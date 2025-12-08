@@ -1,0 +1,136 @@
+import SwiftUI
+import AppKit
+
+struct EditorView: NSViewRepresentable {
+    @Binding var text: String
+    @ObservedObject var controller: EditorController
+    @EnvironmentObject var themeManager: ThemeManager
+    var onCommit: () -> Void
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = context.coordinator.scrollView
+        let textView = context.coordinator.textView
+        
+        // --- MODIFICATION TRANSPARENCE ---
+        // On force le fond transparent au démarrage
+        textView.backgroundColor = .clear
+        textView.textColor = NSColor(themeManager.textColor)
+        textView.insertionPointColor = NSColor(themeManager.textColor)
+        
+        // Connecter le contrôleur
+        DispatchQueue.main.async {
+            controller.textView = textView
+            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+            scrollView.verticalRulerView?.needsDisplay = true
+        }
+        
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        let textView = context.coordinator.textView
+        let textStorage = context.coordinator.textStorage
+        let highlighter = context.coordinator.highlighter
+        
+        let currentTheme = themeManager.currentTheme
+        
+        // Mise à jour du thème
+        if context.coordinator.lastTheme != currentTheme {
+            // --- MODIFICATION TRANSPARENCE ---
+            // On garde .clear pour le fond pour laisser passer le flou de la fenêtre
+            textView.backgroundColor = .clear
+            nsView.backgroundColor = .clear
+            
+            textView.textColor = NSColor(themeManager.textColor)
+            textView.insertionPointColor = NSColor(themeManager.textColor)
+            
+            nsView.appearance = NSAppearance(named: currentTheme == .light ? .aqua : .darkAqua)
+            
+            highlighter.updateTheme(currentTheme)
+            highlighter.applyHighlighting(to: textStorage)
+            
+            context.coordinator.lastTheme = currentTheme
+        }
+        
+        // Mise à jour du texte externe
+        if textView.string != text {
+            let selectedRange = textView.selectedRange()
+            textView.string = text
+            highlighter.applyHighlighting(to: textStorage)
+            if selectedRange.location + selectedRange.length <= text.count {
+                textView.setSelectedRange(selectedRange)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: EditorView
+        let highlighter = SyntaxHighlighter()
+        var lastTheme: AppTheme?
+        
+        let scrollView: NSScrollView
+        let textView: NSTextView
+        let textStorage: NSTextStorage
+        let layoutManager: NSLayoutManager
+        let textContainer: NSTextContainer
+
+        @MainActor init(_ parent: EditorView) {
+            self.parent = parent
+            
+            self.textStorage = NSTextStorage()
+            self.layoutManager = NSLayoutManager()
+            self.textStorage.addLayoutManager(layoutManager)
+            
+            self.textContainer = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+            self.textContainer.widthTracksTextView = true
+            self.layoutManager.addTextContainer(textContainer)
+            
+            self.textView = NSTextView(frame: .zero, textContainer: textContainer)
+            self.scrollView = NSScrollView()
+            
+            super.init()
+            
+            // --- CONFIGURATION SCROLLVIEW ---
+            scrollView.hasVerticalScroller = true
+            scrollView.borderType = .noBorder
+            
+            // --- MODIFICATION TRANSPARENCE ---
+            scrollView.drawsBackground = false // CRUCIAL: Désactive le fond gris par défaut
+            scrollView.backgroundColor = .clear
+            
+            scrollView.documentView = textView
+            
+            // --- CONFIGURATION TEXTVIEW ---
+            textView.minSize = NSSize(width: 0, height: 0)
+            textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
+            textView.textContainerInset = NSSize(width: 0, height: 10)
+            
+            // --- MODIFICATION TRANSPARENCE ---
+            textView.drawsBackground = false // CRUCIAL: Désactive le fond blanc par défaut
+            textView.backgroundColor = .clear
+            
+            textView.isRichText = false
+            textView.allowsUndo = true
+            textView.isAutomaticQuoteSubstitutionEnabled = false
+            textView.isAutomaticDashSubstitutionEnabled = false
+            textView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+            
+            textView.delegate = self
+            textStorage.delegate = highlighter
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            self.parent.text = textView.string
+            self.parent.onCommit()
+            self.parent.controller.needsRedraw()
+        }
+    }
+}
