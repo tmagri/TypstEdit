@@ -29,12 +29,9 @@ struct AppearanceSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Theme", selection: $themeManager.currentTheme) {
-                    ForEach(AppTheme.allCases) { theme in
-                        Text(theme.displayName).tag(theme)
-                    }
-                }
-                .pickerStyle(.menu)
+                Text("The application uses a default dark theme designed for optimal readability.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             } header: {
                 Text("UI Theme")
             }

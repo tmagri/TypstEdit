@@ -110,6 +110,25 @@ struct AppMenuCommands: Commands {
             .disabled(true)
         }
         
+        // MARK: - Insert Menu
+        CommandMenu("Insert") {
+            Button("Table") {
+                NotificationCenter.default.post(name: .insertSnippet, object: "table")
+            }
+            .keyboardShortcut("t", modifiers: [.command, .control])
+            
+            Button("Image") {
+                NotificationCenter.default.post(name: .insertSnippet, object: "image")
+            }
+            .keyboardShortcut("i", modifiers: [.command, .control])
+            
+            Button("Chart") {
+                NotificationCenter.default.post(name: .insertSnippet, object: "chart")
+            }
+            .keyboardShortcut("c", modifiers: [.command, .control])
+        }
+        
+        
         // MARK: - View Menu
         CommandMenu("View") {
             Button("File Panel") {
@@ -155,24 +174,6 @@ struct AppMenuCommands: Commands {
             }
             
             Divider()
-            
-            // Theme submenu
-            Menu("Theme") {
-                ForEach(AppTheme.allCases) { theme in
-                    Button(action: {
-                        withAnimation {
-                            themeManager.currentTheme = theme
-                        }
-                    }) {
-                        HStack {
-                            Text(theme.displayName)
-                            if themeManager.currentTheme == theme {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            }
             
             Menu("Cursor Size") {
                 Button("Small") { }
@@ -243,3 +244,9 @@ struct AppMenuCommands: Commands {
         }
     }
 }
+
+// MARK: - Notification Names
+extension Notification.Name {
+    static let insertSnippet = Notification.Name("insertSnippet")
+}
+

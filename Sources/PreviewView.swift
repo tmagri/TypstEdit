@@ -18,7 +18,9 @@ struct PreviewView: NSViewRepresentable {
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
         // Update Theme Appearance
-        pdfView.appearance = NSAppearance(named: themeManager.currentTheme == .light ? .aqua : .darkAqua)
+        pdfView.backgroundColor = .clear
+        pdfView.autoScales = true
+        pdfView.appearance = NSAppearance(named: .darkAqua)
         
         // Update Background Color explicitly (converting SwiftUI Color to NSColor)
         // We use a helper or simple conversation here since ThemeManager uses Color

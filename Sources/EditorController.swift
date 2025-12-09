@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 
+@MainActor
 class EditorController: NSObject, ObservableObject {
     @Published var errors: [TypstError] = []
     @Published var scrollPosition: CGFloat = 0
@@ -40,6 +41,28 @@ class EditorController: NSObject, ObservableObject {
     
     func redo() {
         textView?.undoManager?.redo()
+    }
+    
+    // --- Snippet Functions ---
+    
+    func insertTableSnippet() {
+        guard let textView = textView else { return }
+        SnippetsManager.shared.insertSnippet("table", into: textView)
+    }
+    
+    func insertImageSnippet() {
+        guard let textView = textView else { return }
+        SnippetsManager.shared.insertSnippet("image", into: textView)
+    }
+    
+    func insertChartSnippet() {
+        guard let textView = textView else { return }
+        SnippetsManager.shared.insertSnippet("chart", into: textView)
+    }
+    
+    func insertTimelineSnippet() {
+        guard let textView = textView else { return }
+        SnippetsManager.shared.insertSnippet("timeline", into: textView)
     }
     
     // --- Search Functions ---
@@ -169,6 +192,7 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Navigation ---
     
+    @MainActor
     func goToLine(_ lineNumber: Int) {
         guard let textView = textView,
               let layoutManager = textView.layoutManager else { return }
@@ -190,6 +214,7 @@ class EditorController: NSObject, ObservableObject {
         textView.setSelectedRange(NSRange(location: charIndex, length: 0))
     }
     
+    @MainActor
     private func setupScrollNotification() {
         guard let scrollView = textView?.enclosingScrollView else { return }
         

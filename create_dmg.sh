@@ -8,7 +8,7 @@ APP_BUNDLE="TypstEdit.app"
 echo "📦 Preparing to package $APP_NAME..."
 
 # Ensure bundle exists and is fresh
-./bundle.sh
+./bundle_universal.sh
 
 # Create temporary folder for DMG content
 echo "📂 Setting up DMG structure..."

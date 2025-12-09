@@ -4,23 +4,27 @@ struct ToolbarView: View {
     @ObservedObject var controller: EditorController
     
     var body: some View {
-        HStack(spacing: 0) { // Tighter spacing, groups handle their own or use ToolbarItemGroup
+        HStack(spacing: 0) {
+            // Text formatting
             Group {
                 ToolbarButton(icon: "bold", action: controller.toggleBold)
                 ToolbarButton(icon: "italic", action: controller.toggleItalic)
                 ToolbarButton(icon: "underline", action: {})
             }
             
-            // Divider/Space
             Rectangle().fill(Color.clear).frame(width: 12, height: 1)
             
+            // Snippets
             Group {
-                ToolbarButton(icon: "list.bullet", action: {}) 
-                ToolbarButton(icon: "list.number", action: {})
+                ToolbarButton(icon: "tablecells", action: controller.insertTableSnippet)
+                ToolbarButton(icon: "photo", action: controller.insertImageSnippet)
+                ToolbarButton(icon: "chart.bar", action: controller.insertChartSnippet)
+                ToolbarButton(icon: "calendar", action: controller.insertTimelineSnippet)
             }
             
             Rectangle().fill(Color.clear).frame(width: 12, height: 1)
             
+            // Other formatting
             Group {
                 ToolbarButton(text: "H", action: controller.insertHeading)
                 ToolbarButton(icon: "function", action: controller.insertMath)

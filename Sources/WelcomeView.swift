@@ -6,6 +6,8 @@ struct WelcomeView: View {
     @ObservedObject var recents = RecentFilesManager.shared
     var onOpen: (URL) -> Void
     
+    @State private var showingTemplateSelection = false
+    
     var body: some View {
         HStack(spacing: 0) {
             // Left Panel: Actions (Centered)
@@ -29,7 +31,7 @@ struct WelcomeView: View {
                     .padding(.horizontal)
                 
                 HStack(spacing: 20) {
-                    Button(action: { model.createNewProject() }) {
+                    Button(action: { showingTemplateSelection = true }) {
                         VStack {
                             Image(systemName: "plus.square.fill")
                                 .font(.system(size: 24))
@@ -99,6 +101,7 @@ struct WelcomeView: View {
                             VStack(alignment: .leading) {
                                 Text(file.name)
                                     .foregroundColor(themeManager.textColor)
+                                .truncationMode(.middle)
                                 Text(file.path)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
@@ -123,5 +126,11 @@ struct WelcomeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.mainBackground.ignoresSafeArea())
+        .sheet(isPresented: $showingTemplateSelection) {
+            TemplateSelectionView { template in
+                model.createNewProject(template: template)
+            }
+            .environmentObject(themeManager)
+        }
     }
 }

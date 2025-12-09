@@ -62,7 +62,7 @@ class FileSystemModel: ObservableObject {
         return nodes
     }
     
-    func createNewProject() {
+    func createNewProject(template: ProjectTemplate) {
         let panel = NSSavePanel()
         panel.title = "Create New Project Folder"
         panel.nameFieldStringValue = "New Project"
@@ -72,12 +72,7 @@ class FileSystemModel: ObservableObject {
             do {
                 try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: nil)
                 let mainFile = url.appendingPathComponent("main.typ")
-                let content = """
-                #set page(width: auto, height: auto, margin: 1cm)
-                = Hello Typst
-                
-                Start typing here...
-                """
+                let content = template.content
                 try content.write(to: mainFile, atomically: true, encoding: .utf8)
                 self.currentFolder = url
                 loadFiles()
@@ -152,7 +147,8 @@ struct SidebarView: View {
             ErrorPanelView(compiler: compiler, editorController: editorController)
                 .environmentObject(themeManager)
         }
-        .background(themeManager.sidebarOverlay.ignoresSafeArea())
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(themeManager.sidebarBackground.ignoresSafeArea())
         .onReceive(NotificationCenter.default.publisher(for: .typstErrorsUpdated)) { notification in
             if let errors = notification.object as? [TypstError] {
                 compiler.errors = errors

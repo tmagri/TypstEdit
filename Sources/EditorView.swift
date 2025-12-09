@@ -32,31 +32,17 @@ struct EditorView: NSViewRepresentable {
         let textStorage = context.coordinator.textStorage
         let highlighter = context.coordinator.highlighter
         
-        let currentTheme = themeManager.currentTheme
+        // Always use dark appearance
+        nsView.appearance = NSAppearance(named: .darkAqua)
         
-        // Mise à jour du thème
-        if context.coordinator.lastTheme != currentTheme {
-            // --- MODIFICATION TRANSPARENCE ---
-            // On garde .clear pour le fond pour laisser passer le flou de la fenêtre
-            textView.backgroundColor = .clear
-            nsView.backgroundColor = .clear
-            
-            textView.textColor = NSColor(themeManager.textColor)
-            textView.insertionPointColor = NSColor(themeManager.textColor)
-            
-            nsView.appearance = NSAppearance(named: currentTheme == .light ? .aqua : .darkAqua)
-            
-            highlighter.updateTheme(currentTheme)
-            highlighter.applyHighlighting(to: textStorage)
-            
-            context.coordinator.lastTheme = currentTheme
-        }
-        
-        // Mise à jour du texte externe
+        // Update text if changed
         if textView.string != text {
             let selectedRange = textView.selectedRange()
-            textView.string = text
+            textStorage.beginEditing()
+            textStorage.replaceCharacters(in: NSRange(location: 0, length: textStorage.length), with: text)
+            // Re-apply highlighting to be safe (though textStorage delegate handles it)
             highlighter.applyHighlighting(to: textStorage)
+            textStorage.endEditing()
             if selectedRange.location + selectedRange.length <= text.count {
                 textView.setSelectedRange(selectedRange)
             }
@@ -70,7 +56,6 @@ struct EditorView: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: EditorView
         let highlighter = SyntaxHighlighter()
-        var lastTheme: AppTheme?
         
         let scrollView: NSScrollView
         let textView: NSTextView

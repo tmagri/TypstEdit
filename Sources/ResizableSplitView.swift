@@ -61,6 +61,11 @@ struct ResizableSplitView<Left: View, Right: View>: NSViewRepresentable {
         splitView.addArrangedSubview(leftContainer)
         splitView.addArrangedSubview(rightContainer)
         
+        // Add constraint to encourage 50/50 split initially (Priority 250 - Low)
+        let equalWidth = leftContainer.widthAnchor.constraint(equalTo: rightContainer.widthAnchor)
+        equalWidth.priority = .defaultLow
+        equalWidth.isActive = true
+        
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         

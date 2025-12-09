@@ -77,10 +77,10 @@ struct ContentView: View {
         ZStack {
             // Main Background with Visual Effect
             VisualEffectView(
-                material: themeManager.currentTheme == .dark ? .hudWindow : .sidebar,
+                material: .hudWindow,
                 blendingMode: .withinWindow,
                 state: .active,
-                emphasized: true
+                emphasized: false
             )
             .ignoresSafeArea()
             
@@ -129,6 +129,7 @@ struct ContentView: View {
                                 .padding(.trailing, 12) // Keep trailing padding for window edge
                             }
                         }
+                        .layoutPriority(1)
                     } else {
                         // Empty state when no file selected but folder open
                          ZStack {
@@ -137,6 +138,7 @@ struct ContentView: View {
                                 .foregroundColor(themeManager.textColor)
                          }
                          .frame(maxWidth: .infinity, maxHeight: .infinity)
+                         .layoutPriority(1)
                     }
                 }
                 // Toolbar attached to the main split view
@@ -301,6 +303,22 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         .onChange(of: selectedFile) { newValue in
             loadFile(url: newValue)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in
+            if let snippetKey = notification.object as? String {
+                switch snippetKey {
+                case "table":
+                    editorController.insertTableSnippet()
+                case "image":
+                    editorController.insertImageSnippet()
+                case "chart":
+                    editorController.insertChartSnippet()
+                case "timeline":
+                    editorController.insertTimelineSnippet()
+                default:
+                    break
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
             if let url = notification.object as? URL {
                 self.currentPDFURL = url
@@ -312,6 +330,8 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                 }
             }
         }
+
+        .preferredColorScheme(.dark)
     }
     
     func loadFile(url: URL?) {
