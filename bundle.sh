@@ -3,14 +3,15 @@ set -e
 
 APP_NAME="TypstEdit"
 
-echo "Building..."
-swift build
+CONFIG=${1:-debug}
+echo "Building with configuration: $CONFIG..."
+swift build -c "$CONFIG"
 
-# Find the executable dynamically in .build
-EXECUTABLE=$(find .build -type f -maxdepth 5 -name "$APP_NAME" | grep -v "dSYM" | head -n 1)
+# Find the executable specifically in the requested configuration folder
+EXECUTABLE=$(find .build -type f -path "*/$CONFIG/$APP_NAME" | grep -v "dSYM" | head -n 1)
 
 if [ -z "$EXECUTABLE" ]; then
-    echo "Error: Executable $APP_NAME not found in .build"
+    echo "Error: Executable $APP_NAME not found in .build for configuration $CONFIG"
     exit 1
 fi
 

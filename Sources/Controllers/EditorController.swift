@@ -59,6 +59,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     // --- Image Editor State ---
     @Published var showImageEditor: Bool = false
+    @Published var showLayoutEditor: Bool = false
     @Published var pendingImagePath: String = ""
     @Published var imageWidth: String = "auto"
     @Published var imageHeight: String = "auto"
@@ -92,8 +93,13 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var viewMode: ViewMode = .both
     @Published var isVerticalSplit: Bool = true
     @Published var colorBlindnessMode: ColorBlindnessMode = .none
+    @Published var cursorSize: CGFloat = 2.0 // Default thickness
     
     var currentImageRange: NSRange? = nil
+    
+    var isTypstFile: Bool {
+        currentFileURL?.pathExtension.lowercased() == "typ"
+    }
     
     func openEquationEditor(at range: NSRange, initialContent: String) {
         currentEquationRange = range
@@ -579,6 +585,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         SnippetsManager.shared.insertSnippet("timeline", into: textView)
     }
     
+    func openLayoutEditor() {
+        self.showLayoutEditor = true
+    }
+    
     // --- Search Functions ---
     
     func performSearch() {
@@ -957,7 +967,6 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleCodeBlock() {
-        guard let textView = textView else { return }
         // Simple wrap for now
         wrapSelection(prefix: "```\n", suffix: "\n```")
     }

@@ -196,7 +196,7 @@ class TypstCompiler: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: typstPath)
         
-        var arguments = ["compile", sourceURL.path, outputURL.path]
+        var arguments = ["compile", sourceURL.path, outputURL.path, "--format", format]
         
         // Pass root if available
         if let root = projectRoot {

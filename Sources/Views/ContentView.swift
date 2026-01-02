@@ -32,16 +32,18 @@ struct ContentView: View {
             
             VStack(spacing: 0) {
                 // Formatting Toolbar above editor
-                HStack {
-                    ToolbarView(controller: editorController)
-                        .padding(.leading, 44) // Align with text after ruler to avoid separator line
-                    Spacer()
+                if editorController.isTypstFile {
+                    HStack {
+                        ToolbarView(controller: editorController)
+                            .padding(.leading, 44) // Align with text after ruler to avoid separator line
+                        Spacer()
+                    }
+                    .padding(.trailing, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.3)) // More opaque background
+                    .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
+                    .fixedSize(horizontal: false, vertical: true) // Prevent toolbar from expanding vertically
                 }
-                .padding(.trailing, 12)
-                .padding(.vertical, 8)
-                .background(Color.black.opacity(0.3)) // More opaque background
-                .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
-                .fixedSize(horizontal: false, vertical: true) // Prevent toolbar from expanding vertically
                
                 // Editor
                 EditorView(text: $sourceCode, controller: editorController, onCommit: {
@@ -111,6 +113,12 @@ struct ContentView: View {
                         onCancel: {
                             editorController.showQuoteEditor = false
                         }
+                    )
+                }
+                .sheet(isPresented: $editorController.showLayoutEditor) {
+                    LayoutEditorView(
+                        controller: editorController,
+                        isPresented: $editorController.showLayoutEditor
                     )
                 }
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
@@ -202,7 +210,7 @@ struct ContentView: View {
                             themeManager.contentOverlay.ignoresSafeArea() 
                             themeManager.mainBackground.ignoresSafeArea() // .clear
                             
-                            if editorController.viewMode == .editorOnly {
+                            if !editorController.isTypstFile || editorController.viewMode == .editorOnly {
                                 editorBox
                                     .padding(.leading, 12)
                                     .padding(.trailing, 12)
@@ -371,24 +379,26 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                                 .keyboardShortcut("s", modifiers: .command)
                                 .buttonStyle(.plain)
                                 
-                                // Print Button
-                                Button(action: printPDF) {
-                                    Image(systemName: "printer")
-                                        .foregroundColor(themeManager.textColor)
-                                        .padding(6)
+                                if editorController.isTypstFile {
+                                    // Print Button
+                                    Button(action: printPDF) {
+                                        Image(systemName: "printer")
+                                            .foregroundColor(themeManager.textColor)
+                                            .padding(6)
+                                            .background(Color.black.opacity(0.3))
+                                            .cornerRadius(8)
+                                    }
+                                    .help("Print")
+                                    .buttonStyle(.plain)
+                                    
+                                    // Share Button (Native Anchor)
+                                    ShareButton(fileURL: exportedPDFURL)
+                                        .frame(width: 28, height: 28)
+                                        .padding(4)
                                         .background(Color.black.opacity(0.3))
                                         .cornerRadius(8)
+                                        .help("Share")
                                 }
-                                .help("Print")
-                                .buttonStyle(.plain)
-                                
-                                // Share Button (Native Anchor)
-                                ShareButton(fileURL: exportedPDFURL)
-                                    .frame(width: 28, height: 28)
-                                    .padding(4)
-                                    .background(Color.black.opacity(0.3))
-                                    .cornerRadius(8)
-                                    .help("Share")
                             }
                             
                             // Save Status & Finder
@@ -601,7 +611,11 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
     }
 
     func scheduleCompilation() {
-        guard let url = selectedFile else { return }
+        guard let url = selectedFile, editorController.isTypstFile else { 
+            compiler.cleanUp()
+            currentPDFURL = nil
+            return 
+        }
         
         workItem?.cancel()
         let currentSource = sourceCode
@@ -650,8 +664,10 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                 self.newFileName = url.lastPathComponent
                 self.showRenameAlert = true
             }
-        case "exportPDF":
+        case "quickExportPDF":
             if let url = selectedFile { exportPDF(from: url) }
+        case "exportPDF":
+            handleExport(format: "pdf")
         case "exportPNG":
             handleExport(format: "png")
         case "exportSVG":

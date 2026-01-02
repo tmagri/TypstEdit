@@ -29,20 +29,26 @@ struct AppMenuCommands: Commands {
             Divider()
             
             Button("Quick Export PDF") {
-                NotificationCenter.default.post(name: .menuCommand, object: "exportPDF")
+                NotificationCenter.default.post(name: .menuCommand, object: "quickExportPDF")
             }
             .keyboardShortcut("s", modifiers:[.command, .shift])
+            .disabled(!editorController.isTypstFile)
             
             Menu("Export As") {
                 Button("PDF") {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportPDF")
                 }
+                .disabled(!editorController.isTypstFile)
+                
                 Button("PNG") {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportPNG")
                 }
+                .disabled(!editorController.isTypstFile)
+                
                 Button("SVG") {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportSVG")
                 }
+                .disabled(!editorController.isTypstFile)
             }
             
             Divider()
@@ -120,50 +126,56 @@ struct AppMenuCommands: Commands {
         
         // MARK: - Insert Menu
         CommandMenu("Insert") {
-            Button("Table...") {
-                NotificationCenter.default.post(name: NSNotification.Name("insertTable"), object: nil)
+            Group {
+                Button("Table...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("insertTable"), object: nil)
+                }
+                .keyboardShortcut("t", modifiers: [.command, .control])
+                
+                Button("Link...") {
+                    NotificationCenter.default.post(name: NSNotification.Name("insertLink"), object: nil)
+                }
+                .keyboardShortcut("k", modifiers: [.command])
+                
+                Button("Equation") {
+                    NotificationCenter.default.post(name: .insertSnippet, object: "equation")
+                }
+                .keyboardShortcut("e", modifiers: [.command, .control])
+                
+                Button("Image") {
+                    NotificationCenter.default.post(name: .insertSnippet, object: "image")
+                }
+                .keyboardShortcut("i", modifiers: [.command, .control])
+                
+                Button("Chart") {
+                    NotificationCenter.default.post(name: .insertSnippet, object: "chart")
+                }
+                .keyboardShortcut("c", modifiers: [.command, .control])
             }
-            .keyboardShortcut("t", modifiers: [.command, .control])
-            
-            Button("Link...") {
-                NotificationCenter.default.post(name: NSNotification.Name("insertLink"), object: nil)
-            }
-            .keyboardShortcut("k", modifiers: [.command])
-            
-            Button("Equation") {
-                NotificationCenter.default.post(name: .insertSnippet, object: "equation")
-            }
-            .keyboardShortcut("e", modifiers: [.command, .control])
-            
-            Button("Image") {
-                NotificationCenter.default.post(name: .insertSnippet, object: "image")
-            }
-            .keyboardShortcut("i", modifiers: [.command, .control])
-            
-            Button("Chart") {
-                NotificationCenter.default.post(name: .insertSnippet, object: "chart")
-            }
-            .keyboardShortcut("c", modifiers: [.command, .control])
+            .disabled(!editorController.isTypstFile)
             
             Divider()
             
-            Button("Page Break") {
-                NotificationCenter.default.post(name: .menuCommand, object: "insertPageBreak")
-            }
-            .keyboardShortcut(.return, modifiers: [.command])
+            Group {
+                Button("Page Break") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "insertPageBreak")
+                }
+                .keyboardShortcut(.return, modifiers: [.command])
 
-            Button("Horizontal Line") {
-                NotificationCenter.default.post(name: .menuCommand, object: "insertHorizontalLine")
+                Button("Horizontal Line") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "insertHorizontalLine")
+                }
+                .keyboardShortcut("-", modifiers: [.command, .option])
+                
+                Button("Block Quote") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleQuote")
+                }
+                
+                Button("Code Block") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
+                }
             }
-            .keyboardShortcut("-", modifiers: [.command, .option])
-            
-            Button("Block Quote") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleQuote")
-            }
-            
-            Button("Code Block") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
-            }
+            .disabled(!editorController.isTypstFile)
         }
         
         
@@ -199,9 +211,10 @@ struct AppMenuCommands: Commands {
             Divider()
             
             Menu("Cursor Size") {
-                Button("Small") { }
-                Button("Medium") { }
-                Button("Large") { }
+                Button("Small") { editorController.cursorSize = 1.0 }
+                Button("Medium") { editorController.cursorSize = 2.0 }
+                Button("Large") { editorController.cursorSize = 4.0 }
+                Button("Extra Large") { editorController.cursorSize = 6.0 }
             }
             
             Divider()

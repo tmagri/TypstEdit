@@ -4,11 +4,22 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug TypstEdit",
+            "name": "Debug TypstEdit (App)",
             "program": "${workspaceFolder}/TypstEdit.app/Contents/MacOS/TypstEdit",
             "args": [],
             "cwd": "${workspaceFolder}",
-            "preLaunchTask": "swift: build"
+            "preLaunchTask": "bundle: app (debug)"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug TypstEdit Tests",
+            "program": "swift",
+            "args": [
+                "test",
+                "--enable-test-discovery"
+            ],
+            "cwd": "${workspaceFolder}"
         }
     ]
 }

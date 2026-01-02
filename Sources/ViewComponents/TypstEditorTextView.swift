@@ -12,6 +12,21 @@ protocol TypstEditorTextViewDelegate: AnyObject {
 
 class TypstEditorTextView: NSTextView {
     weak var editorDelegate: TypstEditorTextViewDelegate?
+    var cursorWidth: CGFloat = 2.0 {
+        didSet {
+            // Force redraw of the text view to update the cursor thickness
+            self.needsDisplay = true
+        }
+    }
+    
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        if flag {
+            var newRect = rect
+            newRect.size.width = cursorWidth
+            color.set()
+            newRect.fill()
+        }
+    }
 
     override func setSelectedRange(_ charRange: NSRange, affinity: NSSelectionAffinity, stillSelecting flag: Bool) {
         super.setSelectedRange(charRange, affinity: affinity, stillSelecting: flag)

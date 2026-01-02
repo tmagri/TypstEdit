@@ -50,6 +50,11 @@ struct EditorView: NSViewRepresentable {
             textView.font = NSFont.monospacedSystemFont(ofSize: scaledSize, weight: .regular)
         }
         
+        // Update cursor size
+        if textView.cursorWidth != controller.cursorSize {
+            textView.cursorWidth = controller.cursorSize
+        }
+        
         // Update ruler errors and redraw
         if let ruler = nsView.verticalRulerView as? LineNumberRulerView {
             let errorLines = Set(controller.errors.map { $0.line })

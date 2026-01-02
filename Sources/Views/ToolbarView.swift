@@ -66,7 +66,16 @@ struct ToolbarView: View {
                 .fill(Color.gray.opacity(0.3))
                 .frame(width: 1, height: 32)
             
-            // Group 4: Insert (Objects)
+            // Group 4: Layout
+            ToolbarGroup(title: "Layout") {
+                ToolbarButton(icon: "doc.badge.gearshape", tooltip: "Page Layout", action: controller.openLayoutEditor)
+            }
+            
+            Rectangle()
+                .fill(Color.gray.opacity(0.3))
+                .frame(width: 1, height: 32)
+            
+            // Group 5: Insert (Objects)
             ToolbarGroup(title: "Insert") {
                 ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive) {
                     controller.toggleLink()

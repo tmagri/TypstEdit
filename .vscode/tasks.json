@@ -4,39 +4,54 @@
         {
             "label": "swift: build",
             "type": "shell",
-            "command": "./bundle.sh",
+            "command": "swift build",
+            "group": "build",
+            "problemMatcher": "$swiftc",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "bundle: app (debug)",
+            "type": "shell",
+            "command": "./bundle.sh debug",
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
+            "problemMatcher": "$swiftc",
             "presentation": {
                 "reveal": "always",
                 "panel": "shared"
-            },
-            "problemMatcher": []
+            }
+        },
+        {
+            "label": "bundle: app (release)",
+            "type": "shell",
+            "command": "./bundle.sh release",
+            "group": "build",
+            "problemMatcher": "$swiftc",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            }
         },
         {
             "label": "swift: clean",
             "type": "shell",
-            "command": "swift",
-            "args": [
-                "package",
-                "clean"
-            ],
+            "command": "swift package clean",
             "problemMatcher": []
         },
         {
             "label": "publish: create installer",
             "type": "shell",
             "command": "./create_dmg.sh",
-            "dependsOn": [
-                "swift: build"
-            ],
             "presentation": {
                 "reveal": "always",
                 "panel": "shared"
             },
-            "problemMatcher": []
+            "problemMatcher": "$swiftc"
         }
     ]
 }
