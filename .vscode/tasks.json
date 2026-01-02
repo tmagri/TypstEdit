@@ -4,7 +4,7 @@
         {
             "label": "swift: build",
             "type": "shell",
-            "command": "./bundle.sh", // Run bundling script
+            "command": "./bundle.sh",
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -13,7 +13,7 @@
                 "reveal": "always",
                 "panel": "shared"
             },
-            "problemMatcher": "$swiftc"
+            "problemMatcher": []
         },
         {
             "label": "swift: clean",
@@ -23,6 +23,19 @@
                 "package",
                 "clean"
             ],
+            "problemMatcher": []
+        },
+        {
+            "label": "publish: create installer",
+            "type": "shell",
+            "command": "./create-installer.sh",
+            "dependsOn": [
+                "swift: build"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
             "problemMatcher": []
         }
     ]
