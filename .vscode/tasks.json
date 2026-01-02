@@ -1,0 +1,29 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "swift: build",
+            "type": "shell",
+            "command": "./bundle.sh", // Run bundling script
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$swiftc"
+        },
+        {
+            "label": "swift: clean",
+            "type": "shell",
+            "command": "swift",
+            "args": [
+                "package",
+                "clean"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}

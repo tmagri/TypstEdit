@@ -35,7 +35,7 @@ class SyntaxHighlighter: NSObject, NSTextStorageDelegate {
         // Keywords (let, set, show, import, include)
         let keywords = ["let", "set", "show", "import", "include", "if", "else", "for", "while", "break", "continue", "return"]
         for keyword in keywords {
-             highlight(pattern: "\\b\\(keyword)\\b", in: string, textStorage: textStorage, color: darkKeyword, bold: true)
+             highlight(pattern: "\\b\(keyword)\\b", in: string, textStorage: textStorage, color: darkKeyword, bold: true)
         }
         
         // Functions: #name or just #

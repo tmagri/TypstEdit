@@ -20,6 +20,8 @@ struct EditorView: NSViewRepresentable {
         // Connecter le contrôleur
         DispatchQueue.main.async {
             controller.textView = textView
+            // Connect the delegate for equation editor
+            textView.editorDelegate = controller
             textView.layoutManager?.ensureLayout(for: textView.textContainer!)
             scrollView.verticalRulerView?.needsDisplay = true
         }
@@ -58,7 +60,7 @@ struct EditorView: NSViewRepresentable {
         let highlighter = SyntaxHighlighter()
         
         let scrollView: NSScrollView
-        let textView: NSTextView
+        let textView: TypstEditorTextView
         let textStorage: NSTextStorage
         let layoutManager: NSLayoutManager
         let textContainer: NSTextContainer
@@ -74,7 +76,7 @@ struct EditorView: NSViewRepresentable {
             self.textContainer.widthTracksTextView = true
             self.layoutManager.addTextContainer(textContainer)
             
-            self.textView = NSTextView(frame: .zero, textContainer: textContainer)
+            self.textView = TypstEditorTextView(frame: .zero, textContainer: textContainer)
             self.scrollView = NSScrollView()
             
             super.init()
@@ -112,7 +114,7 @@ struct EditorView: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
-            guard let textView = notification.object as? NSTextView else { return }
+            guard let textView = notification.object as? TypstEditorTextView else { return }
             self.parent.text = textView.string
             self.parent.onCommit()
             self.parent.controller.needsRedraw()

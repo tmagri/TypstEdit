@@ -20,6 +20,7 @@ struct ToolbarView: View {
                 ToolbarButton(icon: "photo", action: controller.insertImageSnippet)
                 ToolbarButton(icon: "chart.bar", action: controller.insertChartSnippet)
                 ToolbarButton(icon: "calendar", action: controller.insertTimelineSnippet)
+                ToolbarButton(icon: "sum", action: controller.openNewEquationEditor)
             }
             
             Rectangle().fill(Color.clear).frame(width: 12, height: 1)

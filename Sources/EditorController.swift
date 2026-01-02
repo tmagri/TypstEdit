@@ -2,7 +2,43 @@ import SwiftUI
 import AppKit
 
 @MainActor
-class EditorController: NSObject, ObservableObject {
+class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate {
+    // --- Equation Editor State ---
+    @Published var showEquationEditor: Bool = false
+    @Published var currentEquationContent: String = ""
+    var currentEquationRange: NSRange?
+    
+    // Delegate method
+    func openEquationEditor(at range: NSRange, initialContent: String) {
+        currentEquationRange = range
+        currentEquationContent = initialContent
+        showEquationEditor = true
+    }
+    
+    func saveEquation(_ newContent: String) {
+        guard let range = currentEquationRange, let textView = textView else { 
+            print("[ERROR] saveEquation aborted: range=\(String(describing: currentEquationRange)), textView=\(textView != nil)")
+            return 
+        }
+        
+        print("[DEBUG] saveEquation: range=\(range), content length=\(newContent.count)")
+        
+        let replacement = "$\(newContent)$"
+        
+        if range.location != NSNotFound {
+            print("[DEBUG] Inserting replacement: '\(replacement)' at range: \(range)")
+            if textView.shouldChangeText(in: range, replacementString: replacement) {
+                textView.insertText(replacement, replacementRange: range)
+                textView.didChangeText()
+                
+                // For a better UX, select the newly inserted equation
+                let newRange = NSRange(location: range.location, length: replacement.count)
+                textView.setSelectedRange(newRange)
+            }
+        }
+        
+        showEquationEditor = false
+    }
     @Published var errors: [TypstError] = []
     @Published var scrollPosition: CGFloat = 0
     
@@ -189,6 +225,24 @@ class EditorController: NSObject, ObservableObject {
     func insertHeading() { insertText("= ") }
     
     func insertMath() { wrapSelection(prefix: "$", suffix: "$") }
+    
+    // Opens the visual equation editor for a new equation at the cursor
+    func openNewEquationEditor() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        
+        // If there is a selection, use it as initial content (stripping $ if present)
+        var initialContent = ""
+        if range.length > 0 {
+             let selectedText = (textView.string as NSString).substring(with: range)
+             // Simple strip of surrounding $
+             initialContent = selectedText.trimmingCharacters(in: CharacterSet(charactersIn: "$"))
+        }
+        
+        currentEquationRange = range
+        currentEquationContent = initialContent
+        showEquationEditor = true
+    }
     
     // --- Navigation ---
     

@@ -27,7 +27,7 @@ struct ShareButton: NSViewRepresentable {
             self.parent = parent
         }
         
-        @objc func clicked(_ sender: NSButton) {
+        @MainActor @objc func clicked(_ sender: NSButton) {
             print("[DEBUG] ShareButton clicked")
             print("[DEBUG] fileURL: \(String(describing: parent.fileURL))")
             

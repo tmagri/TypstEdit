@@ -2,12 +2,20 @@
 set -e
 
 APP_NAME="TypstEdit"
-BUILD_DIR=".build/debug"
-EXECUTABLE="$BUILD_DIR/$APP_NAME"
-APP_BUNDLE="$APP_NAME.app"
 
 echo "Building..."
 swift build
+
+# Find the executable dynamically in .build
+EXECUTABLE=$(find .build -type f -maxdepth 5 -name "$APP_NAME" | grep -v "dSYM" | head -n 1)
+
+if [ -z "$EXECUTABLE" ]; then
+    echo "Error: Executable $APP_NAME not found in .build"
+    exit 1
+fi
+
+echo "Found executable: $EXECUTABLE"
+APP_BUNDLE="$APP_NAME.app"
 
 echo "Creating App Bundle..."
 rm -rf "$APP_BUNDLE"
@@ -15,6 +23,13 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+# Copy SPM Resources Bundle if exists
+RESOURCE_BUNDLE=$(find .build -type d -path "*arm64-apple-macosx*" -name "TypstEdit_TypstEdit.bundle" | head -n 1)
+if [ -d "$RESOURCE_BUNDLE" ]; then
+    echo "Copying resources bundle..."
+    cp -r "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
+fi
 
 # Copy Typst executable into the bundle
 echo "Bundling Typst executable..."

@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Equation Editor</title>
+    <!-- MathLive -->
+    <script defer src="https://cdn.jsdelivr.net/npm/mathlive@0.101.0/dist/mathlive.min.js"></script>
+    <!-- tex2typst -->
+    <script src="https://cdn.jsdelivr.net/npm/tex2typst@0.3.0/dist/tex2typst.min.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 24px;
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: transparent;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow: hidden;
+        }
+
+        math-field {
+            width: 100%;
+            max-width: 100%;
+            min-height: 80px;
+            font-size: 28px;
+            padding: 12px;
+            border-radius: 12px;
+            background-color: white;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        /* Dark mode support */
+        @media (prefers-color-scheme: dark) {
+            math-field {
+                background-color: #1e1e1e;
+                color: #fff;
+                --caret-color: #007aff;
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+        }
+    </style>
+</head>
+
+<body onclick="document.getElementById('math-field').focus()">
+    <math-field id="math-field" virtual-keyboard-mode="manual"></math-field>
+
+    <script>
+        // Custom logger to send all console outputs back to Swift for debugging
+        let isLogging = false;
+        const logToSwift = (level, ...args) => {
+            if (isLogging) return; // Prevent recursion
+            try {
+                isLogging = true;
+                const message = args.map(arg => {
+                    if (arg === null) return "null";
+                    if (arg === undefined) return "undefined";
+                    try {
+                        return typeof arg === 'object' ? JSON.stringify(arg) : String(arg);
+                    } catch (e) {
+                        return "[Unserializable Object]";
+                    }
+                }).join(' ');
+
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.equationEditor) {
+                    window.webkit.messageHandlers.equationEditor.postMessage({
+                        type: 'log',
+                        level: level,
+                        message: message
+                    });
+                }
+            } catch (e) {
+                // Secondary fallback
+            } finally {
+                isLogging = false;
+            }
+        };
+
+        // Wrap console methods
+        const originalLog = console.log;
+        const originalWarn = console.warn;
+        const originalError = console.error;
+
+        console.log = (...args) => { originalLog(...args); logToSwift('debug', ...args); };
+        console.warn = (...args) => { originalWarn(...args); logToSwift('warn', ...args); };
+        console.error = (...args) => { originalError(...args); logToSwift('error', ...args); };
+
+        // Global error reporting
+        window.onerror = function (message, source, lineno, colno, error) {
+            console.error("JS Runtime Error:", message, "at", source, ":", lineno);
+        };
+
+        // Initial setup
+        window.addEventListener('load', async () => {
+            console.log("Equation Editor Page Loaded - waiting for math-field...");
+
+            // Wait for MathLive component to be defined
+            try {
+                if (window.customElements) {
+                    await customElements.whenDefined('math-field');
+                    console.log("math-field component defined");
+                }
+            } catch (e) {
+                console.error("Error waiting for math-field definition:", e);
+            }
+
+            // Notify Swift that we are ready
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.equationEditor) {
+                window.webkit.messageHandlers.equationEditor.postMessage({ type: 'ready' });
+            }
+
+            // Focus the field
+            const mf = document.getElementById('math-field');
+            if (mf) mf.focus();
+        });
+
+        // Helper to convert simple Typst math shorthand to LaTeX for MathLive
+        const typstToLatex = (typst) => {
+            console.log("Pre-processing Typst for LaTeX conversion:", typst);
+            if (!typst) return "";
+
+            let latex = typst.trim();
+
+            // 1. Handle mat(...) -> \begin{matrix} ... \end{matrix}
+            // Use non-greedy match for content to avoid eating the whole file if a paren is missing
+            latex = latex.replace(/mat\s*\(([\s\S]*?)\)/g, (match, content) => {
+                console.log("Found matrix pattern, content:", content);
+
+                // Heuristic to detect specified environment
+                let env = "pmatrix"; // Typst mat() default approx
+                let innerContent = content;
+
+                if (content.includes("delim:")) {
+                    if (content.includes("#none")) env = "matrix";
+                    else if (content.includes("[")) env = "bmatrix";
+                    else if (content.includes("{")) env = "Bmatrix";
+                    else if (content.includes("|")) env = "vmatrix";
+
+                    // Strip the delim part if present to get to the elements
+                    const firstComma = content.indexOf(",");
+                    if (firstComma !== -1) {
+                        innerContent = content.substring(firstComma + 1);
+                    }
+                }
+
+                // Split rows by semicolon
+                const rows = innerContent.split(';');
+                const latexRows = rows.map(row => {
+                    // Split elements by comma
+                    return row.split(',').map(el => el.trim()).join(' & ');
+                }).join(' \\\\ ');
+
+                return `\\begin{${env}} ${latexRows} \\end{${env}}`;
+            });
+
+            // 2. Handle fractions: (top) / (bottom) -> \frac{top}{bottom}
+            latex = latex.replace(/\(([^)]+)\)\s*\/\s*\(([^)]+)\)/g, '\\frac{$1}{$2}');
+
+            // 3. Handle Greek letters: pi -> \pi, sigma -> \sigma, etc.
+            const greek = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma', 'tau', 'phi', 'chi', 'psi', 'omega'];
+            greek.forEach(g => {
+                const re = new RegExp(`\\b${g}\\b`, 'g');
+                latex = latex.replace(re, `\\${g}`);
+            });
+
+            console.log("Converted to LaTeX heuristic:", latex);
+            return latex;
+        };
+
+        // Function called by Swift to set the initial equation (from Typst)
+        window.setEquation = (typstCode) => {
+            console.log("window.setEquation called with:", typstCode);
+            const mf = document.getElementById('math-field');
+            if (!mf) {
+                console.error("Critical: Math-field element NOT found in DOM!");
+                return;
+            }
+
+            try {
+                // Pre-process Typst into LaTeX for better MathLive rendering
+                const latexEquivalent = typstToLatex(typstCode);
+
+                // Try injecting as LaTeX first for visual rendering
+                console.log("Injection attempt 1: LaTeX");
+                mf.setValue(latexEquivalent, { format: 'latex' });
+
+                // Check for failure (if result is just raw text or empty)
+                const currentVal = mf.getValue();
+                if (currentVal.includes('mat(') || (currentVal === "" && typstCode.trim() !== "")) {
+                    console.log("Injection attempt 2: ascii-math");
+                    mf.setValue(typstCode, { format: 'ascii-math' });
+                }
+
+                // Final fallback
+                if (mf.getValue() === "" && typstCode.trim() !== "") {
+                    console.log("Injection attempt 3: executeCommand insert");
+                    mf.executeCommand(['insert', typstCode]);
+                }
+
+                console.log("Final field value after injection attempt:", mf.getValue());
+            } catch (e) {
+                console.error("Injection crashed:", e);
+            }
+        }
+
+        // Function called by Swift to get the current equation (as Typst)
+        window.getEquation = async () => {
+            console.log("window.getEquation called");
+            const mf = document.getElementById('math-field');
+            if (!mf) return "";
+
+            const latex = mf.getValue('latex-expanded');
+            console.log("Current LaTeX from field for export:", latex);
+
+            if (!latex) return "";
+
+            try {
+                if (typeof window.tex2typst === 'function') {
+                    console.log("Converting LaTeX -> Typst...");
+                    let typst = await window.tex2typst(latex);
+
+                    // Fix: tex2typst 0.3.0 stripped brackets wrongly in pmatrix
+                    if (latex.includes('pmatrix') || latex.includes('bmatrix') || latex.includes('vmatrix')) {
+                        console.log("Detected matrix environment, cleaning up delim:#none corruption...");
+                        typst = typst.replace(/delim:\s*#none,\s*/g, '');
+                    }
+
+                    return typst;
+                }
+                console.warn("tex2typst missing, fallback to native typst");
+                return mf.getValue('typst') || latex;
+            } catch (e) {
+                console.error("Export conversion error:", e);
+                return latex;
+            }
+        }
+
+        // Function called by Swift to trigger a save
+        window.triggerSave = () => {
+            console.log("window.triggerSave called");
+            // Wrap in IIFE to keep entry synchronous (avoids evaluateJavaScript unsupported type error)
+            (async () => {
+                try {
+                    const equation = await window.getEquation();
+                    console.log("Final equation to save (cleaned):", equation);
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.equationEditor) {
+                        window.webkit.messageHandlers.equationEditor.postMessage({
+                            type: 'save',
+                            content: equation
+                        });
+                    }
+                } catch (e) {
+                    console.error("triggerSave async failure:", e);
+                }
+            })();
+        }
+
+        // Setup change listener if element ready
+        const initialMf = document.getElementById('math-field');
+        if (initialMf) {
+            initialMf.addEventListener('input', (ev) => {
+                // Bridge changed events if needed
+            });
+        }
+    </script>
+</body>
+
+</html>

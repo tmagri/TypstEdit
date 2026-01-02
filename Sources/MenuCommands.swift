@@ -117,6 +117,11 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("t", modifiers: [.command, .control])
             
+            Button("Equation") {
+                NotificationCenter.default.post(name: .insertSnippet, object: "equation")
+            }
+            .keyboardShortcut("e", modifiers: [.command, .control])
+            
             Button("Image") {
                 NotificationCenter.default.post(name: .insertSnippet, object: "image")
             }

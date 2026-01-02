@@ -65,6 +65,18 @@ struct ContentView: View {
                 })
                 .environmentObject(themeManager)
                 .padding(8)
+                .sheet(isPresented: $editorController.showEquationEditor) {
+                    VisualEquationEditor(
+                        initialEquation: $editorController.currentEquationContent,
+                        onSave: { newEquation in
+                            editorController.saveEquation(newEquation)
+                        },
+                        onCancel: {
+                            editorController.showEquationEditor = false
+                        }
+                    )
+                    .frame(width: 900, height: 500) // Improved size for wider equations and better fit
+                }
             }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
@@ -312,6 +324,8 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                     editorController.insertImageSnippet()
                 case "chart":
                     editorController.insertChartSnippet()
+                case "equation":
+                    editorController.openNewEquationEditor()
                 case "timeline":
                     editorController.insertTimelineSnippet()
                 default:
