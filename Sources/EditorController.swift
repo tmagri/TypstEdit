@@ -1,5 +1,10 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
+
+extension Notification.Name {
+    static let refreshProjectSidebar = Notification.Name("refreshProjectSidebar")
+}
 
 @MainActor
 class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate {
@@ -14,6 +19,27 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var currentTableCells: [String] = []
     @Published var tableEditInitialRows: Int = 0
     @Published var tableEditInitialCols: Int = 0
+    
+    // --- File Context ---
+    @Published var currentFileURL: URL?
+    @Published var projectRootURL: URL?
+    @Published var shouldCopyImages: Bool = true
+    
+    // --- Image Editor State ---
+    @Published var showImageEditor: Bool = false
+    @Published var pendingImagePath: String = ""
+    @Published var imageWidth: String = "auto"
+    @Published var imageHeight: String = "auto"
+    @Published var imageAlt: String = ""
+    @Published var imageFit: String = "contain"
+    @Published var imageValidationError: String? = nil
+    @Published var imageValidationWarning: String? = nil
+    @Published var selectedImageURL: URL? = nil
+    @Published var isBoldActive: Bool = false
+    @Published var isItalicActive: Bool = false
+    @Published var isUnderlineActive: Bool = false
+    @Published var currentHeadingLevel: Int = 0
+    var currentImageRange: NSRange? = nil
     
     // Delegate method
     func openEquationEditor(at range: NSRange, initialContent: String) {
@@ -91,20 +117,35 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     func insertTableSnippet() {
         guard let textView = textView else { return }
         let range = textView.selectedRange()
+        setupTableEditor(at: range.location)
+        self.showTableEditor = true
+    }
+    
+    func openTableEditor(at range: NSRange) {
+        setupTableEditor(at: range.location)
+        self.showTableEditor = true
+    }
+    
+    func textViewDidChangeSelection() {
+        updateFormattingState()
+    }
+    
+    private func setupTableEditor(at location: Int) {
+        guard let textView = textView else { return }
         
-        if let tableInfo = TableDetector.parseTable(in: textView.string, at: range.location) {
-            currentTableRange = tableInfo.range
-            currentTableCells = tableInfo.cells
-            tableEditInitialRows = tableInfo.rows
-            tableEditInitialCols = tableInfo.columns
-        } else {
-            currentTableRange = nil
-            currentTableCells = []
-            tableEditInitialRows = 0
-            tableEditInitialCols = 0
+        // Reset state
+        self.currentTableRange = nil
+        self.currentTableCells = []
+        self.tableEditInitialRows = 0
+        self.tableEditInitialCols = 0
+        
+        // Detect existing table
+        if let tableInfo = TableDetector.parseTable(in: textView.string, at: location) {
+            self.currentTableRange = tableInfo.range
+            self.currentTableCells = tableInfo.cells
+            self.tableEditInitialRows = tableInfo.rows
+            self.tableEditInitialCols = tableInfo.columns
         }
-        
-        showTableEditor = true
     }
     
     func insertTable(rows: Int, cols: Int) {
@@ -163,7 +204,239 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     func insertImageSnippet() {
         guard let textView = textView else { return }
-        SnippetsManager.shared.insertSnippet("image", into: textView)
+        let range = textView.selectedRange()
+        
+        // Reset state
+        self.pendingImagePath = ""
+        self.imageWidth = "auto"
+        self.imageHeight = "auto"
+        self.imageAlt = ""
+        self.imageFit = "contain"
+        self.imageValidationError = nil
+        self.selectedImageURL = nil
+        self.currentImageRange = nil
+        
+        if let imageInfo = ImageDetector.parseImage(in: textView.string, at: range.location) {
+            setupImageEditor(with: imageInfo)
+        }
+        
+        self.showImageEditor = true
+    }
+    
+    func openImageEditor(at range: NSRange) {
+        guard let textView = textView else { return }
+        if let imageInfo = ImageDetector.parseImage(in: textView.string, at: range.location) {
+            setupImageEditor(with: imageInfo)
+            self.showImageEditor = true
+        }
+    }
+    
+    private func setupImageEditor(with imageInfo: ImageInfo) {
+        self.currentImageRange = imageInfo.range
+        self.pendingImagePath = imageInfo.path
+        self.imageWidth = imageInfo.width ?? "auto"
+        self.imageHeight = imageInfo.height ?? "auto"
+        self.imageAlt = imageInfo.alt ?? ""
+        self.imageFit = imageInfo.fit ?? "contain"
+        self.selectedImageURL = nil
+        self.imageValidationError = nil
+        self.imageValidationWarning = nil
+    }
+    
+    func browseForImage() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .gif, .svg]
+        panel.title = "Select Image"
+        
+        if panel.runModal() == .OK, let selectedURL = panel.url {
+            self.selectedImageURL = selectedURL
+            self.imageValidationError = nil
+        }
+    }
+    
+    private func handleImageSelection(selectedURL: URL, shouldCopy: Bool) -> String? {
+        print("[DEBUG] handleImageSelection: shouldCopy=\(shouldCopy), projectRootURL=\(projectRootURL?.path ?? "nil"), currentFileURL=\(currentFileURL?.path ?? "nil")")
+        
+        var imagePath = selectedURL.path
+        
+        if shouldCopy, let root = projectRootURL {
+            let fileName = selectedURL.lastPathComponent
+            let destinationURL = root.appendingPathComponent(fileName)
+            
+            do {
+                if FileManager.default.fileExists(atPath: destinationURL.path) {
+                    let timestamp = Int(Date().timeIntervalSince1970)
+                    let newFileName = "\(selectedURL.deletingPathExtension().lastPathComponent)_\(timestamp).\(selectedURL.pathExtension)"
+                    let newDestinationURL = root.appendingPathComponent(newFileName)
+                    try FileManager.default.copyItem(at: selectedURL, to: newDestinationURL)
+                    imagePath = newFileName
+                } else {
+                    try FileManager.default.copyItem(at: selectedURL, to: destinationURL)
+                    imagePath = fileName
+                }
+                
+                NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+            } catch {
+                print("[ERROR] Failed to copy image: \(error.localizedDescription)")
+                if let currentFile = currentFileURL {
+                     imagePath = relativePath(from: currentFile.deletingLastPathComponent(), to: selectedURL) ?? selectedURL.path
+                }
+            }
+        } else if let currentFile = currentFileURL {
+            let rel = relativePath(from: currentFile.deletingLastPathComponent(), to: selectedURL)
+            imagePath = rel ?? selectedURL.path
+        }
+        
+        return imagePath
+    }
+    
+    func generateImageSnippet() -> String {
+        var finalPath = pendingImagePath
+        if let selectedURL = selectedImageURL {
+            // This is a bit tricky for real-time preview since we don't want to copy the file yet.
+            // For preview, we'll just show the filename or the original path.
+            finalPath = selectedURL.lastPathComponent
+        }
+        
+        if finalPath.isEmpty { return "" }
+        
+        var params: [String] = []
+        params.append("\"\(finalPath)\"")
+        
+        if imageWidth != "auto" && !imageWidth.isEmpty {
+            params.append("width: \(imageWidth)")
+        }
+        
+        if imageHeight != "auto" && !imageHeight.isEmpty {
+            params.append("height: \(imageHeight)")
+        }
+        
+        if !imageAlt.isEmpty {
+            params.append("alt: \"\(imageAlt)\"")
+        }
+        
+        if imageFit != "contain" {
+            params.append("fit: \"\(imageFit)\"")
+        }
+        
+        return "#image(\(params.joined(separator: ", ")))"
+    }
+    
+    func validateImageSettings() {
+        imageValidationError = nil
+        imageValidationWarning = nil
+        
+        if selectedImageURL == nil && pendingImagePath.isEmpty {
+            imageValidationError = "Please select an image file."
+            return
+        }
+        
+        // Validate width
+        if !imageWidth.isEmpty && imageWidth != "auto" {
+            if !validateTypstLength(imageWidth) {
+                imageValidationError = "Invalid width: '\(imageWidth)'. Use auto, %, pt, mm, cm, in."
+            }
+        }
+        
+        // Validate height
+        if !imageHeight.isEmpty && imageHeight != "auto" {
+            if !validateTypstLength(imageHeight) {
+                imageValidationError = "Invalid height: '\(imageHeight)'. Use auto, %, pt, mm, cm, in."
+            } else if imageHeight.hasSuffix("%") {
+                // Layout conflict warning
+                imageValidationWarning = "Tip: 100% height often collapses to zero height on pages with auto-size. Consider using fixed units or width: 100% instead."
+            }
+        }
+    }
+    
+    private func validateTypstLength(_ length: String) -> Bool {
+        let trimmed = length.trimmingCharacters(in: .whitespaces)
+        if trimmed == "auto" { return true }
+        
+        // Regex for Typst length: optional number, followed by unit
+        // Typst also supports things like 10pt + 50% but we'll stick to basic validation for now.
+        let pattern = "^-?(\\d+(\\.\\d+)?)(pt|mm|cm|in|%|em|fr)$"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return false }
+        let range = NSRange(location: 0, length: trimmed.utf16.count)
+        return regex.firstMatch(in: trimmed, options: [], range: range) != nil
+    }
+    
+    func saveImageSnippet() {
+        validateImageSettings()
+        if imageValidationError != nil { return }
+        
+        // Final processing (copying file)
+         var finalPath = pendingImagePath
+         if let selectedURL = selectedImageURL {
+             if let path = handleImageSelection(selectedURL: selectedURL, shouldCopy: shouldCopyImages) {
+                 finalPath = path
+             } else {
+                 imageValidationError = "Failed to copy image to project."
+                 return
+             }
+         }
+         
+         // Re-generate final snippet with correct path
+         var params: [String] = []
+         params.append("\"\(finalPath)\"")
+         
+         if imageWidth != "auto" && !imageWidth.isEmpty {
+             params.append("width: \(imageWidth)")
+         }
+         
+         if imageHeight != "auto" && !imageHeight.isEmpty {
+             params.append("height: \(imageHeight)")
+         }
+         
+         if !imageAlt.isEmpty {
+             params.append("alt: \"\(imageAlt)\"")
+         }
+         
+         if imageFit != "contain" {
+             params.append("fit: \"\(imageFit)\"")
+         }
+         
+         let snippet = "#image(\(params.joined(separator: ", ")))"
+        
+        if let range = currentImageRange, let textView = textView {
+             textView.insertText(snippet, replacementRange: range)
+        } else {
+             insertText(snippet)
+        }
+        
+        // Reset state
+        showImageEditor = false
+        pendingImagePath = ""
+        selectedImageURL = nil
+        currentImageRange = nil
+        imageWidth = "auto"
+        imageHeight = "auto"
+        imageAlt = ""
+        imageFit = "contain"
+        imageValidationError = nil
+        imageValidationWarning = nil
+    }
+    
+    private func relativePath(from base: URL, to target: URL) -> String? {
+        let baseComponents = base.pathComponents
+        let targetComponents = target.pathComponents
+        
+        var commonPrefixCount = 0
+        for i in 0..<min(baseComponents.count, targetComponents.count) {
+            if baseComponents[i] == targetComponents[i] {
+                commonPrefixCount += 1
+            } else {
+                break
+            }
+        }
+        
+        var relComponents = Array(repeating: "..", count: baseComponents.count - commonPrefixCount)
+        relComponents.append(contentsOf: targetComponents[commonPrefixCount...])
+        
+        return relComponents.joined(separator: "/")
     }
     
     func insertChartSnippet() {
@@ -289,15 +562,113 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         }
     }
     
-    // --- Raccourcis de formatage Typst ---
+    func updateFormattingState() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        let text = textView.string
+        
+        isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location) != nil
+        isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location) != nil
+        isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
+        currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
+    }
     
-    func toggleBold() { wrapSelection(prefix: "*", suffix: "*") }
+    // --- Heading Actions ---
     
-    func toggleItalic() { wrapSelection(prefix: "_", suffix: "_") }
+    func setHeadingLevel(_ level: Int) {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        let text = textView.string
+        
+        let currentLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
+        if currentLevel == level { return }
+        
+        // Find existing heading prefix if any
+        let headingRange = FormatDetector.findHeadingRange(in: text, at: range.location)
+        
+        if level == 0 {
+            // Remove heading
+            if let hr = headingRange {
+                textView.insertText("", replacementRange: hr)
+            }
+        } else {
+            let prefix = String(repeating: "=", count: level) + " "
+            if let hr = headingRange {
+                // Replace existing prefix
+                textView.insertText(prefix, replacementRange: hr)
+            } else {
+                // Add new prefix at start of line
+                let nsText = text as NSString
+                let lineRange = nsText.lineRange(for: NSRange(location: range.location, length: 0))
+                textView.insertText(prefix, replacementRange: NSRange(location: lineRange.location, length: 0))
+            }
+        }
+        
+        updateFormattingState()
+    }
+    
+    // --- Formatting Actions ---
+    
+    func toggleBold() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let boldRange = FormatDetector.findBoldRange(in: textView.string, at: range.location) {
+            unwrapFormatting(range: boldRange, prefixLen: 1, suffixLen: 1)
+        } else {
+            wrapSelection(prefix: "*", suffix: "*")
+        }
+        updateFormattingState()
+    }
+    
+    func toggleItalic() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let italicRange = FormatDetector.findItalicRange(in: textView.string, at: range.location) {
+            unwrapFormatting(range: italicRange, prefixLen: 1, suffixLen: 1)
+        } else {
+            wrapSelection(prefix: "_", suffix: "_")
+        }
+        updateFormattingState()
+    }
+    
+    func toggleUnderline() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let underlineRange = FormatDetector.findUnderlineRange(in: textView.string, at: range.location) {
+            // Underline is more complex: #underline[...]
+            // We need to find the correct prefix length (#underline[)
+            let text = textView.string as NSString
+            let snippet = text.substring(with: underlineRange)
+            // Fix: range(of:options:) on String uses String.Index
+            if let openerRange = snippet.range(of: #"^#underline\s*[\[\(]"#, options: .regularExpression) {
+                let prefixLen = snippet.distance(from: snippet.startIndex, to: openerRange.upperBound)
+                unwrapFormatting(range: underlineRange, prefixLen: prefixLen, suffixLen: 1)
+            } else {
+                // Fallback: search for first [ or (
+                if let startParen = snippet.firstIndex(where: { $0 == "[" || $0 == "(" }) {
+                    let prefixLen = snippet.distance(from: snippet.startIndex, to: startParen) + 1
+                    unwrapFormatting(range: underlineRange, prefixLen: prefixLen, suffixLen: 1)
+                }
+            }
+        } else {
+            wrapSelection(prefix: "#underline[", suffix: "]")
+        }
+        updateFormattingState()
+    }
+    
+    private func unwrapFormatting(range: NSRange, prefixLen: Int, suffixLen: Int) {
+        guard let textView = textView else { return }
+        let nsText = textView.string as NSString
+        let fullSnippet = nsText.substring(with: range)
+        
+        let contentStart = fullSnippet.index(fullSnippet.startIndex, offsetBy: prefixLen)
+        let contentEnd = fullSnippet.index(fullSnippet.endIndex, offsetBy: -suffixLen)
+        let innerContent = String(fullSnippet[contentStart..<contentEnd])
+        
+        textView.insertText(innerContent, replacementRange: range)
+    }
     
     func toggleCode() { wrapSelection(prefix: "`", suffix: "`") }
-    
-    func insertHeading() { insertText("= ") }
     
     func insertMath() { wrapSelection(prefix: "$", suffix: "$") }
     

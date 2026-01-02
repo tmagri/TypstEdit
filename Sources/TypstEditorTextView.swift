@@ -3,10 +3,18 @@ import Cocoa
 @MainActor
 protocol TypstEditorTextViewDelegate: AnyObject {
     func openEquationEditor(at range: NSRange, initialContent: String)
+    func openImageEditor(at range: NSRange)
+    func openTableEditor(at range: NSRange)
+    func textViewDidChangeSelection()
 }
 
 class TypstEditorTextView: NSTextView {
     weak var editorDelegate: TypstEditorTextViewDelegate?
+
+    override func setSelectedRange(_ charRange: NSRange, affinity: NSSelectionAffinity, stillSelecting flag: Bool) {
+        super.setSelectedRange(charRange, affinity: affinity, stillSelecting: flag)
+        editorDelegate?.textViewDidChangeSelection()
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = super.menu(for: event)
@@ -40,6 +48,32 @@ class TypstEditorTextView: NSTextView {
             menu?.insertItem(item, at: 0)
         }
         
+        let imageRange = ImageDetector.findImageRange(in: string, at: effectiveIndex)
+        if let imageRange = imageRange {
+            let item = NSMenuItem(title: "Open Image Editor", action: #selector(openImageEditorAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = NSValue(range: imageRange)
+            
+            // If we already inserted a separator for equation, don't insert another one unless we're at the top
+            if equationRange == nil {
+                menu?.insertItem(NSMenuItem.separator(), at: 0)
+            }
+            menu?.insertItem(item, at: 0)
+        }
+        
+        let tableRange = TableDetector.findTableRange(in: string, at: effectiveIndex)
+        if let tableRange = tableRange {
+            let item = NSMenuItem(title: "Open Table Editor", action: #selector(openTableEditorAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = NSValue(range: tableRange)
+            
+            // If we didn't insert a separator for equation or image, do it now
+            if equationRange == nil && imageRange == nil {
+                menu?.insertItem(NSMenuItem.separator(), at: 0)
+            }
+            menu?.insertItem(item, at: 0)
+        }
+        
         return menu
     }
     
@@ -62,6 +96,18 @@ class TypstEditorTextView: NSTextView {
                  editorDelegate?.openEquationEditor(at: range, initialContent: content)
              }
         }
+    }
+    
+    @objc func openImageEditorAction(_ sender: NSMenuItem) {
+        guard let rangeValue = sender.representedObject as? NSValue else { return }
+        let range = rangeValue.rangeValue
+        editorDelegate?.openImageEditor(at: range)
+    }
+    
+    @objc func openTableEditorAction(_ sender: NSMenuItem) {
+        guard let rangeValue = sender.representedObject as? NSValue else { return }
+        let range = rangeValue.rangeValue
+        editorDelegate?.openTableEditor(at: range)
     }
     
     // Check if the index is inside a $$...$$ block

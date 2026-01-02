@@ -7,9 +7,9 @@ struct ToolbarView: View {
         HStack(spacing: 0) {
             // Text formatting
             Group {
-                ToolbarButton(icon: "bold", action: controller.toggleBold)
-                ToolbarButton(icon: "italic", action: controller.toggleItalic)
-                ToolbarButton(icon: "underline", action: {})
+                ToolbarButton(icon: "bold", isActive: controller.isBoldActive, action: controller.toggleBold)
+                ToolbarButton(icon: "italic", isActive: controller.isItalicActive, action: controller.toggleItalic)
+                ToolbarButton(icon: "underline", isActive: controller.isUnderlineActive, action: controller.toggleUnderline)
             }
             
             Rectangle().fill(Color.clear).frame(width: 12, height: 1)
@@ -27,7 +27,19 @@ struct ToolbarView: View {
             
             // Other formatting
             Group {
-                ToolbarButton(text: "H", action: controller.insertHeading)
+                Menu {
+                    Button("Body", action: { controller.setHeadingLevel(0) })
+                    Divider()
+                    ForEach(1...6, id: \.self) { level in
+                        Button("Heading \(level)", action: { controller.setHeadingLevel(level) })
+                    }
+                } label: {
+                    ToolbarButton(text: controller.currentHeadingLevel == 0 ? "Body" : "H\(controller.currentHeadingLevel)", action: {})
+                        .frame(width: 48) // Wider for text
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 54)
+                
                 ToolbarButton(icon: "function", action: controller.insertMath)
                 ToolbarButton(icon: "chevron.left.forwardslash.chevron.right", action: controller.toggleCode)
             }
@@ -38,6 +50,7 @@ struct ToolbarView: View {
 struct ToolbarButton: View {
     var icon: String?
     var text: String?
+    var isActive: Bool = false
     var action: () -> Void
     @State private var isHovering = false
     
@@ -53,7 +66,8 @@ struct ToolbarButton: View {
                 }
             }
             .frame(width: 28, height: 28)
-            .background(isHovering ? Color.primary.opacity(0.1) : Color.clear)
+            .background(isActive ? Color.accentColor : (isHovering ? Color.primary.opacity(0.1) : Color.clear))
+            .foregroundColor(isActive ? .white : .primary)
             .cornerRadius(6)
         }
         .buttonStyle(.plain)

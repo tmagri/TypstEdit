@@ -96,7 +96,7 @@ struct SidebarView: View {
     @Binding var selectedFile: URL?
     @EnvironmentObject var themeManager: ThemeManager
     @StateObject private var compiler = TypstCompiler()
-    @StateObject private var editorController = EditorController()
+    @ObservedObject var editorController: EditorController
     
     var body: some View {
         VStack(spacing: 0) {
@@ -153,6 +153,9 @@ struct SidebarView: View {
             if let errors = notification.object as? [TypstError] {
                 compiler.errors = errors
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .refreshProjectSidebar)) { _ in
+            model.loadFiles()
         }
     }
 }

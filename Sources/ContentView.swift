@@ -5,7 +5,11 @@ struct ContentView: View {
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
     
-    @State private var selectedFile: URL?
+    @State private var selectedFile: URL? {
+        didSet {
+            editorController.currentFileURL = selectedFile
+        }
+    }
     @State private var sourceCode: String = ""
     @State private var currentPDFURL: URL? // Preview PDF for live viewing
     @State private var exportedPDFURL: URL? // Exported PDF for sharing/printing
@@ -89,6 +93,17 @@ struct ContentView: View {
                         initialCols: editorController.tableEditInitialCols
                     )
                 }
+                .sheet(isPresented: $editorController.showImageEditor) {
+                    ImageEditorView(
+                        controller: editorController,
+                        onInsert: {
+                            editorController.saveImageSnippet()
+                        },
+                        onCancel: {
+                            editorController.showImageEditor = false
+                        }
+                    )
+                }
             }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
@@ -122,11 +137,21 @@ struct ContentView: View {
                 // Unified HSplitView for Transparency
                 HSplitView {
                     // LEFT: Sidebar (starts minimized)
-                    SidebarView(model: fileSystem, selectedFile: $selectedFile)
+                    SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+                        .onChange(of: fileSystem.currentFolder) { newFolder in
+                            editorController.projectRootURL = newFolder
+                        }
+                        .onChange(of: selectedFile) { newFile in
+                            editorController.currentFileURL = newFile
+                        }
+                        .onAppear {
+                            editorController.projectRootURL = fileSystem.currentFolder
+                            editorController.currentFileURL = selectedFile
+                        }
                         .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
                     
                     // RIGHT: Main Content (Editor + PDF)
-                    if let selectedFile = selectedFile {
+                    if selectedFile != nil {
                          ZStack {
                             themeManager.contentOverlay.ignoresSafeArea() 
                             themeManager.mainBackground.ignoresSafeArea() // .clear
