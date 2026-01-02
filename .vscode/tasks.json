@@ -28,7 +28,7 @@
         {
             "label": "publish: create installer",
             "type": "shell",
-            "command": "./create-installer.sh",
+            "command": "./create_dmg.sh",
             "dependsOn": [
                 "swift: build"
             ],
