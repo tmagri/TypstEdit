@@ -45,6 +45,13 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var currentLinkURL: String = ""
     @Published var currentLinkText: String = ""
     
+    // --- Quote Editor State ---
+    @Published var showQuoteEditor: Bool = false
+    @Published var currentQuoteRange: NSRange?
+    @Published var currentQuoteContent: String = ""
+    @Published var currentQuoteAttribution: String = ""
+    @Published var isQuoteBlock: Bool = true
+    
     // --- File Context ---
     @Published var currentFileURL: URL?
     @Published var projectRootURL: URL?
@@ -911,8 +918,42 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     func toggleQuote() {
         guard let textView = textView else { return }
-        // Naive toggle: simple wrap. Parsing active block quote removal is complex.
-        wrapSelection(prefix: "#quote(block: true)[", suffix: "]")
+        let range = textView.selectedRange()
+        
+        // Reset state
+        currentQuoteRange = nil
+        currentQuoteContent = ""
+        currentQuoteAttribution = ""
+        isQuoteBlock = true
+        
+        // If cursor is inside a quote, parse it
+        if let quoteInfo = FormatDetector.parseQuote(in: textView.string, at: range.location) {
+            currentQuoteRange = quoteInfo.range
+            currentQuoteContent = quoteInfo.content
+            currentQuoteAttribution = quoteInfo.attribution
+            isQuoteBlock = quoteInfo.isBlock
+        } else if range.length > 0 {
+            // If text is selected but not a quote, use it as initial content
+            let nsString = textView.string as NSString
+            currentQuoteContent = nsString.substring(with: range)
+        }
+        
+        showQuoteEditor = true
+    }
+    
+    func insertQuote(text: String, attribution: String, isBlock: Bool) {
+        guard let textView = textView else { return }
+        
+        var params: [String] = []
+        if isBlock { params.append("block: true") }
+        if !attribution.isEmpty { params.append("attribution: \"\(attribution)\"") }
+        
+        let paramStr = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
+        let snippet = "#quote\(paramStr)[\(text)]"
+        
+        let rangeToReplace = currentQuoteRange ?? textView.selectedRange()
+        textView.insertText(snippet, replacementRange: rangeToReplace)
+        showQuoteEditor = false
     }
     
     func toggleCodeBlock() {

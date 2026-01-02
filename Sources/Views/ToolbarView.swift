@@ -4,9 +4,9 @@ struct ToolbarView: View {
     @ObservedObject var controller: EditorController
     
     var body: some View {
-        HStack(spacing: 0) {
-            // Text formatting
-            Group {
+        HStack(spacing: 8) {
+            // Group 1: Structure (Headings)
+            ToolbarGroup(title: "Structure") {
                 Menu {
                     Button("Body", action: { controller.setHeadingLevel(0) })
                     Divider()
@@ -14,11 +14,19 @@ struct ToolbarView: View {
                         Button("Heading \(level)", action: { controller.setHeadingLevel(level) })
                     }
                 } label: {
-                ToolbarButton(text: controller.currentHeadingLevel == 0 ? "Body" : "H\(controller.currentHeadingLevel)", tooltip: "Heading Level", action: {})
-                        .frame(width: 48) // Wider for text
+                    ToolbarButton(text: controller.currentHeadingLevel == 0 ? "Body" : "H\(controller.currentHeadingLevel)", tooltip: "Heading Level", action: {})
+                        .frame(width: 48)
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 54)
+            }
+            
+            Rectangle()
+                .fill(Color.gray.opacity(0.3))
+                .frame(width: 1, height: 32)
+            
+            // Group 2: Font (Bold, Italic, etc.)
+            ToolbarGroup(title: "Font") {
                 ToolbarButton(icon: "bold", tooltip: "Bold (Cmd+B)", isActive: controller.isBoldActive, action: controller.toggleBold)
                 ToolbarButton(icon: "italic", tooltip: "Italic (Cmd+I)", isActive: controller.isItalicActive, action: controller.toggleItalic)
                 ToolbarButton(icon: "underline", tooltip: "Underline (Cmd+U)", isActive: controller.isUnderlineActive, action: controller.toggleUnderline)
@@ -27,15 +35,7 @@ struct ToolbarView: View {
                     controller.toggleStrike()
                 }
                 
-                ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive) {
-                    controller.toggleLink()
-                }
-                
-                // Essentials Pack
-                ToolbarButton(icon: "text.quote", tooltip: "Block Quote", isActive: controller.isQuoteActive, action: controller.toggleQuote)
-                ToolbarButton(icon: "curlybraces", tooltip: "Code Block", isActive: controller.isCodeBlockActive, action: controller.toggleCodeBlock)
-                
-                // Color Picker - Simple Menu for now
+                // Color Picker
                 Menu {
                     Button(action: { controller.applyTextColor("red") }) { Label("Red", systemImage: "circle.fill").foregroundColor(.red) }
                     Button(action: { controller.applyTextColor("blue") }) { Label("Blue", systemImage: "circle.fill").foregroundColor(.blue) }
@@ -48,34 +48,63 @@ struct ToolbarView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 32)
-
-                Divider()
-                    .frame(height: 20)
+                
+                ToolbarButton(icon: "chevron.left.forwardslash.chevron.right", tooltip: "Inline Code (Cmd+`)", isActive: controller.isCodeActive, action: controller.toggleCode)
             }
             
-            Rectangle().fill(Color.clear).frame(width: 12, height: 1)
+            Rectangle()
+                .fill(Color.gray.opacity(0.3))
+                .frame(width: 1, height: 32)
             
-            // Snippets
-            Group {
+            // Group 3: Block (Quote, Code Block, Lists if any)
+            ToolbarGroup(title: "Paragraph") {
+                ToolbarButton(icon: "text.quote", tooltip: "Block Quote", isActive: controller.isQuoteActive, action: controller.toggleQuote)
+                ToolbarButton(icon: "curlybraces", tooltip: "Code Block", isActive: controller.isCodeBlockActive, action: controller.toggleCodeBlock)
+            }
+            
+            Rectangle()
+                .fill(Color.gray.opacity(0.3))
+                .frame(width: 1, height: 32)
+            
+            // Group 4: Insert (Objects)
+            ToolbarGroup(title: "Insert") {
+                ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive) {
+                    controller.toggleLink()
+                }
                 ToolbarButton(icon: "tablecells", tooltip: "Insert Table", isActive: controller.isTableActive, action: controller.insertTableSnippet)
                 ToolbarButton(icon: "photo", tooltip: "Insert Image", isActive: controller.isImageActive, action: controller.insertImageSnippet)
                 ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart", action: controller.insertChartSnippet)
                 ToolbarButton(icon: "calendar", tooltip: "Insert Timeline", action: controller.insertTimelineSnippet)
                 ToolbarButton(icon: "sum", tooltip: "Insert Equation", isActive: controller.isEquationActive, action: controller.openNewEquationEditor)
-            }
-            
-            Rectangle().fill(Color.clear).frame(width: 12, height: 1)
-            
-            // Other formatting
-            Group {
+                
                 ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", action: controller.insertPageBreak)
-                // .help modifier on the button itself is redundant if ToolbarButton handles it, but keep consistency
-                
                 ToolbarButton(icon: "minus", tooltip: "Horizontal Line", action: controller.insertHorizontalLine)
-                
-                ToolbarButton(icon: "chevron.left.forwardslash.chevron.right", tooltip: "Inline Code (Cmd+`)", isActive: controller.isCodeActive, action: controller.toggleCode)
             }
         }
+    }
+}
+
+struct ToolbarGroup<Content: View>: View {
+    let title: String
+    let content: Content
+    
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+    
+    var body: some View {
+        VStack(alignment: .center, spacing: 3) {
+            HStack(spacing: 2) {
+                content
+            }
+            // Ribbon Title
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.secondary)
+                .opacity(0.8)
+        }
+        .padding(.horizontal, 2)
     }
 }
 
@@ -95,13 +124,13 @@ struct ToolbarButton: View {
                         .font(.system(size: 14))
                 } else if let text = text {
                     Text(text)
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: 13, weight: .semibold))
                 }
             }
-            .frame(width: 28, height: 28)
+            .frame(width: 26, height: 26) // Slightly smaller to compact the ribbon
             .background(isActive ? Color.accentColor : (isHovering ? Color.primary.opacity(0.1) : Color.clear))
             .foregroundColor(isActive ? .white : .primary)
-            .cornerRadius(6)
+            .cornerRadius(4)
         }
         .buttonStyle(.plain)
         .help(tooltip ?? (text ?? ""))

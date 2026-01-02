@@ -34,11 +34,14 @@ struct ContentView: View {
                 // Formatting Toolbar above editor
                 HStack {
                     ToolbarView(controller: editorController)
+                        .padding(.leading, 44) // Align with text after ruler to avoid separator line
                     Spacer()
                 }
-                .padding(.horizontal, 12)
+                .padding(.trailing, 12)
                 .padding(.vertical, 8)
-                .background(Color.black.opacity(0.1))
+                .background(Color.black.opacity(0.3)) // More opaque background
+                .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
+                .fixedSize(horizontal: false, vertical: true) // Prevent toolbar from expanding vertically
                
                 // Editor
                 EditorView(text: $sourceCode, controller: editorController, onCommit: {
@@ -96,6 +99,17 @@ struct ContentView: View {
                         },
                         onCancel: {
                             editorController.showImageEditor = false
+                        }
+                    )
+                }
+                .sheet(isPresented: $editorController.showQuoteEditor) {
+                    QuoteEditorView(
+                        controller: editorController,
+                        onInsert: { text, attribution, isBlock in
+                            editorController.insertQuote(text: text, attribution: attribution, isBlock: isBlock)
+                        },
+                        onCancel: {
+                            editorController.showQuoteEditor = false
                         }
                     )
                 }

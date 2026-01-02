@@ -13,17 +13,17 @@ struct FormatDetector {
     
     /// Finds the range of underline (#underline[...]) surrounding the index.
     static func findUnderlineRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: "#underline\\s*[\\(\\[]")
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#underline(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
     
     /// Finds the range of highlight (#highlight[...]) surrounding the index.
     static func findHighlightRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: "#highlight\\s*[\\(\\[]")
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#highlight(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
     
     /// Finds the range of strikethrough (#strike[...]) surrounding the index.
     static func findStrikeRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: "#strike\\s*[\\(\\[]")
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#strike(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
     
     private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
@@ -208,6 +208,59 @@ struct FormatDetector {
     }
     
     static func findQuoteRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: "#quote\\s*[\\(\\[]")
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#quote(?:\s*\([^)]*\))?\s*[\[(]"#)
+    }
+
+    struct QuoteInfo {
+        let range: NSRange
+        let content: String
+        let attribution: String
+        let isBlock: Bool
+    }
+
+    static func parseQuote(in text: String, at index: Int) -> QuoteInfo? {
+        guard let range = findQuoteRange(in: text, at: index) else { return nil }
+        let nsText = text as NSString
+        let quoteStr = nsText.substring(with: range)
+        
+        // Extract content between []
+        var content = ""
+        if let bracketStart = quoteStr.firstIndex(of: "["), let bracketEnd = quoteStr.lastIndex(of: "]") {
+            let start = quoteStr.index(after: bracketStart)
+            content = String(quoteStr[start..<bracketEnd])
+        }
+        
+        // Extract attribution and block status from ()
+        var attribution = ""
+        var isBlock = false
+        if let parenStart = quoteStr.firstIndex(of: "("), let parenEnd = quoteStr.firstIndex(of: ")") {
+            let params = String(quoteStr[quoteStr.index(after: parenStart)..<parenEnd])
+            
+            // Attribution: "..."
+            let attrQuotePattern = "attribution:\\s*\"([^\"]*)\""
+            if let attrRange = params.range(of: attrQuotePattern, options: .regularExpression) {
+                let match = params[attrRange]
+                if let firstQuote = match.firstIndex(of: "\""), let lastQuote = match.lastIndex(of: "\"") {
+                    attribution = String(match[match.index(after: firstQuote)..<lastQuote])
+                }
+            } else {
+                // Attribution: [...]
+                let attrBracketPattern = "attribution:\\s*\\[(.*?)\\]"
+                if let attrRange = params.range(of: attrBracketPattern, options: .regularExpression) {
+                    let match = params[attrRange]
+                    if let firstBracket = match.firstIndex(of: "["), let lastBracket = match.lastIndex(of: "]") {
+                        attribution = String(match[match.index(after: firstBracket)..<lastBracket])
+                    }
+                }
+            }
+            
+            if params.contains("block: true") {
+                isBlock = true
+            }
+        } else {
+            isBlock = quoteStr.contains("block: true")
+        }
+        
+        return QuoteInfo(range: range, content: content, attribution: attribution, isBlock: isBlock)
     }
 }
