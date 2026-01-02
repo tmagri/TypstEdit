@@ -173,6 +173,9 @@ struct ContentView: View {
                             Button(action: editorController.undo) {
                                 Image(systemName: "arrow.uturn.backward")
                                     .foregroundColor(themeManager.textColor)
+                                    .padding(6)
+                                    .background(Color.black.opacity(0.3))
+                                    .cornerRadius(8)
                             }
                             .help("Undo (Cmd+Z)")
                             .buttonStyle(.plain)
@@ -180,6 +183,9 @@ struct ContentView: View {
                             Button(action: editorController.redo) {
                                 Image(systemName: "arrow.uturn.forward")
                                     .foregroundColor(themeManager.textColor)
+                                    .padding(6)
+                                    .background(Color.black.opacity(0.3))
+                                    .cornerRadius(8)
                             }
                             .help("Redo (Cmd+Shift+Z)")
                             .buttonStyle(.plain)
@@ -188,8 +194,12 @@ struct ContentView: View {
                     
                     ToolbarItem(placement: .principal) {
                         Text(selectedFile?.lastPathComponent ?? "")
-                            .font(.headline)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
                             .foregroundColor(themeManager.textColor)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.black.opacity(0.3))
+                            .cornerRadius(8)
                     }
                     
                     ToolbarItem(placement: .primaryAction) {
@@ -197,19 +207,19 @@ struct ContentView: View {
                             
                             // Search Bar with Popup
                             VStack(spacing: 0) {
-                                HStack(spacing: 4) {
+                                HStack(spacing: 6) {
                                     Image(systemName: "magnifyingglass")
                                         .foregroundColor(.secondary)
-                                        .font(.system(size: 12))
+                                        .font(.system(size: 13))
                                     TextField("Search", text: $editorController.searchQuery)
                                         .textFieldStyle(.plain)
-                                        .frame(width: 120)
+                                        .frame(width: 130)
                                         .foregroundColor(themeManager.textColor)
                                 }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.black.opacity(0.2))
-                                .cornerRadius(6)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.black.opacity(0.3))
+                                .cornerRadius(8)
                                 
                                 // Search results popup (appears when there are matches)
                                 if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 {
@@ -264,10 +274,13 @@ struct ContentView: View {
 Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                             
                             // Actions: Save, Print, Share
-                            HStack(spacing: 12) {
+                            HStack(spacing: 8) {
                                 Button(action: saveFile) {
                                     Image(systemName: "square.and.arrow.down")
                                         .foregroundColor(themeManager.textColor)
+                                        .padding(6)
+                                        .background(Color.black.opacity(0.3))
+                                        .cornerRadius(8)
                                 }
                                 .help("Save (Cmd+S)")
                                 .keyboardShortcut("s", modifiers: .command)
@@ -277,13 +290,19 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                                 Button(action: printPDF) {
                                     Image(systemName: "printer")
                                         .foregroundColor(themeManager.textColor)
+                                        .padding(6)
+                                        .background(Color.black.opacity(0.3))
+                                        .cornerRadius(8)
                                 }
                                 .help("Print")
                                 .buttonStyle(.plain)
                                 
                                 // Share Button (Native Anchor)
                                 ShareButton(fileURL: exportedPDFURL)
-                                    .frame(width: 20, height: 20)
+                                    .frame(width: 28, height: 28)
+                                    .padding(4)
+                                    .background(Color.black.opacity(0.3))
+                                    .cornerRadius(8)
                                     .help("Share")
                             }
                             

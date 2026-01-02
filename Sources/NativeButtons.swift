@@ -7,7 +7,10 @@ struct ShareButton: NSViewRepresentable {
     
     func makeNSView(context: Context) -> NSButton {
         let button = NSButton(image: NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Share")!, target: context.coordinator, action: #selector(Coordinator.clicked(_:)))
-        button.bezelStyle = .texturedRounded
+        button.isBordered = false
+        button.bezelStyle = .shadowlessSquare
+        button.imageScaling = .scaleProportionallyDown
+        button.contentTintColor = .labelColor
         button.toolTip = "Share"
         return button
     }
