@@ -5,8 +5,15 @@ import AppKit
 class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate {
     // --- Equation Editor State ---
     @Published var showEquationEditor: Bool = false
+    @Published var showTableEditor: Bool = false
     @Published var currentEquationContent: String = ""
     var currentEquationRange: NSRange?
+    
+    // --- Table Editor State ---
+    var currentTableRange: NSRange?
+    @Published var currentTableCells: [String] = []
+    @Published var tableEditInitialRows: Int = 0
+    @Published var tableEditInitialCols: Int = 0
     
     // Delegate method
     func openEquationEditor(at range: NSRange, initialContent: String) {
@@ -83,7 +90,75 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     func insertTableSnippet() {
         guard let textView = textView else { return }
-        SnippetsManager.shared.insertSnippet("table", into: textView)
+        let range = textView.selectedRange()
+        
+        if let tableInfo = TableDetector.parseTable(in: textView.string, at: range.location) {
+            currentTableRange = tableInfo.range
+            currentTableCells = tableInfo.cells
+            tableEditInitialRows = tableInfo.rows
+            tableEditInitialCols = tableInfo.columns
+        } else {
+            currentTableRange = nil
+            currentTableCells = []
+            tableEditInitialRows = 0
+            tableEditInitialCols = 0
+        }
+        
+        showTableEditor = true
+    }
+    
+    func insertTable(rows: Int, cols: Int) {
+        guard let textView = textView else { return }
+        
+        var snippet = "#table(\n  columns: \(cols),\n"
+        
+        // Preserve data from currentTableCells if we are editing
+        let totalCellsNeeded = rows * cols
+        var cellsToInsert: [String] = []
+        
+        for i in 0..<totalCellsNeeded {
+            // If we have existing data for this index, use it
+            let r = i / cols
+            let c = i % cols
+            
+            // Map old index to new index if possible
+            // This is naive: it assumes data is filled row-major.
+            // If we are editing, we probably want to mapped by (r, c)
+            if let oldCols = tableEditInitialCols != 0 ? tableEditInitialCols : nil {
+                let oldIndex = r * oldCols + c
+                if r < tableEditInitialRows && c < oldCols && oldIndex < currentTableCells.count {
+                    cellsToInsert.append(currentTableCells[oldIndex])
+                } else {
+                    cellsToInsert.append("[]")
+                }
+            } else {
+                cellsToInsert.append("[]")
+            }
+        }
+        
+        for r in 0..<rows {
+            var rowText = "  "
+            for c in 0..<cols {
+                let index = r * cols + c
+                rowText += "\(cellsToInsert[index]), "
+            }
+            snippet += rowText.trimmingCharacters(in: CharacterSet(charactersIn: ", ")) + ",\n"
+        }
+        snippet += ")"
+        
+        let rangeToReplace = currentTableRange ?? textView.selectedRange()
+        
+        if rangeToReplace.location != NSNotFound {
+            textView.insertText(snippet, replacementRange: rangeToReplace)
+        }
+        
+        // Clear state
+        currentTableRange = nil
+        currentTableCells = []
+        tableEditInitialRows = 0
+        tableEditInitialCols = 0
+        
+        showTableEditor = false
     }
     
     func insertImageSnippet() {

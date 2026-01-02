@@ -77,6 +77,18 @@ struct ContentView: View {
                     )
                     .frame(width: 900, height: 500) // Improved size for wider equations and better fit
                 }
+                .sheet(isPresented: $editorController.showTableEditor) {
+                    TableEditorView(
+                        onInsert: { rows, cols in
+                            editorController.insertTable(rows: rows, cols: cols)
+                        },
+                        onCancel: {
+                            editorController.showTableEditor = false
+                        },
+                        initialRows: editorController.tableEditInitialRows,
+                        initialCols: editorController.tableEditInitialCols
+                    )
+                }
             }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
