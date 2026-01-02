@@ -231,7 +231,25 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         guard let textView = textView else { return }
         let range = textView.selectedRange()
         
-        // If there is a selection, use it as initial content (stripping $ if present)
+        // Priority: Check if cursor or selection is inside an existing equation
+        if let equationRange = EquationDetector.findEquationRange(in: textView.string, at: range.location) {
+            let fullText = textView.string as NSString
+            let content = fullText.substring(with: equationRange)
+            var innerContent = content
+            
+            if content.hasPrefix("$$") && content.hasSuffix("$$") && content.count >= 4 {
+                innerContent = String(content.dropFirst(2).dropLast(2))
+            } else if content.hasPrefix("$") && content.hasSuffix("$") && content.count >= 2 {
+                innerContent = String(content.dropFirst(1).dropLast(1))
+            }
+            
+            currentEquationRange = equationRange
+            currentEquationContent = innerContent
+            showEquationEditor = true
+            return
+        }
+        
+        // Fallback: If there is a selection, use it as initial content (stripping $ if present)
         var initialContent = ""
         if range.length > 0 {
              let selectedText = (textView.string as NSString).substring(with: range)
