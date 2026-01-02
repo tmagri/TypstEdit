@@ -1,153 +1,109 @@
 import AppKit
 
 class LineNumberRulerView: NSRulerView {
+    var errorLines: Set<Int> = []
     
-    // We can inject errors here to show markers
-    var errors: [Int] = [] {
-        didSet {
-            self.needsDisplay = true
-        }
-    }
-    
-    var font: NSFont {
-        return NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-    }
-    
-    var textColor: NSColor {
-        return NSColor.gray // Visible gray color
-    }
-    
-    var backgroundColor: NSColor {
-        // More opaque to make ruler visible
-        return NSColor(white: 0.0, alpha: 0.4)
-    }
-    
-    override init(scrollView: NSScrollView?, orientation: NSRulerView.Orientation) {
-        super.init(scrollView: scrollView, orientation: orientation)
-        self.ruleThickness = 40
-    }
-    
-    required init(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
+    override var isFlipped: Bool { true }
     
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        guard let textView = self.clientView as? NSTextView,
+        guard let textView = clientView as? NSTextView,
               let layoutManager = textView.layoutManager,
-              let textContainer = textView.textContainer
-        else {
-            return
+              let textContainer = textView.textContainer,
+              let textStorage = textView.textStorage else { return }
+        
+        let fullString = textStorage.string as NSString
+        
+        // Refresh thickness based on font size and line count
+        let textViewFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        let lineCount = fullString.components(separatedBy: "\n").count
+        let digits = max(2, "\(lineCount)".count)
+        let newThickness = (textViewFont.pointSize * CGFloat(digits) * 0.6) + 16
+        if abs(ruleThickness - newThickness) > 1 {
+            ruleThickness = newThickness
         }
+
+        let fontSize = textViewFont.pointSize * 0.85
+        let font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .regular)
         
-        // Define toolbar height (must match textContainerInset in EditorView)
-        let toolbarHeight: CGFloat = 58
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .right
         
-        // Only draw below the toolbar area
-        let drawingRect = NSRect(
-            x: rect.minX,
-            y: max(rect.minY, toolbarHeight),
-            width: rect.width,
-            height: max(0, rect.maxY - toolbarHeight)
-        )
+        let normalAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white.withAlphaComponent(0.4),
+            .paragraphStyle: paragraphStyle
+        ]
         
-        // Background
-        backgroundColor.setFill()
-        drawingRect.fill()
+        let errorAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.systemRed,
+            .paragraphStyle: paragraphStyle
+        ]
         
-        // Draw Border (only below toolbar)
-        NSColor.separatorColor.setStroke()
-        let borderPath = NSBezierPath()
-        borderPath.move(to: NSPoint(x: ruleThickness, y: drawingRect.minY))
-        borderPath.line(to: NSPoint(x: ruleThickness, y: drawingRect.maxY))
-        borderPath.lineWidth = 1
-        borderPath.stroke()
+        // Account for text container insets
+        let insetHeight = textView.textContainerInset.height
         
-        // Get container origin offset (handles padding/inset)
-        let containerOrigin = textView.textContainerOrigin
-        
-        // Convert visible rect to container coords
+        // Find visible range accurately
         let visibleRect = textView.visibleRect
-        // We calculate the range of glyphs that are actually visible
-        // We can just ask for the whole range in the rect, shifting by origin
-        let visibleRectInContainer = visibleRect.offsetBy(dx: -containerOrigin.x, dy: -containerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
+        let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
         
-        let visibleGlyphRange = layoutManager.glyphRange(forBoundingRect: visibleRectInContainer, in: textContainer)
-        
-        // Start counting lines from beginning to finding correct number for first visible line
-        // (Optimization: In a real large app, you'd want something smarter than O(N) from start)
+        // Start from line 1 and find the first visible logical line
         var lineNumber = 1
-        let fullString = textView.string as NSString
-        if visibleGlyphRange.location > 0 {
-            let substring = fullString.substring(to: visibleGlyphRange.location)
-            lineNumber += substring.filter { $0 == "\n" }.count
-            // If the last character before visible range is NOT a newline, we are in the middle of a line, 
-            // so the current line number is correct for this fragment.
-            // If it IS a newline, we are starting a new line, so increment.
-            // Actually, if substring ends in \n, the NEXT char is on next line.
-            // So count of \n gives us how many lines *completed*. 
-            // Current line index is count + 1. So `lineNumber` is correct.
+        var currentIdx = 0
+        
+        while currentIdx < charRange.location {
+            currentIdx = NSMaxRange(fullString.lineRange(for: NSRange(location: currentIdx, length: 0)))
+            lineNumber += 1
         }
         
-        // Iterate visible glyphs
-        var glyphIndex = visibleGlyphRange.location
-        while glyphIndex < NSMaxRange(visibleGlyphRange) {
-            var lineRange = NSRange()
-            layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: &lineRange)
+        // Iterate through lines until we pass the visible range
+        let maxIdx = NSMaxRange(charRange)
+        
+        while currentIdx < maxIdx || (currentIdx == fullString.length && charRange.length == 0) {
+            let lineRange = fullString.lineRange(for: NSRange(location: currentIdx, length: 0))
+            let glyphIndex = layoutManager.glyphIndexForCharacter(at: lineRange.location)
             
-            // Calculate Y position in View Coordinates
-            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
-            let yInView = lineRect.origin.y + containerOrigin.y
-            let yPos = self.convert(NSPoint(x: 0, y: yInView), from: textView).y
+            // Get the rect for the first fragment of this logical line
+            let firstFragmentRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
             
-            // Check if this fragment starts a new line
-            var isNewLine = true
-            if glyphIndex > 0 {
-                let charRange = layoutManager.characterRange(forGlyphRange: NSRange(location: glyphIndex - 1, length: 1), actualGlyphRange: nil)
-                if charRange.location < fullString.length {
-                    let prevChar = fullString.substring(with: charRange)
-                    isNewLine = (prevChar == "\n")
-                }
+            let yPos = firstFragmentRect.origin.y + insetHeight
+            // Center the number vertically within the line fragment
+            let textHeight = font.pointSize * 1.2
+            let drawRect = NSRect(
+                x: 0, 
+                y: yPos + (firstFragmentRect.height - textHeight) / 2, 
+                width: ruleThickness - 8, 
+                height: textHeight
+            )
+            
+            if drawRect.intersects(rect) {
+                let hasErr = errorLines.contains(lineNumber)
+                let numStr = "\(lineNumber)" as NSString
+                numStr.draw(in: drawRect, withAttributes: hasErr ? errorAttrs : normalAttrs)
             }
             
-            // Draw
-            if isNewLine {
-                let label = "\(lineNumber)" as NSString
-                
-                // Active Line Highlight could be added here
-                
-                let size = label.size(withAttributes: [.font: font])
-                
-                // Draw Line Number
-                let xPos = ruleThickness - size.width - 8
-                // Center vertically relative to line height
-                let centeredY = yPos + (lineRect.height - size.height) / 2
-                
-                let numberRect = NSRect(x: xPos, y: centeredY, width: size.width, height: size.height)
-                
-                label.draw(in: numberRect, withAttributes: [
-                    .font: font,
-                    .foregroundColor: NSColor.gray // Better contrast
-                ])
-                
-                // Draw Error if needed
-                if errors.contains(lineNumber) {
-                    let errorRect = NSRect(x: 4, y: centeredY + 3, width: 6, height: 6)
-                    NSColor.systemRed.setFill()
-                    let path = NSBezierPath(ovalIn: errorRect)
-                    path.fill()
-                }
-            }
+            if currentIdx == fullString.length { break }
+            currentIdx = NSMaxRange(lineRange)
+            lineNumber += 1
+        }
+        
+        // Handle trailing newline if visible
+        if fullString.length > 0 && fullString.character(at: fullString.length - 1) == 10 {
+            let extraRect = layoutManager.extraLineFragmentRect
+            let yPos = extraRect.origin.y + insetHeight
+            let textHeight = font.pointSize * 1.2
+            let drawRect = NSRect(
+                x: 0, 
+                y: yPos + (extraRect.height - textHeight) / 2, 
+                width: ruleThickness - 8, 
+                height: textHeight
+            )
             
-            // Advance
-            glyphIndex = NSMaxRange(lineRange)
-            
-            // Check if we need to increment line number for next loop
-            let charRange = layoutManager.characterRange(forGlyphRange: lineRange, actualGlyphRange: nil)
-            if charRange.location + charRange.length <= fullString.length {
-               let fragmentString = fullString.substring(with: charRange)
-               if fragmentString.last == "\n" {
-                   lineNumber += 1
-               }
+            if drawRect.intersects(rect) && NSMaxRange(charRange) >= fullString.length {
+                let hasErr = errorLines.contains(lineNumber)
+                let numStr = "\(lineNumber)" as NSString
+                numStr.draw(in: drawRect, withAttributes: hasErr ? errorAttrs : normalAttrs)
             }
         }
     }

@@ -180,6 +180,57 @@ class TypstCompiler: ObservableObject {
             NotificationCenter.default.post(name: .typstErrorsUpdated, object: nil)
         }
     }
+    
+    // --- Export Functions ---
+    
+    func export(sourceURL: URL, outputURL: URL, format: String, projectRoot: URL? = nil) async -> (success: Bool, error: String?) {
+        guard let typstPath = resolveTypstPath() else {
+            return (false, "Error: 'typst' executable not found.")
+        }
+        
+        // If it's a multi-page document and the format is PNG/SVG, 
+        // Typst expects a template like "output-{0p}.png" if we don't want it to fail.
+        // However, we'll let the user provide the name via the NSSavePanel.
+        // If they don't provide a {p} template, Typst will fail for multi-page docs.
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: typstPath)
+        
+        var arguments = ["compile", sourceURL.path, outputURL.path]
+        
+        // Pass root if available
+        if let root = projectRoot {
+            arguments.append(contentsOf: ["--root", root.path])
+            process.currentDirectoryURL = root
+        }
+        
+        process.arguments = arguments
+        
+        let pipe = Pipe()
+        process.standardError = pipe
+        process.standardOutput = pipe
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            
+            if process.terminationStatus != 0 {
+                print("[TYPST-EXPORT-ERROR]: \(output)")
+                if output.contains("error:") {
+                    parseErrors(from: output)
+                }
+                return (false, output.isEmpty ? "Unknown Typst error (exit code \(process.terminationStatus))" : output)
+            }
+            
+            print("[TYPST-EXPORT-SUCCESS]: \(outputURL.lastPathComponent)")
+            return (true, nil)
+        } catch {
+            print("[TYPST-EXPORT] Failed to run: \(error)")
+            return (false, error.localizedDescription)
+        }
+    }
 }
 
 extension Notification.Name {

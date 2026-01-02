@@ -6,6 +6,8 @@ protocol TypstEditorTextViewDelegate: AnyObject {
     func openImageEditor(at range: NSRange)
     func openTableEditor(at range: NSRange)
     func textViewDidChangeSelection()
+    func adjustZoom(by delta: CGFloat)
+    func setZoomLevel(_ level: CGFloat)
 }
 
 class TypstEditorTextView: NSTextView {
@@ -113,6 +115,23 @@ class TypstEditorTextView: NSTextView {
     // Check if the index is inside a $$...$$ block
     func findProximityEquationRange(at index: Int) -> NSRange? {
         return EquationDetector.findEquationRange(in: string, at: index)
+    }
+    
+    // --- GESTURE HANDLING ---
+    
+    override func magnify(with event: NSEvent) {
+        // Pinch zoom
+        editorDelegate?.adjustZoom(by: event.magnification)
+    }
+    
+    override func scrollWheel(with event: NSEvent) {
+        // Ctrl + Scroll zoom
+        if event.modifierFlags.contains(.control) || event.modifierFlags.contains(.command) {
+            let delta = event.scrollingDeltaY / 100.0
+            editorDelegate?.adjustZoom(by: delta)
+        } else {
+            super.scrollWheel(with: event)
+        }
     }
 }
 

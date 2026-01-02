@@ -23,7 +23,13 @@ struct EditorView: NSViewRepresentable {
             // Connect the delegate for equation editor
             textView.editorDelegate = controller
             textView.layoutManager?.ensureLayout(for: textView.textContainer!)
-            scrollView.verticalRulerView?.needsDisplay = true
+            
+            // --- CONFIGURATION RULER ---
+            scrollView.hasVerticalRuler = true
+            scrollView.rulersVisible = true
+            let ruler = LineNumberRulerView(scrollView: scrollView, orientation: .verticalRuler)
+            ruler.clientView = textView
+            scrollView.verticalRulerView = ruler
         }
         
         return scrollView
@@ -37,6 +43,31 @@ struct EditorView: NSViewRepresentable {
         // Always use dark appearance
         nsView.appearance = NSAppearance(named: .darkAqua)
         
+        // Update font based on zoom
+        let baseSize: CGFloat = 14
+        let scaledSize = baseSize * controller.zoomLevel
+        if textView.font?.pointSize != scaledSize {
+            textView.font = NSFont.monospacedSystemFont(ofSize: scaledSize, weight: .regular)
+        }
+        
+        // Update ruler errors and redraw
+        if let ruler = nsView.verticalRulerView as? LineNumberRulerView {
+            let errorLines = Set(controller.errors.map { $0.line })
+            ruler.errorLines = errorLines
+            ruler.needsDisplay = true // Always force redraw on update to catch font changes
+        }
+        
+        // Update text wrapping
+        let textContainer = context.coordinator.textContainer
+        if controller.wrapLines {
+            textContainer.widthTracksTextView = true
+            textView.isHorizontallyResizable = false
+        } else {
+            textContainer.widthTracksTextView = false
+            textView.isHorizontallyResizable = true
+            textContainer.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        }
+
         // Update text if changed
         if textView.string != text {
             let selectedRange = textView.selectedRange()

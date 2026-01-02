@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct FileNode: Identifiable, Hashable {
     var id: URL { url }
@@ -89,6 +90,88 @@ class FileSystemModel: ObservableObject {
             expandedFolders.insert(node.url)
         }
     }
+    
+    func createNewFile() {
+        guard let folder = currentFolder else { return }
+        let panel = NSSavePanel()
+        panel.directoryURL = folder
+        panel.nameFieldStringValue = "untitle.typ"
+        panel.allowedContentTypes = [UTType(filenameExtension: "typ")!]
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try "".write(to: url, atomically: true, encoding: .utf8)
+                loadFiles()
+                // We might want to notify ContentView to select this new file
+                NotificationCenter.default.post(name: .fileDidCreate, object: url)
+            } catch {
+                print("Error creating file: \(error)")
+            }
+        }
+    }
+    
+    func importFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [UTType(filenameExtension: "typ")!, .pdf, .png, .jpeg]
+        
+        if panel.runModal() == .OK {
+            guard let folder = currentFolder else { return }
+            for url in panel.urls {
+                let dest = folder.appendingPathComponent(url.lastPathComponent)
+                try? FileManager.default.copyItem(at: url, to: dest)
+            }
+            loadFiles()
+        }
+    }
+    
+    func renameFile(url: URL) {
+        // Renaming in macOS is often done via an alert or inline.
+        // For simplicity, we'll use a NSSavePanel-like approach or just a simple input if we were in a custom view.
+        // Let's use a simple prompt logic or post a notification for ContentView to handle it with an alert.
+        NotificationCenter.default.post(name: .requestRename, object: url)
+    }
+    
+    func performRename(from url: URL, to newName: String) {
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
+        do {
+            try FileManager.default.moveItem(at: url, to: newURL)
+            loadFiles()
+            NotificationCenter.default.post(name: .fileDidRename, object: ["old": url, "new": newURL])
+        } catch {
+            print("Error renaming file: \(error)")
+        }
+    }
+    
+    func createBackup(to destination: URL) async -> Bool {
+        guard let root = currentFolder else { return false }
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        // zip -r archive.zip .
+        process.currentDirectoryURL = root
+        process.arguments = ["-r", "-q", destination.path, "."]
+        
+        return await withCheckedContinuation { continuation in
+            do {
+                try process.run()
+                process.terminationHandler = { process in
+                    continuation.resume(returning: process.terminationStatus == 0)
+                }
+            } catch {
+                print("Zip error: \(error)")
+                continuation.resume(returning: false)
+            }
+        }
+    }
+}
+
+extension Notification.Name {
+    static let fileDidCreate = Notification.Name("fileDidCreate")
+    static let requestRename = Notification.Name("requestRename")
+    static let fileDidRename = Notification.Name("fileDidRename")
 }
 
 struct SidebarView: View {

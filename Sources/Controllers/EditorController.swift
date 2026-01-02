@@ -45,13 +45,29 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isCodeActive: Bool = false
     @Published var showDeleteEquationAlert: Bool = false
     @Published var showDeleteCodeAlert: Bool = false
+    @Published var showGoToLineAlert: Bool = false
+    @Published var showExportErrorAlert: Bool = false
+    @Published var lastExportError: String = ""
+    @Published var targetLineNumber: String = ""
+    @Published var zoomLevel: CGFloat = 1.0
+    @Published var isSidebarVisible: Bool = true
+    @Published var isSearchVisible: Bool = false
+    @Published var wrapLines: Bool = true
     var currentImageRange: NSRange? = nil
     
-    // Delegate method
     func openEquationEditor(at range: NSRange, initialContent: String) {
         currentEquationRange = range
         currentEquationContent = initialContent
         showEquationEditor = true
+    }
+    
+    func adjustZoom(by delta: CGFloat) {
+        let newZoom = zoomLevel + delta
+        zoomLevel = max(0.5, min(3.0, newZoom))
+    }
+    
+    func setZoomLevel(_ level: CGFloat) {
+        zoomLevel = max(0.5, min(3.0, level))
     }
     
     func saveEquation(_ newContent: String) {
@@ -711,6 +727,68 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
              textView.insertText("", replacementRange: equationRange)
              updateFormattingState()
         }
+    }
+    
+    // --- Commenting Actions ---
+    
+    func toggleLineComment() {
+        guard let textView = textView else { return }
+        let nsString = textView.string as NSString
+        let range = textView.selectedRange()
+        let lineRange = nsString.lineRange(for: range)
+        let selectedLinesText = nsString.substring(with: lineRange)
+        
+        let lines = selectedLinesText.components(separatedBy: .newlines)
+        var newLines: [String] = []
+        
+        // If all non-empty lines start with //, remove them. Otherwise add them.
+        let nonEmptyLines = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let areAllCommented = !nonEmptyLines.isEmpty && nonEmptyLines.allSatisfy { $0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        
+        for line in lines {
+            if areAllCommented {
+                if let prefixRange = line.range(of: "//") {
+                    var newLine = line
+                    newLine.removeSubrange(prefixRange)
+                    newLines.append(newLine)
+                } else {
+                    newLines.append(line)
+                }
+            } else {
+                newLines.append("// " + line)
+            }
+        }
+        
+        let replacement = newLines.joined(separator: "\n")
+        textView.insertText(replacement, replacementRange: lineRange)
+    }
+    
+    func toggleBlockComment() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        let nsString = textView.string as NSString
+        let selectedText = nsString.substring(with: range)
+        
+        if selectedText.hasPrefix("/*") && selectedText.hasSuffix("*/") {
+            let inner = String(selectedText.dropFirst(2).dropLast(2))
+            textView.insertText(inner, replacementRange: range)
+        } else {
+            textView.insertText("/* \(selectedText) */", replacementRange: range)
+        }
+    }
+    
+    // --- Zoom Actions ---
+    
+    func zoomIn() {
+        zoomLevel += 0.1
+    }
+    
+    func zoomOut() {
+        zoomLevel = max(0.5, zoomLevel - 0.1)
+    }
+    
+    func selectAll() {
+        textView?.selectAll(nil)
     }
     
     // Opens the visual equation editor for a new equation at the cursor

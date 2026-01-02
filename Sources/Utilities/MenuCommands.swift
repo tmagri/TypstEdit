@@ -3,24 +3,25 @@ import SwiftUI
 struct AppMenuCommands: Commands {
     @ObservedObject var themeManager: ThemeManager
     @Binding var selectedFile: URL?
+    @ObservedObject var editorController: EditorController
     
     var body: some Commands {
         // MARK: - File Menu
         CommandGroup(replacing: .newItem) {
             Button("New File") {
-                // TODO: Implement new file
+                NotificationCenter.default.post(name: .menuCommand, object: "newFile")
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
             
             Button("Upload File...") {
-                // TODO: Implement file picker  
+                NotificationCenter.default.post(name: .menuCommand, object: "uploadFile")
             }
             .keyboardShortcut("o", modifiers: .command)
             
             Divider()
             
             Button("Rename File") {
-                // TODO: Implement rename
+                NotificationCenter.default.post(name: .menuCommand, object: "renameFile")
             }
             // F2 shortcut not supported in SwiftUI Commands
             
@@ -32,73 +33,72 @@ struct AppMenuCommands: Commands {
             Divider()
             
             Button("Quick Export PDF") {
-                // TODO: Implement quick export
+                NotificationCenter.default.post(name: .menuCommand, object: "exportPDF")
             }
             .keyboardShortcut("s", modifiers:[.command, .shift])
             
             Menu("Export As") {
                 Button("PDF") {
-                    // TODO
+                    NotificationCenter.default.post(name: .menuCommand, object: "exportPDF")
                 }
                 Button("PNG") {
-                    // TODO
+                    NotificationCenter.default.post(name: .menuCommand, object: "exportPNG")
                 }
                 Button("SVG") {
-                    // TODO
+                    NotificationCenter.default.post(name: .menuCommand, object: "exportSVG")
                 }
             }
             
             Divider()
             
             Button("Backup Project") {
-                // TODO: Implement backup
+                NotificationCenter.default.post(name: .backupProject, object: nil)
             }
+            .keyboardShortcut("b", modifiers: [.command, .shift])
         }
         
         // MARK: - Edit Menu
         CommandGroup(replacing: .textEditing) {
             Button("Undo") {
-                if let undoManager = NSApp.keyWindow?.firstResponder?.undoManager {
-                    undoManager.undo()
-                }
+                NotificationCenter.default.post(name: .menuCommand, object: "undo")
             }
             .keyboardShortcut("z", modifiers: .command)
             
             Button("Redo") {
-                if let undoManager = NSApp.keyWindow?.firstResponder?.undoManager {
-                    undoManager.redo()
-                }
+                NotificationCenter.default.post(name: .menuCommand, object: "redo")
             }
             .keyboardShortcut("z", modifiers: [.command, .shift])
             
             Divider()
             
             Button("Search and Replace") {
-                // TODO: Implement search/replace
+                withAnimation {
+                    editorController.isSearchVisible.toggle()
+                }
             }
             .keyboardShortcut("f", modifiers: .command)
             
             Button("Go to Line") {
-                // TODO: Implement go to line
+                NotificationCenter.default.post(name: .menuCommand, object: "goToLine")
             }
-            .keyboardShortcut("g", modifiers: .command)
+            .keyboardShortcut("l", modifiers: .command) // Changed G to L which is more common and was G in original but typically L
             
             Divider()
             
             Button("Select All") {
-                NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+                NotificationCenter.default.post(name: .menuCommand, object: "selectAll")
             }
             .keyboardShortcut("a", modifiers: .command)
             
             Divider()
             
             Button("Toggle Line Comment") {
-                // TODO: Implement
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleLineComment")
             }
             .keyboardShortcut("/", modifiers: .command)
             
             Button("Toggle Block Comment") {
-                // TODO: Implement
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleBlockComment")
             }
             .keyboardShortcut("/", modifiers: [.command, .option])
             
@@ -136,13 +136,10 @@ struct AppMenuCommands: Commands {
         
         // MARK: - View Menu
         CommandMenu("View") {
-            Button("File Panel") {
-                // TODO: Toggle sidebar
-            }
+            Toggle("File Panel", isOn: $editorController.isSidebarVisible)
+                .keyboardShortcut("b", modifiers: .command)
             
-            Button("Search Panel") {
-                // TODO: Show search panel
-            }
+            Toggle("Search Panel", isOn: $editorController.isSearchVisible)
             
             Button("Outline Panel") {
                 // TODO: Show outline
@@ -154,7 +151,7 @@ struct AppMenuCommands: Commands {
             .keyboardShortcut("3", modifiers: [.command, .option])
             
             Button("Settings Panel") {
-                // TODO: Show settings
+                NotificationCenter.default.post(name: .menuCommand, object: "showSettings")
             }
             
             Divider()
@@ -166,7 +163,7 @@ struct AppMenuCommands: Commands {
             
             Toggle("Scroll on Type", isOn: .constant(true))
             
-            Toggle("Wrap Lines", isOn: .constant(false))
+            Toggle("Wrap Lines", isOn: $editorController.wrapLines)
             
             Divider()
             
@@ -189,14 +186,16 @@ struct AppMenuCommands: Commands {
             Divider()
             
             Button("Only Show Editor") {
-                // TODO
+                NotificationCenter.default.post(name: .menuCommand, object: "viewEditorOnly")
             }
             
             Button("Only Show Preview") {
-                // TODO
+                NotificationCenter.default.post(name: .menuCommand, object: "viewPreviewOnly")
             }
             
-            Toggle("Show Both Panels", isOn: .constant(true))
+            Button("Show Both Panels") {
+                NotificationCenter.default.post(name: .menuCommand, object: "viewBothPanels")
+            }
             
             Button("Show Preview in Popup") {
                 // TODO
@@ -226,12 +225,12 @@ struct AppMenuCommands: Commands {
             Divider()
             
             Button("Zoom In") {
-                // TODO
+                NotificationCenter.default.post(name: .menuCommand, object: "zoomIn")
             }
             .keyboardShortcut("+", modifiers: .command)
             
             Button("Zoom Out") {
-                // TODO
+                NotificationCenter.default.post(name: .menuCommand, object: "zoomOut")
             }
             .keyboardShortcut("-", modifiers: .command)
             
@@ -253,5 +252,7 @@ struct AppMenuCommands: Commands {
 // MARK: - Notification Names
 extension Notification.Name {
     static let insertSnippet = Notification.Name("insertSnippet")
+    static let menuCommand = Notification.Name("menuCommand")
+    static let backupProject = Notification.Name("backupProject")
 }
 

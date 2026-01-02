@@ -1,15 +1,14 @@
 import SwiftUI
 import Combine
+import UniformTypeIdentifiers
 
 struct ContentView: View {
+    @Binding var selectedFile: URL?
+    @ObservedObject var editorController: EditorController
+    
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
     
-    @State private var selectedFile: URL? {
-        didSet {
-            editorController.currentFileURL = selectedFile
-        }
-    }
     @State private var sourceCode: String = ""
     @State private var currentPDFURL: URL? // Preview PDF for live viewing
     @State private var exportedPDFURL: URL? // Exported PDF for sharing/printing
@@ -17,37 +16,15 @@ struct ContentView: View {
     // Debounce timer
     @State private var workItem: DispatchWorkItem?
     
-    @StateObject private var editorController = EditorController()
-    
     @State private var reloadToken: UUID = UUID()
     @State private var lastSaved: Date?
     @State private var showSavePopup: Bool = false
+    @State private var showRenameAlert: Bool = false
+    @State private var renameTargetURL: URL?
+    @State private var newFileName: String = ""
     @EnvironmentObject var themeManager: ThemeManager
     
     // MARK: - Computed Properties for UI Components
-    
-    private var lineNumbersBox: some View {
-        VStack(spacing: 0) {
-            // Spacer matching Toolbar height (transparent, no background)
-            Rectangle()
-                .fill(Color.clear)
-                .frame(height: 44) // Precise: 12+44+8+10=74 matches editor 12+44+8+10=74
-            
-            // The visual box for line numbers starting at Line 1
-            ZStack {
-                Color.black.opacity(0.3)
-                
-                LineNumbersView(controller: editorController)
-                    .environmentObject(themeManager)
-                    .padding(8)
-            }
-            .cornerRadius(12)
-            .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
-        }
-        .frame(minWidth: 50, maxWidth: 50, maxHeight: .infinity)
-        .padding(.leading, 12)
-        .padding(.vertical, 12) // Match editorBox vertical padding
-    }
     
     private var editorBox: some View {
         ZStack {
@@ -116,6 +93,29 @@ struct ContentView: View {
                 } message: {
                     Text("Are you sure you want to remove this code block?")
                 }
+                .alert("Go to Line", isPresented: $editorController.showGoToLineAlert) {
+                    TextField("Line Number", text: $editorController.targetLineNumber)
+                    Button("Go") {
+                        if let line = Int(editorController.targetLineNumber) {
+                            editorController.goToLine(line)
+                        }
+                    }
+                    Button("Cancel", role: .cancel) { }
+                }
+                .alert("Rename File", isPresented: $showRenameAlert) {
+                    TextField("New Name", text: $newFileName)
+                    Button("Rename") {
+                        if let url = renameTargetURL {
+                            fileSystem.performRename(from: url, to: newFileName)
+                        }
+                    }
+                    Button("Cancel", role: .cancel) { }
+                }
+                .alert("Export Error", isPresented: $editorController.showExportErrorAlert) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text(editorController.lastExportError)
+                }
             }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
@@ -149,18 +149,20 @@ struct ContentView: View {
                 // Unified HSplitView for Transparency
                 HSplitView {
                     // LEFT: Sidebar (starts minimized)
-                    SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
-                        .onChange(of: fileSystem.currentFolder) { newFolder in
-                            editorController.projectRootURL = newFolder
-                        }
-                        .onChange(of: selectedFile) { newFile in
-                            editorController.currentFileURL = newFile
-                        }
-                        .onAppear {
-                            editorController.projectRootURL = fileSystem.currentFolder
-                            editorController.currentFileURL = selectedFile
-                        }
-                        .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
+                    if editorController.isSidebarVisible {
+                        SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+                            .onChange(of: fileSystem.currentFolder) { newFolder in
+                                editorController.projectRootURL = newFolder
+                            }
+                            .onChange(of: selectedFile) { newFile in
+                                editorController.currentFileURL = newFile
+                            }
+                            .onAppear {
+                                editorController.projectRootURL = fileSystem.currentFolder
+                                editorController.currentFileURL = selectedFile
+                            }
+                            .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
+                    }
                     
                     // RIGHT: Main Content (Editor + PDF)
                     if selectedFile != nil {
@@ -169,12 +171,9 @@ struct ContentView: View {
                             themeManager.mainBackground.ignoresSafeArea() // .clear
                             
                             ResizableSplitView(initialWidth: 500) {
-                                // Left Pane: Line Numbers + Editor
-                                HStack(spacing: 8) { // Added spacing
-                                    lineNumbersBox
-                                    editorBox
-                                        .padding(.trailing, 0) // Remove padding as handle provides spacing
-                                }
+                                // Left Pane: Integrated Ruler + Editor
+                                editorBox
+                                    .padding(.leading, 12)
                             } right: {
                                 // PDF Preview Area with Shadow Box
                                 ZStack {
@@ -243,7 +242,8 @@ struct ContentView: View {
                         HStack(spacing: 8) {
                             
                             // Search Bar with Popup
-                            VStack(spacing: 0) {
+                            if editorController.isSearchVisible {
+                                VStack(spacing: 0) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "magnifyingglass")
                                         .foregroundColor(.secondary)
@@ -305,6 +305,7 @@ struct ContentView: View {
                                     .cornerRadius(6)
                                     .offset(y: 2)
                                 }
+                            }
                             }
                             
                             // Divider
@@ -399,6 +400,31 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                 default:
                     break
                 }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in
+            handleBackup()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
+            if let command = notification.object as? String {
+                handleMenuCommand(command)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
+            if let url = notification.object as? URL {
+                self.selectedFile = url
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
+            if let url = notification.object as? URL {
+                self.renameTargetURL = url
+                self.newFileName = url.lastPathComponent
+                self.showRenameAlert = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
+            if let info = notification.object as? [String: URL], let newURL = info["new"] {
+                self.selectedFile = newURL
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
@@ -538,6 +564,113 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         }
         workItem = newWorkItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: newWorkItem)
+    }
+    
+    func handleBackup() {
+        guard let root = fileSystem.currentFolder else { return }
+        
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue = "\(root.lastPathComponent)_backup.zip"
+        panel.title = "Backup Project"
+        panel.message = "Choose a location to save your project backup."
+        
+        if panel.runModal() == .OK, let dest = panel.url {
+            Task {
+                let success = await fileSystem.createBackup(to: dest)
+                if success {
+                    NSWorkspace.shared.open(dest.deletingLastPathComponent())
+                } else {
+                    editorController.lastExportError = "Failed to create project backup."
+                    editorController.showExportErrorAlert = true
+                }
+            }
+        }
+    }
+    
+    func handleMenuCommand(_ command: String) {
+        switch command {
+        case "newFile":
+            fileSystem.createNewFile()
+        case "uploadFile":
+            fileSystem.importFile()
+        case "renameFile":
+            if let url = selectedFile {
+                self.renameTargetURL = url
+                self.newFileName = url.lastPathComponent
+                self.showRenameAlert = true
+            }
+        case "exportPDF":
+            if let url = selectedFile { exportPDF(from: url) }
+        case "exportPNG":
+            handleExport(format: "png")
+        case "exportSVG":
+            handleExport(format: "svg")
+        case "undo":
+            editorController.undo()
+        case "redo":
+            editorController.redo()
+        case "toggleSearch":
+            // Focus search field?
+            break
+        case "goToLine":
+            editorController.showGoToLineAlert = true
+        case "selectAll":
+            editorController.selectAll()
+        case "toggleLineComment":
+            editorController.toggleLineComment()
+        case "toggleBlockComment":
+            editorController.toggleBlockComment()
+        case "toggleSidebar":
+            withAnimation { editorController.isSidebarVisible.toggle() }
+        case "showSettings":
+            // Notification or direct show
+            break
+        case "viewEditorOnly":
+            // Need ResizableSplitView control
+            break
+        case "viewPreviewOnly":
+            // Need ResizableSplitView control
+            break
+        case "viewBothPanels":
+            // Need ResizableSplitView control
+            break
+        case "zoomIn":
+            editorController.zoomIn()
+        case "zoomOut":
+            editorController.zoomOut()
+        default:
+            break
+        }
+    }
+    
+    func handleExport(format: String) {
+        guard let url = selectedFile else { return }
+        
+        // Export naming recommendation for multi-page documents
+        let suggestedName = url.deletingPathExtension().appendingPathExtension(format).lastPathComponent
+        
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: format)!]
+        panel.nameFieldStringValue = suggestedName
+        panel.message = "For multi-page \(format.uppercased()) export, you can use {p} in the filename (e.g. image-{p}.\(format))"
+        
+        if panel.runModal() == .OK, let dest = panel.url {
+            Task {
+                let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: editorController.projectRootURL)
+                if result.success {
+                    NSWorkspace.shared.open(dest)
+                    
+                    // Refresh sidebar if destination is within project root
+                    if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) {
+                        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+                    }
+                } else {
+                    editorController.lastExportError = result.error ?? "Unknown error"
+                    editorController.showExportErrorAlert = true
+                }
+            }
+        }
     }
 }
 import PDFKit
