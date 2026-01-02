@@ -7,26 +7,6 @@ struct ToolbarView: View {
         HStack(spacing: 0) {
             // Text formatting
             Group {
-                ToolbarButton(icon: "bold", isActive: controller.isBoldActive, action: controller.toggleBold)
-                ToolbarButton(icon: "italic", isActive: controller.isItalicActive, action: controller.toggleItalic)
-                ToolbarButton(icon: "underline", isActive: controller.isUnderlineActive, action: controller.toggleUnderline)
-            }
-            
-            Rectangle().fill(Color.clear).frame(width: 12, height: 1)
-            
-            // Snippets
-            Group {
-                ToolbarButton(icon: "tablecells", action: controller.insertTableSnippet)
-                ToolbarButton(icon: "photo", action: controller.insertImageSnippet)
-                ToolbarButton(icon: "chart.bar", action: controller.insertChartSnippet)
-                ToolbarButton(icon: "calendar", action: controller.insertTimelineSnippet)
-                ToolbarButton(icon: "sum", action: controller.openNewEquationEditor)
-            }
-            
-            Rectangle().fill(Color.clear).frame(width: 12, height: 1)
-            
-            // Other formatting
-            Group {
                 Menu {
                     Button("Body", action: { controller.setHeadingLevel(0) })
                     Divider()
@@ -39,9 +19,30 @@ struct ToolbarView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 54)
+                ToolbarButton(icon: "bold", isActive: controller.isBoldActive, action: controller.toggleBold)
+                ToolbarButton(icon: "italic", isActive: controller.isItalicActive, action: controller.toggleItalic)
+                ToolbarButton(icon: "underline", isActive: controller.isUnderlineActive, action: controller.toggleUnderline)
+            }
+            
+            Rectangle().fill(Color.clear).frame(width: 12, height: 1)
+            
+            // Snippets
+            Group {
+                ToolbarButton(icon: "tablecells", isActive: controller.isTableActive, action: controller.insertTableSnippet)
+                ToolbarButton(icon: "photo", isActive: controller.isImageActive, action: controller.insertImageSnippet)
+                ToolbarButton(icon: "chart.bar", action: controller.insertChartSnippet)
+                ToolbarButton(icon: "calendar", action: controller.insertTimelineSnippet)
+                ToolbarButton(icon: "sum", isActive: controller.isEquationActive, action: controller.openNewEquationEditor)
+            }
+            
+            Rectangle().fill(Color.clear).frame(width: 12, height: 1)
+            
+            // Other formatting
+            Group {
                 
-                ToolbarButton(icon: "function", action: controller.insertMath)
-                ToolbarButton(icon: "chevron.left.forwardslash.chevron.right", action: controller.toggleCode)
+                
+                ToolbarButton(icon: "function", isActive: controller.isEquationActive, action: controller.insertMath)
+                ToolbarButton(icon: "chevron.left.forwardslash.chevron.right", isActive: controller.isCodeActive, action: controller.toggleCode)
             }
         }
     }

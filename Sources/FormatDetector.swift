@@ -138,4 +138,26 @@ struct FormatDetector {
         }
         return nil
     }
+    
+    /// Finds the range of a code block (`...` or ```...```) surrounding the index.
+    static func findCodeRange(in text: String, at index: Int) -> NSRange? {
+        let nsText = text as NSString
+        let length = nsText.length
+        
+        // Pattern for triple backticks (multiline) and single backticks (inline)
+        // Order matters: match triple first
+        let patterns = [#"```[\s\S]*?```"#, #"`[^`\n]*?`"#]
+        
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
+            
+            for match in matches {
+                if index >= match.range.location && index <= match.range.upperBound {
+                    return match.range
+                }
+            }
+        }
+        return nil
+    }
 }

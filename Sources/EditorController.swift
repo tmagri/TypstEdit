@@ -39,6 +39,12 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isItalicActive: Bool = false
     @Published var isUnderlineActive: Bool = false
     @Published var currentHeadingLevel: Int = 0
+    @Published var isEquationActive: Bool = false
+    @Published var isTableActive: Bool = false
+    @Published var isImageActive: Bool = false
+    @Published var isCodeActive: Bool = false
+    @Published var showDeleteEquationAlert: Bool = false
+    @Published var showDeleteCodeAlert: Bool = false
     var currentImageRange: NSRange? = nil
     
     // Delegate method
@@ -571,6 +577,11 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location) != nil
         isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
         currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
+        
+        isEquationActive = EquationDetector.findEquationRange(in: text, at: range.location) != nil
+        isTableActive = TableDetector.findTableRange(in: text, at: range.location) != nil
+        isImageActive = ImageDetector.findImageRange(in: text, at: range.location) != nil
+        isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
     }
     
     // --- Heading Actions ---
@@ -668,9 +679,39 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         textView.insertText(innerContent, replacementRange: range)
     }
     
-    func toggleCode() { wrapSelection(prefix: "`", suffix: "`") }
+    func toggleCode() {
+        if isCodeActive {
+            showDeleteCodeAlert = true
+        } else {
+            wrapSelection(prefix: "`", suffix: "`")
+        }
+    }
     
-    func insertMath() { wrapSelection(prefix: "$", suffix: "$") }
+    func deleteCodeBlock() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let codeRange = FormatDetector.findCodeRange(in: textView.string, at: range.location) {
+             textView.insertText("", replacementRange: codeRange)
+             updateFormattingState()
+        }
+    }
+    
+    func insertMath() {
+        if isEquationActive {
+            showDeleteEquationAlert = true
+        } else {
+            wrapSelection(prefix: "$", suffix: "$")
+        }
+    }
+    
+    func deleteEquation() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let equationRange = EquationDetector.findEquationRange(in: textView.string, at: range.location) {
+             textView.insertText("", replacementRange: equationRange)
+             updateFormattingState()
+        }
+    }
     
     // Opens the visual equation editor for a new equation at the cursor
     func openNewEquationEditor() {

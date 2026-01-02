@@ -104,6 +104,18 @@ struct ContentView: View {
                         }
                     )
                 }
+                .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
+                    Button("Delete", role: .destructive) { editorController.deleteEquation() }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("Are you sure you want to remove this equation?")
+                }
+                .alert("Delete Code Block?", isPresented: $editorController.showDeleteCodeAlert) {
+                    Button("Delete", role: .destructive) { editorController.deleteCodeBlock() }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("Are you sure you want to remove this code block?")
+                }
             }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
