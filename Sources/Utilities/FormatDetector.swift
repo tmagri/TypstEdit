@@ -13,9 +13,22 @@ struct FormatDetector {
     
     /// Finds the range of underline (#underline[...]) surrounding the index.
     static func findUnderlineRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: "#underline\\s*[\\(\\[]")
+    }
+    
+    /// Finds the range of highlight (#highlight[...]) surrounding the index.
+    static func findHighlightRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: "#highlight\\s*[\\(\\[]")
+    }
+    
+    /// Finds the range of strikethrough (#strike[...]) surrounding the index.
+    static func findStrikeRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: "#strike\\s*[\\(\\[]")
+    }
+    
+    private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
         let nsText = text as NSString
-        let pattern = "#underline\\s*[\\[\\(]"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        guard let regex = try? NSRegularExpression(pattern: prefixPattern, options: []) else { return nil }
         
         let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
         
@@ -159,5 +172,42 @@ struct FormatDetector {
             }
         }
         return nil
+    }
+
+    static func findLinkRange(in text: String, at index: Int) -> NSRange? {
+        let pattern = #"#link\("([^"]+)"\)(?:\[(.*?)\])?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        
+        let range = NSRange(location: 0, length: text.utf16.count)
+        let matches = regex.matches(in: text, options: [], range: range)
+        
+        for match in matches {
+            if NSLocationInRange(index, match.range) {
+                return match.range
+            }
+        }
+        
+        return nil
+    }
+    
+    static func findCodeBlockRange(in text: String, at index: Int) -> NSRange? {
+        // Simple detection for triple backticks
+        // This is a naive implementation and might need robustness for nested blocks if supported
+        let pattern = #"```[\s\S]*?```"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        
+        let range = NSRange(location: 0, length: text.utf16.count)
+        let matches = regex.matches(in: text, options: [], range: range)
+        
+        for match in matches {
+            if NSLocationInRange(index, match.range) {
+                return match.range
+            }
+        }
+        return nil
+    }
+    
+    static func findQuoteRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: "#quote\\s*[\\(\\[]")
     }
 }

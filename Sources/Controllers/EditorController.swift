@@ -8,6 +8,19 @@ extension Notification.Name {
 
 @MainActor
 class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate {
+    enum ViewMode {
+        case both
+        case editorOnly
+        case previewOnly
+    }
+    
+    enum ColorBlindnessMode: String, CaseIterable {
+        case none = "None"
+        case protanopia = "Protanopia"
+        case deuteranopia = "Deuteranopia"
+        case tritanopia = "Tritanopia"
+    }
+    
     // --- Equation Editor State ---
     @Published var showEquationEditor: Bool = false
     @Published var showTableEditor: Bool = false
@@ -19,6 +32,18 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var currentTableCells: [String] = []
     @Published var tableEditInitialRows: Int = 0
     @Published var tableEditInitialCols: Int = 0
+    @Published var tableColumnsString: String = ""
+    @Published var tableInset: String = ""
+    @Published var tableAlign: String = ""
+    @Published var useTableHeader: Bool = false
+    @Published var tableHeaderCells: [String] = []
+    
+    // --- Link ---
+    @Published var isLinkActive: Bool = false
+    @Published var showLinkEditor: Bool = false
+    @Published var currentLinkRange: NSRange?
+    @Published var currentLinkURL: String = ""
+    @Published var currentLinkText: String = ""
     
     // --- File Context ---
     @Published var currentFileURL: URL?
@@ -38,6 +63,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isBoldActive: Bool = false
     @Published var isItalicActive: Bool = false
     @Published var isUnderlineActive: Bool = false
+    @Published var isHighlightActive: Bool = false
+    @Published var isStrikeActive: Bool = false
+    @Published var isQuoteActive: Bool = false
+    @Published var isCodeBlockActive: Bool = false
     @Published var currentHeadingLevel: Int = 0
     @Published var isEquationActive: Bool = false
     @Published var isTableActive: Bool = false
@@ -53,6 +82,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isSidebarVisible: Bool = true
     @Published var isSearchVisible: Bool = false
     @Published var wrapLines: Bool = true
+    @Published var viewMode: ViewMode = .both
+    @Published var isVerticalSplit: Bool = true
+    @Published var colorBlindnessMode: ColorBlindnessMode = .none
+    
     var currentImageRange: NSRange? = nil
     
     func openEquationEditor(at range: NSRange, initialContent: String) {
@@ -160,6 +193,11 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         self.currentTableCells = []
         self.tableEditInitialRows = 0
         self.tableEditInitialCols = 0
+        self.tableColumnsString = ""
+        self.tableInset = ""
+        self.tableAlign = ""
+        self.useTableHeader = false
+        self.tableHeaderCells = []
         
         // Detect existing table
         if let tableInfo = TableDetector.parseTable(in: textView.string, at: location) {
@@ -167,26 +205,84 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
             self.currentTableCells = tableInfo.cells
             self.tableEditInitialRows = tableInfo.rows
             self.tableEditInitialCols = tableInfo.columns
+            self.tableColumnsString = tableInfo.columnsString ?? "\(tableInfo.columns)"
+            self.tableInset = tableInfo.inset ?? ""
+            self.tableAlign = tableInfo.align ?? ""
+            if let headers = tableInfo.headerCells {
+                self.useTableHeader = true
+                self.tableHeaderCells = headers
+            }
         }
     }
     
-    func insertTable(rows: Int, cols: Int) {
+    private func ensureTypstContent(_ str: String) -> String {
+        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "[]" }
+        
+        // If it's already wrapped in [] or "", or is a number, return as is
+        if (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")) ||
+           (trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")) ||
+           (Double(trimmed) != nil) ||
+           (trimmed == "true" || trimmed == "false" || trimmed == "none") {
+            return trimmed
+        }
+        
+        // If it looks like a function call or a variable starting with #, or contains math $
+        if trimmed.hasPrefix("#") || trimmed.contains("(") || (trimmed.hasPrefix("$") && trimmed.hasSuffix("$")) {
+            return trimmed
+        }
+        
+        return "[\(trimmed)]"
+    }
+    
+    func insertTable(rows: Int, cols: Int, columnsString: String, inset: String, align: String, useHeader: Bool, headerCells: [String]) {
         guard let textView = textView else { return }
         
-        var snippet = "#table(\n  columns: \(cols),\n"
+        var snippet = "#table(\n"
+        
+        // Columns
+        if !columnsString.isEmpty {
+            snippet += "  columns: \(columnsString),\n"
+        } else {
+            snippet += "  columns: \(cols),\n"
+        }
+        
+        // Inset
+        if !inset.isEmpty {
+            snippet += "  inset: \(inset),\n"
+        }
+        
+        // Align
+        if !align.isEmpty {
+            snippet += "  align: \(align),\n"
+        }
+        
+        // Header
+        if useHeader {
+            let headerCount = !columnsString.isEmpty ? 
+                (Int(columnsString) ?? columnsString.split(separator: ",").count) : cols
+            
+            var effectiveHeaders = headerCells
+            if effectiveHeaders.count > headerCount {
+                effectiveHeaders = Array(effectiveHeaders.prefix(headerCount))
+            } else {
+                while effectiveHeaders.count < headerCount {
+                    effectiveHeaders.append("[]")
+                }
+            }
+            
+            let headerContent = effectiveHeaders.map { ensureTypstContent($0) }.joined(separator: ", ")
+            snippet += "  table.header(\n    \(headerContent),\n  ),\n"
+        }
         
         // Preserve data from currentTableCells if we are editing
         let totalCellsNeeded = rows * cols
         var cellsToInsert: [String] = []
         
         for i in 0..<totalCellsNeeded {
-            // If we have existing data for this index, use it
             let r = i / cols
             let c = i % cols
             
-            // Map old index to new index if possible
-            // This is naive: it assumes data is filled row-major.
-            // If we are editing, we probably want to mapped by (r, c)
             if let oldCols = tableEditInitialCols != 0 ? tableEditInitialCols : nil {
                 let oldIndex = r * oldCols + c
                 if r < tableEditInitialRows && c < oldCols && oldIndex < currentTableCells.count {
@@ -203,7 +299,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
             var rowText = "  "
             for c in 0..<cols {
                 let index = r * cols + c
-                rowText += "\(cellsToInsert[index]), "
+                rowText += "\(ensureTypstContent(cellsToInsert[index])), "
             }
             snippet += rowText.trimmingCharacters(in: CharacterSet(charactersIn: ", ")) + ",\n"
         }
@@ -220,6 +316,11 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         currentTableCells = []
         tableEditInitialRows = 0
         tableEditInitialCols = 0
+        tableColumnsString = ""
+        tableInset = ""
+        tableAlign = ""
+        useTableHeader = false
+        tableHeaderCells = []
         
         showTableEditor = false
     }
@@ -592,12 +693,18 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location) != nil
         isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location) != nil
         isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
+        isHighlightActive = FormatDetector.findHighlightRange(in: text, at: range.location) != nil
+        isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
+        isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
+        isLinkActive = FormatDetector.findLinkRange(in: text, at: range.location) != nil
+        isQuoteActive = FormatDetector.findQuoteRange(in: text, at: range.location) != nil
+        isCodeBlockActive = FormatDetector.findCodeBlockRange(in: text, at: range.location) != nil
+        
         currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
         
         isEquationActive = EquationDetector.findEquationRange(in: text, at: range.location) != nil
         isTableActive = TableDetector.findTableRange(in: text, at: range.location) != nil
         isImageActive = ImageDetector.findImageRange(in: text, at: range.location) != nil
-        isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
     }
     
     // --- Heading Actions ---
@@ -662,25 +769,50 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         guard let textView = textView else { return }
         let range = textView.selectedRange()
         if let underlineRange = FormatDetector.findUnderlineRange(in: textView.string, at: range.location) {
-            // Underline is more complex: #underline[...]
-            // We need to find the correct prefix length (#underline[)
-            let text = textView.string as NSString
-            let snippet = text.substring(with: underlineRange)
-            // Fix: range(of:options:) on String uses String.Index
-            if let openerRange = snippet.range(of: #"^#underline\s*[\[\(]"#, options: .regularExpression) {
-                let prefixLen = snippet.distance(from: snippet.startIndex, to: openerRange.upperBound)
-                unwrapFormatting(range: underlineRange, prefixLen: prefixLen, suffixLen: 1)
-            } else {
-                // Fallback: search for first [ or (
-                if let startParen = snippet.firstIndex(where: { $0 == "[" || $0 == "(" }) {
-                    let prefixLen = snippet.distance(from: snippet.startIndex, to: startParen) + 1
-                    unwrapFormatting(range: underlineRange, prefixLen: prefixLen, suffixLen: 1)
-                }
-            }
+            unwrapBracketedFormatting(range: underlineRange, prefixPattern: #"^#underline\s*[\[\(]"#)
         } else {
             wrapSelection(prefix: "#underline[", suffix: "]")
         }
         updateFormattingState()
+    }
+    
+    func toggleHighlight() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let highlightRange = FormatDetector.findHighlightRange(in: textView.string, at: range.location) {
+            unwrapBracketedFormatting(range: highlightRange, prefixPattern: #"^#highlight\s*[\[\(]"#)
+        } else {
+            wrapSelection(prefix: "#highlight[", suffix: "]")
+        }
+        updateFormattingState()
+    }
+    
+    func toggleStrike() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let strikeRange = FormatDetector.findStrikeRange(in: textView.string, at: range.location) {
+            unwrapBracketedFormatting(range: strikeRange, prefixPattern: #"^#strike\s*[\[\(]"#)
+        } else {
+            wrapSelection(prefix: "#strike[", suffix: "]")
+        }
+        updateFormattingState()
+    }
+    
+    private func unwrapBracketedFormatting(range: NSRange, prefixPattern: String) {
+        guard let textView = textView else { return }
+        let text = textView.string as NSString
+        let snippet = text.substring(with: range)
+        
+        if let openerRange = snippet.range(of: prefixPattern, options: .regularExpression) {
+            let prefixLen = snippet.distance(from: snippet.startIndex, to: openerRange.upperBound)
+            unwrapFormatting(range: range, prefixLen: prefixLen, suffixLen: 1)
+        } else {
+            // Fallback: search for first [ or (
+            if let startParen = snippet.firstIndex(where: { $0 == "[" || $0 == "(" }) {
+                let prefixLen = snippet.distance(from: snippet.startIndex, to: startParen) + 1
+                unwrapFormatting(range: range, prefixLen: prefixLen, suffixLen: 1)
+            }
+        }
     }
     
     private func unwrapFormatting(range: NSRange, prefixLen: Int, suffixLen: Int) {
@@ -777,6 +909,33 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         }
     }
     
+    func toggleQuote() {
+        guard let textView = textView else { return }
+        // Naive toggle: simple wrap. Parsing active block quote removal is complex.
+        wrapSelection(prefix: "#quote(block: true)[", suffix: "]")
+    }
+    
+    func toggleCodeBlock() {
+        guard let textView = textView else { return }
+        // Simple wrap for now
+        wrapSelection(prefix: "```\n", suffix: "\n```")
+    }
+    
+    func insertPageBreak() {
+        guard let textView = textView else { return }
+        textView.insertText("#pagebreak()\n", replacementRange: textView.selectedRange())
+    }
+    
+    func insertHorizontalLine() {
+        guard let textView = textView else { return }
+        textView.insertText("#line(length: 100%)\n", replacementRange: textView.selectedRange())
+    }
+    
+    func applyTextColor(_ color: String) {
+         // color should be a Typst color string like "red", "blue", "rgb(...)".
+         wrapSelection(prefix: "#text(fill: \(color))[", suffix: "]")
+    }
+    
     // --- Zoom Actions ---
     
     func zoomIn() {
@@ -849,6 +1008,59 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyphIndex, length: 1), in: textView.textContainer!)
         textView.scrollToVisible(rect)
         textView.setSelectedRange(NSRange(location: charIndex, length: 0))
+    }
+    
+    func toggleLink() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        let text = textView.string
+        
+        if let linkRange = FormatDetector.findLinkRange(in: text, at: range.location) {
+            // Edit existing
+            self.currentLinkRange = linkRange
+            let linkSnippet = (text as NSString).substring(with: linkRange)
+            
+            // Basic parsing of #link("url")[text]
+            if let urlRange = linkSnippet.range(of: "(?<=\"|')[^\"']+(?=\"|')", options: .regularExpression) {
+                self.currentLinkURL = String(linkSnippet[urlRange])
+            } else {
+                self.currentLinkURL = ""
+            }
+            
+            if let textRange = linkSnippet.range(of: "(?<=\\[)[^\\]]+(?=\\])", options: .regularExpression) {
+                self.currentLinkText = String(linkSnippet[textRange])
+            } else {
+                self.currentLinkText = ""
+            }
+        } else {
+            // New link
+            self.currentLinkRange = nil
+            self.currentLinkURL = ""
+            if range.length > 0 {
+                self.currentLinkText = (text as NSString).substring(with: range)
+            } else {
+                self.currentLinkText = ""
+            }
+        }
+        
+        self.showLinkEditor = true
+    }
+    
+    func insertLink(url: String, text: String) {
+        guard let textView = textView else { return }
+        
+        var snippet = ""
+        if text.isEmpty {
+            snippet = "#link(\"\(url)\")"
+        } else {
+            snippet = "#link(\"\(url)\")[\(text)]"
+        }
+        
+        let rangeToReplace = currentLinkRange ?? textView.selectedRange()
+        textView.insertText(snippet, replacementRange: rangeToReplace)
+        
+        showLinkEditor = false
+        updateFormattingState()
     }
     
     @MainActor

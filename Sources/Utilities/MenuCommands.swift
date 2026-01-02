@@ -25,10 +25,6 @@ struct AppMenuCommands: Commands {
             }
             // F2 shortcut not supported in SwiftUI Commands
             
-            Button("Package Project") {
-                // TODO: Implement (PRO feature)
-            }
-            .disabled(true) // PRO feature placeholder
             
             Divider()
             
@@ -104,6 +100,18 @@ struct AppMenuCommands: Commands {
             
             Divider()
             
+            Button("Toggle Highlight") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleHighlight")
+            }
+            .keyboardShortcut("h", modifiers: [.command, .shift])
+            
+            Button("Toggle Strikethrough") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleStrike")
+            }
+            .keyboardShortcut("s", modifiers: [.command, .shift])
+            
+            Divider()
+            
             Button("Add Suggestion/Comment") {
                 // TODO: PRO feature
             }
@@ -112,10 +120,15 @@ struct AppMenuCommands: Commands {
         
         // MARK: - Insert Menu
         CommandMenu("Insert") {
-            Button("Table") {
-                NotificationCenter.default.post(name: .insertSnippet, object: "table")
+            Button("Table...") {
+                NotificationCenter.default.post(name: NSNotification.Name("insertTable"), object: nil)
             }
             .keyboardShortcut("t", modifiers: [.command, .control])
+            
+            Button("Link...") {
+                NotificationCenter.default.post(name: NSNotification.Name("insertLink"), object: nil)
+            }
+            .keyboardShortcut("k", modifiers: [.command])
             
             Button("Equation") {
                 NotificationCenter.default.post(name: .insertSnippet, object: "equation")
@@ -131,6 +144,26 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .insertSnippet, object: "chart")
             }
             .keyboardShortcut("c", modifiers: [.command, .control])
+            
+            Divider()
+            
+            Button("Page Break") {
+                NotificationCenter.default.post(name: .menuCommand, object: "insertPageBreak")
+            }
+            .keyboardShortcut(.return, modifiers: [.command])
+
+            Button("Horizontal Line") {
+                NotificationCenter.default.post(name: .menuCommand, object: "insertHorizontalLine")
+            }
+            .keyboardShortcut("-", modifiers: [.command, .option])
+            
+            Button("Block Quote") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleQuote")
+            }
+            
+            Button("Code Block") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
+            }
         }
         
         
@@ -140,24 +173,12 @@ struct AppMenuCommands: Commands {
                 .keyboardShortcut("b", modifiers: .command)
             
             Toggle("Search Panel", isOn: $editorController.isSearchVisible)
-            
-            Button("Outline Panel") {
-                // TODO: Show outline
-            }
-            
-            Button("Improve Panel") {
-                // TODO: Show improve panel
-            }
-            .keyboardShortcut("3", modifiers: [.command, .option])
-            
+                    
             Button("Settings Panel") {
                 NotificationCenter.default.post(name: .menuCommand, object: "showSettings")
             }
             
             Divider()
-            
-            Toggle("Show Collaborator Cursors", isOn: .constant(false))
-                .disabled(true) // PRO feature
             
             Toggle("Show Toolbar", isOn: .constant(true))
             
@@ -168,11 +189,11 @@ struct AppMenuCommands: Commands {
             Divider()
             
             Button("Split Views Vertically") {
-                // TODO
+                NotificationCenter.default.post(name: .menuCommand, object: "splitVertical")
             }
             
             Button("Split Views Horizontally") {
-                // TODO
+                NotificationCenter.default.post(name: .menuCommand, object: "splitHorizontal")
             }
             
             Divider()
@@ -197,17 +218,26 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "viewBothPanels")
             }
             
-            Button("Show Preview in Popup") {
-                // TODO
-            }
             
             Divider()
             
             Menu("Simulate Color Blindness") {
-                Button("None") { }
-                Button("Protanopia") { }
-                Button("Deuteranopia") { }
-                Button("Tritanopia") { }
+                Button("None") {
+                    editorController.colorBlindnessMode = .none
+                }
+                .keyboardShortcut(editorController.colorBlindnessMode == .none ? .defaultAction : .cancelAction) // Visual hack or just rely on state
+                
+                Button("Protanopia") {
+                    editorController.colorBlindnessMode = .protanopia
+                }
+                
+                Button("Deuteranopia") {
+                    editorController.colorBlindnessMode = .deuteranopia
+                }
+                
+                Button("Tritanopia") {
+                    editorController.colorBlindnessMode = .tritanopia
+                }
             }
             
             Divider()
@@ -234,17 +264,6 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("-", modifiers: .command)
             
-            Button("Fit to Width") {
-                // TODO
-            }
-            
-            Button("Fit to Height") {
-                // TODO
-            }
-            
-            Button("Fit to Page") {
-                // TODO
-            }
         }
     }
 }

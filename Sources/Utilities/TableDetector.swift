@@ -3,8 +3,12 @@ import Foundation
 struct TableInfo {
     let range: NSRange
     let columns: Int
+    let columnsString: String?
     let rows: Int
     let cells: [String]
+    let inset: String?
+    let align: String?
+    let headerCells: [String]?
 }
 
 struct TableDetector {
@@ -50,18 +54,39 @@ struct TableDetector {
         
         // Extract columns
         var cols = 1
+        var colsStr: String? = nil
         let colRegex = try? NSRegularExpression(pattern: #"columns:\s*(\d+)"#, options: [])
-        let tupleRegex = try? NSRegularExpression(pattern: #"columns:\s*\((.*?)\)"#, options: [.dotMatchesLineSeparators])
+        let tupleRegex = try? NSRegularExpression(pattern: #"columns:\s*(\(.*?\)|\d+\w*)"#, options: [.dotMatchesLineSeparators])
         
         if let match = colRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
             if let colStr = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) }) {
                 cols = Int(colStr) ?? 1
+                colsStr = colStr
             }
         } else if let match = tupleRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
             if let tupleContent = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) }) {
-                // Split by comma, but respect nested parentheses/brackets
-                cols = smartSplit(tupleContent).count
+                colsStr = tupleContent
+                if tupleContent.hasPrefix("(") {
+                    let inner = String(tupleContent.dropFirst().dropLast())
+                    cols = smartSplit(inner).count
+                } else {
+                    cols = 1
+                }
             }
+        }
+        
+        // Extract inset
+        var inset: String? = nil
+        let insetRegex = try? NSRegularExpression(pattern: #"inset:\s*([^,)]+)"#, options: [])
+        if let match = insetRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
+            inset = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) })?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        // Extract align
+        var align: String? = nil
+        let alignRegex = try? NSRegularExpression(pattern: #"align:\s*([^,)]+)"#, options: [])
+        if let match = alignRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
+            align = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) })?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
         // Let's strip the #table(...) wrapper
@@ -72,14 +97,22 @@ struct TableDetector {
         // Split inner code by commas, respecting parentheses and brackets
         let segments = smartSplit(innerCode)
         var cells: [String] = []
+        var headerCells: [String]? = nil
         
         for segment in segments {
             let trimmed = segment.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { continue }
             
-            // If it's a named argument (like columns:, fill:, gutter:), skip it.
-            // Named arguments must start with an identifier followed by a colon.
-            // Simple check: does it contain a colon that is NOT inside brackets?
+            // Handle table.header
+            if trimmed.hasPrefix("table.header") {
+                if let parenStart = trimmed.firstIndex(of: "("), let parenEnd = trimmed.lastIndex(of: ")") {
+                    let headerInner = String(trimmed[trimmed.index(after: parenStart)..<parenEnd])
+                    headerCells = smartSplit(headerInner).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                }
+                continue
+            }
+            
+            // If it's a named argument, skip it.
             if isNamedArgument(trimmed) {
                 continue
             }
@@ -89,7 +122,7 @@ struct TableDetector {
         
         let rows = Int(ceil(Double(cells.count) / Double(cols)))
         
-        return TableInfo(range: range, columns: cols, rows: rows, cells: cells)
+        return TableInfo(range: range, columns: cols, columnsString: colsStr, rows: rows, cells: cells, inset: inset, align: align, headerCells: headerCells)
     }
     
     /// Splits a string by commas but respects nesting of (), [], {}

@@ -58,16 +58,34 @@ struct ContentView: View {
                     )
                     .frame(width: 900, height: 500) // Improved size for wider equations and better fit
                 }
+                .sheet(isPresented: $editorController.showLinkEditor) {
+                    LinkEditorView(
+                        controller: editorController,
+                        onInsert: { url, text in
+                            editorController.insertLink(url: url, text: text)
+                        },
+                        onCancel: {
+                            editorController.showLinkEditor = false
+                        }
+                    )
+                }
                 .sheet(isPresented: $editorController.showTableEditor) {
                     TableEditorView(
+                        controller: editorController,
                         onInsert: { rows, cols in
-                            editorController.insertTable(rows: rows, cols: cols)
+                            editorController.insertTable(
+                                rows: rows,
+                                cols: cols,
+                                columnsString: editorController.tableColumnsString,
+                                inset: editorController.tableInset,
+                                align: editorController.tableAlign,
+                                useHeader: editorController.useTableHeader,
+                                headerCells: editorController.tableHeaderCells
+                            )
                         },
                         onCancel: {
                             editorController.showTableEditor = false
-                        },
-                        initialRows: editorController.tableEditInitialRows,
-                        initialCols: editorController.tableEditInitialCols
+                        }
                     )
                 }
                 .sheet(isPresented: $editorController.showImageEditor) {
@@ -170,23 +188,38 @@ struct ContentView: View {
                             themeManager.contentOverlay.ignoresSafeArea() 
                             themeManager.mainBackground.ignoresSafeArea() // .clear
                             
-                            ResizableSplitView(initialWidth: 500) {
-                                // Left Pane: Integrated Ruler + Editor
+                            if editorController.viewMode == .editorOnly {
                                 editorBox
                                     .padding(.leading, 12)
-                            } right: {
-                                // PDF Preview Area with Shadow Box
+                                    .padding(.trailing, 12)
+                            } else if editorController.viewMode == .previewOnly {
                                 ZStack {
                                     themeManager.pdfBackground
-                                    
-                                    PreviewView(url: currentPDFURL, reloadToken: reloadToken)
+                                    PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode)
                                         .padding(20)
                                 }
                                 .cornerRadius(12)
                                 .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
-                                .padding(.vertical, 12)
-                                .padding(.leading, 0) // Remove padding as handle provides spacing
-                                .padding(.trailing, 12) // Keep trailing padding for window edge
+                                .padding(12)
+                            } else {
+                                ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                                    // Left Pane: Integrated Ruler + Editor
+                                    editorBox
+                                        .padding(.leading, 12)
+                                } right: {
+                                    // PDF Preview Area with Shadow Box
+                                    ZStack {
+                                        themeManager.pdfBackground
+                                        
+                                        PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode)
+                                            .padding(20)
+                                    }
+                                    .cornerRadius(12)
+                                    .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
+                                    .padding(.vertical, 12)
+                                    .padding(.leading, 0) // Remove padding as handle provides spacing
+                                    .padding(.trailing, 12) // Keep trailing padding for window edge
+                                }
                             }
                         }
                         .layoutPriority(1)
@@ -405,6 +438,9 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in
             handleBackup()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in
+            editorController.toggleLink()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
             if let command = notification.object as? String {
                 handleMenuCommand(command)
@@ -621,20 +657,35 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
             editorController.toggleLineComment()
         case "toggleBlockComment":
             editorController.toggleBlockComment()
+        case "toggleHighlight":
+            editorController.toggleHighlight()
+        case "toggleStrike":
+            editorController.toggleStrike()
+        case "toggleLink":
+            editorController.toggleLink()
+        case "toggleQuote":
+            editorController.toggleQuote()
+        case "toggleCodeBlock":
+            editorController.toggleCodeBlock()
+        case "insertPageBreak":
+            editorController.insertPageBreak()
+        case "insertHorizontalLine":
+            editorController.insertHorizontalLine()
         case "toggleSidebar":
             withAnimation { editorController.isSidebarVisible.toggle() }
         case "showSettings":
             // Notification or direct show
             break
         case "viewEditorOnly":
-            // Need ResizableSplitView control
-            break
+            withAnimation { editorController.viewMode = .editorOnly }
         case "viewPreviewOnly":
-            // Need ResizableSplitView control
-            break
+            withAnimation { editorController.viewMode = .previewOnly }
         case "viewBothPanels":
-            // Need ResizableSplitView control
-            break
+            withAnimation { editorController.viewMode = .both }
+        case "splitVertical":
+            withAnimation { editorController.isVerticalSplit = true }
+        case "splitHorizontal":
+            withAnimation { editorController.isVerticalSplit = false }
         case "zoomIn":
             editorController.zoomIn()
         case "zoomOut":

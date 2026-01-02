@@ -17,15 +17,17 @@ class CustomSplitView: NSSplitView {
 struct ResizableSplitView<Left: View, Right: View>: NSViewRepresentable {
     let left: Left
     let right: Right
+    var isVertical: Bool
     
-    init(initialWidth: CGFloat = 500, @ViewBuilder left: () -> Left, @ViewBuilder right: () -> Right) {
+    init(initialWidth: CGFloat = 500, isVertical: Bool = true, @ViewBuilder left: () -> Left, @ViewBuilder right: () -> Right) {
         self.left = left()
         self.right = right()
+        self.isVertical = isVertical
     }
     
     func makeNSView(context: Context) -> CustomSplitView {
         let splitView = CustomSplitView()
-        splitView.isVertical = true
+        splitView.isVertical = isVertical
         splitView.dividerStyle = .thin
         
         // Create hosting controllers for SwiftUI views
@@ -76,6 +78,11 @@ struct ResizableSplitView<Left: View, Right: View>: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: CustomSplitView, context: Context) {
+        // Update orientation
+        if nsView.isVertical != isVertical {
+            nsView.isVertical = isVertical
+        }
+        
         // Update hosting controllers with new SwiftUI views
         context.coordinator.leftHost?.rootView = left
         context.coordinator.rightHost?.rootView = right
