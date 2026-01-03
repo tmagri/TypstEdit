@@ -13,6 +13,14 @@ class TypstCompiler: ObservableObject {
     @Published var isCompiling: Bool = false
     @Published var errors: [TypstError] = []
     
+    var isDarkMode: Bool = false
+    private let preambleLineCount = 3 
+    private let darkModePreamble = """
+    #set page(fill: rgb("#1a1a1a"))
+    #set text(fill: rgb("#d1d1d1"))
+    
+    """
+    
     // Check if typst makes sense or we need full path
     private func resolveTypstPath() -> String? {
         // Priority 1: Check if bundled with the app
@@ -64,7 +72,11 @@ class TypstCompiler: ObservableObject {
         
         // Write content to shadow file
         do {
-            try source.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
+            var finalSource = source
+            if isDarkMode {
+                finalSource = darkModePreamble + source
+            }
+            try finalSource.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
         } catch {
             self.compilationStatus = "Error writing shadow file: \(error)"
             return
@@ -170,7 +182,8 @@ class TypstCompiler: ObservableObject {
                 // match is like ":10:5"
                 let parts = match.split(separator: ":")
                 if parts.count >= 1, let lineNum = Int(parts[0]) {
-                    newErrors.append(TypstError(line: lineNum, message: currentMessage))
+                    let adjustedLine = isDarkMode ? max(1, lineNum - preambleLineCount) : lineNum
+                    newErrors.append(TypstError(line: adjustedLine, message: currentMessage))
                 }
             }
         }

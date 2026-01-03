@@ -193,6 +193,8 @@ struct AppMenuCommands: Commands {
             
             Toggle("Wrap Lines", isOn: $editorController.wrapLines)
             
+            Toggle("Preview Dark Mode", isOn: $editorController.isPreviewDarkMode)
+            
             Divider()
             
             Button("Split Views Vertically") {

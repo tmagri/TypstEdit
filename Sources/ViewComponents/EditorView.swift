@@ -17,6 +17,9 @@ struct EditorView: NSViewRepresentable {
         textView.textColor = NSColor(themeManager.textColor)
         textView.insertionPointColor = NSColor(themeManager.textColor)
         
+        // Initialize with current text
+        textView.string = text
+        
         // Connecter le contrôleur
         DispatchQueue.main.async {
             controller.textView = textView
@@ -80,8 +83,13 @@ struct EditorView: NSViewRepresentable {
             textStorage.replaceCharacters(in: NSRange(location: 0, length: textStorage.length), with: text)
             // Re-apply highlighting to be safe (though textStorage delegate handles it)
             highlighter.applyHighlighting(to: textStorage)
+            
+            context.coordinator.isUpdating = true
             textStorage.endEditing()
-            if selectedRange.location + selectedRange.length <= text.count {
+            context.coordinator.isUpdating = false
+            
+            // Fix: Use UTF-16 count for range validation as NSRange is based on code units
+            if selectedRange.location + selectedRange.length <= (text as NSString).length {
                 textView.setSelectedRange(selectedRange)
             }
         }
@@ -100,6 +108,7 @@ struct EditorView: NSViewRepresentable {
         let textStorage: NSTextStorage
         let layoutManager: NSLayoutManager
         let textContainer: NSTextContainer
+        var isUpdating: Bool = false
 
         @MainActor init(_ parent: EditorView) {
             self.parent = parent
@@ -150,10 +159,14 @@ struct EditorView: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
+            guard !isUpdating else { return }
             guard let textView = notification.object as? TypstEditorTextView else { return }
-            self.parent.text = textView.string
-            self.parent.onCommit()
-            self.parent.controller.needsRedraw()
+            let newText = textView.string
+            if self.parent.text != newText {
+                self.parent.text = newText
+                self.parent.onCommit()
+                self.parent.controller.needsRedraw()
+            }
         }
     }
 }

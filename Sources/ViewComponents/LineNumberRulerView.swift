@@ -64,6 +64,14 @@ class LineNumberRulerView: NSRulerView {
             let lineRange = fullString.lineRange(for: NSRange(location: currentIdx, length: 0))
             let glyphIndex = layoutManager.glyphIndexForCharacter(at: lineRange.location)
             
+            // Safety check for glyph index
+            if glyphIndex >= layoutManager.numberOfGlyphs {
+                if currentIdx == fullString.length { break }
+                currentIdx = NSMaxRange(lineRange)
+                lineNumber += 1
+                continue
+            }
+            
             // Get the rect for the first fragment of this logical line
             let firstFragmentRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: nil)
             

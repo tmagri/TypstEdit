@@ -85,7 +85,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var showGoToLineAlert: Bool = false
     @Published var showExportErrorAlert: Bool = false
     @Published var showHelp: Bool = false
+    @Published var showFileNotFoundAlert: Bool = false
     @Published var lastExportError: String = ""
+    @Published var missingFileName: String = ""
     @Published var targetLineNumber: String = ""
     @Published var zoomLevel: CGFloat = 1.0
     @Published var isSidebarVisible: Bool = true
@@ -94,6 +96,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var viewMode: ViewMode = .both
     @Published var isVerticalSplit: Bool = true
     @Published var colorBlindnessMode: ColorBlindnessMode = .none
+    @Published var isPreviewDarkMode: Bool = true
     @Published var cursorSize: CGFloat = 2.0 // Default thickness
     
     var currentImageRange: NSRange? = nil

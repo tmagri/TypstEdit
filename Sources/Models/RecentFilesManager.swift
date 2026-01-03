@@ -41,6 +41,11 @@ class RecentFilesManager: ObservableObject {
         saveRecents()
     }
     
+    func remove(url: URL) {
+        recentFiles.removeAll { $0.url == url }
+        saveRecents()
+    }
+    
     private func saveRecents() {
         if let data = try? JSONEncoder().encode(recentFiles) {
             UserDefaults.standard.set(data, forKey: key)

@@ -160,6 +160,11 @@ struct ContentView: View {
                 } message: {
                     Text(editorController.lastExportError)
                 }
+                .alert("File Not Found", isPresented: $editorController.showFileNotFoundAlert) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.")
+                }
             }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
@@ -183,6 +188,18 @@ struct ContentView: View {
             
             if fileSystem.currentFolder == nil {
                 WelcomeView(model: fileSystem, onOpen: { url in
+                    // Robust existence check using URL
+                    var isDirectory: ObjCBool = false
+                    if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                        // Try resource reachable as fallthru for sandbox
+                        if (try? url.checkResourceIsReachable()) != true {
+                            editorController.missingFileName = url.lastPathComponent
+                            editorController.showFileNotFoundAlert = true
+                            RecentFilesManager.shared.remove(url: url)
+                            return
+                        }
+                    }
+                    
                     self.selectedFile = url
                     let folder = url.deletingLastPathComponent()
                     fileSystem.currentFolder = folder
@@ -221,7 +238,7 @@ struct ContentView: View {
                             } else if editorController.viewMode == .previewOnly {
                                 ZStack {
                                     themeManager.pdfBackground
-                                    PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode)
+                                    PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode, isPreviewDarkMode: editorController.isPreviewDarkMode)
                                         .padding(20)
                                 }
                                 .cornerRadius(12)
@@ -237,7 +254,7 @@ struct ContentView: View {
                                     ZStack {
                                         themeManager.pdfBackground
                                         
-                                        PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode)
+                                        PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode, isPreviewDarkMode: editorController.isPreviewDarkMode)
                                             .padding(20)
                                     }
                                     .cornerRadius(12)
@@ -259,6 +276,10 @@ struct ContentView: View {
                          .frame(maxWidth: .infinity, maxHeight: .infinity)
                          .layoutPriority(1)
                     }
+                }
+                .onChange(of: editorController.isPreviewDarkMode) { newValue in
+                    compiler.isDarkMode = newValue
+                    scheduleCompilation()
                 }
                 // Toolbar attached to the main split view
                 .toolbar {
@@ -508,16 +529,38 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
     
     func loadFile(url: URL?) {
         guard let url = url else { return }
+        
+        // Use try to read content first, it's more definitive than fileExists in sandbox
         do {
-            self.sourceCode = try String(contentsOf: url, encoding: .utf8)
-            // Set exported PDF URL based on file path
-            self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-            // Add to recents
-            RecentFilesManager.shared.add(url: url)
-            // Trigger watch
-            scheduleCompilation()
+            let content = try String(contentsOf: url, encoding: .utf8)
+            
+            // Success! Update UI
+            DispatchQueue.main.async {
+                self.sourceCode = content
+                
+                // Set exported PDF URL based on file path
+                self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
+                // Add to recents
+                RecentFilesManager.shared.add(url: url)
+                // Trigger watch
+                scheduleCompilation(with: content)
+                
+                print("[INFO] Successfully loaded file: \(url.lastPathComponent)")
+            }
         } catch {
-            print("Failed to read file: \(error)")
+            print("[ERROR] Failed to read file: \(error)")
+            
+            // Only show alert if file actually doesn't exist
+            if (try? url.checkResourceIsReachable()) != true {
+                DispatchQueue.main.async {
+                    editorController.missingFileName = url.lastPathComponent
+                    editorController.showFileNotFoundAlert = true
+                    RecentFilesManager.shared.remove(url: url)
+                    if self.selectedFile == url {
+                        self.selectedFile = nil
+                    }
+                }
+            }
         }
     }
     
@@ -529,7 +572,7 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
             RecentFilesManager.shared.add(url: url)
             
             // Trigger compilation to generate PDF
-            scheduleCompilation()
+            scheduleCompilation(with: sourceCode)
             
             // UI Feedback
             lastSaved = Date()
@@ -614,7 +657,7 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         }
     }
 
-    func scheduleCompilation() {
+    func scheduleCompilation(with content: String? = nil) {
         guard let url = selectedFile, editorController.isTypstFile else { 
             compiler.cleanUp()
             currentPDFURL = nil
@@ -622,11 +665,13 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         }
         
         workItem?.cancel()
-        let currentSource = sourceCode
+        let currentSource = content ?? sourceCode
         let fileURL = url
+        let isDark = editorController.isPreviewDarkMode
         
         let newWorkItem = DispatchWorkItem {
             Task {
+                compiler.isDarkMode = isDark
                 await compiler.updateContent(source: currentSource, fileURL: fileURL)
             }
         }
