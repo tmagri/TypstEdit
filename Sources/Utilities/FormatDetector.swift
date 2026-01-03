@@ -273,4 +273,31 @@ struct FormatDetector {
         
         return QuoteInfo(range: range, content: content, attribution: attribution, isBlock: isBlock)
     }
+    
+    /// Detects if the cursor at the given index is likely inside a Typst math block ($ ... $).
+    /// This uses a heuristic of counting unescaped dollar signs from the beginning of text.
+    static func isMathMode(in text: String, at index: Int) -> Bool {
+        let nsText = text as NSString
+        var dollarCount = 0
+        var i = 0
+        
+        while i < index && i < nsText.length {
+            let char = nsText.substring(with: NSRange(location: i, length: 1))
+            
+            if char == "\\" {
+                // Skip escaped characters
+                i += 2
+                continue
+            }
+            
+            if char == "$" {
+                dollarCount += 1
+            }
+            
+            i += 1
+        }
+        
+        // If odd number of dollars, we are likely inside a math block
+        return dollarCount % 2 != 0
+    }
 }

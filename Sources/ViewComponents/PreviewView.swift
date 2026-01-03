@@ -6,6 +6,7 @@ struct PreviewView: NSViewRepresentable {
     var reloadToken: UUID?
     var colorBlindnessMode: EditorController.ColorBlindnessMode = .none
     var isPreviewDarkMode: Bool = true
+    var onWordCountChange: ((Int) -> Void)?
 
     @EnvironmentObject var themeManager: ThemeManager
 
@@ -74,7 +75,9 @@ struct PreviewView: NSViewRepresentable {
                         context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                         snapshotView.animator().alphaValue = 0.0
                     } completionHandler: {
-                        snapshotView.removeFromSuperview()
+                        DispatchQueue.main.async {
+                            snapshotView.removeFromSuperview()
+                        }
                     }
                 } else {
                     // First load, just set it
@@ -83,6 +86,17 @@ struct PreviewView: NSViewRepresentable {
                 
                 context.coordinator.lastUrl = url
                 context.coordinator.lastToken = reloadToken
+                
+                // Calculate word count asynchronously
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let text = document.string ?? ""
+                    let words = text.split { $0.isWhitespace || $0.isNewline }
+                    let count = words.count
+                    
+                    DispatchQueue.main.async {
+                        self.onWordCountChange?(count)
+                    }
+                }
             }
         }
     }

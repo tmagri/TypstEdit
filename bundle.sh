@@ -4,7 +4,14 @@ set -e
 APP_NAME="TypstEdit"
 
 CONFIG=${1:-debug}
-echo "Building with configuration: $CONFIG..."
+
+if [ -f "VERSION" ]; then
+    VERSION=$(cat VERSION)
+else
+    VERSION="1.0.0"
+fi
+
+echo "Building version $VERSION with configuration: $CONFIG..."
 swift build -c "$CONFIG"
 
 # Find the executable specifically in the requested configuration folder
@@ -91,9 +98,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

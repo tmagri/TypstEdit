@@ -5,6 +5,12 @@ APP_NAME="TypstEdit"
 BUILD_DIR=".build"
 APP_BUNDLE="$APP_NAME.app"
 
+if [ -f "VERSION" ]; then
+    VERSION=$(cat VERSION)
+else
+    VERSION="1.0.0"
+fi
+
 echo "Building Universal Binary (ARM64 + x86_64)..."
 
 # Build for ARM64 (Apple Silicon)
@@ -64,9 +70,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>$VERSION</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

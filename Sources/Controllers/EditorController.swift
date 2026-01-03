@@ -60,7 +60,41 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var bibFull: Bool = false
     @Published var bibStyle: String = "apa"
     
-    // --- File Context ---
+    // --- Outline Editor State ---
+    @Published var showOutlineEditor: Bool = false
+    
+    // --- Figure Editor State ---
+    @Published var showFigureEditor: Bool = false
+    @Published var currentFigureContent: String = ""
+    
+    // --- External Data Editor State ---
+    @Published var showExternalDataEditor: Bool = false
+    
+    // MARK: - New Features (Symbol Picker & Word Count)
+    @Published var showSymbolPicker: Bool = false
+    @Published var wordCount: Int = 0
+    
+    // MARK: - Symbol Insertion
+    func insertSymbol(code: String, unicode: String) {
+        // Detect if we are in math mode ($ ... $)
+        guard let textView = textView else { return }
+        let index = textView.selectedRange().location
+        let text = textView.string
+        
+        // Simple heuristic: count unescaped $ before cursor. Odd = math mode.
+        let isMathMode = FormatDetector.isMathMode(in: text, at: index)
+        
+        let contentToInsert = isMathMode ? code : unicode
+        insertText(contentToInsert)
+        
+        // If inserting a code (e.g. "alpha"), maybe add space if needed? 
+        // Typst usually needs space after command if followed by letter.
+        // But for symbol picker, "alpha" might be used as variable.
+        // Let's keep it raw for now.
+    }
+    
+    
+    // MARK: - Typst Insertion Logic
     @Published var currentFileURL: URL?
     @Published var projectRootURL: URL?
     @Published var shouldCopyImages: Bool = true
@@ -603,6 +637,185 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     func openLayoutEditor() {
         self.showLayoutEditor = true
     }
+
+    // --- Outline Functions ---
+    
+    func openOutlineEditor() {
+        self.showOutlineEditor = true
+    }
+    
+    func insertOutline(title: String, target: String, depth: Int?, indent: Bool?) {
+        var params: [String] = []
+        
+        if !title.isEmpty {
+            params.append("title: [\(title)]")
+        }
+        
+        switch target {
+        case "Heading":
+            // default is heading, no param needed usually, but can be explicit
+            // params.append("target: heading")
+            break
+        case "Figure":
+            params.append("target: figure")
+        case "Image":
+            params.append("target: image")
+        case "Custom":
+            // If custom, user might want to edit manually, or we add selector logic later
+            break
+        default:
+            break
+        }
+        
+        if let depth = depth, depth > 0 {
+            params.append("depth: \(depth)")
+        }
+        
+        if let indent = indent {
+            params.append("indent: \(indent)")
+        }
+        
+        let snippet = "#outline(\(params.joined(separator: ", ")))"
+        insertText(snippet)
+        showOutlineEditor = false
+    }
+    
+    // --- Figure Functions ---
+    
+    func openFigureEditor() {
+         guard let textView = textView else { return }
+         let range = textView.selectedRange()
+         if range.length > 0 {
+             currentFigureContent = String(textView.string[Range(range, in: textView.string)!])
+         } else {
+             currentFigureContent = ""
+         }
+         self.showFigureEditor = true
+    }
+    
+    func insertFigure(content: String, caption: String, label: String, kind: String?, supplement: String?) {
+        var params: [String] = []
+        
+        params.append(ensureTypstContent(content))
+        
+        if !caption.isEmpty {
+            params.append("caption: [\(caption)]")
+        }
+        
+        if let kind = kind, !kind.isEmpty {
+             params.append("kind: \(kind)")
+        }
+        
+        if let supplement = supplement, !supplement.isEmpty {
+            params.append("supplement: [\(supplement)]")
+        }
+        
+        var snippet = "#figure(\(params.joined(separator: ", ")))"
+        
+        if !label.isEmpty {
+            snippet += " <\(label)>"
+        }
+        
+        if let range = textView?.selectedRange(), range.length > 0 {
+             textView?.insertText(snippet, replacementRange: range)
+        } else {
+             insertText(snippet)
+        }
+        
+        showFigureEditor = false
+    }
+    
+    // --- External Data Functions ---
+    
+    func openExternalDataEditor() {
+        self.showExternalDataEditor = true
+    }
+    
+    func insertExternalData(filePath: String, type: String, variableName: String?) {
+        // e.g. #let data = json("data.json")
+        // type: json, csv, xml, yaml, toml
+        // filePath: relative or absolute... we should try to make it relative if possible or just use what is given
+        
+        let pathStr: String
+        // If we have a project root, try to make relative
+        if let root = projectRootURL, let fileURL = URL(string: filePath) ?? URL(string: "file://" + filePath) {
+             pathStr = relativePath(from: root, to: fileURL) ?? filePath
+        } else {
+             pathStr = filePath
+        }
+        
+        let command = type.lowercased()
+        let loadCmd = "\(command)(\"\(pathStr)\")"
+        
+        let snippet: String
+        if let varName = variableName, !varName.isEmpty {
+            snippet = "#let \(varName) = \(loadCmd)"
+        } else {
+            snippet = "#\(loadCmd)"
+        }
+        
+        insertText(snippet)
+        showExternalDataEditor = false
+    }
+    
+    // --- List Functions ---
+    
+    func toggleBulletList() {
+        toggleListPrefix("- ")
+    }
+    
+    func toggleNumberList() {
+        toggleListPrefix("+ ")
+    }
+    
+    private func toggleListPrefix(_ prefix: String) {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        let text = textView.string as NSString
+        
+        let lineRange = text.lineRange(for: range)
+        let lineContent = text.substring(with: lineRange)
+        
+        var lines: [String] = []
+        text.enumerateSubstrings(in: lineRange, options: .byLines) { (line, _, _, _) in
+            if let line = line {
+                // Check if line starts with prefix (allowing for leading whitespace mostly for check, but replacement should be strict or smart)
+                // For a robust toggle:
+                // If line starts with "prefix ", remove it.
+                // Else add "prefix ".
+                
+                if line.hasPrefix(prefix) {
+                    lines.append(String(line.dropFirst(prefix.count)))
+                } else if let prefixRange = line.range(of: prefix) {
+                    // This handles if prefix is somewhere else? No, just stick to strict prefix for toggles usually.
+                    // Or " - " vs "- "
+                    if prefixRange.lowerBound == line.startIndex {
+                        lines.append(String(line.dropFirst(prefix.count)))
+                    } else {
+                        lines.append(prefix + line)
+                    }
+                } else {
+                    lines.append(prefix + line)
+                }
+            } else {
+                lines.append("")
+            }
+        }
+        
+        // Reconstruct text
+        var replacement = lines.joined(separator: "\n")
+        
+        // If the original selection ended with a newline, ensure our replacement does too.
+        // enumerateSubstrings(byLines) strips newlines. joined(separator: "\n") adds them between but not at end.
+        if lineContent.hasSuffix("\n") {
+           replacement += "\n"
+        }
+        
+        if lineRange.location != NSNotFound {
+            textView.insertText(replacement, replacementRange: lineRange)
+        }
+    }
+
     
     // --- Search Functions ---
     

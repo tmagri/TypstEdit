@@ -1,6 +1,8 @@
+
 import SwiftUI
 import Combine
 import UniformTypeIdentifiers
+import PDFKit
 
 struct ContentView: View {
     @Binding var selectedFile: URL?
@@ -51,6 +53,7 @@ struct ContentView: View {
                 })
                 .environmentObject(themeManager)
                 .padding(8)
+                // Sheets
                 .sheet(isPresented: $editorController.showEquationEditor) {
                     VisualEquationEditor(
                         initialEquation: $editorController.currentEquationContent,
@@ -61,7 +64,7 @@ struct ContentView: View {
                             editorController.showEquationEditor = false
                         }
                     )
-                    .frame(width: 900, height: 500) // Improved size for wider equations and better fit
+                    .frame(width: 900, height: 500)
                 }
                 .sheet(isPresented: $editorController.showLinkEditor) {
                     LinkEditorView(
@@ -104,6 +107,9 @@ struct ContentView: View {
                         }
                     )
                 }
+                .sheet(isPresented: $editorController.showSymbolPicker) {
+                    SymbolPickerView(controller: editorController)
+                }
                 .sheet(isPresented: $editorController.showQuoteEditor) {
                     QuoteEditorView(
                         controller: editorController,
@@ -128,6 +134,16 @@ struct ContentView: View {
                     HelpView()
                         .environmentObject(themeManager)
                 }
+                .sheet(isPresented: $editorController.showOutlineEditor) {
+                    OutlineEditorView(controller: editorController)
+                }
+                .sheet(isPresented: $editorController.showFigureEditor) {
+                    FigureEditorView(controller: editorController)
+                }
+                .sheet(isPresented: $editorController.showExternalDataEditor) {
+                    ExternalDataEditorView(controller: editorController)
+                }
+                // Alerts
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }
                     Button("Cancel", role: .cancel) { }
@@ -168,7 +184,22 @@ struct ContentView: View {
                 } message: {
                     Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.")
                 }
-            }
+            
+                // Status Bar
+                if editorController.isTypstFile {
+                    HStack {
+                        Text("Words: \(editorController.wordCount)")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundColor(themeManager.textColor)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.3))
+                    .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
+                }
+            } // End VStack
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
         .cornerRadius(12)
@@ -211,253 +242,271 @@ struct ContentView: View {
                 .background(themeManager.mainBackground)
             } else {
                 // Unified HSplitView for Transparency
-                HSplitView {
-                    // LEFT: Sidebar (starts minimized)
-                    if editorController.isSidebarVisible {
-                        SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
-                            .onChange(of: fileSystem.currentFolder) { newFolder in
-                                editorController.projectRootURL = newFolder
-                            }
-                            .onChange(of: selectedFile) { newFile in
-                                editorController.currentFileURL = newFile
-                            }
-                            .onAppear {
-                                editorController.projectRootURL = fileSystem.currentFolder
-                                editorController.currentFileURL = selectedFile
-                            }
-                            .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
-                    }
-                    
-                    // RIGHT: Main Content (Editor + PDF)
-                    if selectedFile != nil {
-                         ZStack {
-                            themeManager.contentOverlay.ignoresSafeArea() 
-                            themeManager.mainBackground.ignoresSafeArea() // .clear
-                            
-                            if !editorController.isTypstFile || editorController.viewMode == .editorOnly {
-                                editorBox
-                                    .padding(.leading, 12)
-                                    .padding(.trailing, 12)
-                            } else if editorController.viewMode == .previewOnly {
-                                ZStack {
-                                    themeManager.pdfBackground
-                                    PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode, isPreviewDarkMode: editorController.isPreviewDarkMode)
-                                        .padding(20)
+                VStack(spacing: 0) {
+                    HSplitView {
+                        // LEFT: Sidebar (starts minimized)
+                        if editorController.isSidebarVisible {
+                            SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+                                .onChange(of: fileSystem.currentFolder) { newFolder in
+                                    editorController.projectRootURL = newFolder
                                 }
-                                .cornerRadius(12)
-                                .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
-                                .padding(12)
-                            } else {
-                                ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
-                                    // Left Pane: Integrated Ruler + Editor
+                                .onChange(of: selectedFile) { newFile in
+                                    editorController.currentFileURL = newFile
+                                }
+                                .onAppear {
+                                    editorController.projectRootURL = fileSystem.currentFolder
+                                    editorController.currentFileURL = selectedFile
+                                }
+                                .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
+                        }
+                        
+                        // RIGHT: Main Content (Editor + PDF)
+                        if selectedFile != nil {
+                             ZStack {
+                                themeManager.contentOverlay.ignoresSafeArea() 
+                                themeManager.mainBackground.ignoresSafeArea() // .clear
+                                
+                                if !editorController.isTypstFile || editorController.viewMode == .editorOnly {
                                     editorBox
                                         .padding(.leading, 12)
-                                } right: {
-                                    // PDF Preview Area with Shadow Box
+                                        .padding(.trailing, 12)
+                                } else if editorController.viewMode == .previewOnly {
                                     ZStack {
                                         themeManager.pdfBackground
-                                        
-                                        PreviewView(url: currentPDFURL, reloadToken: reloadToken, colorBlindnessMode: editorController.colorBlindnessMode, isPreviewDarkMode: editorController.isPreviewDarkMode)
+                                        PreviewView(
+                                            url: currentPDFURL,
+                                            reloadToken: reloadToken,
+                                            colorBlindnessMode: editorController.colorBlindnessMode,
+                                            isPreviewDarkMode: editorController.isPreviewDarkMode,
+                                            onWordCountChange: { count in
+                                                DispatchQueue.main.async { editorController.wordCount = count }
+                                            }
+                                        )
                                             .padding(20)
                                     }
                                     .cornerRadius(12)
                                     .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
-                                    .padding(.vertical, 12)
-                                    .padding(.leading, 0) // Remove padding as handle provides spacing
-                                    .padding(.trailing, 12) // Keep trailing padding for window edge
-                                }
-                            }
-                        }
-                        .layoutPriority(1)
-                    } else {
-                        // Empty state when no file selected but folder open
-                         ZStack {
-                            themeManager.contentOverlay.ignoresSafeArea()
-                            Text("Select a file")
-                                .foregroundColor(themeManager.textColor)
-                         }
-                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                         .layoutPriority(1)
-                    }
-                }
-                .onChange(of: editorController.isPreviewDarkMode) { newValue in
-                    compiler.isDarkMode = newValue
-                    scheduleCompilation()
-                }
-                // Toolbar attached to the main split view
-                .toolbar {
-                    // Undo/Redo on the left
-                    ToolbarItem(placement: .navigation) {
-                        HStack(spacing: 8) {
-                            Button(action: editorController.undo) {
-                                Image(systemName: "arrow.uturn.backward")
-                                    .foregroundColor(themeManager.textColor)
-                                    .padding(6)
-                                    .background(Color.black.opacity(0.3))
-                                    .cornerRadius(8)
-                            }
-                            .help("Undo (Cmd+Z)")
-                            .buttonStyle(.plain)
-                            
-                            Button(action: editorController.redo) {
-                                Image(systemName: "arrow.uturn.forward")
-                                    .foregroundColor(themeManager.textColor)
-                                    .padding(6)
-                                    .background(Color.black.opacity(0.3))
-                                    .cornerRadius(8)
-                            }
-                            .help("Redo (Cmd+Shift+Z)")
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    
-                    ToolbarItem(placement: .principal) {
-                        Text(selectedFile?.lastPathComponent ?? "")
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .foregroundColor(themeManager.textColor)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.black.opacity(0.3))
-                            .cornerRadius(8)
-                    }
-                    
-                    ToolbarItem(placement: .primaryAction) {
-                        HStack(spacing: 8) {
-                            
-                            // Search Bar with Popup
-                            if editorController.isSearchVisible {
-                                VStack(spacing: 0) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "magnifyingglass")
-                                        .foregroundColor(.secondary)
-                                        .font(.system(size: 13))
-                                    TextField("Search", text: $editorController.searchQuery)
-                                        .textFieldStyle(.plain)
-                                        .frame(width: 130)
-                                        .foregroundColor(themeManager.textColor)
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .background(Color.black.opacity(0.3))
-                                .cornerRadius(8)
-                                
-                                // Search results popup (appears when there are matches)
-                                if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 {
-                                    HStack(spacing: 8) {
-                                        // Match counter
-                                        Text("\(editorController.currentMatchIndex + 1) of \(editorController.matchCount)")
-                                            .font(.caption)
-                                            .foregroundColor(themeManager.secondaryTextColor)
-                                        
-                                        Divider()
-                                            .frame(height: 12)
-                                        
-                                        // Previous match button
-                                        Button(action: { editorController.previousMatch() }) {
-                                            Image(systemName: "chevron.up")
-                                                .font(.system(size: 10))
+                                    .padding(12)
+                                } else {
+                                    ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                                        // Left Pane: Integrated Ruler + Editor
+                                        editorBox
+                                            .padding(.leading, 12)
+                                    } right: {
+                                        // PDF Preview Area with Shadow Box
+                                        ZStack {
+                                            themeManager.pdfBackground
+                                            
+                                            PreviewView(
+                                                url: currentPDFURL,
+                                                reloadToken: reloadToken,
+                                                colorBlindnessMode: editorController.colorBlindnessMode,
+                                                isPreviewDarkMode: editorController.isPreviewDarkMode,
+                                                onWordCountChange: { count in
+                                                    DispatchQueue.main.async { editorController.wordCount = count }
+                                                }
+                                            )
+                                                .padding(20)
                                         }
-                                        .buttonStyle(.plain)
-                                        .help("Previous")
-                                        
-                                        // Next match button
-                                        Button(action: { editorController.nextMatch() }) {
-                                            Image(systemName: "chevron.down")
-                                                .font(.system(size: 10))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .help("Next")
-                                        
-                                        Divider()
-                                            .frame(height: 12)
-                                        
-                                        // Done button
-                                        Button(action: { 
-                                            editorController.searchQuery = ""
-                                            editorController.clearSearch()
-                                        }) {
-                                            Image(systemName: "xmark")
-                                                .font(.system(size: 10))
-                                        }
-                                        .buttonStyle(.plain)
-                                        .help("Done")
+                                        .cornerRadius(12)
+                                        .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
+                                        .padding(.vertical, 12)
+                                        .padding(.leading, 0) // Remove padding as handle provides spacing
+                                        .padding(.trailing, 12) // Keep trailing padding for window edge
                                     }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 6)
-                                    .background(Color.black.opacity(0.3))
-                                    .cornerRadius(6)
-                                    .offset(y: 2)
                                 }
                             }
-                            }
-                            
-                            // Divider
-Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
-                            
-                            // Actions: Save, Print, Share
+                            .layoutPriority(1)
+                        } else {
+                            // Empty state when no file selected but folder open
+                             ZStack {
+                                themeManager.contentOverlay.ignoresSafeArea()
+                                Text("Select a file")
+                                    .foregroundColor(themeManager.textColor)
+                             }
+                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                             .layoutPriority(1)
+                        }
+                    }
+                    .onChange(of: editorController.isPreviewDarkMode) { newValue in
+                        compiler.isDarkMode = newValue
+                        scheduleCompilation()
+                    }
+                    // Toolbar attached to the main split view
+                    .toolbar {
+                        // Undo/Redo on the left
+                        ToolbarItem(placement: .navigation) {
                             HStack(spacing: 8) {
-                                Button(action: saveFile) {
-                                    Image(systemName: "square.and.arrow.down")
+                                Button(action: editorController.undo) {
+                                    Image(systemName: "arrow.uturn.backward")
                                         .foregroundColor(themeManager.textColor)
                                         .padding(6)
                                         .background(Color.black.opacity(0.3))
                                         .cornerRadius(8)
                                 }
-                                .help("Save (Cmd+S)")
-                                .keyboardShortcut("s", modifiers: .command)
+                                .help("Undo (Cmd+Z)")
                                 .buttonStyle(.plain)
                                 
-                                if editorController.isTypstFile {
-                                    // Print Button
-                                    Button(action: printPDF) {
-                                        Image(systemName: "printer")
+                                Button(action: editorController.redo) {
+                                    Image(systemName: "arrow.uturn.forward")
+                                        .foregroundColor(themeManager.textColor)
+                                        .padding(6)
+                                        .background(Color.black.opacity(0.3))
+                                        .cornerRadius(8)
+                                }
+                                .help("Redo (Cmd+Shift+Z)")
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        
+                        ToolbarItem(placement: .principal) {
+                            Text(selectedFile?.lastPathComponent ?? "")
+                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                .foregroundColor(themeManager.textColor)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.3))
+                                .cornerRadius(8)
+                        }
+                        
+                        ToolbarItem(placement: .primaryAction) {
+                            HStack(spacing: 8) {
+                                
+                                // Search Bar with Popup
+                                if editorController.isSearchVisible {
+                                    VStack(spacing: 0) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "magnifyingglass")
+                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 13))
+                                        TextField("Search", text: $editorController.searchQuery)
+                                            .textFieldStyle(.plain)
+                                            .frame(width: 130)
+                                            .foregroundColor(themeManager.textColor)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .background(Color.black.opacity(0.3))
+                                    .cornerRadius(8)
+                                    
+                                    // Search results popup (appears when there are matches)
+                                    if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 {
+                                        HStack(spacing: 8) {
+                                            // Match counter
+                                            Text("\(editorController.currentMatchIndex + 1) of \(editorController.matchCount)")
+                                                .font(.caption)
+                                                .foregroundColor(themeManager.secondaryTextColor)
+                                            
+                                            Divider()
+                                                .frame(height: 12)
+                                            
+                                            // Previous match button
+                                            Button(action: { editorController.previousMatch() }) {
+                                                Image(systemName: "chevron.up")
+                                                    .font(.system(size: 10))
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("Previous")
+                                            
+                                            // Next match button
+                                            Button(action: { editorController.nextMatch() }) {
+                                                Image(systemName: "chevron.down")
+                                                    .font(.system(size: 10))
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("Next")
+                                            
+                                            Divider()
+                                                .frame(height: 12)
+                                            
+                                            // Done button
+                                            Button(action: { 
+                                                editorController.searchQuery = ""
+                                                editorController.clearSearch()
+                                            }) {
+                                                Image(systemName: "xmark")
+                                                    .font(.system(size: 10))
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("Done")
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 6)
+                                        .background(Color.black.opacity(0.3))
+                                        .cornerRadius(6)
+                                        .offset(y: 2)
+                                    }
+                                }
+                                }
+                                
+                                // Divider
+    Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
+                                
+                                // Actions: Save, Print, Share
+                                HStack(spacing: 8) {
+                                    Button(action: saveFile) {
+                                        Image(systemName: "square.and.arrow.down")
                                             .foregroundColor(themeManager.textColor)
                                             .padding(6)
                                             .background(Color.black.opacity(0.3))
                                             .cornerRadius(8)
                                     }
-                                    .help("Print")
+                                    .help("Save (Cmd+S)")
+                                    .keyboardShortcut("s", modifiers: .command)
                                     .buttonStyle(.plain)
                                     
-                                    // Share Button (Native Anchor)
-                                    ShareButton(fileURL: exportedPDFURL)
-                                        .frame(width: 28, height: 28)
-                                        .padding(4)
-                                        .background(Color.black.opacity(0.3))
-                                        .cornerRadius(8)
-                                        .help("Share")
+                                    if editorController.isTypstFile {
+                                        // Print Button
+                                        Button(action: printPDF) {
+                                            Image(systemName: "printer")
+                                                .foregroundColor(themeManager.textColor)
+                                                .padding(6)
+                                                .background(Color.black.opacity(0.3))
+                                                .cornerRadius(8)
+                                        }
+                                        .help("Print")
+                                        .buttonStyle(.plain)
+                                        
+                                        // Share Button (Native Anchor)
+                                        ShareButton(fileURL: exportedPDFURL)
+                                            .frame(width: 28, height: 28)
+                                            .padding(4)
+                                            .background(Color.black.opacity(0.3))
+                                            .cornerRadius(8)
+                                            .help("Share")
+                                    }
                                 }
+                                
+                                // Save Status & Finder
+                                if let lastSaved = lastSaved {
+                                    Text("Last saved: \(lastSaved.formatted(date: .omitted, time: .shortened))")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                
                             }
-                            
-                            // Save Status & Finder
-                            if let lastSaved = lastSaved {
-                                Text("Last saved: \(lastSaved.formatted(date: .omitted, time: .shortened))")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            
                         }
                     }
-                }
-                // Important: Hide explicit window toolbar background to use our transparency
-                .toolbarBackground(.hidden, for: .windowToolbar)
-                .onChange(of: compiler.errors) { newErrors in
-                    editorController.errors = newErrors
-                    editorController.needsRedraw()
-                    // Broadcast errors to sidebar
-                    NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
-                }
+                    // Important: Hide explicit window toolbar background to use our transparency
+                    .toolbarBackground(.hidden, for: .windowToolbar)
+                    .onChange(of: compiler.errors) { newErrors in
+                        editorController.errors = newErrors
+                        editorController.needsRedraw()
+                        // Broadcast errors to sidebar
+                        NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
+                    }
+                } // End VStack
             }
             
             // Save Popup
             if showSavePopup {
                 VStack {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 40))
-                        .foregroundColor(.green)
+                    .font(.system(size: 40))
+                    .foregroundColor(.green)
                     Text("Saved!")
-                        .font(.headline)
-                        .foregroundColor(.white)
+                    .font(.headline)
+                    .foregroundColor(.white)
                 }
                 .padding(20)
                 .background(Color.black.opacity(0.8))
@@ -593,6 +642,43 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         }
     }
     
+    @MainActor
+    func handleExport(format: String) {
+        guard let url = selectedFile else { return }
+        
+        // Export naming recommendation for multi-page documents
+        let suggestedName = url.deletingPathExtension().appendingPathExtension(format).lastPathComponent
+        
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: format)!]
+        panel.nameFieldStringValue = suggestedName
+        panel.message = "For multi-page \(format.uppercased()) export, you can use {p} in the filename (e.g. image-{p}.\(format))"
+        
+        if panel.runModal() == .OK, let dest = panel.url {
+            let controller = self.editorController
+            let root = controller.projectRootURL
+            
+            Task {
+                let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: root)
+                
+                // Switch back to MainActor for UI updates
+                await MainActor.run {
+                    if result.success {
+                        NSWorkspace.shared.open(dest)
+                        
+                        // Refresh sidebar if destination is within project root
+                        if let root = root, dest.path.hasPrefix(root.path) {
+                            fileSystem.loadFiles()
+                        }
+                    } else {
+                        controller.lastExportError = result.error ?? "Unknown error"
+                        controller.showExportErrorAlert = true
+                    }
+                }
+            }
+        }
+    }
+
     func exportPDF(from sourceURL: URL) {
         let pdfDestination = sourceURL.deletingPathExtension().appendingPathExtension("pdf")
         let workingDirectory = sourceURL.deletingLastPathComponent()
@@ -682,6 +768,7 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: newWorkItem)
     }
     
+    @MainActor
     func handleBackup() {
         guard let root = fileSystem.currentFolder else { return }
         
@@ -704,6 +791,7 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         }
     }
     
+    @MainActor
     func handleMenuCommand(_ command: String) {
         switch command {
         case "newFile":
@@ -785,63 +873,5 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
         default:
             break
         }
-    }
-    
-    func handleExport(format: String) {
-        guard let url = selectedFile else { return }
-        
-        // Export naming recommendation for multi-page documents
-        let suggestedName = url.deletingPathExtension().appendingPathExtension(format).lastPathComponent
-        
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: format)!]
-        panel.nameFieldStringValue = suggestedName
-        panel.message = "For multi-page \(format.uppercased()) export, you can use {p} in the filename (e.g. image-{p}.\(format))"
-        
-        if panel.runModal() == .OK, let dest = panel.url {
-            Task {
-                let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: editorController.projectRootURL)
-                if result.success {
-                    NSWorkspace.shared.open(dest)
-                    
-                    // Refresh sidebar if destination is within project root
-                    if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) {
-                        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
-                    }
-                } else {
-                    editorController.lastExportError = result.error ?? "Unknown error"
-                    editorController.showExportErrorAlert = true
-                }
-            }
-        }
-    }
-}
-import PDFKit
-
-
-
-extension Color {
-    init(hex: String) {
-        let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&int)
-        let a, r, g, b: UInt64
-        switch hex.count {
-        case 3: // RGB (12-bit)
-            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
-        case 6: // RGB (24-bit)
-            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
-        case 8: // ARGB (32-bit)
-            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
-        default:
-            (a, r, g, b) = (1, 1, 1, 0)
-        }
-        self.init(
-            .sRGB,
-            red: Double(r) / 255,
-            green: Double(g) / 255,
-            blue:  Double(b) / 255,
-            opacity: Double(a) / 255
-        )
     }
 }
