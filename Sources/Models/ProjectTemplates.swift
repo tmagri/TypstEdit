@@ -80,37 +80,6 @@ class ProjectTemplates {
             """
         ),
         ProjectTemplate(
-            name: "Presentation",
-            description: "Slides for a presentation.",
-            icon: "rectangle.inset.filled.on.rectangle",
-            content: """
-            #set page(
-              paper: "presentation-16-9",
-              margin: 2cm,
-            )
-            #set text(size: 20pt)
-            
-            #align(center + horizon)[
-              = Presentation Title
-              
-              Presenter Name
-            ]
-            
-            #pagebreak()
-            
-            == Slide 1
-            
-            - Point 1
-            - Point 2
-            
-            #pagebreak()
-            
-            == Slide 2
-            
-            Content for slide 2.
-            """
-        ),
-        ProjectTemplate(
             name: "Resume",
             description: "A clean and professional resume layout.",
             icon: "person.text.rectangle",

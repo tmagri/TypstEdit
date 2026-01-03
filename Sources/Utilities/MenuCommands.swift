@@ -116,13 +116,8 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
             
-            Divider()
-            
-            Button("Add Suggestion/Comment") {
-                // TODO: PRO feature
-            }
-            .disabled(true)
         }
+
         
         // MARK: - Insert Menu
         CommandMenu("Insert") {
@@ -254,18 +249,7 @@ struct AppMenuCommands: Commands {
             }
             
             Divider()
-            
-            Button("Present") {
-                // TODO: PRO
-            }
-            .disabled(true)
-            
-            Button("Speaker Mode") {
-                // TODO: PRO
-            }
-            .disabled(true)
-            
-            Divider()
+
             
             Button("Zoom In") {
                 NotificationCenter.default.post(name: .menuCommand, object: "zoomIn")
@@ -277,6 +261,12 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("-", modifiers: .command)
             
+        }
+        
+        CommandGroup(replacing: .help) {
+            Button("TypstEdit Help") {
+                NotificationCenter.default.post(name: .menuCommand, object: "showHelp")
+            }
         }
     }
 }

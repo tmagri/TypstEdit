@@ -8,16 +8,43 @@ struct WelcomeView: View {
     
     @State private var showingTemplateSelection = false
     
+    private var appIconImage: Image {
+        // Try simple name first (standard Asset Catalog)
+        if let image = NSImage(named: "AppIcon") {
+            print("[DEBUG] WelcomeView: Loaded AppIcon via NSImage(named:)")
+            return Image(nsImage: image)
+        }
+        
+        // Try looking in the module bundle specifically (SPM)
+        if let path = Bundle.module.path(forResource: "AppIcon", ofType: "png") {
+            if let image = NSImage(contentsOfFile: path) {
+                print("[DEBUG] WelcomeView: Loaded AppIcon via Bundle.module.path (Root)")
+                return Image(nsImage: image)
+            }
+        }
+        
+        // Try looking in the bundle by path (Loose file in Media.xcassets/AppIcon.imageset if not compiled)
+        if let path = Bundle.module.path(forResource: "AppIcon", ofType: "png", inDirectory: "Media.xcassets/AppIcon.imageset") {
+            if let image = NSImage(contentsOfFile: path) {
+                print("[DEBUG] WelcomeView: Loaded AppIcon via Bundle.module.path (xcassets)")
+                return Image(nsImage: image)
+            }
+        }
+
+        print("[ERROR] WelcomeView: Failed to load AppIcon image from all known locations")
+        // Fallback to system icon if all fails
+        return Image(systemName: "doc.text.fill")
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // Left Panel: Actions (Centered)
             VStack(spacing: 30) {
                 Spacer()
-                Image(systemName: "doc.text.fill")
+                appIconImage
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 80, height: 80)
-                    .foregroundColor(.white.opacity(0.8))
+                    .frame(width: 160, height: 160)
                     .shadow(radius: 10)
                 
                 Text("Welcome to TypstEdit")

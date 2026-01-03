@@ -84,6 +84,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var showDeleteCodeAlert: Bool = false
     @Published var showGoToLineAlert: Bool = false
     @Published var showExportErrorAlert: Bool = false
+    @Published var showHelp: Bool = false
     @Published var lastExportError: String = ""
     @Published var targetLineNumber: String = ""
     @Published var zoomLevel: CGFloat = 1.0

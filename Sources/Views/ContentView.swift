@@ -121,6 +121,10 @@ struct ContentView: View {
                         isPresented: $editorController.showLayoutEditor
                     )
                 }
+                .sheet(isPresented: $editorController.showHelp) {
+                    HelpView()
+                        .environmentObject(themeManager)
+                }
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }
                     Button("Cancel", role: .cancel) { }
@@ -697,6 +701,8 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
             editorController.toggleQuote()
         case "toggleCodeBlock":
             editorController.toggleCodeBlock()
+        case "showHelp":
+            editorController.showHelp = true
         case "insertPageBreak":
             editorController.insertPageBreak()
         case "insertHorizontalLine":
