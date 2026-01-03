@@ -115,6 +115,16 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleStrike")
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
+
+            Button("Subscript") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleSubscript")
+            }
+            .keyboardShortcut("=", modifiers: .command)
+            
+            Button("Superscript") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleSuperscript")
+            }
+            .keyboardShortcut("+", modifiers: .command)
             
         }
 

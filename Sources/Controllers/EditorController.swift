@@ -73,6 +73,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isUnderlineActive: Bool = false
     @Published var isHighlightActive: Bool = false
     @Published var isStrikeActive: Bool = false
+    @Published var isSubscriptActive: Bool = false
+    @Published var isSuperscriptActive: Bool = false
     @Published var isQuoteActive: Bool = false
     @Published var isCodeBlockActive: Bool = false
     @Published var currentHeadingLevel: Int = 0
@@ -720,6 +722,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         isLinkActive = FormatDetector.findLinkRange(in: text, at: range.location) != nil
         isQuoteActive = FormatDetector.findQuoteRange(in: text, at: range.location) != nil
         isCodeBlockActive = FormatDetector.findCodeBlockRange(in: text, at: range.location) != nil
+        isSubscriptActive = FormatDetector.findSubscriptRange(in: text, at: range.location) != nil
+        isSuperscriptActive = FormatDetector.findSuperscriptRange(in: text, at: range.location) != nil
         
         currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
         
@@ -815,6 +819,28 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
             unwrapBracketedFormatting(range: strikeRange, prefixPattern: #"^#strike\s*[\[\(]"#)
         } else {
             wrapSelection(prefix: "#strike[", suffix: "]")
+        }
+        updateFormattingState()
+    }
+    
+    func toggleSubscript() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let subRange = FormatDetector.findSubscriptRange(in: textView.string, at: range.location) {
+            unwrapBracketedFormatting(range: subRange, prefixPattern: #"^#sub\s*[\[\(]"#)
+        } else {
+            wrapSelection(prefix: "#sub[", suffix: "]")
+        }
+        updateFormattingState()
+    }
+    
+    func toggleSuperscript() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        if let supRange = FormatDetector.findSuperscriptRange(in: textView.string, at: range.location) {
+            unwrapBracketedFormatting(range: supRange, prefixPattern: #"^#sup\s*[\[\(]"#)
+        } else {
+            wrapSelection(prefix: "#sup[", suffix: "]")
         }
         updateFormattingState()
     }

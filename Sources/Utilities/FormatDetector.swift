@@ -25,6 +25,16 @@ struct FormatDetector {
     static func findStrikeRange(in text: String, at index: Int) -> NSRange? {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#strike(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
+
+    /// Finds the range of subscript (#sub[...]) surrounding the index.
+    static func findSubscriptRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#sub(?:\s*\([^)]*\))?\s*[\[(]"#)
+    }
+
+    /// Finds the range of superscript (#sup[...]) surrounding the index.
+    static func findSuperscriptRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#sup(?:\s*\([^)]*\))?\s*[\[(]"#)
+    }
     
     private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
         let nsText = text as NSString

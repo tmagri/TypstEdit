@@ -34,6 +34,8 @@ struct ToolbarView: View {
                 ToolbarButton(icon: "strikethrough", tooltip: "Strikethrough (Cmd+Shift+S)", isActive: controller.isStrikeActive) {
                     controller.toggleStrike()
                 }
+                ToolbarButton(icon: "textformat.subscript", tooltip: "Subscript (Cmd+=)", isActive: controller.isSubscriptActive, action: controller.toggleSubscript)
+                ToolbarButton(icon: "textformat.superscript", tooltip: "Superscript (Cmd++, Shift for +)", isActive: controller.isSuperscriptActive, action: controller.toggleSuperscript)
                 
                 // Color Picker
                 Menu {

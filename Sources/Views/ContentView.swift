@@ -746,6 +746,10 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
             editorController.toggleQuote()
         case "toggleCodeBlock":
             editorController.toggleCodeBlock()
+        case "toggleSubscript":
+            editorController.toggleSubscript()
+        case "toggleSuperscript":
+            editorController.toggleSuperscript()
         case "showHelp":
             editorController.showHelp = true
         case "insertPageBreak":
