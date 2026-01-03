@@ -5,8 +5,8 @@ struct ToolbarView: View {
     
     var body: some View {
         HStack(spacing: 8) {
-            // Group 1: Structure (Headings)
-            ToolbarGroup(title: "Structure") {
+            // Group 1: Layout (Headings & Page Layout)
+            ToolbarGroup(title: "Layout") {
                 Menu {
                     Button("Body", action: { controller.setHeadingLevel(0) })
                     Divider()
@@ -19,6 +19,8 @@ struct ToolbarView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 54)
+                
+                ToolbarButton(icon: "doc.badge.gearshape", tooltip: "Page Layout", action: controller.openLayoutEditor)
             }
             
             Rectangle()
@@ -68,9 +70,10 @@ struct ToolbarView: View {
                 .fill(Color.gray.opacity(0.3))
                 .frame(width: 1, height: 32)
             
-            // Group 4: Layout
-            ToolbarGroup(title: "Layout") {
-                ToolbarButton(icon: "doc.badge.gearshape", tooltip: "Page Layout", action: controller.openLayoutEditor)
+            // Group 4: References
+            ToolbarGroup(title: "References") {
+                ToolbarButton(icon: "text.book.closed", tooltip: "Bibliography", isActive: controller.isBibliographyActive, action: controller.toggleBibliography)
+                ToolbarButton(icon: "character.textbox", tooltip: "Footnote", action: controller.insertFootnote)
             }
             
             Rectangle()

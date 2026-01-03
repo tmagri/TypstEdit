@@ -52,6 +52,14 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var currentQuoteAttribution: String = ""
     @Published var isQuoteBlock: Bool = true
     
+    // --- Bibliography Editor State ---
+    @Published var showBibliographyEditor: Bool = false
+    @Published var currentBibliographyRange: NSRange?
+    @Published var bibSources: String = ""
+    @Published var bibTitle: String = ""
+    @Published var bibFull: Bool = false
+    @Published var bibStyle: String = "apa"
+    
     // --- File Context ---
     @Published var currentFileURL: URL?
     @Published var projectRootURL: URL?
@@ -81,6 +89,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isEquationActive: Bool = false
     @Published var isTableActive: Bool = false
     @Published var isImageActive: Bool = false
+    @Published var isBibliographyActive: Bool = false
     @Published var isCodeActive: Bool = false
     @Published var showDeleteEquationAlert: Bool = false
     @Published var showDeleteCodeAlert: Bool = false
@@ -730,6 +739,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         isEquationActive = EquationDetector.findEquationRange(in: text, at: range.location) != nil
         isTableActive = TableDetector.findTableRange(in: text, at: range.location) != nil
         isImageActive = ImageDetector.findImageRange(in: text, at: range.location) != nil
+        isBibliographyActive = BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil
     }
     
     // --- Heading Actions ---
@@ -1009,6 +1019,60 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     func insertHorizontalLine() {
         guard let textView = textView else { return }
         textView.insertText("#line(length: 100%)\n", replacementRange: textView.selectedRange())
+    }
+    
+    func insertFootnote() {
+        wrapSelection(prefix: "#footnote[", suffix: "]")
+    }
+    
+    func toggleBibliography() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        
+        // Reset state
+        currentBibliographyRange = nil
+        bibSources = ""
+        bibTitle = ""
+        bibFull = false
+        bibStyle = "apa"
+        
+        if let info = BibliographyDetector.parseBibliography(in: textView.string, at: range.location) {
+            currentBibliographyRange = info.range
+            bibSources = info.sources
+            bibTitle = info.title ?? ""
+            bibFull = info.full
+            bibStyle = info.style ?? "apa"
+        }
+        
+        showBibliographyEditor = true
+    }
+    
+    func insertBibliography(sources: String, title: String, full: Bool, style: String) {
+        guard let textView = textView else { return }
+        
+        var params: [String] = []
+        // sources is positional, but we can also use sources: if it's cleaner or needed
+        // For Typst, it's usually #bibliography("sources") or #bibliography(("src1", "src2"))
+        
+        let cleanedSources: String
+        if sources.contains(",") {
+            let split = sources.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            cleanedSources = "(" + split.map { "\"\($0)\"" }.joined(separator: ", ") + ")"
+        } else {
+            cleanedSources = "\"\(sources)\""
+        }
+        
+        if !title.isEmpty { params.append("title: \"\(title)\"") }
+        if full { params.append("full: true") }
+        if !style.isEmpty && style != "apa" { params.append("style: \"\(style)\"") }
+        
+        let paramStr = params.isEmpty ? "" : ", " + params.joined(separator: ", ")
+        let snippet = "#bibliography(\(cleanedSources)\(paramStr))"
+        
+        let rangeToReplace = currentBibliographyRange ?? textView.selectedRange()
+        textView.insertText(snippet, replacementRange: rangeToReplace)
+        showBibliographyEditor = false
+        updateFormattingState()
     }
     
     func applyTextColor(_ color: String) {

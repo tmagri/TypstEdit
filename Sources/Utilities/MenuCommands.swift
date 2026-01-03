@@ -179,6 +179,16 @@ struct AppMenuCommands: Commands {
                 Button("Code Block") {
                     NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
                 }
+
+                Divider()
+
+                Button("Footnote") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "insertFootnote")
+                }
+                
+                Button("Bibliography") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "insertBibliography")
+                }
             }
             .disabled(!editorController.isTypstFile)
         }

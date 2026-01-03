@@ -115,6 +115,9 @@ struct ContentView: View {
                         }
                     )
                 }
+                .sheet(isPresented: $editorController.showBibliographyEditor) {
+                    BibliographyEditorView(controller: editorController)
+                }
                 .sheet(isPresented: $editorController.showLayoutEditor) {
                     LayoutEditorView(
                         controller: editorController,
@@ -750,6 +753,10 @@ Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
             editorController.toggleSubscript()
         case "toggleSuperscript":
             editorController.toggleSuperscript()
+        case "insertFootnote":
+            editorController.insertFootnote()
+        case "insertBibliography":
+            editorController.toggleBibliography()
         case "showHelp":
             editorController.showHelp = true
         case "insertPageBreak":
