@@ -848,9 +848,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         guard let textView = textView else { return }
         let range = textView.selectedRange()
         if let supRange = FormatDetector.findSuperscriptRange(in: textView.string, at: range.location) {
-            unwrapBracketedFormatting(range: supRange, prefixPattern: #"^#sup\s*[\[\(]"#)
+            unwrapBracketedFormatting(range: supRange, prefixPattern: #"^#super\s*[\[\(]"#)
         } else {
-            wrapSelection(prefix: "#sup[", suffix: "]")
+            wrapSelection(prefix: "#super[", suffix: "]")
         }
         updateFormattingState()
     }

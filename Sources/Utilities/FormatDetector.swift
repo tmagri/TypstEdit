@@ -33,7 +33,7 @@ struct FormatDetector {
 
     /// Finds the range of superscript (#sup[...]) surrounding the index.
     static func findSuperscriptRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#sup(?:\s*\([^)]*\))?\s*[\[(]"#)
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#super(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
     
     private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
