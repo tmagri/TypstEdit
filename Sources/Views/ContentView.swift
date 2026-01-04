@@ -829,12 +829,12 @@ struct ContentView: View {
         case "insertFootnote": editorController.insertFootnote()
         case "insertBibliography": editorController.toggleBibliography()
         case "showHelp": editorController.showHelp = true
-        case \"insertPageBreak\": editorController.insertPageBreak()
-        case \"insertHorizontalLine\": editorController.insertHorizontalLine()
-        case \"openFigureEditor\": editorController.openFigureEditor()
-        case \"openSymbolPicker\": editorController.showSymbolPicker = true
-        case \"openOutlineEditor\": editorController.openOutlineEditor()
-        case \"openExternalDataEditor\": editorController.openExternalDataEditor()
+        case "insertPageBreak": editorController.insertPageBreak()
+        case "insertHorizontalLine": editorController.insertHorizontalLine()
+        case "openFigureEditor": editorController.openFigureEditor()
+        case "openSymbolPicker": editorController.showSymbolPicker = true
+        case "openOutlineEditor": editorController.openOutlineEditor()
+        case "openExternalDataEditor": editorController.openExternalDataEditor()
         case "toggleSidebar": withAnimation { editorController.isSidebarVisible.toggle() }
         case "viewEditorOnly": withAnimation { editorController.viewMode = .editorOnly }
         case "viewPreviewOnly": withAnimation { editorController.viewMode = .previewOnly }
