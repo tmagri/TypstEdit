@@ -12,50 +12,100 @@ struct OutlineEditorView: View {
     let targets = ["Heading", "Figure", "Image", "Custom"]
     
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Insert Outline")
-                .font(.headline)
-            
-            Form {
-                TextField("Title (Optional)", text: $title)
-                
-                Picker("Target", selection: $target) {
-                    ForEach(targets, id: \.self) {
-                        Text($0)
-                    }
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "list.bullet.indent")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                Text(controller.currentOutlineRange != nil ? "Edit Outline" : "Insert Outline")
+                    .font(.headline)
+                Spacer()
+                Button(action: { controller.showOutlineEditor = false }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
                 }
-                
-                TextField("Depth (Optional)", text: $depthString)
-                    .onChange(of: depthString) { newValue in
-                        // Only allow numbers
-                        let filtered = newValue.filter { "0123456789".contains($0) }
-                        if filtered != newValue {
-                            self.depthString = filtered
-                        }
-                    }
-                
-                Toggle("Indent", isOn: $indent)
+                .buttonStyle(.plain)
             }
             .padding()
+            .background(Color(NSColor.windowBackgroundColor))
             
+            Divider()
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Configuration", systemImage: "gearshape")
+                            .font(.subheadline.bold())
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Title (Optional)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("Table of Contents", text: $title)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Target")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Picker("", selection: $target) {
+                                ForEach(targets, id: \.self) {
+                                    Text($0).tag($0)
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Depth (Optional)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("e.g. 3", text: $depthString)
+                                .textFieldStyle(.roundedBorder)
+                                .onChange(of: depthString) { newValue in
+                                    let filtered = newValue.filter { "0123456789".contains($0) }
+                                    if filtered != newValue {
+                                        self.depthString = filtered
+                                    }
+                                }
+                        }
+                        
+                        Toggle("Indent Entries", isOn: $indent)
+                            .toggleStyle(.checkbox)
+                    }
+                }
+                .padding()
+            }
+            
+            Divider()
+            
+            // Footer
             HStack {
                 Button("Cancel") {
                     controller.showOutlineEditor = false
                 }
-                .keyboardShortcut(.cancelAction)
+                .keyboardShortcut(.escape, modifiers: [])
                 
-                Button("Insert") {
+                Spacer()
+                
+                Button(controller.currentOutlineRange != nil ? "Update Outline" : "Insert Outline") {
                     let depth = Int(depthString)
-                    // If target is "Heading", we might not pass it explicitly as it is default,
-                    // but passing explicit "target: heading" or "target: figure" is safer.
-                    // However, Typst default is headings.
                     controller.insertOutline(title: title, target: target, depth: depth, indent: indent ? true : nil)
                 }
-                .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
             }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
         }
-        .padding()
-        .frame(width: 350)
+        .frame(width: 400, height: 400)
+        .onAppear {
+            self.title = controller.outlineTitle
+            self.target = controller.outlineTarget
+            self.depthString = controller.outlineDepthString
+            self.indent = controller.outlineIndent
+        }
     }
 }

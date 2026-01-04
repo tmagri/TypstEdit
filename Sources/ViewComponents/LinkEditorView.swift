@@ -9,53 +9,72 @@ struct LinkEditorView: View {
     @State private var text: String = ""
     
     var body: some View {
-        VStack(spacing: 20) {
-            Text(controller.currentLinkRange == nil ? "Insert Link" : "Edit Link")
-                .font(.headline)
-            
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("URL:")
-                        .font(.caption)
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "link")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                Text(controller.currentLinkRange == nil ? "Insert Link" : "Edit Link")
+                    .font(.headline)
+                Spacer()
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
                         .foregroundColor(.secondary)
-                    TextField("https://example.com", text: $url)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit {
-                            if !url.isEmpty {
-                                onInsert(url, text)
-                            }
-                        }
                 }
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Display Text (optional):")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("My Link", text: $text)
-                        .textFieldStyle(.roundedBorder)
-                }
+                .buttonStyle(.plain)
             }
-            .padding(.horizontal)
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
             
-            HStack(spacing: 12) {
-                Button("Cancel") {
-                    onCancel()
+            Divider()
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Link Details", systemImage: "link.badge.plus")
+                            .font(.subheadline.bold())
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("URL:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("https://example.com", text: $url)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Display Text (optional):")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            TextField("My Link", text: $text)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
                 }
-                .keyboardShortcut(.escape, modifiers: [])
+                .padding()
+            }
+            
+            Divider()
+            
+            // Footer
+            HStack {
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.escape, modifiers: [])
                 
                 Spacer()
                 
-                Button(controller.currentLinkRange == nil ? "Insert" : "Update") {
+                Button(controller.currentLinkRange == nil ? "Insert Link" : "Update Link") {
                     onInsert(url, text)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(url.isEmpty)
-                .keyboardShortcut(.return, modifiers: [])
+                .keyboardShortcut(.return, modifiers: .command)
             }
-            .padding(.horizontal)
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
         }
-        .padding()
-        .frame(width: 400)
+        .frame(width: 400, height: 300)
         .onAppear {
             self.url = controller.currentLinkURL
             self.text = controller.currentLinkText

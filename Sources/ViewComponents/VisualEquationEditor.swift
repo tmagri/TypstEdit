@@ -21,25 +21,17 @@ struct VisualEquationEditor: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Button("Cancel") {
-                    onCancel()
-                }
-                .keyboardShortcut(.escape)
-                
-                Spacer()
-                
+                Image(systemName: "sum")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
                 Text("Equation Editor")
                     .font(.headline)
-                    .foregroundColor(.secondary)
-                
                 Spacer()
-                
-                Button("Insert") {
-                    print("[DEBUG] Insert button clicked")
-                    bridge.save()
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
                 }
-                .keyboardShortcut(.return, modifiers: .command)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
             }
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
@@ -50,6 +42,25 @@ struct VisualEquationEditor: View {
             WebViewWrapper(initialEquation: $initialEquation, bridge: bridge, onSaveTransport: { code in
                 onSave(code)
             })
+            
+            Divider()
+            
+            // Footer
+            HStack {
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.escape, modifiers: [])
+                
+                Spacer()
+                
+                Button("Insert Equation") {
+                    print("[DEBUG] Insert button clicked")
+                    bridge.save()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
+            }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
         }
     }
 }

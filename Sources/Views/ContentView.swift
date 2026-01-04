@@ -144,6 +144,9 @@ struct ContentView: View {
                 .sheet(isPresented: $editorController.showExternalDataEditor) {
                     ExternalDataEditorView(controller: editorController)
                 }
+                .sheet(isPresented: $editorController.showFootnoteEditor) {
+                    FootnoteEditorView(controller: editorController)
+                }
                 // Alerts
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }

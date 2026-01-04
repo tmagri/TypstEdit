@@ -77,8 +77,8 @@ struct ToolbarView: View {
                 ToolbarGroup(title: "Paragraph", icon: "paragraphsign", isCompact: collapseParagraph) {
                      VStack(spacing: 2) {
                          HStack(spacing: 2) {
-                             ToolbarButton(icon: "list.bullet", tooltip: "Bullet List", action: controller.toggleBulletList)
-                             ToolbarButton(icon: "list.number", tooltip: "Number List", action: controller.toggleNumberList)
+                             ToolbarButton(icon: "list.bullet", tooltip: "Bullet List", isActive: controller.isBulletListActive, action: controller.toggleBulletList)
+                             ToolbarButton(icon: "list.number", tooltip: "Number List", isActive: controller.isNumberListActive, action: controller.toggleNumberList)
                              ToolbarButton(icon: "text.quote", tooltip: "Block Quote", isActive: controller.isQuoteActive, action: controller.toggleQuote)
                          }
                          HStack(spacing: 2) {
@@ -106,7 +106,7 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "calendar", tooltip: "Insert Timeline", action: controller.insertTimelineSnippet)
                          }
                          HStack(spacing: 2) {
-                             ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline", action: controller.openOutlineEditor)
+                             ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
                              ToolbarButton(icon: "server.rack", tooltip: "External Data", action: controller.openExternalDataEditor)
                              ToolbarButton(icon: "minus", tooltip: "Horizontal Line", action: controller.insertHorizontalLine)
                              ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", action: controller.insertPageBreak)
@@ -124,7 +124,7 @@ struct ToolbarView: View {
                 ToolbarGroup(title: "References", icon: "text.book.closed", isCompact: collapseInsert) {
                     VStack(spacing: 2) {
                         ToolbarButton(icon: "text.book.closed", tooltip: "Bibliography", isActive: controller.isBibliographyActive, action: controller.toggleBibliography)
-                        ToolbarButton(icon: "character.textbox", tooltip: "Footnote", action: controller.insertFootnote)
+                        ToolbarButton(icon: "character.textbox", tooltip: "Footnote", isActive: controller.isFootnoteActive, action: controller.openFootnoteEditor)
                     }
                 }
             }

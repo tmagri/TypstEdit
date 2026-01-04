@@ -62,6 +62,11 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     // --- Outline Editor State ---
     @Published var showOutlineEditor: Bool = false
+    @Published var currentOutlineRange: NSRange?
+    @Published var outlineTitle: String = ""
+    @Published var outlineTarget: String = "Heading"
+    @Published var outlineDepthString: String = ""
+    @Published var outlineIndent: Bool = false
     
     // --- Figure Editor State ---
     @Published var showFigureEditor: Bool = false
@@ -124,6 +129,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isTableActive: Bool = false
     @Published var isImageActive: Bool = false
     @Published var isBibliographyActive: Bool = false
+    @Published var isOutlineActive: Bool = false
     @Published var isCodeActive: Bool = false
     @Published var showDeleteEquationAlert: Bool = false
     @Published var showDeleteCodeAlert: Bool = false
@@ -138,6 +144,16 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isSidebarVisible: Bool = true
     @Published var isSearchVisible: Bool = false
     @Published var wrapLines: Bool = true
+    @Published var isBulletListActive: Bool = false
+    @Published var isNumberListActive: Bool = false
+    @Published var isFootnoteActive: Bool = false
+    
+    // --- Footnote Editor State ---
+    @Published var showFootnoteEditor: Bool = false
+    @Published var footnoteBody: String = ""
+    @Published var footnoteNumbering: String = "1"
+    @Published var currentFootnoteRange: NSRange?
+    
     @Published var hasUnsavedChanges: Bool = false
     private var savedContent: String = ""
     @Published var viewMode: ViewMode = .both
@@ -653,6 +669,26 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Outline Functions ---
     
     func openOutlineEditor() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        
+        // Reset state
+        self.currentOutlineRange = nil
+        self.outlineTitle = ""
+        self.outlineTarget = "Heading"
+        self.outlineDepthString = ""
+        self.outlineIndent = false
+        
+        if let info = OutlineDetector.parseOutline(in: textView.string, at: range.location) {
+            self.currentOutlineRange = info.range
+            self.outlineTitle = info.title ?? ""
+            self.outlineTarget = info.target ?? "Heading"
+            if let depth = info.depth {
+                self.outlineDepthString = "\(depth)"
+            }
+            self.outlineIndent = info.indent ?? false
+        }
+        
         self.showOutlineEditor = true
     }
     
@@ -688,8 +724,17 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         }
         
         let snippet = "#outline(\(params.joined(separator: ", ")))"
-        insertText(snippet)
+        
+        let rangeToReplace = currentOutlineRange ?? textView?.selectedRange() ?? NSRange(location: 0, length: 0)
+        
+        if rangeToReplace.location != NSNotFound {
+            textView?.insertText(snippet, replacementRange: rangeToReplace)
+        } else {
+            insertText(snippet)
+        }
+        
         showOutlineEditor = false
+        updateFormattingState()
     }
     
     // --- Figure Functions ---
@@ -1001,6 +1046,52 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         isTableActive = TableDetector.findTableRange(in: text, at: range.location) != nil
         isImageActive = ImageDetector.findImageRange(in: text, at: range.location) != nil
         isBibliographyActive = BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil
+        isOutlineActive = OutlineDetector.findOutlineRange(in: text, at: range.location) != nil
+        
+        isBulletListActive = FormatDetector.isBulletListActive(in: text, at: range.location)
+        isNumberListActive = FormatDetector.isNumberListActive(in: text, at: range.location)
+        isFootnoteActive = FormatDetector.findFootnoteRange(in: text, at: range.location) != nil
+    }
+    
+    // --- Footnote Editor Functions ---
+    
+    func openFootnoteEditor() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        
+        // Reset state
+        self.footnoteBody = ""
+        self.footnoteNumbering = "1"
+        self.currentFootnoteRange = nil
+        
+        if let info = FormatDetector.parseFootnote(in: textView.string, at: range.location) {
+            self.currentFootnoteRange = info.range
+            self.footnoteBody = info.body
+            self.footnoteNumbering = info.numbering ?? "1"
+        }
+        
+        self.showFootnoteEditor = true
+    }
+    
+    func insertFootnote(body: String, numbering: String? = nil) {
+        var params: [String] = []
+        if let numbering = numbering, !numbering.isEmpty, numbering != "1" {
+            params.append("numbering: \"\(numbering)\"")
+        }
+        
+        let paramPart = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
+        let snippet = "#footnote\(paramPart)[\(body)]"
+        
+        let rangeToReplace = currentFootnoteRange ?? textView?.selectedRange() ?? NSRange(location: 0, length: 0)
+        
+        if rangeToReplace.location != NSNotFound {
+            textView?.insertText(snippet, replacementRange: rangeToReplace)
+        } else {
+            insertText(snippet)
+        }
+        
+        showFootnoteEditor = false
+        updateFormattingState()
     }
     
     // --- Heading Actions ---

@@ -43,31 +43,25 @@ struct TableEditorView: View {
     }
     
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 0) {
             // Header
             HStack {
-                Button("Cancel") {
-                    onCancel()
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-                
-                Spacer()
-                
+                Image(systemName: "tablecells")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
                 Text("Insert Table")
                     .font(.headline)
-                
                 Spacer()
-                
-                Button("Insert") {
-                    let rows = selectedRows > 0 ? selectedRows : 2
-                    let cols = selectedCols > 0 ? selectedCols : 2
-                    onInsert(rows, cols)
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(selectedRows == 0 && !hasInitialized)
+                .buttonStyle(.plain)
             }
-            .padding(.bottom, 10)
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
+            
+            Divider()
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 15) {
@@ -141,7 +135,7 @@ struct TableEditorView: View {
                             }
                         }
                         .padding(12)
-                        .background(Color.black.opacity(0.2))
+                        .background(Color.black.opacity(0.1))
                         .cornerRadius(12)
                         .onHover { hovering in
                             if !hovering {
@@ -160,10 +154,8 @@ struct TableEditorView: View {
                     
                     // Advanced Settings
                     Group {
-                        Text("Properties")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.top, 5)
+                        Label("Properties", systemImage: "slider.horizontal.3")
+                            .font(.subheadline.bold())
                         
                         VStack(spacing: 12) {
                             HStack {
@@ -197,7 +189,10 @@ struct TableEditorView: View {
                         
                         // Header Settings
                         VStack(alignment: .leading, spacing: 10) {
-                            Toggle("Include Header", isOn: $controller.useTableHeader)
+                            Label("Header Options", systemImage: "menubar.rectangle")
+                                .font(.subheadline.bold())
+                            
+                            Toggle("Include Header Row", isOn: $controller.useTableHeader)
                                 .toggleStyle(.checkbox)
                             
                             if controller.useTableHeader {
@@ -230,27 +225,36 @@ struct TableEditorView: View {
                                     }
                                 }
                                 .padding(.leading, 20)
-                                .onAppear {
-                                    // Pre-populate if empty
-                                    if controller.tableHeaderCells.isEmpty {
-                                        controller.tableHeaderCells = Array(repeating: "", count: count)
-                                    }
-                                }
                             }
                         }
                     }
                 }
-                .padding(.horizontal, 2)
+                .padding()
             }
-            .frame(maxHeight: 400)
+            .frame(maxHeight: 500)
             
-            Text("Left-click grid to Pick, Left-click again to Keep")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            Divider()
+            
+            // Footer
+            HStack {
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.escape, modifiers: [])
+                
+                Spacer()
+                
+                Button("Insert Table") {
+                    let rows = selectedRows > 0 ? selectedRows : 2
+                    let cols = selectedCols > 0 ? selectedCols : 2
+                    onInsert(rows, cols)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(selectedRows == 0 && !hasInitialized)
+            }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
         }
-        .padding(25)
-        .frame(width: 450)
-        .background(VisualEffectView(material: .hudWindow, blendingMode: .withinWindow).ignoresSafeArea())
+        .frame(width: 450, height: 600)
         .onAppear {
             if !hasInitialized {
                 if controller.tableEditInitialRows > 0 && controller.tableEditInitialCols > 0 {

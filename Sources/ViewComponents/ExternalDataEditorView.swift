@@ -11,57 +11,93 @@ struct ExternalDataEditorView: View {
     let types = ["JSON", "CSV", "XML", "YAML", "TOML"]
     
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Insert External Data")
-                .font(.headline)
-            
-            Form {
-                Picker("Type", selection: $type) {
-                    ForEach(types, id: \.self) {
-                        Text($0)
-                    }
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
+                Text("Insert External Data")
+                    .font(.headline)
+                Spacer()
+                Button(action: { controller.showExternalDataEditor = false }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
                 }
-                
-                HStack {
-                    TextField("File Path", text: $filePath)
-                    Button("Browse") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseFiles = true
-                        panel.allowsMultipleSelection = false
-                        panel.allowedContentTypes = [.json] // Expand based on selection?
-                        // For simplicity, allow all or filter later
-                        
-                        // Simple setting of types based on selection
-                        // This might be better as a computed property or update dynamically
-                        
-                        if panel.runModal() == .OK, let url = panel.url {
-                            self.filePath = url.path
-                        }
-                    }
-                }
-                
-                TextField("Variable Name (Optional)", text: $variableName)
-                Text("Will generate: #let \(variableName) = \(type.lowercased())(\"\(URL(fileURLWithPath: filePath).lastPathComponent)\")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                .buttonStyle(.plain)
             }
             .padding()
+            .background(Color(NSColor.windowBackgroundColor))
             
+            Divider()
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Data Type", systemImage: "square.grid.3x3")
+                            .font(.subheadline.bold())
+                        Picker("", selection: $type) {
+                            ForEach(types, id: \.self) {
+                                Text($0).tag($0)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("File Path", systemImage: "folder")
+                            .font(.subheadline.bold())
+                        HStack {
+                            TextField("File Path", text: $filePath)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Browse") {
+                                let panel = NSOpenPanel()
+                                panel.canChooseFiles = true
+                                panel.allowsMultipleSelection = false
+                                panel.allowedContentTypes = [.json] // Expand based on selection?
+                                
+                                if panel.runModal() == .OK, let url = panel.url {
+                                    self.filePath = url.path
+                                }
+                            }
+                        }
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Variable Name", systemImage: "character.cursor.ibeam")
+                            .font(.subheadline.bold())
+                        TextField("Variable name (e.g. data)", text: $variableName)
+                            .textFieldStyle(.roundedBorder)
+                        
+                        Text("Snippet: #let \(variableName) = \(type.lowercased())(\"\(URL(fileURLWithPath: filePath).lastPathComponent)\")")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding()
+            }
+            
+            Divider()
+            
+            // Footer
             HStack {
                 Button("Cancel") {
                     controller.showExternalDataEditor = false
                 }
-                .keyboardShortcut(.cancelAction)
+                .keyboardShortcut(.escape, modifiers: [])
                 
-                Button("Insert") {
+                Spacer()
+                
+                Button("Insert Data") {
                     controller.insertExternalData(filePath: filePath, type: type, variableName: variableName)
                 }
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(.return, modifiers: .command)
                 .buttonStyle(.borderedProminent)
                 .disabled(filePath.isEmpty)
             }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
         }
-        .padding()
-        .frame(width: 400)
+        .frame(width: 450, height: 400)
     }
 }

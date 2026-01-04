@@ -74,8 +74,23 @@ struct FormatDetector {
                 return min(eqStr.count, 6)
             }
         }
-        
         return 0
+    }
+    
+    /// Detects if the cursor at the given index is on a bullet list line.
+    static func isBulletListActive(in text: String, at index: Int) -> Bool {
+        let nsText = text as NSString
+        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
+        return line.hasPrefix("- ")
+    }
+
+    /// Detects if the cursor at the given index is on a numerical list line.
+    static func isNumberListActive(in text: String, at index: Int) -> Bool {
+        let nsText = text as NSString
+        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
+        return line.hasPrefix("+ ")
     }
     
     /// Finds the range of the heading prefix (e.g., "== ") for the line at the given index.
@@ -219,6 +234,45 @@ struct FormatDetector {
     
     static func findQuoteRange(in text: String, at index: Int) -> NSRange? {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#quote(?:\s*\([^)]*\))?\s*[\[(]"#)
+    }
+
+    static func findFootnoteRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#footnote\s*[\[(]"#)
+    }
+
+    struct FootnoteInfo {
+        let range: NSRange
+        let body: String
+        let numbering: String?
+    }
+
+    static func parseFootnote(in text: String, at index: Int) -> FootnoteInfo? {
+        guard let range = findFootnoteRange(in: text, at: index) else { return nil }
+        let nsText = text as NSString
+        let snippet = nsText.substring(with: range)
+        
+        var body = ""
+        var numbering: String? = nil
+        
+        // Extract body between []
+        if let bracketStart = snippet.firstIndex(of: "["), let bracketEnd = snippet.lastIndex(of: "]") {
+            let start = snippet.index(after: bracketStart)
+            body = String(snippet[start..<bracketEnd])
+        }
+        
+        // Extract numbering: "..." from ()
+        if let parenStart = snippet.firstIndex(of: "("), let parenEnd = snippet.firstIndex(of: ")") {
+            let params = String(snippet[snippet.index(after: parenStart)..<parenEnd])
+            let numberingPattern = #"numbering:\s*"([^"]*)""#
+            if let numberingMatch = params.range(of: numberingPattern, options: .regularExpression) {
+                let match = params[numberingMatch]
+                if let firstQuote = match.firstIndex(of: "\""), let lastQuote = match.lastIndex(of: "\"") {
+                    numbering = String(match[match.index(after: firstQuote)..<lastQuote])
+                }
+            }
+        }
+        
+        return FootnoteInfo(range: range, body: body, numbering: numbering)
     }
 
     struct QuoteInfo {

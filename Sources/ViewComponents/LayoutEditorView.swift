@@ -43,6 +43,9 @@ struct LayoutEditorView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
+                Image(systemName: "doc.plaintext")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
                 Text("Layout & Style")
                     .font(.headline)
                 Spacer()
@@ -53,7 +56,9 @@ struct LayoutEditorView: View {
                 .buttonStyle(.plain)
             }
             .padding()
-            .background(Color.gray.opacity(0.1))
+            .background(Color(NSColor.windowBackgroundColor))
+            
+            Divider()
             
             // Tab Picker
             Picker("", selection: $selectedTab) {
@@ -62,7 +67,10 @@ struct LayoutEditorView: View {
             }
             .pickerStyle(.segmented)
             .padding(.horizontal)
-            .padding(.top, 10)
+            .padding(.vertical, 10)
+            .background(Color(NSColor.windowBackgroundColor))
+            
+            Divider()
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -83,13 +91,16 @@ struct LayoutEditorView: View {
                     .padding(.bottom, 8)
             }
             
+            Divider()
+            
             // Footer
             HStack {
-                Spacer()
                 Button("Cancel") {
                     isPresented = false
                 }
-                .keyboardShortcut(.cancelAction)
+                .keyboardShortcut(.escape, modifiers: [])
+                
+                Spacer()
                 
                 Button("Insert Code") {
                     if selectedTab == "page" {
@@ -99,12 +110,12 @@ struct LayoutEditorView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(.return, modifiers: .command)
             }
             .padding()
-            .background(Color.gray.opacity(0.1))
+            .background(Color(NSColor.windowBackgroundColor))
         }
-        .frame(width: 400, height: 500)
+        .frame(width: 450, height: 550)
         .onAppear {
             loadFonts()
         }
@@ -116,7 +127,8 @@ struct LayoutEditorView: View {
         VStack(alignment: .leading, spacing: 16) {
             // Paper Size & Orientation
             VStack(alignment: .leading, spacing: 8) {
-                Text("Paper").font(.subheadline).bold()
+                Label("Paper", systemImage: "doc.text")
+                    .font(.subheadline.bold())
                 HStack {
                     Picker("Size", selection: $paperSize) {
                         ForEach(paperSizes, id: \.self) { size in
@@ -154,7 +166,8 @@ struct LayoutEditorView: View {
             // Margins
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("Margins").font(.subheadline).bold()
+                    Label("Margins", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+                        .font(.subheadline.bold())
                     Spacer()
                     Picker("", selection: $marginType) {
                         Text("Auto").tag("auto")
@@ -169,14 +182,18 @@ struct LayoutEditorView: View {
                         HStack(spacing: 12) {
                             Text("Top:")
                             TextField("2.5cm", text: $marginTop)
+                                .textFieldStyle(.roundedBorder)
                             Text("Bottom:")
                             TextField("2.5cm", text: $marginBottom)
+                                .textFieldStyle(.roundedBorder)
                         }
                         HStack(spacing: 12) {
                             Text("Left:")
                             TextField("2.5cm", text: $marginLeft)
+                                .textFieldStyle(.roundedBorder)
                             Text("Right:")
                             TextField("2.5cm", text: $marginRight)
+                                .textFieldStyle(.roundedBorder)
                         }
                     }
                 }
@@ -185,8 +202,9 @@ struct LayoutEditorView: View {
             Divider()
             
             // Columns & Numbering
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Content").font(.subheadline).bold()
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Content", systemImage: "list.dash")
+                    .font(.subheadline.bold())
                 
                 HStack {
                     Text("Columns:")
@@ -194,14 +212,20 @@ struct LayoutEditorView: View {
                     Stepper("\(columns)", value: $columns, in: 1...4)
                 }
                 
-                HStack {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Page Numbers:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     TextField("e.g. \"1 / 1\"", text: $pageNumbering)
+                        .textFieldStyle(.roundedBorder)
                 }
                 
-                HStack {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Background Fill:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     TextField("e.g. #f0f0f0", text: $pageFill)
+                        .textFieldStyle(.roundedBorder)
                 }
             }
             
@@ -209,7 +233,8 @@ struct LayoutEditorView: View {
             
             // Apply To
             VStack(alignment: .leading, spacing: 8) {
-                Text("Apply To").font(.subheadline).bold()
+                Label("Apply To", systemImage: "arrow.turn.down.right")
+                    .font(.subheadline.bold())
                 Picker("", selection: $applyTo) {
                     Text("Document (#set)").tag("document")
                     Text("New Page (#page)").tag("next_page")
@@ -221,11 +246,14 @@ struct LayoutEditorView: View {
     
     var textSettingsView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Font Settings").font(.subheadline).bold()
+            Label("Font Settings", systemImage: "textformat")
+                .font(.subheadline.bold())
             
             // Font Family
-            HStack {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Font Family:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 Picker("", selection: $textFont) {
                     Text("Default").tag("Default")
                     Divider()
@@ -236,46 +264,82 @@ struct LayoutEditorView: View {
             }
             
             // Size, Weight, Style
-            HStack {
-                Text("Size:")
-                TextField("11pt", text: $textSize)
-                    .frame(width: 60)
-                Spacer()
-                Text("Weight:")
-                Picker("", selection: $textWeight) {
-                    ForEach(weights, id: \.self) { w in
-                        Text(w.capitalized).tag(w)
-                    }
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Size:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("11pt", text: $textSize)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
                 }
-                .frame(width: 100)
+                
+                Spacer()
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Weight:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $textWeight) {
+                        ForEach(weights, id: \.self) { w in
+                            Text(w.capitalized).tag(w)
+                        }
+                    }
+                    .frame(width: 120)
+                }
             }
             
-            HStack {
-                Text("Style:")
-                Picker("", selection: $textStyle) {
-                    ForEach(styles, id: \.self) { s in
-                        Text(s.capitalized).tag(s)
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Style:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $textStyle) {
+                        ForEach(styles, id: \.self) { s in
+                            Text(s.capitalized).tag(s)
+                        }
                     }
+                    .frame(width: 120)
                 }
+                
                 Spacer()
-                Text("Color:")
-                TextField("#000000", text: $textColor)
-                    .frame(width: 80)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Color:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("#000000", text: $textColor)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                }
             }
             
             Divider()
             
-            Text("Localization").font(.subheadline).bold()
+            Label("Localization", systemImage: "globe")
+                .font(.subheadline.bold())
             
             // Lang & Region
-            HStack {
-                Text("Language:")
-                TextField("en", text: $textLang)
-                    .frame(width: 50)
+            HStack(spacing: 20) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Language:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("en", text: $textLang)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Region:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("US", text: $textRegion)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                }
+                
                 Spacer()
-                Text("Region:")
-                TextField("US", text: $textRegion)
-                    .frame(width: 50)
             }
         }
     }

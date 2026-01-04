@@ -11,6 +11,9 @@ struct ImageEditorView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
+                Image(systemName: "photo")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
                 Text(controller.currentImageRange != nil ? "Edit Image Properties" : "Image Properties")
                     .font(.headline)
                 Spacer()
@@ -21,15 +24,16 @@ struct ImageEditorView: View {
                 .buttonStyle(.plain)
             }
             .padding()
-            .background(Color.black.opacity(0.1))
+            .background(Color(NSColor.windowBackgroundColor))
+            
+            Divider()
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     // File Selection
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("IMAGE FILE")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        Label("Image File", systemImage: "photo.on.rectangle")
+                            .font(.subheadline.bold())
                         
                         HStack {
                             Button("Choose Image...") {
@@ -55,16 +59,12 @@ struct ImageEditorView: View {
                         Toggle("Copy to project directory", isOn: $controller.shouldCopyImages)
                             .font(.subheadline)
                     }
-                    .padding(12)
-                    .background(Color.black.opacity(0.1))
-                    .cornerRadius(8)
                     
                     HStack(spacing: 20) {
                         // Width
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("WIDTH")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            Label("Width", systemImage: "arrow.left.and.right")
+                                .font(.subheadline.bold())
                             TextField("auto, 100%, 200pt", text: $controller.imageWidth)
                                 .textFieldStyle(.roundedBorder)
                             Text("Units: %, pt, mm, cm, in")
@@ -74,9 +74,8 @@ struct ImageEditorView: View {
                         
                         // Height
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("HEIGHT")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            Label("Height", systemImage: "arrow.up.and.down")
+                                .font(.subheadline.bold())
                             TextField("auto, 100%, 200pt", text: $controller.imageHeight)
                                 .textFieldStyle(.roundedBorder)
                             Text("Units: %, pt, mm, cm, in, fr")
@@ -87,18 +86,16 @@ struct ImageEditorView: View {
                     
                     // Alt Text
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("ALT TEXT")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        Label("Alt Text", systemImage: "text.bubble")
+                            .font(.subheadline.bold())
                         TextField("Description for screen readers", text: $controller.imageAlt)
                             .textFieldStyle(.roundedBorder)
                     }
                     
                     // Fit
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("FIT")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        Label("Fit", systemImage: "arrow.up.left.and.down.right.and.arrow.up.right.and.down.left")
+                            .font(.subheadline.bold())
                         Picker("", selection: $controller.imageFit) {
                             ForEach(fitOptions, id: \.self) { option in
                                 Text(option).tag(option)
@@ -122,9 +119,8 @@ struct ImageEditorView: View {
                     
                     // Code Preview
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("CODE PREVIEW")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        Label("Code Preview", systemImage: "chevron.left.forwardslash.chevron.right")
+                            .font(.subheadline.bold())
                         Text(controller.generateImageSnippet())
                             .font(.system(.caption, design: .monospaced))
                             .padding(8)
@@ -145,7 +141,7 @@ struct ImageEditorView: View {
             // Footer
             HStack {
                 Button("Cancel", action: onCancel)
-                    .keyboardShortcut(.cancelAction)
+                    .keyboardShortcut(.escape, modifiers: [])
                 
                 Spacer()
                 
@@ -160,11 +156,12 @@ struct ImageEditorView: View {
                     onInsert()
                 }
                 .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(.return, modifiers: .command)
                 .disabled(controller.imageValidationError != nil)
             }
             .padding()
+            .background(Color(NSColor.windowBackgroundColor))
         }
-        .frame(width: 400, height: 450)
+        .frame(width: 450, height: 550)
     }
 }
