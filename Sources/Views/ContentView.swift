@@ -57,6 +57,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in
             editorController.toggleLink()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertTable"))) { _ in
+            editorController.insertTableSnippet()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
             if let command = notification.object as? String {
                 handleMenuCommand(command)
@@ -826,8 +829,12 @@ struct ContentView: View {
         case "insertFootnote": editorController.insertFootnote()
         case "insertBibliography": editorController.toggleBibliography()
         case "showHelp": editorController.showHelp = true
-        case "insertPageBreak": editorController.insertPageBreak()
-        case "insertHorizontalLine": editorController.insertHorizontalLine()
+        case \"insertPageBreak\": editorController.insertPageBreak()
+        case \"insertHorizontalLine\": editorController.insertHorizontalLine()
+        case \"openFigureEditor\": editorController.openFigureEditor()
+        case \"openSymbolPicker\": editorController.showSymbolPicker = true
+        case \"openOutlineEditor\": editorController.openOutlineEditor()
+        case \"openExternalDataEditor\": editorController.openExternalDataEditor()
         case "toggleSidebar": withAnimation { editorController.isSidebarVisible.toggle() }
         case "viewEditorOnly": withAnimation { editorController.viewMode = .editorOnly }
         case "viewPreviewOnly": withAnimation { editorController.viewMode = .previewOnly }

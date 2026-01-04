@@ -94,15 +94,15 @@ struct ToolbarView: View {
                 ToolbarGroup(title: "Insert", icon: "plus.square", isCompact: collapseInsert) {
                      VStack(spacing: 2) {
                          HStack(spacing: 2) {
-                             ToolbarButton(icon: "photo", tooltip: "Insert Image", isActive: controller.isImageActive, action: controller.insertImageSnippet)
-                             ToolbarButton(icon: "tablecells", tooltip: "Insert Table", isActive: controller.isTableActive, action: controller.insertTableSnippet)
-                             ToolbarButton(icon: "sum", tooltip: "Insert Equation", isActive: controller.isEquationActive, action: controller.openNewEquationEditor)
+                             ToolbarButton(icon: "photo", tooltip: "Insert Image (Cmd+Ctrl+I)", isActive: controller.isImageActive, action: controller.insertImageSnippet)
+                             ToolbarButton(icon: "tablecells", tooltip: "Insert Table (Cmd+Ctrl+T)", isActive: controller.isTableActive, action: controller.insertTableSnippet)
+                             ToolbarButton(icon: "sum", tooltip: "Insert Equation (Cmd+Ctrl+E)", isActive: controller.isEquationActive, action: controller.openNewEquationEditor)
                              ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive, action: controller.toggleLink)
                          }
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "function", tooltip: "Insert Symbol", isActive: controller.showSymbolPicker) { controller.showSymbolPicker.toggle() }
                              ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure", action: controller.openFigureEditor)
-                             ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart", action: controller.insertChartSnippet)
+                             ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart (Cmd+Ctrl+C)", action: controller.insertChartSnippet)
                              ToolbarButton(icon: "calendar", tooltip: "Insert Timeline", action: controller.insertTimelineSnippet)
                          }
                          HStack(spacing: 2) {
