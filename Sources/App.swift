@@ -3,16 +3,31 @@ import AppKit
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    var editorController: EditorController?
+    static private(set) var shared: AppDelegate?
+    
+    var editorController: EditorController? {
+        didSet {
+            print("[DEBUG] AppDelegate: editorController assigned (nil? \(editorController == nil))")
+        }
+    }
+    
+    override init() {
+        super.init()
+        AppDelegate.shared = self
+        print("[DEBUG] AppDelegate: init")
+    }
     
     // Shared logic for save warning
-    func showSaveWarningIfNeeded() -> Bool {
+    func showSaveWarningIfNeeded(for url: URL? = nil) -> Bool {
+        print("[DEBUG] showSaveWarningIfNeeded entry: editorController is nil? \(editorController == nil), hasUnsavedChanges=\(editorController?.hasUnsavedChanges ?? false), url=\(url?.lastPathComponent ?? "nil")")
         guard let controller = editorController, controller.hasUnsavedChanges else {
-            return true // Proceed with closing/terminating
+            return true // Proceed with closing/terminating/switching
         }
         
+        let fileName = url?.lastPathComponent ?? "the document"
+        
         let alert = NSAlert()
-        alert.messageText = "Do you want to save the changes made to the document?"
+        alert.messageText = "Do you want to save the changes made to \(fileName)?"
         alert.informativeText = "Your changes will be lost if you don't save them."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
@@ -22,7 +37,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         switch response {
         case .alertFirstButtonReturn: // Save
-            NotificationCenter.default.post(name: .requestSave, object: nil)
+            NotificationCenter.default.post(name: .requestSave, object: url)
             return true // Proceed (after starting save)
         case .alertSecondButtonReturn: // Cancel
             return false // Abort
@@ -81,6 +96,7 @@ struct TypstEditApp: App {
                     }
                 })
                 .onAppear {
+                    print("[DEBUG] TypstEditApp onAppear: assigning editorController to appDelegate")
                     appDelegate.editorController = editorController
                 }
         }

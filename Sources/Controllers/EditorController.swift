@@ -240,11 +240,20 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Unsaved Changes Comparison logic ---
     func syncSavedContent(_ content: String) {
         self.savedContent = content
-        self.hasUnsavedChanges = false
+        print("[DEBUG] EditorController: syncSavedContent (len=\(content.count))")
+        DispatchQueue.main.async {
+            self.hasUnsavedChanges = false
+        }
     }
 
     func checkUnsavedChanges(currentContent: String) {
-        self.hasUnsavedChanges = (currentContent != savedContent)
+        let dirty = (currentContent != savedContent)
+        if self.hasUnsavedChanges != dirty {
+            print("[DEBUG] EditorController(\(ObjectIdentifier(self))): checkUnsavedChanges changing to \(dirty) (prev=\(self.hasUnsavedChanges))")
+            DispatchQueue.main.async {
+                self.hasUnsavedChanges = dirty
+            }
+        }
     }
     
     // --- Undo/Redo Functions ---
@@ -272,7 +281,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func textViewDidChangeSelection() {
-        updateFormattingState()
+        DispatchQueue.main.async {
+            self.updateFormattingState()
+        }
     }
     
     private func setupTableEditor(at location: Int) {

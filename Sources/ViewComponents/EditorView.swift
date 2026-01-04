@@ -43,6 +43,10 @@ struct EditorView: NSViewRepresentable {
         let textStorage = context.coordinator.textStorage
         let highlighter = context.coordinator.highlighter
         
+        if textView.string.count != text.count {
+            print("[DEBUG] EditorView.updateNSView: text lengths differ (\(textView.string.count) vs \(text.count))")
+        }
+        
         // Always use dark appearance
         nsView.appearance = NSAppearance(named: .darkAqua)
         
@@ -78,6 +82,7 @@ struct EditorView: NSViewRepresentable {
 
         // Update text if changed
         if textView.string != text {
+            print("[DEBUG] EditorView.updateNSView: text content mismatch, length: \(textView.string.count) -> \(text.count)")
             let selectedRange = textView.selectedRange()
             textStorage.beginEditing()
             textStorage.replaceCharacters(in: NSRange(location: 0, length: textStorage.length), with: text)
@@ -92,6 +97,12 @@ struct EditorView: NSViewRepresentable {
             if selectedRange.location + selectedRange.length <= (text as NSString).length {
                 textView.setSelectedRange(selectedRange)
             }
+            
+            // Enforce layout and redraw to ensure content is immediately visible
+            textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+            textView.needsDisplay = true
+            
+            print("[DEBUG] EditorView.updateNSView: text update complete")
         }
     }
 

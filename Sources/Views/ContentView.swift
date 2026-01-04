@@ -25,36 +25,368 @@ struct ContentView: View {
     @State private var renameTargetURL: URL?
     @State private var newFileName: String = ""
     @State private var currentLoadID: UUID = UUID()
+    @State private var isInternalSelectionChange: Bool = false
     @EnvironmentObject var themeManager: ThemeManager
     
-    // MARK: - Computed Properties for UI Components
+    // MARK: - Body
+    
+    var body: some View {
+        ZStack {
+            VisualEffectView(material: .hudWindow, blendingMode: .withinWindow, state: .active, emphasized: false)
+                .ignoresSafeArea()
+            
+            themeManager.mainBackground.ignoresSafeArea()
+            
+            mainLayout
+            
+            savePopup
+        }
+        .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+        .cornerRadius(12)
+        .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
+        .padding(.vertical, 12)
+        .onChange(of: selectedFile) { newValue in
+            handleFileSelectionChange(newValue: newValue)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in
+            handleSnippetInsertion(notification: notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in
+            handleBackup()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in
+            editorController.toggleLink()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
+            if let command = notification.object as? String {
+                handleMenuCommand(command)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
+            if let url = notification.object as? URL {
+                self.selectedFile = url
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
+            if let url = notification.object as? URL {
+                self.renameTargetURL = url
+                self.newFileName = url.lastPathComponent
+                self.showRenameAlert = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
+            if let info = notification.object as? [String: URL], let newURL = info["new"] {
+                self.selectedFile = newURL
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
+            if let url = notification.object as? URL {
+                self.currentPDFURL = url
+                self.reloadToken = UUID()
+                if let selectedFile = selectedFile {
+                    exportPDF(from: selectedFile)
+                }
+            }
+        }
+        .onChange(of: sourceCode) { newValue in
+            editorController.checkUnsavedChanges(currentContent: newValue)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in
+            saveFile(to: notification.object as? URL)
+        }
+        .onAppear {
+            if let file = selectedFile {
+                loadFile(url: file)
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+    
+    // MARK: - Subviews
+    
+    private var mainLayout: some View {
+        Group {
+            if fileSystem.currentFolder == nil {
+                WelcomeView(model: fileSystem, onOpen: { url in
+                    self.selectedFile = url
+                    let folder = url.deletingLastPathComponent()
+                    fileSystem.currentFolder = folder
+                    fileSystem.loadFiles()
+                })
+                .background(themeManager.mainBackground)
+            } else {
+                VStack(spacing: 0) {
+                    HSplitView {
+                        if editorController.isSidebarVisible {
+                            SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+                                .onChange(of: fileSystem.currentFolder) { newFolder in
+                                    editorController.projectRootURL = newFolder
+                                }
+                                .onAppear {
+                                    editorController.projectRootURL = fileSystem.currentFolder
+                                }
+                                .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
+                        }
+                        
+                        if selectedFile != nil {
+                            editorPreviewArea
+                        } else {
+                            emptyStateView
+                        }
+                    }
+                    .onChange(of: editorController.isPreviewDarkMode) { newValue in
+                        compiler.isDarkMode = newValue
+                        scheduleCompilation()
+                    }
+                    .toolbar {
+                        appToolbar
+                    }
+                    .toolbarBackground(.hidden, for: .windowToolbar)
+                    .onChange(of: compiler.errors) { newErrors in
+                        editorController.errors = newErrors
+                        editorController.needsRedraw()
+                        NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
+                    }
+                }
+            }
+        }
+    }
+    
+    private var editorPreviewArea: some View {
+        ZStack {
+            themeManager.contentOverlay.ignoresSafeArea() 
+            themeManager.mainBackground.ignoresSafeArea() 
+            
+            if !editorController.isTypstFile || editorController.viewMode == .editorOnly {
+                editorBox.padding(.horizontal, 12)
+            } else if editorController.viewMode == .previewOnly {
+                pdfBox
+            } else {
+                ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                    editorBox.padding(.leading, 12)
+                } right: {
+                    pdfBox
+                }
+            }
+        }
+        .layoutPriority(1)
+    }
+    
+    private var pdfBox: some View {
+        ZStack {
+            themeManager.pdfBackground
+            PreviewView(
+                url: currentPDFURL,
+                reloadToken: reloadToken,
+                colorBlindnessMode: editorController.colorBlindnessMode,
+                isPreviewDarkMode: editorController.isPreviewDarkMode,
+                onWordCountChange: { count in
+                    DispatchQueue.main.async { editorController.wordCount = count }
+                }
+            )
+            .padding(20)
+        }
+        .cornerRadius(12)
+        .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
+        .padding(.vertical, 12)
+        .padding(.trailing, 12)
+    }
+    
+    private var emptyStateView: some View {
+        ZStack {
+            themeManager.contentOverlay.ignoresSafeArea()
+            Text("Select a file")
+                .foregroundColor(themeManager.textColor)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .layoutPriority(1)
+    }
+    
+    private var savePopup: some View {
+        Group {
+            if showSavePopup {
+                VStack {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 40))
+                        .foregroundColor(.green)
+                    Text("Saved!")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                }
+                .padding(20)
+                .background(Color.black.opacity(0.8))
+                .cornerRadius(12)
+                .transition(.scale.combined(with: .opacity))
+                .zIndex(100)
+            }
+        }
+    }
+    
+    @ToolbarContentBuilder
+    private var appToolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            HStack(spacing: 8) {
+                Button(action: editorController.undo) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .foregroundColor(themeManager.textColor)
+                        .padding(6)
+                        .background(Color.black.opacity(0.3))
+                        .cornerRadius(8)
+                }
+                .help("Undo (Cmd+Z)")
+                .buttonStyle(.plain)
+                
+                Button(action: editorController.redo) {
+                    Image(systemName: "arrow.uturn.forward")
+                        .foregroundColor(themeManager.textColor)
+                        .padding(6)
+                        .background(Color.black.opacity(0.3))
+                        .cornerRadius(8)
+                }
+                .help("Redo (Cmd+Shift+Z)")
+                .buttonStyle(.plain)
+            }
+        }
+        
+        ToolbarItem(placement: .principal) {
+            Text("\(selectedFile?.lastPathComponent ?? "")\(editorController.hasUnsavedChanges ? "*" : "")")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundColor(themeManager.textColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Color.black.opacity(0.3))
+                .cornerRadius(8)
+        }
+        
+        ToolbarItem(placement: .primaryAction) {
+            HStack(spacing: 8) {
+                if editorController.isSearchVisible {
+                    searchBar
+                }
+                
+                Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
+                
+                HStack(spacing: 8) {
+                    Button(action: { saveFile() }) {
+                        Image(systemName: "square.and.arrow.down")
+                            .foregroundColor(themeManager.textColor)
+                            .padding(6)
+                            .background(Color.black.opacity(0.3))
+                            .cornerRadius(8)
+                    }
+                    .help("Save (Cmd+S)")
+                    .keyboardShortcut("s", modifiers: .command)
+                    .buttonStyle(.plain)
+                    
+                    if editorController.isTypstFile {
+                        Button(action: printPDF) {
+                            Image(systemName: "printer")
+                                .foregroundColor(themeManager.textColor)
+                                .padding(6)
+                                .background(Color.black.opacity(0.3))
+                                .cornerRadius(8)
+                        }
+                        .help("Print")
+                        .buttonStyle(.plain)
+                        
+                        ShareButton(fileURL: exportedPDFURL)
+                            .frame(width: 28, height: 28)
+                            .padding(4)
+                            .background(Color.black.opacity(0.3))
+                            .cornerRadius(8)
+                            .help("Share")
+                    }
+                }
+                
+                if let lastSaved = lastSaved {
+                    Text("Last saved: \(lastSaved.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+    
+    private var searchBar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 13))
+                TextField("Search", text: $editorController.searchQuery)
+                    .textFieldStyle(.plain)
+                    .frame(width: 130)
+                    .foregroundColor(themeManager.textColor)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.3))
+            .cornerRadius(8)
+            
+            if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 {
+                searchResultsPopup
+            }
+        }
+    }
+    
+    private var searchResultsPopup: some View {
+        HStack(spacing: 8) {
+            Text("\(editorController.currentMatchIndex + 1) of \(editorController.matchCount)")
+                .font(.caption)
+                .foregroundColor(themeManager.secondaryTextColor)
+            
+            Divider().frame(height: 12)
+            
+            Button(action: { editorController.previousMatch() }) {
+                Image(systemName: "chevron.up").font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: { editorController.nextMatch() }) {
+                Image(systemName: "chevron.down").font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+            
+            Divider().frame(height: 12)
+            
+            Button(action: { 
+                editorController.searchQuery = ""
+                editorController.clearSearch()
+            }) {
+                Image(systemName: "xmark").font(.system(size: 10))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.black.opacity(0.3))
+        .cornerRadius(6)
+        .offset(y: 2)
+    }
     
     private var editorBox: some View {
         ZStack {
             themeManager.editorBackground
             
             VStack(spacing: 0) {
-                // Formatting Toolbar above editor
                 if editorController.isTypstFile {
                     HStack {
                         ToolbarView(controller: editorController)
-                            .padding(.leading, 44) // Align with text after ruler to avoid separator line
+                            .padding(.leading, 44)
                         Spacer()
                     }
                     .padding(.trailing, 12)
                     .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.3)) // More opaque background
+                    .background(Color.black.opacity(0.3))
                     .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
-                    .fixedSize(horizontal: false, vertical: true) // Prevent toolbar from expanding vertically
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                
-                // Editor
                 EditorView(text: $sourceCode, controller: editorController, onCommit: {
                     scheduleCompilation()
                 })
                 .environmentObject(themeManager)
                 .padding(8)
-                // Sheets
                 .sheet(isPresented: $editorController.showEquationEditor) {
                     VisualEquationEditor(
                         initialEquation: $editorController.currentEquationContent,
@@ -147,7 +479,6 @@ struct ContentView: View {
                 .sheet(isPresented: $editorController.showFootnoteEditor) {
                     FootnoteEditorView(controller: editorController)
                 }
-                // Alerts
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }
                     Button("Cancel", role: .cancel) { }
@@ -189,7 +520,6 @@ struct ContentView: View {
                     Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.")
                 }
             
-                // Status Bar
                 if editorController.isTypstFile {
                     HStack {
                         Text("Words: \(editorController.wordCount)")
@@ -203,7 +533,7 @@ struct ContentView: View {
                     .background(Color.black.opacity(0.3))
                     .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
                 }
-            } // End VStack
+            }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
         .cornerRadius(12)
@@ -211,510 +541,143 @@ struct ContentView: View {
         .padding(.vertical, 12)
     }
     
-    var body: some View {
-        ZStack {
-            // Main Background with Visual Effect
-            VisualEffectView(
-                material: .hudWindow,
-                blendingMode: .withinWindow,
-                state: .active,
-                emphasized: false
-            )
-            .ignoresSafeArea()
-            
-            themeManager.mainBackground.ignoresSafeArea() // Should be .clear
-            
-            if fileSystem.currentFolder == nil {
-                WelcomeView(model: fileSystem, onOpen: { url in
-                    // Robust existence check using URL
-                    var isDirectory: ObjCBool = false
-                    if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-                        // Try resource reachable as fallthru for sandbox
-                        if (try? url.checkResourceIsReachable()) != true {
-                            editorController.missingFileName = url.lastPathComponent
-                            editorController.showFileNotFoundAlert = true
-                            RecentFilesManager.shared.remove(url: url)
-                            return
-                        }
-                    }
-                    
-                    self.selectedFile = url
-                    let folder = url.deletingLastPathComponent()
-                    fileSystem.currentFolder = folder
-                    fileSystem.loadFiles()
-                })
-                .background(themeManager.mainBackground)
-            } else {
-                // Unified HSplitView for Transparency
-                VStack(spacing: 0) {
-                    HSplitView {
-                        // LEFT: Sidebar (starts minimized)
-                        if editorController.isSidebarVisible {
-                            SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
-                                .onChange(of: fileSystem.currentFolder) { newFolder in
-                                    editorController.projectRootURL = newFolder
-                                }
-                                .onChange(of: selectedFile) { newFile in
-                                    editorController.currentFileURL = newFile
-                                }
-                                .onAppear {
-                                    editorController.projectRootURL = fileSystem.currentFolder
-                                    editorController.currentFileURL = selectedFile
-                                }
-                                .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
-                        }
-                        
-                        // RIGHT: Main Content (Editor + PDF)
-                        if selectedFile != nil {
-                             ZStack {
-                                themeManager.contentOverlay.ignoresSafeArea() 
-                                themeManager.mainBackground.ignoresSafeArea() // .clear
-                                
-                                if !editorController.isTypstFile || editorController.viewMode == .editorOnly {
-                                    editorBox
-                                        .padding(.leading, 12)
-                                        .padding(.trailing, 12)
-                                } else if editorController.viewMode == .previewOnly {
-                                    ZStack {
-                                        themeManager.pdfBackground
-                                        PreviewView(
-                                            url: currentPDFURL,
-                                            reloadToken: reloadToken,
-                                            colorBlindnessMode: editorController.colorBlindnessMode,
-                                            isPreviewDarkMode: editorController.isPreviewDarkMode,
-                                            onWordCountChange: { count in
-                                                DispatchQueue.main.async { editorController.wordCount = count }
-                                            }
-                                        )
-                                            .padding(20)
-                                    }
-                                    .cornerRadius(12)
-                                    .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
-                                    .padding(12)
-                                } else {
-                                    ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
-                                        // Left Pane: Integrated Ruler + Editor
-                                        editorBox
-                                            .padding(.leading, 12)
-                                    } right: {
-                                        // PDF Preview Area with Shadow Box
-                                        ZStack {
-                                            themeManager.pdfBackground
-                                            
-                                            PreviewView(
-                                                url: currentPDFURL,
-                                                reloadToken: reloadToken,
-                                                colorBlindnessMode: editorController.colorBlindnessMode,
-                                                isPreviewDarkMode: editorController.isPreviewDarkMode,
-                                                onWordCountChange: { count in
-                                                    DispatchQueue.main.async { editorController.wordCount = count }
-                                                }
-                                            )
-                                                .padding(20)
-                                        }
-                                        .cornerRadius(12)
-                                        .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
-                                        .padding(.vertical, 12)
-                                        .padding(.leading, 0) // Remove padding as handle provides spacing
-                                        .padding(.trailing, 12) // Keep trailing padding for window edge
-                                    }
-                                }
-                            }
-                            .layoutPriority(1)
-                        } else {
-                            // Empty state when no file selected but folder open
-                             ZStack {
-                                themeManager.contentOverlay.ignoresSafeArea()
-                                Text("Select a file")
-                                    .foregroundColor(themeManager.textColor)
-                             }
-                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                             .layoutPriority(1)
-                        }
-                    }
-                    .onChange(of: editorController.isPreviewDarkMode) { newValue in
-                        compiler.isDarkMode = newValue
-                        scheduleCompilation()
-                    }
-                    // Toolbar attached to the main split view
-                    .toolbar {
-                        // Undo/Redo on the left
-                        ToolbarItem(placement: .navigation) {
-                            HStack(spacing: 8) {
-                                Button(action: editorController.undo) {
-                                    Image(systemName: "arrow.uturn.backward")
-                                        .foregroundColor(themeManager.textColor)
-                                        .padding(6)
-                                        .background(Color.black.opacity(0.3))
-                                        .cornerRadius(8)
-                                }
-                                .help("Undo (Cmd+Z)")
-                                .buttonStyle(.plain)
-                                
-                                Button(action: editorController.redo) {
-                                    Image(systemName: "arrow.uturn.forward")
-                                        .foregroundColor(themeManager.textColor)
-                                        .padding(6)
-                                        .background(Color.black.opacity(0.3))
-                                        .cornerRadius(8)
-                                }
-                                .help("Redo (Cmd+Shift+Z)")
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        
-                        ToolbarItem(placement: .principal) {
-                            Text("\(selectedFile?.lastPathComponent ?? "")\(editorController.hasUnsavedChanges ? "*" : "")")
-                                .font(.system(size: 13, weight: .medium, design: .rounded))
-                                .foregroundColor(themeManager.textColor)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(Color.black.opacity(0.3))
-                                .cornerRadius(8)
-                        }
-                        
-                        ToolbarItem(placement: .primaryAction) {
-                            HStack(spacing: 8) {
-                                
-                                // Search Bar with Popup
-                                if editorController.isSearchVisible {
-                                    VStack(spacing: 0) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "magnifyingglass")
-                                            .foregroundColor(.secondary)
-                                            .font(.system(size: 13))
-                                        TextField("Search", text: $editorController.searchQuery)
-                                            .textFieldStyle(.plain)
-                                            .frame(width: 130)
-                                            .foregroundColor(themeManager.textColor)
-                                    }
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(Color.black.opacity(0.3))
-                                    .cornerRadius(8)
-                                    
-                                    // Search results popup (appears when there are matches)
-                                    if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 {
-                                        HStack(spacing: 8) {
-                                            // Match counter
-                                            Text("\(editorController.currentMatchIndex + 1) of \(editorController.matchCount)")
-                                                .font(.caption)
-                                                .foregroundColor(themeManager.secondaryTextColor)
-                                            
-                                            Divider()
-                                                .frame(height: 12)
-                                            
-                                            // Previous match button
-                                            Button(action: { editorController.previousMatch() }) {
-                                                Image(systemName: "chevron.up")
-                                                    .font(.system(size: 10))
-                                            }
-                                            .buttonStyle(.plain)
-                                            .help("Previous")
-                                            
-                                            // Next match button
-                                            Button(action: { editorController.nextMatch() }) {
-                                                Image(systemName: "chevron.down")
-                                                    .font(.system(size: 10))
-                                            }
-                                            .buttonStyle(.plain)
-                                            .help("Next")
-                                            
-                                            Divider()
-                                                .frame(height: 12)
-                                            
-                                            // Done button
-                                            Button(action: { 
-                                                editorController.searchQuery = ""
-                                                editorController.clearSearch()
-                                            }) {
-                                                Image(systemName: "xmark")
-                                                    .font(.system(size: 10))
-                                            }
-                                            .buttonStyle(.plain)
-                                            .help("Done")
-                                        }
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 6)
-                                        .background(Color.black.opacity(0.3))
-                                        .cornerRadius(6)
-                                        .offset(y: 2)
-                                    }
-                                }
-                                }
-                                
-                                // Divider
-    Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
-                                
-                                // Actions: Save, Print, Share
-                                HStack(spacing: 8) {
-                                    Button(action: saveFile) {
-                                        Image(systemName: "square.and.arrow.down")
-                                            .foregroundColor(themeManager.textColor)
-                                            .padding(6)
-                                            .background(Color.black.opacity(0.3))
-                                            .cornerRadius(8)
-                                    }
-                                    .help("Save (Cmd+S)")
-                                    .keyboardShortcut("s", modifiers: .command)
-                                    .buttonStyle(.plain)
-                                    
-                                    if editorController.isTypstFile {
-                                        // Print Button
-                                        Button(action: printPDF) {
-                                            Image(systemName: "printer")
-                                                .foregroundColor(themeManager.textColor)
-                                                .padding(6)
-                                                .background(Color.black.opacity(0.3))
-                                                .cornerRadius(8)
-                                        }
-                                        .help("Print")
-                                        .buttonStyle(.plain)
-                                        
-                                        // Share Button (Native Anchor)
-                                        ShareButton(fileURL: exportedPDFURL)
-                                            .frame(width: 28, height: 28)
-                                            .padding(4)
-                                            .background(Color.black.opacity(0.3))
-                                            .cornerRadius(8)
-                                            .help("Share")
-                                    }
-                                }
-                                
-                                // Save Status & Finder
-                                if let lastSaved = lastSaved {
-                                    Text("Last saved: \(lastSaved.formatted(date: .omitted, time: .shortened))")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                
-                            }
-                        }
-                    }
-                    // Important: Hide explicit window toolbar background to use our transparency
-                    .toolbarBackground(.hidden, for: .windowToolbar)
-                    .onChange(of: compiler.errors) { newErrors in
-                        editorController.errors = newErrors
-                        editorController.needsRedraw()
-                        // Broadcast errors to sidebar
-                        NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
-                    }
-                } // End VStack
+    // MARK: - Handlers
+    
+    private func handleFileSelectionChange(newValue: URL?) {
+        DispatchQueue.main.async {
+            // 1. Ignore if this is part of a revert operation
+            if self.isInternalSelectionChange {
+                self.isInternalSelectionChange = false
+                return
             }
             
-            // Save Popup
-            if showSavePopup {
-                VStack {
-                    Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 40))
-                    .foregroundColor(.green)
-                    Text("Saved!")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                }
-                .padding(20)
-                .background(Color.black.opacity(0.8))
-                .cornerRadius(12)
-                .transition(.scale.combined(with: .opacity))
-                .zIndex(100)
+            // 2. Identify the file we are actually LEAVING
+            let currentlyLoadedFile = self.editorController.currentFileURL
+            
+            // 3. Guard against redundant calls if clicked same file
+            if newValue == currentlyLoadedFile {
+                return
             }
-        }
-        .onChange(of: selectedFile) { newValue in
-            loadFile(url: newValue)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in
-            if let snippetKey = notification.object as? String {
-                switch snippetKey {
-                case "table":
-                    editorController.insertTableSnippet()
-                case "image":
-                    editorController.insertImageSnippet()
-                case "chart":
-                    editorController.insertChartSnippet()
-                case "equation":
-                    editorController.openNewEquationEditor()
-                case "timeline":
-                    editorController.insertTimelineSnippet()
-                default:
-                    break
+            
+            print("[DEBUG] handleFileFileSelectionChange (controller=\(ObjectIdentifier(self.editorController))) from \(currentlyLoadedFile?.lastPathComponent ?? "nil") to \(newValue?.lastPathComponent ?? "nil"), hasUnsavedChanges=\(self.editorController.hasUnsavedChanges)")
+            
+            // 4. Check for unsaved changes in the file we are leaving
+            if self.editorController.hasUnsavedChanges, let prev = currentlyLoadedFile {
+                if let appDelegate = AppDelegate.shared {
+                    if !appDelegate.showSaveWarningIfNeeded(for: prev) {
+                        // User cancelled switch - revert selection
+                        print("[DEBUG] handleFileFileSelectionChange: Reverting selection to \(prev.lastPathComponent)")
+                        self.isInternalSelectionChange = true
+                        self.selectedFile = prev
+                        return
+                    }
+                } else {
+                    print("[ERROR] handleFileFileSelectionChange: AppDelegate.shared is nil!")
                 }
             }
+            
+            // 5. Proceed with loading the new file
+            self.loadFile(url: newValue)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in
-            handleBackup()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in
-            editorController.toggleLink()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
-            if let command = notification.object as? String {
-                handleMenuCommand(command)
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
-            if let url = notification.object as? URL {
-                self.selectedFile = url
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
-            if let url = notification.object as? URL {
-                self.renameTargetURL = url
-                self.newFileName = url.lastPathComponent
-                self.showRenameAlert = true
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
-            if let info = notification.object as? [String: URL], let newURL = info["new"] {
-                self.selectedFile = newURL
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
-            if let url = notification.object as? URL {
-                self.currentPDFURL = url
-                self.reloadToken = UUID()
-                
-                // Auto-export PDF to project directory when preview updates
-                if let selectedFile = selectedFile {
-                    exportPDF(from: selectedFile)
-                }
-            }
-        }
-
-        .onChange(of: sourceCode) { newValue in
-            editorController.checkUnsavedChanges(currentContent: newValue)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { _ in
-            saveFile()
-        }
-        .onAppear {
-            if let file = selectedFile {
-                print("[DEBUG] ContentView onAppear: Loading initial file \(file.lastPathComponent)")
-                loadFile(url: file)
-            }
-        }
-        .preferredColorScheme(.dark)
     }
     
-    func loadFile(url: URL?) {
-        guard let url = url else {
-            print("[DEBUG] loadFile: No URL provided")
-            return
+    private func handleSnippetInsertion(notification: Notification) {
+        if let snippetKey = notification.object as? String {
+            switch snippetKey {
+            case "table": editorController.insertTableSnippet()
+            case "image": editorController.insertImageSnippet()
+            case "chart": editorController.insertChartSnippet()
+            case "equation": editorController.openNewEquationEditor()
+            case "timeline": editorController.insertTimelineSnippet()
+            default: break
+            }
         }
-        
+    }
+    
+    // MARK: - Helper Methods
+    
+    func loadFile(url: URL?) {
+        guard let url = url else { return }
         let loadID = UUID()
         self.currentLoadID = loadID
         
-        print("[INFO] Starting load for file: \(url.lastPathComponent) (ID: \(loadID))")
-        
-        // Read file content asynchronously to keep UI responsive
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let content = try String(contentsOf: url, encoding: .utf8)
-                
-                // Return to main thread for UI updates
                 DispatchQueue.main.async {
-                    // Critical: only update if this is still the latest request
-                    guard self.currentLoadID == loadID else {
-                        print("[DEBUG] loadFile: Ignoring stale content for \(url.lastPathComponent) (Current: \(self.currentLoadID), Req: \(loadID))")
-                        return
-                    }
+                    print("[DEBUG] loadFile completion: currentLoadID=\(self.currentLoadID == loadID), url=\(url.lastPathComponent)")
+                    guard self.currentLoadID == loadID else { return }
                     
-                    self.sourceCode = content
-                    
-                    // Set exported PDF URL based on file path
                     self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-                    // Add to recents
                     RecentFilesManager.shared.add(url: url)
                     
-                    // Sync saved content to establish clean state (for asterisk indicator)
+                    // Update truth BEFORE content to ensure UI state is correct
+                    self.editorController.currentFileURL = url 
                     self.editorController.syncSavedContent(content)
+                    self.sourceCode = content
                     
-                    // Trigger watch/compilation
                     scheduleCompilation(with: content)
-                    
-                    print("[INFO] Successfully loaded file: \(url.lastPathComponent) (ID: \(loadID))")
+                    print("[INFO] Successfully loaded file into editor: \(url.lastPathComponent)")
                 }
             } catch {
                 print("[ERROR] Failed to read file \(url.path): \(error)")
-                
                 DispatchQueue.main.async {
                     guard self.currentLoadID == loadID else { return }
-                    
-                    // Only show alert if file actually doesn't exist
                     if (try? url.checkResourceIsReachable()) != true {
                         editorController.missingFileName = url.lastPathComponent
                         editorController.showFileNotFoundAlert = true
                         RecentFilesManager.shared.remove(url: url)
-                        if self.selectedFile == url {
-                            self.selectedFile = nil
-                        }
+                        if self.selectedFile == url { self.selectedFile = nil }
                     }
                 }
             }
         }
     }
     
-    func saveFile() {
-        guard let url = selectedFile else { return }
+    func saveFile(to url: URL? = nil) {
+        let targetURL = url ?? selectedFile
+        guard let url = targetURL else { return }
+        
         do {
-            // Save .typ file
             try sourceCode.write(to: url, atomically: true, encoding: .utf8)
             RecentFilesManager.shared.add(url: url)
-            
-            // Trigger compilation to generate PDF
-            scheduleCompilation(with: sourceCode)
-            
-            // UI Feedback
-            lastSaved = Date()
-            withAnimation {
-                showSavePopup = true
-            }
-            
-            // Sync saved content to mark as clean
-            editorController.syncSavedContent(sourceCode)
-            
-            // Hide after delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                withAnimation {
-                    showSavePopup = false
+            DispatchQueue.main.async {
+                if url == self.selectedFile {
+                    self.editorController.syncSavedContent(self.sourceCode)
+                    self.scheduleCompilation(with: self.sourceCode)
+                    self.lastSaved = Date()
+                    withAnimation { self.showSavePopup = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        withAnimation { self.showSavePopup = false }
+                    }
+                } else {
+                    print("[INFO] Background file saved: \(url.lastPathComponent)")
                 }
             }
         } catch {
-            print("Error saving: \(error)")
+            print("[ERROR] Failed to save file \(url.lastPathComponent): \(error)")
         }
     }
     
     @MainActor
     func handleExport(format: String) {
         guard let url = selectedFile else { return }
-        
-        // Export naming recommendation for multi-page documents
         let suggestedName = url.deletingPathExtension().appendingPathExtension(format).lastPathComponent
-        
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: format)!]
         panel.nameFieldStringValue = suggestedName
-        panel.message = "For multi-page \(format.uppercased()) export, you can use {p} in the filename (e.g. image-{p}.\(format))"
-        
         if panel.runModal() == .OK, let dest = panel.url {
-            let controller = self.editorController
-            let root = controller.projectRootURL
-            
             Task {
-                let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: root)
-                
-                // Switch back to MainActor for UI updates
+                let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: editorController.projectRootURL)
                 await MainActor.run {
                     if result.success {
                         NSWorkspace.shared.open(dest)
-                        
-                        // Refresh sidebar if destination is within project root
-                        if let root = root, dest.path.hasPrefix(root.path) {
+                        if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) {
                             fileSystem.loadFiles()
                         }
                     } else {
-                        controller.lastExportError = result.error ?? "Unknown error"
-                        controller.showExportErrorAlert = true
+                        editorController.lastExportError = result.error ?? "Unknown error"
+                        editorController.showExportErrorAlert = true
                     }
                 }
             }
@@ -727,18 +690,13 @@ struct ContentView: View {
         let filename = sourceURL.lastPathComponent
         let shadowPDFURL = workingDirectory.appendingPathComponent(".\(filename).preview.pdf")
         
-        // Export happens after a short delay to ensure compilation is complete
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             if FileManager.default.fileExists(atPath: shadowPDFURL.path) {
                 do {
-                    // Remove old PDF if exists
                     if FileManager.default.fileExists(atPath: pdfDestination.path) {
                         try FileManager.default.removeItem(at: pdfDestination)
                     }
-                    // Copy preview PDF to final destination
                     try FileManager.default.copyItem(at: shadowPDFURL, to: pdfDestination)
-                    print("[INFO] PDF exported to: \(pdfDestination.path)")
-                    // Update exported PDF URL for sharing
                     self.exportedPDFURL = pdfDestination
                 } catch {
                     print("[ERROR] Failed to export PDF: \(error)")
@@ -748,62 +706,29 @@ struct ContentView: View {
     }
     
     func printPDF() {
-        print("[DEBUG] printPDF called")
-        print("[DEBUG] currentPDFURL: \(String(describing: currentPDFURL))")
-        
-        guard let url = currentPDFURL else {
-            print("[ERROR] printPDF: currentPDFURL is nil")
-            return
-        }
-        
-        guard let document = PDFDocument(url: url) else {
-            print("[ERROR] printPDF: Failed to load PDFDocument from URL: \(url)")
-            return
-        }
-        
-        print("[DEBUG] printPDF: PDF loaded successfully, page count: \(document.pageCount)")
-        
+        guard let url = currentPDFURL, let document = PDFDocument(url: url) else { return }
         let printInfo = NSPrintInfo.shared
         printInfo.topMargin = 0
         printInfo.bottomMargin = 0
         printInfo.leftMargin = 0
         printInfo.rightMargin = 0
-        
-        // Scale to fit logic is complex in code, but standard print op handles typical cases
         let op = document.printOperation(for: printInfo, scalingMode: .pageScaleToFit, autoRotate: true)
-        print("[DEBUG] printPDF: Running print operation")
         op?.run()
     }
     
-    func sharePDF() {
-        guard let url = currentPDFURL else { return }
-        let picker = NSSharingServicePicker(items: [url])
-        // Need a view to attach to. For now, try standard view.
-        // In SwiftUI, we need to bridge to AppKit view.
-        // Simplest way: dispatch to main and find key window's content view.
-        
-        DispatchQueue.main.async {
-            guard let window = NSApp.keyWindow, let contentView = window.contentView else { return }
-            picker.show(relativeTo: .zero, of: contentView, preferredEdge: .minY)
-        }
-    }
-
     func scheduleCompilation(with content: String? = nil) {
         guard let url = selectedFile, editorController.isTypstFile else { 
             compiler.cleanUp()
             currentPDFURL = nil
             return 
         }
-        
         workItem?.cancel()
         let currentSource = content ?? sourceCode
-        let fileURL = url
         let isDark = editorController.isPreviewDarkMode
-        
         let newWorkItem = DispatchWorkItem {
             Task {
                 compiler.isDarkMode = isDark
-                await compiler.updateContent(source: currentSource, fileURL: fileURL)
+                await compiler.updateContent(source: currentSource, fileURL: url)
             }
         }
         workItem = newWorkItem
@@ -813,17 +738,12 @@ struct ContentView: View {
     @MainActor
     func handleBackup() {
         guard let root = fileSystem.currentFolder else { return }
-        
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.zip]
         panel.nameFieldStringValue = "\(root.lastPathComponent)_backup.zip"
-        panel.title = "Backup Project"
-        panel.message = "Choose a location to save your project backup."
-        
         if panel.runModal() == .OK, let dest = panel.url {
             Task {
-                let success = await fileSystem.createBackup(to: dest)
-                if success {
+                if await fileSystem.createBackup(to: dest) {
                     NSWorkspace.shared.open(dest.deletingLastPathComponent())
                 } else {
                     editorController.lastExportError = "Failed to create project backup."
@@ -836,81 +756,45 @@ struct ContentView: View {
     @MainActor
     func handleMenuCommand(_ command: String) {
         switch command {
-        case "newFile":
-            fileSystem.createNewFile()
-        case "uploadFile":
-            fileSystem.importFile()
+        case "newFile": fileSystem.createNewFile()
+        case "uploadFile": fileSystem.importFile()
         case "renameFile":
             if let url = selectedFile {
                 self.renameTargetURL = url
                 self.newFileName = url.lastPathComponent
                 self.showRenameAlert = true
             }
-        case "quickExportPDF":
-            if let url = selectedFile { exportPDF(from: url) }
-        case "exportPDF":
-            handleExport(format: "pdf")
-        case "exportPNG":
-            handleExport(format: "png")
-        case "exportSVG":
-            handleExport(format: "svg")
-        case "undo":
-            editorController.undo()
-        case "redo":
-            editorController.redo()
-        case "toggleSearch":
-            // Focus search field?
-            break
-        case "goToLine":
-            editorController.showGoToLineAlert = true
-        case "selectAll":
-            editorController.selectAll()
-        case "toggleLineComment":
-            editorController.toggleLineComment()
-        case "toggleBlockComment":
-            editorController.toggleBlockComment()
-        case "toggleHighlight":
-            editorController.toggleHighlight()
-        case "toggleStrike":
-            editorController.toggleStrike()
-        case "toggleLink":
-            editorController.toggleLink()
-        case "toggleQuote":
-            editorController.toggleQuote()
-        case "toggleCodeBlock":
-            editorController.toggleCodeBlock()
-        case "toggleSubscript":
-            editorController.toggleSubscript()
-        case "toggleSuperscript":
-            editorController.toggleSuperscript()
-        case "insertFootnote":
-            editorController.insertFootnote()
-        case "insertBibliography":
-            editorController.toggleBibliography()
-        case "showHelp":
-            editorController.showHelp = true
-        case "insertPageBreak":
-            editorController.insertPageBreak()
-        case "insertHorizontalLine":
-            editorController.insertHorizontalLine()
-        case "toggleSidebar":
-            withAnimation { editorController.isSidebarVisible.toggle() }
-        case "viewEditorOnly":
-            withAnimation { editorController.viewMode = .editorOnly }
-        case "viewPreviewOnly":
-            withAnimation { editorController.viewMode = .previewOnly }
-        case "viewBothPanels":
-            withAnimation { editorController.viewMode = .both }
-        case "splitVertical":
-            withAnimation { editorController.isVerticalSplit = true }
-        case "splitHorizontal":
-            withAnimation { editorController.isVerticalSplit = false }
-        case "zoomIn":
-            editorController.zoomIn()
-        case "zoomOut":
-            editorController.zoomOut()
-        default:
-            break
+        case "quickExportPDF": if let url = selectedFile { exportPDF(from: url) }
+        case "exportPDF": handleExport(format: "pdf")
+        case "exportPNG": handleExport(format: "png")
+        case "exportSVG": handleExport(format: "svg")
+        case "undo": editorController.undo()
+        case "redo": editorController.redo()
+        case "goToLine": editorController.showGoToLineAlert = true
+        case "selectAll": editorController.selectAll()
+        case "toggleLineComment": editorController.toggleLineComment()
+        case "toggleBlockComment": editorController.toggleBlockComment()
+        case "toggleHighlight": editorController.toggleHighlight()
+        case "toggleStrike": editorController.toggleStrike()
+        case "toggleLink": editorController.toggleLink()
+        case "toggleQuote": editorController.toggleQuote()
+        case "toggleCodeBlock": editorController.toggleCodeBlock()
+        case "toggleSubscript": editorController.toggleSubscript()
+        case "toggleSuperscript": editorController.toggleSuperscript()
+        case "insertFootnote": editorController.insertFootnote()
+        case "insertBibliography": editorController.toggleBibliography()
+        case "showHelp": editorController.showHelp = true
+        case "insertPageBreak": editorController.insertPageBreak()
+        case "insertHorizontalLine": editorController.insertHorizontalLine()
+        case "toggleSidebar": withAnimation { editorController.isSidebarVisible.toggle() }
+        case "viewEditorOnly": withAnimation { editorController.viewMode = .editorOnly }
+        case "viewPreviewOnly": withAnimation { editorController.viewMode = .previewOnly }
+        case "viewBothPanels": withAnimation { editorController.viewMode = .both }
+        case "splitVertical": withAnimation { editorController.isVerticalSplit = true }
+        case "splitHorizontal": withAnimation { editorController.isVerticalSplit = false }
+        case "zoomIn": editorController.zoomIn()
+        case "zoomOut": editorController.zoomOut()
+        default: break
         }
     }
 }
