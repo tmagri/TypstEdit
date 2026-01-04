@@ -775,58 +775,75 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         let lineRange = nsText.lineRange(for: range)
         let lineContent = nsText.substring(with: lineRange)
         
-        // --- Case 1: Single line and empty (caret on empty line or selection of only whitespace) ---
+        // --- Case 1: Single line and empty ---
         let hadTrailingNewline = lineContent.hasSuffix("\n")
         let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
         
-        if isSingleLineRepresentation {
-            let trimmed = lineContent.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty {
-                textView.insertText(prefix, replacementRange: range)
-                return
-            }
+        if isSingleLineRepresentation && lineContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            textView.insertText(prefix, replacementRange: range)
+            return
         }
         
         // --- Case 2: Multiline selection or non-empty line ---
         var lineStrings = lineContent.components(separatedBy: .newlines)
         if hadTrailingNewline { lineStrings.removeLast() }
         
-        let knownPrefixes = ["- ", "+ "]
         let otherPrefix = prefix == "- " ? "+ " : "- "
+        let headingPattern = #"^(=+)\s"#
+        guard let headingRegex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
         
-        var nonBlankIndices: [Int] = []
-        var currentPrefixedIndices: [Int] = []
-        
-        for (i, line) in lineStrings.enumerated() {
-            if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                nonBlankIndices.append(i)
-                if line.hasPrefix(prefix) {
-                    currentPrefixedIndices.append(i)
-                }
-            }
+        struct LineInfo {
+            let headingPrefix: String
+            let contentAfterHeading: String
+            let hasTargetPrefix: Bool
+            let hasOtherPrefix: Bool
+            let isBlank: Bool
         }
         
-        // Logic: 
-        // 1. If ALL non-blank lines already have the target prefix -> Remove it from all.
-        // 2. Otherwise -> For each non-blank line:
-        //    - If it has the other prefix, replace it.
-        //    - If it has no prefix, add the target prefix.
-        
-        let shouldRemove = !nonBlankIndices.isEmpty && currentPrefixedIndices.count == nonBlankIndices.count
-        
-        var newLines = lineStrings
-        if shouldRemove {
-            for i in nonBlankIndices {
-                newLines[i] = String(newLines[i].dropFirst(prefix.count))
+        var infos: [LineInfo] = []
+        for line in lineStrings {
+            let nsLine = line as NSString
+            var headingPrefix = ""
+            var remaining = line
+            
+            if let match = headingRegex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: nsLine.length)) {
+                headingPrefix = nsLine.substring(with: match.range)
+                remaining = nsLine.substring(from: match.range.length)
             }
-        } else {
-            for i in nonBlankIndices {
-                if newLines[i].hasPrefix(otherPrefix) {
-                    newLines[i] = prefix + String(newLines[i].dropFirst(otherPrefix.count))
-                } else if !newLines[i].hasPrefix(prefix) {
-                    newLines[i] = prefix + newLines[i]
+            
+            let isBlank = remaining.trimmingCharacters(in: .whitespaces).isEmpty
+            infos.append(LineInfo(
+                headingPrefix: headingPrefix,
+                contentAfterHeading: remaining,
+                hasTargetPrefix: remaining.hasPrefix(prefix),
+                hasOtherPrefix: remaining.hasPrefix(otherPrefix),
+                isBlank: isBlank
+            ))
+        }
+        
+        let nonBlankInfos = infos.filter { !$0.isBlank }
+        if nonBlankInfos.isEmpty { return }
+        
+        let allHaveTarget = nonBlankInfos.allSatisfy { $0.hasTargetPrefix }
+        
+        var newLines: [String] = []
+        for info in infos {
+            if info.isBlank {
+                newLines.append(info.headingPrefix + info.contentAfterHeading)
+                continue
+            }
+            
+            var newContent = info.contentAfterHeading
+            if allHaveTarget {
+                newContent = String(newContent.dropFirst(prefix.count))
+            } else {
+                if info.hasOtherPrefix {
+                    newContent = prefix + String(newContent.dropFirst(otherPrefix.count))
+                } else if !info.hasTargetPrefix {
+                    newContent = prefix + newContent
                 }
             }
+            newLines.append(info.headingPrefix + newContent)
         }
         
         var replacement = newLines.joined(separator: "\n")
@@ -979,32 +996,58 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     func setHeadingLevel(_ level: Int) {
         guard let textView = textView else { return }
         let range = textView.selectedRange()
-        let text = textView.string
+        let nsText = textView.string as NSString
+        let lineRange = nsText.lineRange(for: range)
+        let lineContent = nsText.substring(with: lineRange)
         
-        let currentLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
-        if currentLevel == level { return }
+        let hadTrailingNewline = lineContent.hasSuffix("\n")
+        let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
         
-        // Find existing heading prefix if any
-        let headingRange = FormatDetector.findHeadingRange(in: text, at: range.location)
-        
-        if level == 0 {
-            // Remove heading
-            if let hr = headingRange {
-                textView.insertText("", replacementRange: hr)
-            }
-        } else {
-            let prefix = String(repeating: "=", count: level) + " "
-            if let hr = headingRange {
-                // Replace existing prefix
-                textView.insertText(prefix, replacementRange: hr)
+        // --- Special Case: Single empty line ---
+        if isSingleLineRepresentation && lineContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if level > 0 {
+                let prefix = String(repeating: "=", count: level) + " "
+                textView.insertText(prefix, replacementRange: range)
             } else {
-                // Add new prefix at start of line
-                let nsText = text as NSString
-                let lineRange = nsText.lineRange(for: NSRange(location: range.location, length: 0))
-                textView.insertText(prefix, replacementRange: NSRange(location: lineRange.location, length: 0))
+                textView.insertText("", replacementRange: lineRange)
+            }
+            updateFormattingState()
+            return
+        }
+        
+        // --- Multiline selection or non-empty line ---
+        var lines = lineContent.components(separatedBy: .newlines)
+        if hadTrailingNewline { lines.removeLast() }
+        
+        let headingPattern = #"^(=+)\s"#
+        guard let regex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
+        
+        var newLines: [String] = []
+        for line in lines {
+            // Skip purely blank lines within a selection
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                newLines.append(line)
+                continue
+            }
+            
+            var content = line
+            // Remove existing prefix if any
+            if let match = regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) {
+                content = String(line.dropFirst(match.range.length))
+            }
+            
+            if level > 0 {
+                let prefix = String(repeating: "=", count: level) + " "
+                newLines.append(prefix + content)
+            } else {
+                newLines.append(content)
             }
         }
         
+        var replacement = newLines.joined(separator: "\n")
+        if hadTrailingNewline { replacement += "\n" }
+        
+        textView.insertText(replacement, replacementRange: lineRange)
         updateFormattingState()
     }
     
