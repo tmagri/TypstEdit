@@ -8,6 +8,21 @@ extension Notification.Name {
 
 @MainActor
 class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate {
+    enum SupportedFileType {
+        case typst
+        case text
+        case image
+        case pdf
+        case other
+        
+        var isTextual: Bool {
+            switch self {
+            case .typst, .text: return true
+            default: return false
+            }
+        }
+    }
+
     enum ViewMode {
         case both
         case editorOnly
@@ -100,7 +115,11 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     
     // MARK: - Typst Insertion Logic
-    @Published var currentFileURL: URL?
+    @Published var currentFileURL: URL? {
+        didSet {
+            updateFileType()
+        }
+    }
     @Published var projectRootURL: URL?
     @Published var shouldCopyImages: Bool = true
     
@@ -147,6 +166,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isBulletListActive: Bool = false
     @Published var isNumberListActive: Bool = false
     @Published var isFootnoteActive: Bool = false
+    @Published var isPageBreakActive: Bool = false
+    @Published var isHorizontalLineActive: Bool = false
     
     // --- Footnote Editor State ---
     @Published var showFootnoteEditor: Bool = false
@@ -163,6 +184,29 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var cursorSize: CGFloat = 2.0 // Default thickness
     
     var currentImageRange: NSRange? = nil
+    
+    @Published var currentFileType: SupportedFileType = .typst
+    
+    private func updateFileType() {
+        guard let url = currentFileURL else {
+            currentFileType = .other
+            return
+        }
+        
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "typ":
+            currentFileType = .typst
+        case "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg":
+            currentFileType = .text
+        case "png", "jpg", "jpeg", "gif", "tiff", "bmp", "heic", "webp":
+            currentFileType = .image
+        case "pdf":
+            currentFileType = .pdf
+        default:
+            currentFileType = .other
+        }
+    }
     
     var isTypstFile: Bool {
         currentFileURL?.pathExtension.lowercased() == "typ"
@@ -1039,29 +1083,34 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         let range = textView.selectedRange()
         let text = textView.string
         
-        isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location) != nil
-        isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location) != nil
-        isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
-        isHighlightActive = FormatDetector.findHighlightRange(in: text, at: range.location) != nil
-        isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
-        isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
-        isLinkActive = FormatDetector.findLinkRange(in: text, at: range.location) != nil
-        isQuoteActive = FormatDetector.findQuoteRange(in: text, at: range.location) != nil
-        isCodeBlockActive = FormatDetector.findCodeBlockRange(in: text, at: range.location) != nil
-        isSubscriptActive = FormatDetector.findSubscriptRange(in: text, at: range.location) != nil
-        isSuperscriptActive = FormatDetector.findSuperscriptRange(in: text, at: range.location) != nil
-        
-        currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
-        
-        isEquationActive = EquationDetector.findEquationRange(in: text, at: range.location) != nil
-        isTableActive = TableDetector.findTableRange(in: text, at: range.location) != nil
-        isImageActive = ImageDetector.findImageRange(in: text, at: range.location) != nil
-        isBibliographyActive = BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil
-        isOutlineActive = OutlineDetector.findOutlineRange(in: text, at: range.location) != nil
-        
-        isBulletListActive = FormatDetector.isBulletListActive(in: text, at: range.location)
-        isNumberListActive = FormatDetector.isNumberListActive(in: text, at: range.location)
-        isFootnoteActive = FormatDetector.findFootnoteRange(in: text, at: range.location) != nil
+        // Use async to avoid "Publishing changes from within view updates is not allowed"
+        DispatchQueue.main.async {
+            self.isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location) != nil
+            self.isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location) != nil
+            self.isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
+            self.isHighlightActive = FormatDetector.findHighlightRange(in: text, at: range.location) != nil
+            self.isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
+            self.isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
+            self.isLinkActive = FormatDetector.findLinkRange(in: text, at: range.location) != nil
+            self.isQuoteActive = FormatDetector.findQuoteRange(in: text, at: range.location) != nil
+            self.isCodeBlockActive = FormatDetector.findCodeBlockRange(in: text, at: range.location) != nil
+            self.isSubscriptActive = FormatDetector.findSubscriptRange(in: text, at: range.location) != nil
+            self.isSuperscriptActive = FormatDetector.findSuperscriptRange(in: text, at: range.location) != nil
+            
+            self.currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
+            
+            self.isEquationActive = EquationDetector.findEquationRange(in: text, at: range.location) != nil
+            self.isTableActive = TableDetector.findTableRange(in: text, at: range.location) != nil
+            self.isImageActive = ImageDetector.findImageRange(in: text, at: range.location) != nil
+            self.isBibliographyActive = BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil
+            self.isOutlineActive = OutlineDetector.findOutlineRange(in: text, at: range.location) != nil
+            
+            self.isBulletListActive = FormatDetector.isBulletListActive(in: text, at: range.location)
+            self.isNumberListActive = FormatDetector.isNumberListActive(in: text, at: range.location)
+            self.isFootnoteActive = FormatDetector.findFootnoteRange(in: text, at: range.location) != nil
+            self.isPageBreakActive = FormatDetector.findPageBreakRange(in: text, at: range.location) != nil
+            self.isHorizontalLineActive = FormatDetector.findHorizontalLineRange(in: text, at: range.location) != nil
+        }
     }
     
     // --- Footnote Editor Functions ---
@@ -1402,12 +1451,24 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     func insertPageBreak() {
         guard let textView = textView else { return }
-        textView.insertText("#pagebreak()\n", replacementRange: textView.selectedRange())
+        let range = textView.selectedRange()
+        if let existingRange = FormatDetector.findPageBreakRange(in: textView.string, at: range.location) {
+            textView.insertText("", replacementRange: existingRange)
+        } else {
+            textView.insertText("#pagebreak()\n", replacementRange: range)
+        }
+        updateFormattingState()
     }
     
     func insertHorizontalLine() {
         guard let textView = textView else { return }
-        textView.insertText("#line(length: 100%)\n", replacementRange: textView.selectedRange())
+        let range = textView.selectedRange()
+        if let existingRange = FormatDetector.findHorizontalLineRange(in: textView.string, at: range.location) {
+            textView.insertText("", replacementRange: existingRange)
+        } else {
+            textView.insertText("#line(length: 100%)\n", replacementRange: range)
+        }
+        updateFormattingState()
     }
     
     func insertFootnote() {

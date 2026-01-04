@@ -240,6 +240,26 @@ struct FormatDetector {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#footnote\s*[\[(]"#)
     }
 
+    static func findPageBreakRange(in text: String, at index: Int) -> NSRange? {
+        let nsText = text as NSString
+        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
+        if line.contains("#pagebreak()") {
+            return lineRange
+        }
+        return nil
+    }
+
+    static func findHorizontalLineRange(in text: String, at index: Int) -> NSRange? {
+        let nsText = text as NSString
+        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
+        if line.contains("#line(length: 100%)") {
+            return lineRange
+        }
+        return nil
+    }
+
     struct FootnoteInfo {
         let range: NSRange
         let body: String

@@ -145,11 +145,10 @@ class TypstCompiler: ObservableObject {
                     
                     // Simple heuristic: if we see "compiled" or "success", update view
                     if output.contains("compiled successfully") || output.contains("compiled") {
-                         print("[TYPST] Detected success message, posting notification")
-                         self.compilationStatus = "Compiled Successfully"
-                         self.errors = [] // Clear errors
-                         // Notify View
-                         NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
+                         // Notify View with a small delay to ensure file is fully flushed
+                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                             NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
+                         }
                     } else if output.contains("error:") {
                         print("[TYPST] Detected error message")
                         self.compilationStatus = "Compilation Error"

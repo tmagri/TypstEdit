@@ -157,7 +157,9 @@ struct ContentView: View {
             themeManager.contentOverlay.ignoresSafeArea() 
             themeManager.mainBackground.ignoresSafeArea() 
             
-            if !editorController.isTypstFile || editorController.viewMode == .editorOnly {
+            let isTextual = editorController.currentFileType == .typst || editorController.currentFileType == .text
+            
+            if !isTextual || editorController.viewMode == .editorOnly {
                 editorBox.padding(.horizontal, 12)
             } else if editorController.viewMode == .previewOnly {
                 pdfBox
@@ -364,29 +366,46 @@ struct ContentView: View {
         .offset(y: 2)
     }
     
-    private var editorBox: some View {
-        ZStack {
-            themeManager.editorBackground
-            
-            VStack(spacing: 0) {
-                if editorController.isTypstFile {
-                    HStack {
-                        ToolbarView(controller: editorController)
-                            .padding(.leading, 44)
-                        Spacer()
-                    }
-                    .padding(.trailing, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.3))
-                    .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
-                    .fixedSize(horizontal: false, vertical: true)
+    private var toolbarArea: some View {
+        Group {
+            if editorController.currentFileType == .typst {
+                HStack {
+                    ToolbarView(controller: editorController)
+                        .padding(.leading, 44)
+                    Spacer()
                 }
-               
+                .padding(.trailing, 12)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.3))
+                .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+    
+    private var editorContent: some View {
+        Group {
+            if editorController.currentFileType == .typst || editorController.currentFileType == .text {
                 EditorView(text: $sourceCode, controller: editorController, onCommit: {
                     scheduleCompilation()
                 })
                 .environmentObject(themeManager)
                 .padding(8)
+            } else if let url = selectedFile {
+                FilePreviewView(fileURL: url, fileType: editorController.currentFileType)
+                    .environmentObject(themeManager)
+            }
+        }
+    }
+
+    private var editorBox: some View {
+        ZStack {
+            themeManager.editorBackground
+            
+            VStack(spacing: 0) {
+                toolbarArea
+                editorContent
+                
                 .sheet(isPresented: $editorController.showEquationEditor) {
                     VisualEquationEditor(
                         initialEquation: $editorController.currentEquationContent,
@@ -601,6 +620,23 @@ struct ContentView: View {
         let loadID = UUID()
         self.currentLoadID = loadID
         
+        // 1. Clear previous state to avoid stale previews and conflicts
+        self.currentPDFURL = nil
+        self.reloadToken = UUID()
+        
+        // 2. Update truth immediately so UI identifies the file type
+        self.editorController.currentFileURL = url
+        self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
+        RecentFilesManager.shared.add(url: url)
+        
+        let isTextual = editorController.currentFileType.isTextual
+        if !isTextual {
+            print("[DEBUG] loadFile: binary file detected, skipping string read: \(url.lastPathComponent)")
+            self.sourceCode = ""
+            self.editorController.syncSavedContent("")
+            return
+        }
+        
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let content = try String(contentsOf: url, encoding: .utf8)
@@ -608,11 +644,6 @@ struct ContentView: View {
                     print("[DEBUG] loadFile completion: currentLoadID=\(self.currentLoadID == loadID), url=\(url.lastPathComponent)")
                     guard self.currentLoadID == loadID else { return }
                     
-                    self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-                    RecentFilesManager.shared.add(url: url)
-                    
-                    // Update truth BEFORE content to ensure UI state is correct
-                    self.editorController.currentFileURL = url 
                     self.editorController.syncSavedContent(content)
                     self.sourceCode = content
                     

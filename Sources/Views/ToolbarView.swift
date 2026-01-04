@@ -108,8 +108,8 @@ struct ToolbarView: View {
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
                              ToolbarButton(icon: "server.rack", tooltip: "External Data", action: controller.openExternalDataEditor)
-                             ToolbarButton(icon: "minus", tooltip: "Horizontal Line", action: controller.insertHorizontalLine)
-                             ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", action: controller.insertPageBreak)
+                             ToolbarButton(icon: "minus", tooltip: "Horizontal Line", isActive: controller.isHorizontalLineActive, action: controller.insertHorizontalLine)
+                             ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", isActive: controller.isPageBreakActive, action: controller.insertPageBreak)
                          }
                      }
                 }

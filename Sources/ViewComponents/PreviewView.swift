@@ -1,5 +1,5 @@
 import SwiftUI
-import PDFKit
+@preconcurrency import PDFKit
 
 struct PreviewView: NSViewRepresentable {
     var url: URL?
@@ -34,23 +34,43 @@ struct PreviewView: NSViewRepresentable {
         
         applyFilters(to: pdfView)
         
-        guard let url = url else {
-            pdfView.document = nil
-            return
-        }
+        guard !context.coordinator.isTransitioning else { return }
         
         if context.coordinator.lastUrl != url || context.coordinator.lastToken != reloadToken {
-            if let document = PDFDocument(url: url) {
+            print("[DEBUG] PreviewView: url/token changed. newURL=\(url?.lastPathComponent ?? "nil")")
+            
+            // Avoid unnecessary reloads if URL is nil and we already have nil
+            if url == nil && pdfView.document == nil { return }
+            
+            guard let url = url else {
+                print("[DEBUG] PreviewView: clearing document (url is nil)")
+                pdfView.document = nil
+                context.coordinator.lastUrl = nil
+                return
+            }
+
+            // Defensive: Check if file exists, is not empty, and is readable
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: url.path),
+                  let attributes = try? fm.attributesOfItem(atPath: url.path),
+                  let size = attributes[.size] as? Int64, size > 0,
+                  fm.isReadableFile(atPath: url.path) else {
+                print("[DEBUG] PreviewView: file not ready for PDFDocument (exists=\(fm.fileExists(atPath: url.path)), size=\((try? fm.attributesOfItem(atPath: url.path)[.size]) ?? "nil"), readable=\(fm.isReadableFile(atPath: url.path)))")
+                // Don't clear document yet, maybe it's just a transient state during typst re-writing
+                return
+            }
+
+            print("[DEBUG] PreviewView: attempting to load PDFDocument for \(url.lastPathComponent)")
+            if let document = PDFDocument(url: url), document.pageCount > 0 {
                 let point = pdfView.currentDestination?.point ?? .zero
                 let pageIndex = pdfView.currentPage.map { pdfView.document?.index(for: $0) ?? 0 } ?? 0
                 
                 // --- OVERLAP TRANSITION LOGIC ---
-                // 1. Capture current state
                 if let oldDocument = pdfView.document, oldDocument.pageCount > 0 {
+                    context.coordinator.isTransitioning = true
                     let snapshotView = NSImageView(frame: pdfView.bounds)
                     snapshotView.imageScaling = .scaleProportionallyUpOrDown
                     
-                    // Create a bitmap snapshot of the current view
                     let bitmap = pdfView.bitmapImageRepForCachingDisplay(in: pdfView.bounds)
                     if let bitmap = bitmap {
                         pdfView.cacheDisplay(in: pdfView.bounds, to: bitmap)
@@ -63,40 +83,43 @@ struct PreviewView: NSViewRepresentable {
                     snapshotView.layer?.opacity = 1.0
                     pdfView.addSubview(snapshotView)
                     
-                    // 2. Load new document underneath
                     pdfView.document = document
                     if let page = document.page(at: pageIndex) {
                         pdfView.go(to: PDFDestination(page: page, at: point))
                     }
                     
-                    // 3. Animate snapshot away
                     NSAnimationContext.runAnimationGroup { context in
-                        context.duration = 0.25
+                        context.duration = 0.2
                         context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                         snapshotView.animator().alphaValue = 0.0
                     } completionHandler: {
                         DispatchQueue.main.async {
                             snapshotView.removeFromSuperview()
+                            context.coordinator.isTransitioning = false
                         }
                     }
                 } else {
-                    // First load, just set it
                     pdfView.document = document
                 }
                 
                 context.coordinator.lastUrl = url
                 context.coordinator.lastToken = reloadToken
                 
-                // Calculate word count asynchronously
                 DispatchQueue.global(qos: .userInitiated).async {
                     let text = document.string ?? ""
                     let words = text.split { $0.isWhitespace || $0.isNewline }
                     let count = words.count
                     
                     DispatchQueue.main.async {
-                        self.onWordCountChange?(count)
+                        // Check if document is still relevant
+                        if context.coordinator.lastUrl == url {
+                            self.onWordCountChange?(count)
+                        }
                     }
                 }
+            } else {
+                pdfView.document = nil
+                context.coordinator.lastUrl = url
             }
         }
     }
@@ -146,5 +169,6 @@ struct PreviewView: NSViewRepresentable {
     class Coordinator {
         var lastUrl: URL?
         var lastToken: UUID?
+        var isTransitioning: Bool = false
     }
 }
