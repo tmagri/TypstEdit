@@ -771,49 +771,68 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     private func toggleListPrefix(_ prefix: String) {
         guard let textView = textView else { return }
         let range = textView.selectedRange()
-        let text = textView.string as NSString
+        let nsText = textView.string as NSString
+        let lineRange = nsText.lineRange(for: range)
+        let lineContent = nsText.substring(with: lineRange)
         
-        let lineRange = text.lineRange(for: range)
-        let lineContent = text.substring(with: lineRange)
+        // --- Case 1: Single line and empty (caret on empty line or selection of only whitespace) ---
+        let hadTrailingNewline = lineContent.hasSuffix("\n")
+        let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
         
-        var lines: [String] = []
-        text.enumerateSubstrings(in: lineRange, options: .byLines) { (line, _, _, _) in
-            if let line = line {
-                // Check if line starts with prefix (allowing for leading whitespace mostly for check, but replacement should be strict or smart)
-                // For a robust toggle:
-                // If line starts with "prefix ", remove it.
-                // Else add "prefix ".
-                
-                if line.hasPrefix(prefix) {
-                    lines.append(String(line.dropFirst(prefix.count)))
-                } else if let prefixRange = line.range(of: prefix) {
-                    // This handles if prefix is somewhere else? No, just stick to strict prefix for toggles usually.
-                    // Or " - " vs "- "
-                    if prefixRange.lowerBound == line.startIndex {
-                        lines.append(String(line.dropFirst(prefix.count)))
-                    } else {
-                        lines.append(prefix + line)
-                    }
-                } else {
-                    lines.append(prefix + line)
-                }
-            } else {
-                lines.append("")
+        if isSingleLineRepresentation {
+            let trimmed = lineContent.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                textView.insertText(prefix, replacementRange: range)
+                return
             }
         }
         
-        // Reconstruct text
-        var replacement = lines.joined(separator: "\n")
+        // --- Case 2: Multiline selection or non-empty line ---
+        var lineStrings = lineContent.components(separatedBy: .newlines)
+        if hadTrailingNewline { lineStrings.removeLast() }
         
-        // If the original selection ended with a newline, ensure our replacement does too.
-        // enumerateSubstrings(byLines) strips newlines. joined(separator: "\n") adds them between but not at end.
-        if lineContent.hasSuffix("\n") {
-           replacement += "\n"
+        let knownPrefixes = ["- ", "+ "]
+        let otherPrefix = prefix == "- " ? "+ " : "- "
+        
+        var nonBlankIndices: [Int] = []
+        var currentPrefixedIndices: [Int] = []
+        
+        for (i, line) in lineStrings.enumerated() {
+            if !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                nonBlankIndices.append(i)
+                if line.hasPrefix(prefix) {
+                    currentPrefixedIndices.append(i)
+                }
+            }
         }
         
-        if lineRange.location != NSNotFound {
-            textView.insertText(replacement, replacementRange: lineRange)
+        // Logic: 
+        // 1. If ALL non-blank lines already have the target prefix -> Remove it from all.
+        // 2. Otherwise -> For each non-blank line:
+        //    - If it has the other prefix, replace it.
+        //    - If it has no prefix, add the target prefix.
+        
+        let shouldRemove = !nonBlankIndices.isEmpty && currentPrefixedIndices.count == nonBlankIndices.count
+        
+        var newLines = lineStrings
+        if shouldRemove {
+            for i in nonBlankIndices {
+                newLines[i] = String(newLines[i].dropFirst(prefix.count))
+            }
+        } else {
+            for i in nonBlankIndices {
+                if newLines[i].hasPrefix(otherPrefix) {
+                    newLines[i] = prefix + String(newLines[i].dropFirst(otherPrefix.count))
+                } else if !newLines[i].hasPrefix(prefix) {
+                    newLines[i] = prefix + newLines[i]
+                }
+            }
         }
+        
+        var replacement = newLines.joined(separator: "\n")
+        if hadTrailingNewline { replacement += "\n" }
+        
+        textView.insertText(replacement, replacementRange: lineRange)
     }
 
     
