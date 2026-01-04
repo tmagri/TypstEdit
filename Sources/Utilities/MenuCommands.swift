@@ -94,6 +94,23 @@ struct AppMenuCommands: Commands {
             
             Divider()
             
+            Button("Bold") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleBold")
+            }
+            .keyboardShortcut("b", modifiers: .command)
+            
+            Button("Italic") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleItalic")
+            }
+            .keyboardShortcut("i", modifiers: .command)
+            
+            Button("Underline") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleUnderline")
+            }
+            .keyboardShortcut("u", modifiers: .command)
+            
+            Divider()
+            
             Button("Toggle Line Comment") {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleLineComment")
             }
@@ -125,6 +142,33 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleSuperscript")
             }
             .keyboardShortcut("+", modifiers: .command)
+            
+            Divider()
+            
+            Button("Bullet List") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleBulletList")
+            }
+            .keyboardShortcut("8", modifiers: [.command, .shift])
+            
+            Button("Numbered List") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleNumberList")
+            }
+            .keyboardShortcut("7", modifiers: [.command, .shift])
+            
+            Button("Inline Code") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleCode")
+            }
+            .keyboardShortcut("`", modifiers: .command)
+            
+            Button("Code Block") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
+            }
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+            
+            Button("Block Quote") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleQuote")
+            }
+            .keyboardShortcut(".", modifiers: [.command, .shift])
             
         }
 
@@ -197,7 +241,7 @@ struct AppMenuCommands: Commands {
         // MARK: - View Menu
         CommandMenu("View") {
             Toggle("File Panel", isOn: $editorController.isSidebarVisible)
-                .keyboardShortcut("b", modifiers: .command)
+                .keyboardShortcut("0", modifiers: .command)
             
             Toggle("Search Panel", isOn: $editorController.isSearchVisible)
             

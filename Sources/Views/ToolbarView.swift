@@ -77,12 +77,12 @@ struct ToolbarView: View {
                 ToolbarGroup(title: "Paragraph", icon: "paragraphsign", isCompact: collapseParagraph) {
                      VStack(spacing: 2) {
                          HStack(spacing: 2) {
-                             ToolbarButton(icon: "list.bullet", tooltip: "Bullet List", isActive: controller.isBulletListActive, action: controller.toggleBulletList)
-                             ToolbarButton(icon: "list.number", tooltip: "Number List", isActive: controller.isNumberListActive, action: controller.toggleNumberList)
-                             ToolbarButton(icon: "text.quote", tooltip: "Block Quote", isActive: controller.isQuoteActive, action: controller.toggleQuote)
+                             ToolbarButton(icon: "list.bullet", tooltip: "Bullet List (Cmd+Shift+8)", isActive: controller.isBulletListActive, action: controller.toggleBulletList)
+                             ToolbarButton(icon: "list.number", tooltip: "Number List (Cmd+Shift+7)", isActive: controller.isNumberListActive, action: controller.toggleNumberList)
+                             ToolbarButton(icon: "text.quote", tooltip: "Block Quote (Cmd+Shift+.)", isActive: controller.isQuoteActive, action: controller.toggleQuote)
                          }
                          HStack(spacing: 2) {
-                             ToolbarButton(icon: "curlybraces", tooltip: "Code Block", isActive: controller.isCodeBlockActive, action: controller.toggleCodeBlock)
+                             ToolbarButton(icon: "curlybraces", tooltip: "Code Block (Cmd+Shift+C)", isActive: controller.isCodeBlockActive, action: controller.toggleCodeBlock)
                              ToolbarButton(icon: "chevron.left.forwardslash.chevron.right", tooltip: "Inline Code (Cmd+`)", isActive: controller.isCodeActive, action: controller.toggleCode)
                          }
                      }
