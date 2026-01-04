@@ -138,6 +138,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isSidebarVisible: Bool = true
     @Published var isSearchVisible: Bool = false
     @Published var wrapLines: Bool = true
+    @Published var hasUnsavedChanges: Bool = false
+    private var savedContent: String = ""
     @Published var viewMode: ViewMode = .both
     @Published var isVerticalSplit: Bool = true
     @Published var colorBlindnessMode: ColorBlindnessMode = .none
@@ -217,6 +219,16 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // Demande de redessiner la règle (numéros de ligne)
     func needsRedraw() {
         textView?.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+    }
+
+    // --- Unsaved Changes Comparison logic ---
+    func syncSavedContent(_ content: String) {
+        self.savedContent = content
+        self.hasUnsavedChanges = false
+    }
+
+    func checkUnsavedChanges(currentContent: String) {
+        self.hasUnsavedChanges = (currentContent != savedContent)
     }
     
     // --- Undo/Redo Functions ---

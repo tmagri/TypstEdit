@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var showRenameAlert: Bool = false
     @State private var renameTargetURL: URL?
     @State private var newFileName: String = ""
+    @State private var currentLoadID: UUID = UUID()
     @EnvironmentObject var themeManager: ThemeManager
     
     // MARK: - Computed Properties for UI Components
@@ -360,7 +361,7 @@ struct ContentView: View {
                         }
                         
                         ToolbarItem(placement: .principal) {
-                            Text(selectedFile?.lastPathComponent ?? "")
+                            Text("\(selectedFile?.lastPathComponent ?? "")\(editorController.hasUnsavedChanges ? "*" : "")")
                                 .font(.system(size: 13, weight: .medium, design: .rounded))
                                 .foregroundColor(themeManager.textColor)
                                 .padding(.horizontal, 10)
@@ -576,40 +577,74 @@ struct ContentView: View {
             }
         }
 
+        .onChange(of: sourceCode) { newValue in
+            editorController.checkUnsavedChanges(currentContent: newValue)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { _ in
+            saveFile()
+        }
+        .onAppear {
+            if let file = selectedFile {
+                print("[DEBUG] ContentView onAppear: Loading initial file \(file.lastPathComponent)")
+                loadFile(url: file)
+            }
+        }
         .preferredColorScheme(.dark)
     }
     
     func loadFile(url: URL?) {
-        guard let url = url else { return }
+        guard let url = url else {
+            print("[DEBUG] loadFile: No URL provided")
+            return
+        }
         
-        // Use try to read content first, it's more definitive than fileExists in sandbox
-        do {
-            let content = try String(contentsOf: url, encoding: .utf8)
-            
-            // Success! Update UI
-            DispatchQueue.main.async {
-                self.sourceCode = content
+        let loadID = UUID()
+        self.currentLoadID = loadID
+        
+        print("[INFO] Starting load for file: \(url.lastPathComponent) (ID: \(loadID))")
+        
+        // Read file content asynchronously to keep UI responsive
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let content = try String(contentsOf: url, encoding: .utf8)
                 
-                // Set exported PDF URL based on file path
-                self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-                // Add to recents
-                RecentFilesManager.shared.add(url: url)
-                // Trigger watch
-                scheduleCompilation(with: content)
-                
-                print("[INFO] Successfully loaded file: \(url.lastPathComponent)")
-            }
-        } catch {
-            print("[ERROR] Failed to read file: \(error)")
-            
-            // Only show alert if file actually doesn't exist
-            if (try? url.checkResourceIsReachable()) != true {
+                // Return to main thread for UI updates
                 DispatchQueue.main.async {
-                    editorController.missingFileName = url.lastPathComponent
-                    editorController.showFileNotFoundAlert = true
-                    RecentFilesManager.shared.remove(url: url)
-                    if self.selectedFile == url {
-                        self.selectedFile = nil
+                    // Critical: only update if this is still the latest request
+                    guard self.currentLoadID == loadID else {
+                        print("[DEBUG] loadFile: Ignoring stale content for \(url.lastPathComponent) (Current: \(self.currentLoadID), Req: \(loadID))")
+                        return
+                    }
+                    
+                    self.sourceCode = content
+                    
+                    // Set exported PDF URL based on file path
+                    self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
+                    // Add to recents
+                    RecentFilesManager.shared.add(url: url)
+                    
+                    // Sync saved content to establish clean state (for asterisk indicator)
+                    self.editorController.syncSavedContent(content)
+                    
+                    // Trigger watch/compilation
+                    scheduleCompilation(with: content)
+                    
+                    print("[INFO] Successfully loaded file: \(url.lastPathComponent) (ID: \(loadID))")
+                }
+            } catch {
+                print("[ERROR] Failed to read file \(url.path): \(error)")
+                
+                DispatchQueue.main.async {
+                    guard self.currentLoadID == loadID else { return }
+                    
+                    // Only show alert if file actually doesn't exist
+                    if (try? url.checkResourceIsReachable()) != true {
+                        editorController.missingFileName = url.lastPathComponent
+                        editorController.showFileNotFoundAlert = true
+                        RecentFilesManager.shared.remove(url: url)
+                        if self.selectedFile == url {
+                            self.selectedFile = nil
+                        }
                     }
                 }
             }
@@ -631,6 +666,10 @@ struct ContentView: View {
             withAnimation {
                 showSavePopup = true
             }
+            
+            // Sync saved content to mark as clean
+            editorController.syncSavedContent(sourceCode)
+            
             // Hide after delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 withAnimation {

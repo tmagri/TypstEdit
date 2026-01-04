@@ -212,7 +212,7 @@ struct SidebarView: View {
                 
                 // File Tree
                 List(model.rootNodes, children: \.children) { node in
-                    SidebarRow(node: node, selectedFile: $selectedFile)
+                    SidebarRow(node: node, selectedFile: $selectedFile, editorController: editorController)
                         .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
                         .listRowSeparator(.hidden)
                         .listRowBackground(
@@ -246,6 +246,7 @@ struct SidebarView: View {
 struct SidebarRow: View {
     let node: FileNode
     @Binding var selectedFile: URL?
+    @ObservedObject var editorController: EditorController
     @EnvironmentObject var themeManager: ThemeManager
     
     var isSelected: Bool {
@@ -258,7 +259,7 @@ struct SidebarRow: View {
                 .foregroundColor(iconColor(for: node))
                 .font(.system(size: 13))
             
-            Text(node.name)
+            Text("\(node.name)\(isSelected && editorController.hasUnsavedChanges ? "*" : "")")
                 .font(.system(size: 13))
                 .foregroundColor(isSelected ? .white : themeManager.textColor)
             
