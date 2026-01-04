@@ -100,15 +100,15 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive, action: controller.toggleLink)
                          }
                          HStack(spacing: 2) {
-                             ToolbarButton(icon: "function", tooltip: "Insert Symbol", isActive: controller.showSymbolPicker) { controller.showSymbolPicker.toggle() }
-                             ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure", action: controller.openFigureEditor)
+                             ToolbarButton(icon: "function", tooltip: "Insert Symbol (Cmd+Ctrl+S)", isActive: controller.showSymbolPicker) { controller.showSymbolPicker.toggle() }
+                             ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure (Cmd+Ctrl+F)", action: controller.openFigureEditor)
                              ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart (Cmd+Ctrl+C)", action: controller.insertChartSnippet)
-                             ToolbarButton(icon: "calendar", tooltip: "Insert Timeline", action: controller.insertTimelineSnippet)
+                             ToolbarButton(icon: "calendar", tooltip: "Insert Timeline (Cmd+Ctrl+L)", action: controller.insertTimelineSnippet)
                          }
                          HStack(spacing: 2) {
-                             ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
-                             ToolbarButton(icon: "server.rack", tooltip: "External Data", action: controller.openExternalDataEditor)
-                             ToolbarButton(icon: "minus", tooltip: "Horizontal Line", isActive: controller.isHorizontalLineActive, action: controller.insertHorizontalLine)
+                             ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline (Cmd+Ctrl+O)", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
+                             ToolbarButton(icon: "server.rack", tooltip: "External Data (Cmd+Ctrl+D)", action: controller.openExternalDataEditor)
+                             ToolbarButton(icon: "minus", tooltip: "Horizontal Line (Cmd+Opt+-)", isActive: controller.isHorizontalLineActive, action: controller.insertHorizontalLine)
                              ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", isActive: controller.isPageBreakActive, action: controller.insertPageBreak)
                          }
                      }

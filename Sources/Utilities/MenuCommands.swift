@@ -204,22 +204,27 @@ struct AppMenuCommands: Commands {
                 Button("Figure...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openFigureEditor")
                 }
+                .keyboardShortcut("f", modifiers: [.command, .control])
                 
                 Button("Symbol...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openSymbolPicker")
                 }
+                .keyboardShortcut("s", modifiers: [.command, .control])
                 
                 Button("Timeline") {
                     NotificationCenter.default.post(name: .insertSnippet, object: "timeline")
                 }
+                .keyboardShortcut("l", modifiers: [.command, .control])
                 
                 Button("Outline...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openOutlineEditor")
                 }
+                .keyboardShortcut("o", modifiers: [.command, .control])
                 
                 Button("External Data...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openExternalDataEditor")
                 }
+                .keyboardShortcut("d", modifiers: [.command, .control])
             }
             .disabled(!editorController.isTypstFile)
             
