@@ -157,18 +157,23 @@ struct ContentView: View {
             themeManager.contentOverlay.ignoresSafeArea() 
             themeManager.mainBackground.ignoresSafeArea() 
             
-            let isTextual = editorController.currentFileType == .typst || editorController.currentFileType == .text
+            let isTypst = editorController.currentFileType == .typst
             
-            if !isTextual || editorController.viewMode == .editorOnly {
-                editorBox.padding(.horizontal, 12)
-            } else if editorController.viewMode == .previewOnly {
-                pdfBox
-            } else {
-                ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
-                    editorBox.padding(.leading, 12)
-                } right: {
+            if isTypst {
+                if editorController.viewMode == .editorOnly {
+                    editorBox.padding(.horizontal, 12)
+                } else if editorController.viewMode == .previewOnly {
                     pdfBox
+                } else {
+                    ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                        editorBox.padding(.leading, 12)
+                    } right: {
+                        pdfBox
+                    }
                 }
+            } else {
+                // For all other file types (text, svg, image, pdf, etc.), hide the preview side
+                editorBox.padding(.horizontal, 12)
             }
         }
         .layoutPriority(1)
