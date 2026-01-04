@@ -200,10 +200,6 @@ struct AppMenuCommands: Commands {
                 .keyboardShortcut("b", modifiers: .command)
             
             Toggle("Search Panel", isOn: $editorController.isSearchVisible)
-                    
-            Button("Settings Panel") {
-                NotificationCenter.default.post(name: .menuCommand, object: "showSettings")
-            }
             
             Divider()
             

@@ -895,9 +895,6 @@ struct ContentView: View {
             editorController.insertHorizontalLine()
         case "toggleSidebar":
             withAnimation { editorController.isSidebarVisible.toggle() }
-        case "showSettings":
-            // Notification or direct show
-            break
         case "viewEditorOnly":
             withAnimation { editorController.viewMode = .editorOnly }
         case "viewPreviewOnly":
