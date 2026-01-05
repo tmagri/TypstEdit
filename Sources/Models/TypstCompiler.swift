@@ -15,11 +15,16 @@ class TypstCompiler: ObservableObject {
     
     var isDarkMode: Bool = false
     private let preambleLineCount = 3 
-    private let darkModePreamble = """
-    #set page(fill: rgb("#1a1a1a"))
-    #set text(fill: rgb("#d1d1d1"))
-    
-    """
+    private let darkModePreamble = 
+"""
+#set page(fill: rgb("#1a1a1a"))
+#set text(fill: rgb("#d1d1d1"))
+#set line(stroke: rgb("#d1d1d1"))
+#set rect(stroke: rgb("#d1d1d1"))
+#set circle(stroke: rgb("#d1d1d1"))
+#set table(stroke: rgb("#d1d1d1"))
+#show raw: set text(fill: rgb("#d1d1d1"))
+"""
     
     // Check if typst makes sense or we need full path
     private func resolveTypstPath() -> String? {
