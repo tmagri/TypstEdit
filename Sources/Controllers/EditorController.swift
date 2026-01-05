@@ -159,6 +159,11 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var lastExportError: String = ""
     @Published var missingFileName: String = ""
     @Published var targetLineNumber: String = ""
+    
+    // --- Status Message ---
+    @Published var statusMessage: String = ""
+    @Published var showStatusMessage: Bool = false
+    
     @Published var zoomLevel: CGFloat = 1.0
     @Published var isSidebarVisible: Bool = true
     @Published var isSearchVisible: Bool = false
@@ -1655,6 +1660,80 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         
         showLinkEditor = false
         updateFormattingState()
+    }
+    
+    // --- Context-Aware Editor ---
+    
+    /// Opens the appropriate editor based on what's at the cursor position
+    func openContextualEditor() {
+        guard let textView = textView else { return }
+        let range = textView.selectedRange()
+        let text = textView.string
+        
+        // Check in order of priority:
+        // 1. Equation
+        if EquationDetector.findEquationRange(in: text, at: range.location) != nil {
+            openNewEquationEditor()
+            return
+        }
+        
+        // 2. Image
+        if ImageDetector.findImageRange(in: text, at: range.location) != nil {
+            if let imageInfo = ImageDetector.parseImage(in: text, at: range.location) {
+                currentImageRange = imageInfo.range
+                pendingImagePath = imageInfo.path
+                imageWidth = imageInfo.width ?? "auto"
+                imageHeight = imageInfo.height ?? "auto"
+                imageAlt = imageInfo.alt ?? ""
+                imageFit = imageInfo.fit ?? "contain"
+                showImageEditor = true
+            }
+            return
+        }
+        
+        // 3. Table
+        if TableDetector.findTableRange(in: text, at: range.location) != nil {
+            openTableEditor(at: range)
+            return
+        }
+        
+        // 4. Link
+        if FormatDetector.findLinkRange(in: text, at: range.location) != nil {
+            toggleLink()
+            return
+        }
+        
+        // 5. Bibliography
+        if BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil {
+            toggleBibliography()
+            return
+        }
+        
+        // 6. Outline
+        if OutlineDetector.findOutlineRange(in: text, at: range.location) != nil {
+            openOutlineEditor()
+            return
+        }
+        
+        // 7. Footnote
+        if FormatDetector.findFootnoteRange(in: text, at: range.location) != nil {
+            openFootnoteEditor()
+            return
+        }
+        
+        // If nothing is detected, show status message
+        showStatus("No editable element at cursor")
+    }
+    
+    /// Shows a temporary status message to the user
+    private func showStatus(_ message: String, duration: TimeInterval = 2.0) {
+        statusMessage = message
+        showStatusMessage = true
+        
+        // Auto-hide after duration
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+            self.showStatusMessage = false
+        }
     }
     
     @MainActor

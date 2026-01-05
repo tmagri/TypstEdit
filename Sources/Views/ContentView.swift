@@ -553,7 +553,16 @@ struct ContentView: View {
                             .font(.caption)
                             .monospacedDigit()
                             .foregroundColor(themeManager.textColor)
+                        
                         Spacer()
+                        
+                        // Status message
+                        if editorController.showStatusMessage {
+                            Text(editorController.statusMessage)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .transition(.opacity)
+                        }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 4)
@@ -835,6 +844,7 @@ struct ContentView: View {
         case "openSymbolPicker": editorController.showSymbolPicker = true
         case "openOutlineEditor": editorController.openOutlineEditor()
         case "openExternalDataEditor": editorController.openExternalDataEditor()
+        case "openContextualEditor": editorController.openContextualEditor()
         case "toggleSidebar": withAnimation { editorController.isSidebarVisible.toggle() }
         case "viewEditorOnly": withAnimation { editorController.viewMode = .editorOnly }
         case "viewPreviewOnly": withAnimation { editorController.viewMode = .previewOnly }

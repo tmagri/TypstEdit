@@ -176,6 +176,13 @@ struct AppMenuCommands: Commands {
         // MARK: - Insert Menu
         CommandMenu("Insert") {
             Group {
+                Button("Edit at Cursor...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "openContextualEditor")
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                
+                Divider()
+                
                 Button("Table...") {
                     NotificationCenter.default.post(name: NSNotification.Name("insertTable"), object: nil)
                 }
