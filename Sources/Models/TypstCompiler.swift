@@ -24,7 +24,7 @@ class TypstCompiler: ObservableObject {
 #set circle(stroke: rgb("#d1d1d1"))
 #set table(stroke: rgb("#d1d1d1"))
 #show raw: set text(fill: rgb("#d1d1d1"))
-"""
+""" + "\n"
     
     // Check if typst makes sense or we need full path
     private func resolveTypstPath() -> String? {

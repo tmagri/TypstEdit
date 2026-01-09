@@ -1,8 +1,9 @@
-
 import SwiftUI
 import Combine
 import UniformTypeIdentifiers
 import PDFKit
+import CodeEditSourceEditor
+import AppKit
 
 struct ContentView: View {
     @Binding var selectedFile: URL?
@@ -11,9 +12,12 @@ struct ContentView: View {
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
     
-    @State private var sourceCode: String = ""
-    @State private var currentPDFURL: URL? // Preview PDF for live viewing
-    @State private var exportedPDFURL: URL? // Exported PDF for sharing/printing
+
+    
+    // Legacy local state removed, using editorController.sourceCode
+    @State private var currentPDFURL: URL?
+
+    @State private var exportedPDFURL: URL?
     
     // Debounce timer
     @State private var workItem: DispatchWorkItem?
@@ -27,6 +31,11 @@ struct ContentView: View {
     @State private var currentLoadID: UUID = UUID()
     @State private var isInternalSelectionChange: Bool = false
     @EnvironmentObject var themeManager: ThemeManager
+
+    // MARK: - Editor State
+    // MARK: - Editor State
+    // editorState moved to EditorController
+
     
     // MARK: - Body
     
@@ -45,30 +54,16 @@ struct ContentView: View {
         .cornerRadius(12)
         .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
         .padding(.vertical, 12)
-        .onChange(of: selectedFile) { newValue in
-            handleFileSelectionChange(newValue: newValue)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in
-            handleSnippetInsertion(notification: notification)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in
-            handleBackup()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in
-            editorController.toggleLink()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertTable"))) { _ in
-            editorController.insertTableSnippet()
-        }
+        .onChange(of: selectedFile) { newValue in handleFileSelectionChange(newValue: newValue) }
+        .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in handleSnippetInsertion(notification: notification) }
+        .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in handleBackup() }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in editorController.toggleLink() }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertTable"))) { _ in editorController.insertTableSnippet() }
         .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
-            if let command = notification.object as? String {
-                handleMenuCommand(command)
-            }
+            if let command = notification.object as? String { handleMenuCommand(command) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
-            if let url = notification.object as? URL {
-                self.selectedFile = url
-            }
+            if let url = notification.object as? URL { self.selectedFile = url }
         }
         .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
             if let url = notification.object as? URL {
@@ -78,30 +73,19 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
-            if let info = notification.object as? [String: URL], let newURL = info["new"] {
-                self.selectedFile = newURL
-            }
+            if let info = notification.object as? [String: URL], let newURL = info["new"] { self.selectedFile = newURL }
         }
         .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
             if let url = notification.object as? URL {
                 self.currentPDFURL = url
                 self.reloadToken = UUID()
-                if let selectedFile = selectedFile {
-                    exportPDF(from: selectedFile)
-                }
+                if let selectedFile = selectedFile { exportPDF(from: selectedFile) }
             }
         }
-        .onChange(of: sourceCode) { newValue in
-            editorController.checkUnsavedChanges(currentContent: newValue)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in
-            saveFile(to: notification.object as? URL)
-        }
-        .onAppear {
-            if let file = selectedFile {
-                loadFile(url: file)
-            }
-        }
+        .onChange(of: editorController.sourceCode) { newValue in editorController.checkUnsavedChanges(currentContent: newValue) }
+
+        .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in saveFile(to: notification.object as? URL) }
+        .onAppear { if let file = selectedFile { loadFile(url: file) } }
         .preferredColorScheme(.dark)
     }
     
@@ -112,6 +96,7 @@ struct ContentView: View {
             if fileSystem.currentFolder == nil {
                 WelcomeView(model: fileSystem, onOpen: { url in
                     self.selectedFile = url
+                    self.loadFile(url: url) // Load immediately
                     let folder = url.deletingLastPathComponent()
                     fileSystem.currentFolder = folder
                     fileSystem.loadFiles()
@@ -122,12 +107,8 @@ struct ContentView: View {
                     HSplitView {
                         if editorController.isSidebarVisible {
                             SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
-                                .onChange(of: fileSystem.currentFolder) { newFolder in
-                                    editorController.projectRootURL = newFolder
-                                }
-                                .onAppear {
-                                    editorController.projectRootURL = fileSystem.currentFolder
-                                }
+                                .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
+                                .onAppear { editorController.projectRootURL = fileSystem.currentFolder }
                                 .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
                         }
                         
@@ -141,9 +122,7 @@ struct ContentView: View {
                         compiler.isDarkMode = newValue
                         scheduleCompilation()
                     }
-                    .toolbar {
-                        appToolbar
-                    }
+                    .toolbar { appToolbar }
                     .toolbarBackground(.hidden, for: .windowToolbar)
                     .onChange(of: compiler.errors) { newErrors in
                         editorController.errors = newErrors
@@ -157,8 +136,8 @@ struct ContentView: View {
     
     private var editorPreviewArea: some View {
         ZStack {
-            themeManager.contentOverlay.ignoresSafeArea() 
-            themeManager.mainBackground.ignoresSafeArea() 
+            themeManager.contentOverlay.ignoresSafeArea()
+            themeManager.mainBackground.ignoresSafeArea()
             
             let isTypst = editorController.currentFileType == .typst
             
@@ -175,7 +154,6 @@ struct ContentView: View {
                     }
                 }
             } else {
-                // For all other file types (text, svg, image, pdf, etc.), hide the preview side
                 editorBox.padding(.horizontal, 12)
             }
         }
@@ -190,9 +168,7 @@ struct ContentView: View {
                 reloadToken: reloadToken,
                 colorBlindnessMode: editorController.colorBlindnessMode,
                 isPreviewDarkMode: editorController.isPreviewDarkMode,
-                onWordCountChange: { count in
-                    DispatchQueue.main.async { editorController.wordCount = count }
-                }
+                onWordCountChange: { count in DispatchQueue.main.async { editorController.wordCount = count } }
             )
             .padding(20)
         }
@@ -205,8 +181,7 @@ struct ContentView: View {
     private var emptyStateView: some View {
         ZStack {
             themeManager.contentOverlay.ignoresSafeArea()
-            Text("Select a file")
-                .foregroundColor(themeManager.textColor)
+            Text("Select a file").foregroundColor(themeManager.textColor)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .layoutPriority(1)
@@ -219,9 +194,7 @@ struct ContentView: View {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 40))
                         .foregroundColor(.green)
-                    Text("Saved!")
-                        .font(.headline)
-                        .foregroundColor(.white)
+                    Text("Saved!").font(.headline).foregroundColor(.white)
                 }
                 .padding(20)
                 .background(Color.black.opacity(0.8))
@@ -237,81 +210,50 @@ struct ContentView: View {
         ToolbarItem(placement: .navigation) {
             HStack(spacing: 8) {
                 Button(action: editorController.undo) {
-                    Image(systemName: "arrow.uturn.backward")
-                        .foregroundColor(themeManager.textColor)
-                        .padding(6)
-                        .background(Color.black.opacity(0.3))
-                        .cornerRadius(8)
+                    Image(systemName: "arrow.uturn.backward").foregroundColor(themeManager.textColor)
+                        .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
                 }
-                .help("Undo (Cmd+Z)")
-                .buttonStyle(.plain)
+                .help("Undo (Cmd+Z)").buttonStyle(.plain)
                 
                 Button(action: editorController.redo) {
-                    Image(systemName: "arrow.uturn.forward")
-                        .foregroundColor(themeManager.textColor)
-                        .padding(6)
-                        .background(Color.black.opacity(0.3))
-                        .cornerRadius(8)
+                    Image(systemName: "arrow.uturn.forward").foregroundColor(themeManager.textColor)
+                        .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
                 }
-                .help("Redo (Cmd+Shift+Z)")
-                .buttonStyle(.plain)
+                .help("Redo (Cmd+Shift+Z)").buttonStyle(.plain)
             }
         }
-        
         ToolbarItem(placement: .principal) {
             Text("\(selectedFile?.lastPathComponent ?? "")\(editorController.hasUnsavedChanges ? "*" : "")")
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .foregroundColor(themeManager.textColor)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Color.black.opacity(0.3))
-                .cornerRadius(8)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(Color.black.opacity(0.3)).cornerRadius(8)
         }
-        
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 8) {
-                if editorController.isSearchVisible {
-                    searchBar
-                }
-                
+                if editorController.isSearchVisible { searchBar }
                 Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
-                
                 HStack(spacing: 8) {
                     Button(action: { saveFile() }) {
-                        Image(systemName: "square.and.arrow.down")
-                            .foregroundColor(themeManager.textColor)
-                            .padding(6)
-                            .background(Color.black.opacity(0.3))
-                            .cornerRadius(8)
+                        Image(systemName: "square.and.arrow.down").foregroundColor(themeManager.textColor)
+                            .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
                     }
-                    .help("Save (Cmd+S)")
-                    .keyboardShortcut("s", modifiers: .command)
-                    .buttonStyle(.plain)
+                    .help("Save (Cmd+S)").keyboardShortcut("s", modifiers: .command).buttonStyle(.plain)
                     
                     if editorController.isTypstFile {
                         Button(action: printPDF) {
-                            Image(systemName: "printer")
-                                .foregroundColor(themeManager.textColor)
-                                .padding(6)
-                                .background(Color.black.opacity(0.3))
-                                .cornerRadius(8)
+                            Image(systemName: "printer").foregroundColor(themeManager.textColor)
+                                .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
                         }
-                        .help("Print")
-                        .buttonStyle(.plain)
+                        .help("Print").buttonStyle(.plain)
                         
-                        ShareButton(fileURL: exportedPDFURL)
-                            .frame(width: 28, height: 28)
-                            .padding(4)
-                            .background(Color.black.opacity(0.3))
-                            .cornerRadius(8)
-                            .help("Share")
+                        ShareButton(fileURL: exportedPDFURL).frame(width: 28, height: 28)
+                            .padding(4).background(Color.black.opacity(0.3)).cornerRadius(8).help("Share")
                     }
                 }
-                
                 if let lastSaved = lastSaved {
                     Text("Last saved: \(lastSaved.formatted(date: .omitted, time: .shortened))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .font(.caption).foregroundColor(.secondary)
                 }
             }
         }
@@ -320,70 +262,41 @@ struct ContentView: View {
     private var searchBar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                    .font(.system(size: 13))
+                Image(systemName: "magnifyingglass").foregroundColor(.secondary).font(.system(size: 13))
                 TextField("Search", text: $editorController.searchQuery)
-                    .textFieldStyle(.plain)
-                    .frame(width: 130)
-                    .foregroundColor(themeManager.textColor)
+                    .textFieldStyle(.plain).frame(width: 130).foregroundColor(themeManager.textColor)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.black.opacity(0.3))
-            .cornerRadius(8)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Color.black.opacity(0.3)).cornerRadius(8)
             
-            if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 {
-                searchResultsPopup
-            }
+            if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 { searchResultsPopup }
         }
     }
     
     private var searchResultsPopup: some View {
         HStack(spacing: 8) {
             Text("\(editorController.currentMatchIndex + 1) of \(editorController.matchCount)")
-                .font(.caption)
-                .foregroundColor(themeManager.secondaryTextColor)
-            
+                .font(.caption).foregroundColor(themeManager.secondaryTextColor)
             Divider().frame(height: 12)
-            
-            Button(action: { editorController.previousMatch() }) {
-                Image(systemName: "chevron.up").font(.system(size: 10))
-            }
-            .buttonStyle(.plain)
-            
-            Button(action: { editorController.nextMatch() }) {
-                Image(systemName: "chevron.down").font(.system(size: 10))
-            }
-            .buttonStyle(.plain)
-            
+            Button(action: { editorController.previousMatch() }) { Image(systemName: "chevron.up").font(.system(size: 10)) }.buttonStyle(.plain)
+            Button(action: { editorController.nextMatch() }) { Image(systemName: "chevron.down").font(.system(size: 10)) }.buttonStyle(.plain)
             Divider().frame(height: 12)
-            
-            Button(action: { 
-                editorController.searchQuery = ""
-                editorController.clearSearch()
-            }) {
+            Button(action: { editorController.searchQuery = ""; editorController.clearSearch() }) {
                 Image(systemName: "xmark").font(.system(size: 10))
-            }
-            .buttonStyle(.plain)
+            }.buttonStyle(.plain)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(Color.black.opacity(0.3))
-        .cornerRadius(6)
-        .offset(y: 2)
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(Color.black.opacity(0.3)).cornerRadius(6).offset(y: 2)
     }
     
     private var toolbarArea: some View {
         Group {
             if editorController.currentFileType == .typst {
                 HStack {
-                    ToolbarView(controller: editorController)
-                        .padding(.leading, 44)
+                    ToolbarView(controller: editorController).padding(.leading, 44)
                     Spacer()
                 }
-                .padding(.trailing, 12)
-                .padding(.vertical, 8)
+                .padding(.trailing, 12).padding(.vertical, 8)
                 .background(Color.black.opacity(0.3))
                 .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
                 .fixedSize(horizontal: false, vertical: true)
@@ -391,14 +304,53 @@ struct ContentView: View {
         }
     }
     
+    private var customTheme: EditorTheme {
+        func color(_ nsColor: NSColor) -> NSColor {
+            nsColor.usingColorSpace(.sRGB) ?? nsColor
+        }
+        
+        let editorBg = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.25)
+        let txtColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.9)
+
+        return EditorTheme(
+            text: EditorTheme.Attribute(color: color(txtColor)),
+            insertionPoint: color(txtColor),
+            invisibles: EditorTheme.Attribute(color: color(NSColor.quaternaryLabelColor)),
+            background: color(editorBg),
+            lineHighlight: color(NSColor.unemphasizedSelectedContentBackgroundColor),
+            selection: color(NSColor.selectedTextBackgroundColor),
+            keywords: EditorTheme.Attribute(color: color(NSColor.systemPink), bold: true),
+            commands: EditorTheme.Attribute(color: color(NSColor.systemPurple)), // Functions
+            types: EditorTheme.Attribute(color: color(NSColor.systemBlue), bold: true), // Headers and Types
+            attributes: EditorTheme.Attribute(color: color(NSColor.systemPink)), // Named arguments
+            variables: EditorTheme.Attribute(color: color(NSColor.systemYellow)), // Math and Variables
+            values: EditorTheme.Attribute(color: color(NSColor.systemYellow)),
+            numbers: EditorTheme.Attribute(color: color(NSColor.systemMint)),
+            strings: EditorTheme.Attribute(color: color(NSColor.systemGreen)),
+            characters: EditorTheme.Attribute(color: color(NSColor.systemOrange)),
+            comments: EditorTheme.Attribute(color: color(NSColor.systemGray), italic: true)
+        )
+    }
+
     private var editorContent: some View {
         Group {
             if editorController.currentFileType == .typst || editorController.currentFileType == .text {
-                EditorView(text: $sourceCode, controller: editorController, onCommit: {
-                    scheduleCompilation()
-                })
-                .environmentObject(themeManager)
-                .padding(8)
+                SourceEditor(
+                    $editorController.sourceCode,
+                    language: .typst,
+                    configuration: SourceEditorConfiguration(
+                        appearance: .init(
+                            theme: customTheme,
+                            font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                            wrapLines: true,
+                            tabWidth: 2
+                        )
+                    ),
+                    state: $editorController.editorState
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .id(editorController.currentFileURL?.absoluteString ?? "none")
+                .clipShape(Rectangle())
             } else if let url = selectedFile {
                 FilePreviewView(fileURL: url, fileType: editorController.currentFileType)
                     .environmentObject(themeManager)
@@ -415,157 +367,62 @@ struct ContentView: View {
                 editorContent
                 
                 .sheet(isPresented: $editorController.showEquationEditor) {
-                    VisualEquationEditor(
-                        initialEquation: $editorController.currentEquationContent,
-                        onSave: { newEquation in
-                            editorController.saveEquation(newEquation)
-                        },
-                        onCancel: {
-                            editorController.showEquationEditor = false
-                        }
-                    )
-                    .frame(width: 900, height: 500)
+                    VisualEquationEditor(initialEquation: $editorController.currentEquationContent, onSave: { editorController.saveEquation($0) }, onCancel: { editorController.showEquationEditor = false }).frame(width: 900, height: 500)
                 }
                 .sheet(isPresented: $editorController.showLinkEditor) {
-                    LinkEditorView(
-                        controller: editorController,
-                        onInsert: { url, text in
-                            editorController.insertLink(url: url, text: text)
-                        },
-                        onCancel: {
-                            editorController.showLinkEditor = false
-                        }
-                    )
+                    LinkEditorView(controller: editorController, onInsert: { u, t in editorController.insertLink(url: u, text: t) }, onCancel: { editorController.showLinkEditor = false })
                 }
                 .sheet(isPresented: $editorController.showTableEditor) {
-                    TableEditorView(
-                        controller: editorController,
-                        onInsert: { rows, cols in
-                            editorController.insertTable(
-                                rows: rows,
-                                cols: cols,
-                                columnsString: editorController.tableColumnsString,
-                                inset: editorController.tableInset,
-                                align: editorController.tableAlign,
-                                useHeader: editorController.useTableHeader,
-                                headerCells: editorController.tableHeaderCells
-                            )
-                        },
-                        onCancel: {
-                            editorController.showTableEditor = false
-                        }
-                    )
+                    TableEditorView(controller: editorController, onInsert: { r, c in editorController.insertTable(rows: r, cols: c, columnsString: editorController.tableColumnsString, inset: editorController.tableInset, align: editorController.tableAlign, useHeader: editorController.useTableHeader, headerCells: editorController.tableHeaderCells) }, onCancel: { editorController.showTableEditor = false })
                 }
                 .sheet(isPresented: $editorController.showImageEditor) {
-                    ImageEditorView(
-                        controller: editorController,
-                        onInsert: {
-                            editorController.saveImageSnippet()
-                        },
-                        onCancel: {
-                            editorController.showImageEditor = false
-                        }
-                    )
+                    ImageEditorView(controller: editorController, onInsert: { editorController.saveImageSnippet() }, onCancel: { editorController.showImageEditor = false })
                 }
-                .sheet(isPresented: $editorController.showSymbolPicker) {
-                    SymbolPickerView(controller: editorController)
-                }
+                .sheet(isPresented: $editorController.showSymbolPicker) { SymbolPickerView(controller: editorController) }
                 .sheet(isPresented: $editorController.showQuoteEditor) {
-                    QuoteEditorView(
-                        controller: editorController,
-                        onInsert: { text, attribution, isBlock in
-                            editorController.insertQuote(text: text, attribution: attribution, isBlock: isBlock)
-                        },
-                        onCancel: {
-                            editorController.showQuoteEditor = false
-                        }
-                    )
+                    QuoteEditorView(controller: editorController, onInsert: { t, a, b in editorController.insertQuote(text: t, attribution: a, isBlock: b) }, onCancel: { editorController.showQuoteEditor = false })
                 }
-                .sheet(isPresented: $editorController.showBibliographyEditor) {
-                    BibliographyEditorView(controller: editorController)
-                }
-                .sheet(isPresented: $editorController.showLayoutEditor) {
-                    LayoutEditorView(
-                        controller: editorController,
-                        isPresented: $editorController.showLayoutEditor
-                    )
-                }
-                .sheet(isPresented: $editorController.showHelp) {
-                    HelpView()
-                        .environmentObject(themeManager)
-                }
-                .sheet(isPresented: $editorController.showOutlineEditor) {
-                    OutlineEditorView(controller: editorController)
-                }
-                .sheet(isPresented: $editorController.showFigureEditor) {
-                    FigureEditorView(controller: editorController)
-                }
-                .sheet(isPresented: $editorController.showExternalDataEditor) {
-                    ExternalDataEditorView(controller: editorController)
-                }
-                .sheet(isPresented: $editorController.showFootnoteEditor) {
-                    FootnoteEditorView(controller: editorController)
-                }
+                .sheet(isPresented: $editorController.showBibliographyEditor) { BibliographyEditorView(controller: editorController) }
+                .sheet(isPresented: $editorController.showLayoutEditor) { LayoutEditorView(controller: editorController, isPresented: $editorController.showLayoutEditor) }
+                .sheet(isPresented: $editorController.showHelp) { HelpView().environmentObject(themeManager) }
+                .sheet(isPresented: $editorController.showOutlineEditor) { OutlineEditorView(controller: editorController) }
+                .sheet(isPresented: $editorController.showFigureEditor) { FigureEditorView(controller: editorController) }
+                .sheet(isPresented: $editorController.showExternalDataEditor) { ExternalDataEditorView(controller: editorController) }
+                .sheet(isPresented: $editorController.showFootnoteEditor) { FootnoteEditorView(controller: editorController) }
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }
                     Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("Are you sure you want to remove this equation?")
-                }
+                } message: { Text("Are you sure you want to remove this equation?") }
                 .alert("Delete Code Block?", isPresented: $editorController.showDeleteCodeAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteCodeBlock() }
                     Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("Are you sure you want to remove this code block?")
-                }
+                } message: { Text("Are you sure you want to remove this code block?") }
                 .alert("Go to Line", isPresented: $editorController.showGoToLineAlert) {
                     TextField("Line Number", text: $editorController.targetLineNumber)
-                    Button("Go") {
-                        if let line = Int(editorController.targetLineNumber) {
-                            editorController.goToLine(line)
-                        }
-                    }
+                    Button("Go") { if let line = Int(editorController.targetLineNumber) { editorController.goToLine(line) } }
                     Button("Cancel", role: .cancel) { }
                 }
                 .alert("Rename File", isPresented: $showRenameAlert) {
                     TextField("New Name", text: $newFileName)
-                    Button("Rename") {
-                        if let url = renameTargetURL {
-                            fileSystem.performRename(from: url, to: newFileName)
-                        }
-                    }
+                    Button("Rename") { if let url = renameTargetURL { fileSystem.performRename(from: url, to: newFileName) } }
                     Button("Cancel", role: .cancel) { }
                 }
                 .alert("Export Error", isPresented: $editorController.showExportErrorAlert) {
                     Button("OK", role: .cancel) { }
-                } message: {
-                    Text(editorController.lastExportError)
-                }
+                } message: { Text(editorController.lastExportError) }
                 .alert("File Not Found", isPresented: $editorController.showFileNotFoundAlert) {
                     Button("OK", role: .cancel) { }
-                } message: {
-                    Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.")
-                }
+                } message: { Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.") }
             
                 if editorController.isTypstFile {
                     HStack {
-                        Text("Words: \(editorController.wordCount)")
-                            .font(.caption)
-                            .monospacedDigit()
-                            .foregroundColor(themeManager.textColor)
-                        
+                        Text("Words: \(editorController.wordCount)").font(.caption).monospacedDigit().foregroundColor(themeManager.textColor)
                         Spacer()
-                        
-                        // Status message
                         if editorController.showStatusMessage {
-                            Text(editorController.statusMessage)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .transition(.opacity)
+                            Text(editorController.statusMessage).font(.caption).foregroundColor(.secondary).transition(.opacity)
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 12).padding(.vertical, 4)
                     .background(Color.black.opacity(0.3))
                     .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
                 }
@@ -580,41 +437,21 @@ struct ContentView: View {
     // MARK: - Handlers
     
     private func handleFileSelectionChange(newValue: URL?) {
-        DispatchQueue.main.async {
-            // 1. Ignore if this is part of a revert operation
-            if self.isInternalSelectionChange {
-                self.isInternalSelectionChange = false
-                return
-            }
-            
-            // 2. Identify the file we are actually LEAVING
-            let currentlyLoadedFile = self.editorController.currentFileURL
-            
-            // 3. Guard against redundant calls if clicked same file
-            if newValue == currentlyLoadedFile {
-                return
-            }
-            
-            print("[DEBUG] handleFileFileSelectionChange (controller=\(ObjectIdentifier(self.editorController))) from \(currentlyLoadedFile?.lastPathComponent ?? "nil") to \(newValue?.lastPathComponent ?? "nil"), hasUnsavedChanges=\(self.editorController.hasUnsavedChanges)")
-            
-            // 4. Check for unsaved changes in the file we are leaving
-            if self.editorController.hasUnsavedChanges, let prev = currentlyLoadedFile {
-                if let appDelegate = AppDelegate.shared {
-                    if !appDelegate.showSaveWarningIfNeeded(for: prev) {
-                        // User cancelled switch - revert selection
-                        print("[DEBUG] handleFileFileSelectionChange: Reverting selection to \(prev.lastPathComponent)")
-                        self.isInternalSelectionChange = true
-                        self.selectedFile = prev
-                        return
-                    }
-                } else {
-                    print("[ERROR] handleFileFileSelectionChange: AppDelegate.shared is nil!")
+        if self.isInternalSelectionChange { self.isInternalSelectionChange = false; return }
+        
+        let currentlyLoadedFile = self.editorController.currentFileURL
+        if newValue == currentlyLoadedFile { return }
+        
+        if self.editorController.hasUnsavedChanges, let prev = currentlyLoadedFile {
+            if let appDelegate = AppDelegate.shared {
+                if !appDelegate.showSaveWarningIfNeeded(for: prev) {
+                    self.isInternalSelectionChange = true
+                    self.selectedFile = prev
+                    return
                 }
             }
-            
-            // 5. Proceed with loading the new file
-            self.loadFile(url: newValue)
         }
+        self.loadFile(url: newValue)
     }
     
     private func handleSnippetInsertion(notification: Notification) {
@@ -634,48 +471,71 @@ struct ContentView: View {
     
     func loadFile(url: URL?) {
         guard let url = url else { return }
+        print("[DEBUG] loadFile: Starting load for \(url.lastPathComponent)")
         let loadID = UUID()
         self.currentLoadID = loadID
         
-        // 1. Clear previous state to avoid stale previews and conflicts
-        self.currentPDFURL = nil
-        self.reloadToken = UUID()
+        // 1. Do NOT clear state here. Wait for new content.
         
-        // 2. Update truth immediately so UI identifies the file type
-        self.editorController.currentFileURL = url
-        self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-        RecentFilesManager.shared.add(url: url)
-        
-        let isTextual = editorController.currentFileType.isTextual
-        if !isTextual {
-            print("[DEBUG] loadFile: binary file detected, skipping string read: \(url.lastPathComponent)")
-            self.sourceCode = ""
-            self.editorController.syncSavedContent("")
-            return
+        // 2. Pre-check file type for non-textual files to avoid delay
+        // Check extension manually since editorController.currentFileURL isn't updated yet
+        let ext = url.pathExtension.lowercased()
+        let isTextual = ["typ", "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg"].contains(ext)
+
+        if !isTextual && ext != "pdf" && ext != "png" && ext != "jpg" { // Basic check
+             // For non-text, update immediately as there is no content to read
+             self.editorController.currentFileURL = url
+             self.currentPDFURL = nil
+             return
         }
-        
+
+        // 3. Load content in background
+        print("[DEBUG] loadFile: Dispatching background read")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let content = try String(contentsOf: url, encoding: .utf8)
+                print("[DEBUG] loadFile: Read success (len: \(content.count)). Dispatching main update (id: \(loadID))")
                 DispatchQueue.main.async {
-                    print("[DEBUG] loadFile completion: currentLoadID=\(self.currentLoadID == loadID), url=\(url.lastPathComponent)")
-                    guard self.currentLoadID == loadID else { return }
+                    guard self.currentLoadID == loadID else { 
+                        print("[DEBUG] loadFile: Load ID mismatch (cancelled)")
+                        return 
+                    }
+                    
+                    // Update State ATOMICALLY (as much as possible)
+                    self.editorController.currentFileURL = url
+                    self.currentPDFURL = nil
+                    self.reloadToken = UUID()
+                    self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
+                    RecentFilesManager.shared.add(url: url)
                     
                     self.editorController.syncSavedContent(content)
-                    self.sourceCode = content
+                    print("[DEBUG] loadFile: Updating sourceCode")
+                    self.editorController.sourceCode = content
+                    // Reset undo manager/state by creating new state?
+                    // self.editorController.editorState = .init() // Let .id() handle recreation or keep state?
+                    // Better to reset state for new file
+                    self.editorController.editorState = .init()
                     
-                    scheduleCompilation(with: content)
-                    print("[INFO] Successfully loaded file into editor: \(url.lastPathComponent)")
+                    self.scheduleCompilation(with: content)
+                    print("[DEBUG] loadFile: Complete")
                 }
             } catch {
-                print("[ERROR] Failed to read file \(url.path): \(error)")
+                print("[ERROR] loadFile: Failed to load file at \(url): \(error)")
                 DispatchQueue.main.async {
                     guard self.currentLoadID == loadID else { return }
+                    // Update URL anyway so we can show error or empty state correctly?
+                    // Or keep previous file?
+                    // If we don't update currentFileURL, we stay on old file.
+                    
                     if (try? url.checkResourceIsReachable()) != true {
-                        editorController.missingFileName = url.lastPathComponent
-                        editorController.showFileNotFoundAlert = true
+                        self.editorController.missingFileName = url.lastPathComponent
+                        self.editorController.showFileNotFoundAlert = true
                         RecentFilesManager.shared.remove(url: url)
                         if self.selectedFile == url { self.selectedFile = nil }
+                    } else {
+                         // File exists but read failed (e.g. binary?)
+                         self.editorController.currentFileURL = url
+                         // Don't update sourceCode
                     }
                 }
             }
@@ -685,26 +545,20 @@ struct ContentView: View {
     func saveFile(to url: URL? = nil) {
         let targetURL = url ?? selectedFile
         guard let url = targetURL else { return }
-        
         do {
-            try sourceCode.write(to: url, atomically: true, encoding: .utf8)
+            try editorController.sourceCode.write(to: url, atomically: true, encoding: .utf8)
             RecentFilesManager.shared.add(url: url)
             DispatchQueue.main.async {
                 if url == self.selectedFile {
-                    self.editorController.syncSavedContent(self.sourceCode)
-                    self.scheduleCompilation(with: self.sourceCode)
+                    self.editorController.syncSavedContent(self.editorController.sourceCode)
+                    self.scheduleCompilation(with: self.editorController.sourceCode)
                     self.lastSaved = Date()
                     withAnimation { self.showSavePopup = true }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        withAnimation { self.showSavePopup = false }
-                    }
-                } else {
-                    print("[INFO] Background file saved: \(url.lastPathComponent)")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { withAnimation { self.showSavePopup = false } }
                 }
             }
-        } catch {
-            print("[ERROR] Failed to save file \(url.lastPathComponent): \(error)")
-        }
+
+        } catch { print("[ERROR] Failed to save file \(url.lastPathComponent): \(error)") }
     }
     
     @MainActor
@@ -720,9 +574,7 @@ struct ContentView: View {
                 await MainActor.run {
                     if result.success {
                         NSWorkspace.shared.open(dest)
-                        if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) {
-                            fileSystem.loadFiles()
-                        }
+                        if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
                     } else {
                         editorController.lastExportError = result.error ?? "Unknown error"
                         editorController.showExportErrorAlert = true
@@ -741,14 +593,10 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             if FileManager.default.fileExists(atPath: shadowPDFURL.path) {
                 do {
-                    if FileManager.default.fileExists(atPath: pdfDestination.path) {
-                        try FileManager.default.removeItem(at: pdfDestination)
-                    }
+                    if FileManager.default.fileExists(atPath: pdfDestination.path) { try FileManager.default.removeItem(at: pdfDestination) }
                     try FileManager.default.copyItem(at: shadowPDFURL, to: pdfDestination)
                     self.exportedPDFURL = pdfDestination
-                } catch {
-                    print("[ERROR] Failed to export PDF: \(error)")
-                }
+                } catch { print("[ERROR] Failed to export PDF: \(error)") }
             }
         }
     }
@@ -756,26 +604,21 @@ struct ContentView: View {
     func printPDF() {
         guard let url = currentPDFURL, let document = PDFDocument(url: url) else { return }
         let printInfo = NSPrintInfo.shared
-        printInfo.topMargin = 0
-        printInfo.bottomMargin = 0
-        printInfo.leftMargin = 0
-        printInfo.rightMargin = 0
-        let op = document.printOperation(for: printInfo, scalingMode: .pageScaleToFit, autoRotate: true)
-        op?.run()
+        printInfo.topMargin = 0; printInfo.bottomMargin = 0; printInfo.leftMargin = 0; printInfo.rightMargin = 0
+        document.printOperation(for: printInfo, scalingMode: .pageScaleToFit, autoRotate: true)?.run()
     }
     
     func scheduleCompilation(with content: String? = nil) {
-        guard let url = selectedFile, editorController.isTypstFile else { 
-            compiler.cleanUp()
-            currentPDFURL = nil
-            return 
+        guard let url = selectedFile, editorController.isTypstFile else {
+            compiler.cleanUp(); currentPDFURL = nil; return
         }
         workItem?.cancel()
-        let currentSource = content ?? sourceCode
+        let currentSource = content ?? editorController.sourceCode
         let isDark = editorController.isPreviewDarkMode
         let newWorkItem = DispatchWorkItem {
             Task {
                 compiler.isDarkMode = isDark
+
                 await compiler.updateContent(source: currentSource, fileURL: url)
             }
         }
@@ -791,12 +634,8 @@ struct ContentView: View {
         panel.nameFieldStringValue = "\(root.lastPathComponent)_backup.zip"
         if panel.runModal() == .OK, let dest = panel.url {
             Task {
-                if await fileSystem.createBackup(to: dest) {
-                    NSWorkspace.shared.open(dest.deletingLastPathComponent())
-                } else {
-                    editorController.lastExportError = "Failed to create project backup."
-                    editorController.showExportErrorAlert = true
-                }
+                if await fileSystem.createBackup(to: dest) { NSWorkspace.shared.open(dest.deletingLastPathComponent()) }
+                else { editorController.lastExportError = "Failed to create project backup."; editorController.showExportErrorAlert = true }
             }
         }
     }
@@ -806,12 +645,7 @@ struct ContentView: View {
         switch command {
         case "newFile": fileSystem.createNewFile()
         case "uploadFile": fileSystem.importFile()
-        case "renameFile":
-            if let url = selectedFile {
-                self.renameTargetURL = url
-                self.newFileName = url.lastPathComponent
-                self.showRenameAlert = true
-            }
+        case "renameFile": if let url = selectedFile { self.renameTargetURL = url; self.newFileName = url.lastPathComponent; self.showRenameAlert = true }
         case "quickExportPDF": if let url = selectedFile { exportPDF(from: url) }
         case "exportPDF": handleExport(format: "pdf")
         case "exportPNG": handleExport(format: "png")
@@ -820,31 +654,7 @@ struct ContentView: View {
         case "redo": editorController.redo()
         case "goToLine": editorController.showGoToLineAlert = true
         case "selectAll": editorController.selectAll()
-        case "toggleBold": editorController.toggleBold()
-        case "toggleItalic": editorController.toggleItalic()
-        case "toggleUnderline": editorController.toggleUnderline()
-        case "toggleLineComment": editorController.toggleLineComment()
-        case "toggleBlockComment": editorController.toggleBlockComment()
-        case "toggleHighlight": editorController.toggleHighlight()
-        case "toggleStrike": editorController.toggleStrike()
-        case "toggleBulletList": editorController.toggleBulletList()
-        case "toggleNumberList": editorController.toggleNumberList()
-        case "toggleCode": editorController.toggleCode()
-        case "toggleLink": editorController.toggleLink()
-        case "toggleQuote": editorController.toggleQuote()
-        case "toggleCodeBlock": editorController.toggleCodeBlock()
-        case "toggleSubscript": editorController.toggleSubscript()
-        case "toggleSuperscript": editorController.toggleSuperscript()
-        case "insertFootnote": editorController.insertFootnote()
-        case "insertBibliography": editorController.toggleBibliography()
-        case "showHelp": editorController.showHelp = true
-        case "insertPageBreak": editorController.insertPageBreak()
-        case "insertHorizontalLine": editorController.insertHorizontalLine()
-        case "openFigureEditor": editorController.openFigureEditor()
-        case "openSymbolPicker": editorController.showSymbolPicker = true
-        case "openOutlineEditor": editorController.openOutlineEditor()
-        case "openExternalDataEditor": editorController.openExternalDataEditor()
-        case "openContextualEditor": editorController.openContextualEditor()
+        // Note: For SourceEditor, selection/cursor logic might need to be hooked up to `editorState`
         case "toggleSidebar": withAnimation { editorController.isSidebarVisible.toggle() }
         case "viewEditorOnly": withAnimation { editorController.viewMode = .editorOnly }
         case "viewPreviewOnly": withAnimation { editorController.viewMode = .previewOnly }

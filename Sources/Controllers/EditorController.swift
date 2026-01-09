@@ -6,8 +6,10 @@ extension Notification.Name {
     static let refreshProjectSidebar = Notification.Name("refreshProjectSidebar")
 }
 
+import CodeEditSourceEditor
+
 @MainActor
-class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate {
+class EditorController: NSObject, ObservableObject {
     enum SupportedFileType {
         case typst
         case text
@@ -95,22 +97,56 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var wordCount: Int = 0
     
     // MARK: - Symbol Insertion
+    // MARK: - Helper Properties
+    
+    var selectedRange: NSRange {
+        get {
+            if let pos = editorState.cursorPositions?.first {
+                return pos.range
+            }
+            return NSRange(location: sourceCode.count, length: 0)
+        }
+        set {
+            editorState.cursorPositions = [.init(range: newValue)]
+        }
+    }
+    
+    func insertText(_ text: String, replacementRange: NSRange? = nil, newCursorRange: NSRange? = nil) {
+        let range = replacementRange ?? selectedRange
+        print("[EditorController] insertText: '\(text)' at \(range)")
+        
+        guard let stringRange = Range(range, in: sourceCode) else { 
+             print("[EditorController] insertText FAILED: Invalid range \(range) for len \(sourceCode.count)")
+             return 
+        }
+        
+        sourceCode.replaceSubrange(stringRange, with: text)
+        
+        if let explicitCursor = newCursorRange {
+            editorState.cursorPositions = [.init(range: explicitCursor)]
+        } else {
+            // Default behavior: move to end
+            if let newEndIndex = sourceCode.index(stringRange.lowerBound, offsetBy: text.count, limitedBy: sourceCode.endIndex) {
+                 // Convert index back to NSRange via helper or direct calculation?
+                 // sourceCode calculation is safer.
+                 let utf16View = sourceCode.utf16
+                 let loc = newEndIndex.utf16Offset(in: sourceCode)
+                 let newRange = NSRange(location: loc, length: 0)
+                 editorState.cursorPositions = [.init(range: newRange)]
+            }
+        }
+    }
+
+    // MARK: - Symbol Insertion
     func insertSymbol(code: String, unicode: String) {
         // Detect if we are in math mode ($ ... $)
-        guard let textView = textView else { return }
-        let index = textView.selectedRange().location
-        let text = textView.string
+        let index = selectedRange.location
         
         // Simple heuristic: count unescaped $ before cursor. Odd = math mode.
-        let isMathMode = FormatDetector.isMathMode(in: text, at: index)
+        let isMathMode = FormatDetector.isMathMode(in: sourceCode, at: index)
         
         let contentToInsert = isMathMode ? code : unicode
         insertText(contentToInsert)
-        
-        // If inserting a code (e.g. "alpha"), maybe add space if needed? 
-        // Typst usually needs space after command if followed by letter.
-        // But for symbol picker, "alpha" might be used as variable.
-        // Let's keep it raw for now.
     }
     
     
@@ -188,6 +224,20 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var isPreviewDarkMode: Bool = true
     @Published var cursorSize: CGFloat = 2.0 // Default thickness
     
+    // --- CodeEditSourceEditor State ---
+    @Published var sourceCode: String = ""
+    @Published var editorState: SourceEditorState = .init() {
+        didSet {
+            // Check if selection changed to update UI state
+            let oldRanges = oldValue.cursorPositions?.map { $0.range }
+            let newRanges = editorState.cursorPositions?.map { $0.range }
+            if oldRanges != newRanges {
+                 updateFormattingState()
+            }
+        }
+    }
+
+    
     var currentImageRange: NSRange? = nil
     
     @Published var currentFileType: SupportedFileType = .typst
@@ -233,25 +283,19 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func saveEquation(_ newContent: String) {
-        guard let range = currentEquationRange, let textView = textView else { 
-            print("[ERROR] saveEquation aborted: range=\(String(describing: currentEquationRange)), textView=\(textView != nil)")
-            return 
+        guard let range = currentEquationRange else {
+            print("[ERROR] saveEquation aborted: range is nil")
+            return
         }
-        
-        print("[DEBUG] saveEquation: range=\(range), content length=\(newContent.count)")
         
         let replacement = "$\(newContent)$"
         
         if range.location != NSNotFound {
-            print("[DEBUG] Inserting replacement: '\(replacement)' at range: \(range)")
-            if textView.shouldChangeText(in: range, replacementString: replacement) {
-                textView.insertText(replacement, replacementRange: range)
-                textView.didChangeText()
-                
-                // For a better UX, select the newly inserted equation
-                let newRange = NSRange(location: range.location, length: replacement.count)
-                textView.setSelectedRange(newRange)
-            }
+            insertText(replacement, replacementRange: range)
+            
+            // For a better UX, select the newly inserted equation
+            let newRange = NSRange(location: range.location, length: replacement.utf16.count)
+            self.selectedRange = newRange
         }
         
         showEquationEditor = false
@@ -259,12 +303,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     @Published var errors: [TypstError] = []
     @Published var scrollPosition: CGFloat = 0
     
-    // Référence faible vers la vue native pour manipuler le texte directement
-    weak var textView: NSTextView? {
-        didSet {
-            setupScrollNotification()
-        }
-    }
+    // Old textView reference removed.
+    // We now use direct state manipulation.
+
     
     // Recherche
     @Published var searchQuery: String = "" {
@@ -282,8 +323,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     // Demande de redessiner la règle (numéros de ligne)
+    // Demande de redessiner la règle (numéros de ligne)
     func needsRedraw() {
-        textView?.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+        // textView?.enclosingScrollView?.verticalRulerView?.needsDisplay = true
     }
 
     // --- Unsaved Changes Comparison logic ---
@@ -308,18 +350,17 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Undo/Redo Functions ---
     
     func undo() {
-        textView?.undoManager?.undo()
+        // textView?.undoManager?.undo()
     }
     
     func redo() {
-        textView?.undoManager?.redo()
+        // textView?.undoManager?.redo()
     }
     
     // --- Snippet Functions ---
     
     func insertTableSnippet() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         setupTableEditor(at: range.location)
         self.showTableEditor = true
     }
@@ -336,8 +377,6 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     private func setupTableEditor(at location: Int) {
-        guard let textView = textView else { return }
-        
         // Reset state
         self.currentTableRange = nil
         self.currentTableCells = []
@@ -350,7 +389,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         self.tableHeaderCells = []
         
         // Detect existing table
-        if let tableInfo = TableDetector.parseTable(in: textView.string, at: location) {
+        if let tableInfo = TableDetector.parseTable(in: sourceCode, at: location) {
             self.currentTableRange = tableInfo.range
             self.currentTableCells = tableInfo.cells
             self.tableEditInitialRows = tableInfo.rows
@@ -386,7 +425,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func insertTable(rows: Int, cols: Int, columnsString: String, inset: String, align: String, useHeader: Bool, headerCells: [String]) {
-        guard let textView = textView else { return }
+
         
         var snippet = "#table(\n"
         
@@ -455,10 +494,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         }
         snippet += ")"
         
-        let rangeToReplace = currentTableRange ?? textView.selectedRange()
+        let rangeToReplace = currentTableRange ?? selectedRange
         
         if rangeToReplace.location != NSNotFound {
-            textView.insertText(snippet, replacementRange: rangeToReplace)
+            insertText(snippet, replacementRange: rangeToReplace)
         }
         
         // Clear state
@@ -476,8 +515,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func insertImageSnippet() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         
         // Reset state
         self.pendingImagePath = ""
@@ -489,7 +527,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         self.selectedImageURL = nil
         self.currentImageRange = nil
         
-        if let imageInfo = ImageDetector.parseImage(in: textView.string, at: range.location) {
+        if let imageInfo = ImageDetector.parseImage(in: sourceCode, at: range.location) {
             setupImageEditor(with: imageInfo)
         }
         
@@ -497,8 +535,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func openImageEditor(at range: NSRange) {
-        guard let textView = textView else { return }
-        if let imageInfo = ImageDetector.parseImage(in: textView.string, at: range.location) {
+        if let imageInfo = ImageDetector.parseImage(in: sourceCode, at: range.location) {
             setupImageEditor(with: imageInfo)
             self.showImageEditor = true
         }
@@ -674,8 +711,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
          
          let snippet = "#image(\(params.joined(separator: ", ")))"
         
-        if let range = currentImageRange, let textView = textView {
-             textView.insertText(snippet, replacementRange: range)
+        if let range = currentImageRange {
+             insertText(snippet, replacementRange: range)
         } else {
              insertText(snippet)
         }
@@ -713,13 +750,13 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func insertChartSnippet() {
-        guard let textView = textView else { return }
-        SnippetsManager.shared.insertSnippet("chart", into: textView)
+        // guard let textView = textView else { return }
+        // SnippetsManager.shared.insertSnippet("chart", into: textView)
     }
     
     func insertTimelineSnippet() {
-        guard let textView = textView else { return }
-        SnippetsManager.shared.insertSnippet("timeline", into: textView)
+        // guard let textView = textView else { return }
+        // SnippetsManager.shared.insertSnippet("timeline", into: textView)
     }
     
     func openLayoutEditor() {
@@ -729,8 +766,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Outline Functions ---
     
     func openOutlineEditor() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         
         // Reset state
         self.currentOutlineRange = nil
@@ -739,7 +775,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         self.outlineDepthString = ""
         self.outlineIndent = false
         
-        if let info = OutlineDetector.parseOutline(in: textView.string, at: range.location) {
+        if let info = OutlineDetector.parseOutline(in: sourceCode, at: range.location) {
             self.currentOutlineRange = info.range
             self.outlineTitle = info.title ?? ""
             self.outlineTarget = info.target ?? "Heading"
@@ -785,10 +821,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         
         let snippet = "#outline(\(params.joined(separator: ", ")))"
         
-        let rangeToReplace = currentOutlineRange ?? textView?.selectedRange() ?? NSRange(location: 0, length: 0)
+        let rangeToReplace = currentOutlineRange ?? selectedRange
         
         if rangeToReplace.location != NSNotFound {
-            textView?.insertText(snippet, replacementRange: rangeToReplace)
+            insertText(snippet, replacementRange: rangeToReplace)
         } else {
             insertText(snippet)
         }
@@ -800,10 +836,11 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Figure Functions ---
     
     func openFigureEditor() {
-         guard let textView = textView else { return }
-         let range = textView.selectedRange()
+         let range = selectedRange
          if range.length > 0 {
-             currentFigureContent = String(textView.string[Range(range, in: textView.string)!])
+             if let r = Range(range, in: sourceCode) {
+                 currentFigureContent = String(sourceCode[r])
+             }
          } else {
              currentFigureContent = ""
          }
@@ -833,8 +870,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
             snippet += " <\(label)>"
         }
         
-        if let range = textView?.selectedRange(), range.length > 0 {
-             textView?.insertText(snippet, replacementRange: range)
+        let range = selectedRange
+        if range.length > 0 {
+             insertText(snippet, replacementRange: range)
         } else {
              insertText(snippet)
         }
@@ -886,9 +924,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     private func toggleListPrefix(_ prefix: String) {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        let nsText = textView.string as NSString
+        let range = selectedRange
+        guard let r = Range(range, in: sourceCode) else { return }
+        
+        let nsText = sourceCode as NSString
         let lineRange = nsText.lineRange(for: range)
         let lineContent = nsText.substring(with: lineRange)
         
@@ -897,7 +936,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
         
         if isSingleLineRepresentation && lineContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            textView.insertText(prefix, replacementRange: range)
+            insertText(prefix, replacementRange: lineRange)
             return
         }
         
@@ -966,57 +1005,44 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         var replacement = newLines.joined(separator: "\n")
         if hadTrailingNewline { replacement += "\n" }
         
-        textView.insertText(replacement, replacementRange: lineRange)
+        insertText(replacement, replacementRange: lineRange)
     }
 
     
     // --- Search Functions ---
     
     func performSearch() {
-        guard let textView = textView, !searchQuery.isEmpty else {
+        guard !searchQuery.isEmpty else {
             clearSearch()
             return
         }
         
-        let text = textView.string
+        // Simple case insensitive search
         searchMatches = []
+        let nsString = sourceCode as NSString
+        var searchRange = NSRange(location: 0, length: nsString.length)
         
-        // Find all matches (case-insensitive)
-        let searchOptions: NSString.CompareOptions = [.caseInsensitive]
-        var searchRange = NSRange(location: 0, length: text.utf16.count)
-        
-        while searchRange.location < text.utf16.count {
-            let foundRange = (text as NSString).range(of: searchQuery, options: searchOptions, range: searchRange)
-            if foundRange.location == NSNotFound {
+        while searchRange.location < nsString.length {
+            let foundRange = nsString.range(of: searchQuery, options: .caseInsensitive, range: searchRange)
+            if foundRange.location != NSNotFound {
+                searchMatches.append(foundRange)
+                searchRange.location = foundRange.location + foundRange.length
+                searchRange.length = nsString.length - searchRange.location
+            } else {
                 break
             }
-            searchMatches.append(foundRange)
-            searchRange = NSRange(location: foundRange.location + foundRange.length, 
-                                length: text.utf16.count - (foundRange.location + foundRange.length))
         }
+
         
-        // Highlight all matches
         if !searchMatches.isEmpty {
             currentMatchIndex = 0
-            highlightMatches()
             scrollToMatch(at: 0)
         }
     }
     
     func highlightMatches() {
-        guard let textView = textView, let textStorage = textView.textStorage else { return }
-        
-        // Remove previous highlights
-        textStorage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: textStorage.length))
-        
-        // Highlight all matches in yellow
-        for (index, range) in searchMatches.enumerated() {
-            let isCurrentMatch = (index == currentMatchIndex)
-            let highlightColor = isCurrentMatch ? 
-                NSColor.systemYellow : // Current match
-                NSColor(calibratedRed: 1.0, green: 1.0, blue: 0.0, alpha: 0.3) // Other matches
-            textStorage.addAttribute(.backgroundColor, value: highlightColor, range: range)
-        }
+        // Search highlighting not implemented for CodeEditSourceEditor yet
+        // TODO: Implement highlighting for search matches
     }
     
     func nextMatch() {
@@ -1034,62 +1060,58 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func scrollToMatch(at index: Int) {
-        guard let textView = textView, index >= 0, index < searchMatches.count else { return }
-        let range = searchMatches[index]
-        textView.setSelectedRange(range)
-        textView.scrollRangeToVisible(range)
+        if index >= 0 && index < searchMatches.count {
+            let range = searchMatches[index]
+            selectedRange = range
+        }
     }
     
     func clearSearch() {
         searchMatches = []
         currentMatchIndex = -1
-        if let textView = textView, let textStorage = textView.textStorage {
-            textStorage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: textStorage.length))
-        }
+        // Highlighting cleanup stub
     }
     
     // --- Commandes d'édition de texte ---
     
     // Insère du texte à la position du curseur
-    func insertText(_ text: String) {
-        guard let textView = textView else { return }
-        
-        let range = textView.selectedRange()
-        if range.location != NSNotFound {
-            textView.insertText(text, replacementRange: range)
-        } else {
-            // Fallback: ajout à la fin si pas de sélection valide
-            let endRange = NSRange(location: textView.string.count, length: 0)
-            textView.insertText(text, replacementRange: endRange)
-        }
-    }
+    // Legacy insertText removed (redundant)
     
     // Entoure la sélection actuelle avec un préfixe et un suffixe
     func wrapSelection(prefix: String, suffix: String) {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         
         if range.length == 0 {
-            // Si rien n'est sélectionné : on insère les marqueurs et on place le curseur au milieu
-            textView.insertText(prefix + suffix, replacementRange: range)
-            textView.setSelectedRange(NSRange(location: range.location + prefix.count, length: 0))
+            // Insert markers and place cursor in between
+            let newCursor = NSRange(location: range.location + prefix.count, length: 0)
+            insertText(prefix + suffix, replacementRange: range, newCursorRange: newCursor)
         } else {
-            // Si du texte est sélectionné : on l'entoure
-            if let string = textView.string as NSString? {
-                let selectedText = string.substring(with: range)
-                let newText = prefix + selectedText + suffix
-                textView.insertText(newText, replacementRange: range)
-            }
+            // Surround selection
+             if let r = Range(range, in: sourceCode) {
+                 let selectedText = sourceCode[r]
+                 let newText = prefix + selectedText + suffix
+                 // Cursor should wrap the whole new text? Or stay at end?
+                 // Default insertText moves to end. This is usually fine for selection wrap.
+                 // Unless we want to keep selection?
+                 // Usually wrapping keeps selection?
+                 // TypstEdit behavior: select "foo" -> "*foo*" -> Cursor at end.
+                 // If we want to keep selection "*[foo]*":
+                 // let newCursor = NSRange(location: range.location + prefix.count, length: range.length)
+                 // But let's stick to default (cursor at end) for now unless requested.
+                 insertText(newText, replacementRange: range)
+             }
         }
     }
     
     func updateFormattingState() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        let text = textView.string
+        let range = selectedRange
+        let text = sourceCode
         
         // Use async to avoid "Publishing changes from within view updates is not allowed"
         DispatchQueue.main.async {
+            // Debug Log
+            print("[EditorController] updateFormattingState at \(range), textLen: \(text.count)")
+            
             self.isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location) != nil
             self.isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location) != nil
             self.isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
@@ -1121,15 +1143,14 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Footnote Editor Functions ---
     
     func openFootnoteEditor() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         
         // Reset state
         self.footnoteBody = ""
         self.footnoteNumbering = "1"
         self.currentFootnoteRange = nil
         
-        if let info = FormatDetector.parseFootnote(in: textView.string, at: range.location) {
+        if let info = FormatDetector.parseFootnote(in: sourceCode, at: range.location) {
             self.currentFootnoteRange = info.range
             self.footnoteBody = info.body
             self.footnoteNumbering = info.numbering ?? "1"
@@ -1147,10 +1168,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         let paramPart = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
         let snippet = "#footnote\(paramPart)[\(body)]"
         
-        let rangeToReplace = currentFootnoteRange ?? textView?.selectedRange() ?? NSRange(location: 0, length: 0)
+        let rangeToReplace = currentFootnoteRange ?? selectedRange
         
         if rangeToReplace.location != NSNotFound {
-            textView?.insertText(snippet, replacementRange: rangeToReplace)
+            insertText(snippet, replacementRange: rangeToReplace)
         } else {
             insertText(snippet)
         }
@@ -1162,38 +1183,42 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Heading Actions ---
     
     func setHeadingLevel(_ level: Int) {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        let nsText = textView.string as NSString
+        let range = selectedRange
+        let nsText = sourceCode as NSString
         let lineRange = nsText.lineRange(for: range)
         let lineContent = nsText.substring(with: lineRange)
         
         let hadTrailingNewline = lineContent.hasSuffix("\n")
-        let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
+        let isSingleLineRepresentation = (lineRange.length > 0)
         
         // --- Special Case: Single empty line ---
-        if isSingleLineRepresentation && lineContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if isSingleLineRepresentation && lineContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
             if level > 0 {
                 let prefix = String(repeating: "=", count: level) + " "
-                textView.insertText(prefix, replacementRange: range)
+                insertText(prefix + "\n", replacementRange: lineRange)
             } else {
-                textView.insertText("", replacementRange: lineRange)
+                // Remove heading (it was empty anyway, but ensure clean state)
+                insertText("\n", replacementRange: lineRange)
             }
             updateFormattingState()
             return
         }
         
         // --- Multiline selection or non-empty line ---
-        var lines = lineContent.components(separatedBy: .newlines)
+        var lines = lineContent.components(separatedBy: CharacterSet.newlines)
         if hadTrailingNewline { lines.removeLast() }
         
         let headingPattern = #"^(=+)\s"#
         guard let regex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
         
         var newLines: [String] = []
+        
+        // Check if we need to remove existing heading markers from ALL lines (if toggle off or changing level)
+        // For simplicity: We strip any leading "= " from all lines, then add new level if > 0
+        
         for line in lines {
             // Skip purely blank lines within a selection
-            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+            if line.trimmingCharacters(in: CharacterSet.whitespaces).isEmpty {
                 newLines.append(line)
                 continue
             }
@@ -1215,16 +1240,15 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         var replacement = newLines.joined(separator: "\n")
         if hadTrailingNewline { replacement += "\n" }
         
-        textView.insertText(replacement, replacementRange: lineRange)
+        insertText(replacement, replacementRange: lineRange)
         updateFormattingState()
     }
     
     // --- Formatting Actions ---
     
     func toggleBold() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let boldRange = FormatDetector.findBoldRange(in: textView.string, at: range.location) {
+        let range = selectedRange
+        if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location) {
             unwrapFormatting(range: boldRange, prefixLen: 1, suffixLen: 1)
         } else {
             wrapSelection(prefix: "*", suffix: "*")
@@ -1233,9 +1257,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleItalic() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let italicRange = FormatDetector.findItalicRange(in: textView.string, at: range.location) {
+        let range = selectedRange
+        if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location) {
             unwrapFormatting(range: italicRange, prefixLen: 1, suffixLen: 1)
         } else {
             wrapSelection(prefix: "_", suffix: "_")
@@ -1244,9 +1267,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleUnderline() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let underlineRange = FormatDetector.findUnderlineRange(in: textView.string, at: range.location) {
+        let range = selectedRange
+        if let underlineRange = FormatDetector.findUnderlineRange(in: sourceCode, at: range.location) {
             unwrapBracketedFormatting(range: underlineRange, prefixPattern: #"^#underline\s*[\[\(]"#)
         } else {
             wrapSelection(prefix: "#underline[", suffix: "]")
@@ -1255,9 +1277,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleHighlight() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let highlightRange = FormatDetector.findHighlightRange(in: textView.string, at: range.location) {
+        let range = selectedRange
+        if let highlightRange = FormatDetector.findHighlightRange(in: sourceCode, at: range.location) {
             unwrapBracketedFormatting(range: highlightRange, prefixPattern: #"^#highlight\s*[\[\(]"#)
         } else {
             wrapSelection(prefix: "#highlight[", suffix: "]")
@@ -1266,9 +1287,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleStrike() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let strikeRange = FormatDetector.findStrikeRange(in: textView.string, at: range.location) {
+        let range = selectedRange
+        if let strikeRange = FormatDetector.findStrikeRange(in: sourceCode, at: range.location) {
             unwrapBracketedFormatting(range: strikeRange, prefixPattern: #"^#strike\s*[\[\(]"#)
         } else {
             wrapSelection(prefix: "#strike[", suffix: "]")
@@ -1277,9 +1297,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleSubscript() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let subRange = FormatDetector.findSubscriptRange(in: textView.string, at: range.location) {
+        let range = selectedRange
+        if let subRange = FormatDetector.findSubscriptRange(in: sourceCode, at: range.location) {
             unwrapBracketedFormatting(range: subRange, prefixPattern: #"^#sub\s*[\[\(]"#)
         } else {
             wrapSelection(prefix: "#sub[", suffix: "]")
@@ -1288,9 +1307,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleSuperscript() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let supRange = FormatDetector.findSuperscriptRange(in: textView.string, at: range.location) {
+        let range = selectedRange
+        if let supRange = FormatDetector.findSuperscriptRange(in: sourceCode, at: range.location) {
             unwrapBracketedFormatting(range: supRange, prefixPattern: #"^#super\s*[\[\(]"#)
         } else {
             wrapSelection(prefix: "#super[", suffix: "]")
@@ -1299,11 +1317,10 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     private func unwrapBracketedFormatting(range: NSRange, prefixPattern: String) {
-        guard let textView = textView else { return }
-        let text = textView.string as NSString
+        let text = sourceCode as NSString
         let snippet = text.substring(with: range)
         
-        if let openerRange = snippet.range(of: prefixPattern, options: .regularExpression) {
+        if let openerRange = snippet.range(of: prefixPattern, options: String.CompareOptions.regularExpression) {
             let prefixLen = snippet.distance(from: snippet.startIndex, to: openerRange.upperBound)
             unwrapFormatting(range: range, prefixLen: prefixLen, suffixLen: 1)
         } else {
@@ -1316,15 +1333,14 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     private func unwrapFormatting(range: NSRange, prefixLen: Int, suffixLen: Int) {
-        guard let textView = textView else { return }
-        let nsText = textView.string as NSString
+        let nsText = sourceCode as NSString
         let fullSnippet = nsText.substring(with: range)
         
         let contentStart = fullSnippet.index(fullSnippet.startIndex, offsetBy: prefixLen)
         let contentEnd = fullSnippet.index(fullSnippet.endIndex, offsetBy: -suffixLen)
         let innerContent = String(fullSnippet[contentStart..<contentEnd])
         
-        textView.insertText(innerContent, replacementRange: range)
+        insertText(innerContent, replacementRange: range)
     }
     
     func toggleCode() {
@@ -1336,10 +1352,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func deleteCodeBlock() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let codeRange = FormatDetector.findCodeRange(in: textView.string, at: range.location) {
-             textView.insertText("", replacementRange: codeRange)
+        let range = selectedRange
+        if let codeRange = FormatDetector.findCodeRange(in: sourceCode, at: range.location) {
+             insertText("", replacementRange: codeRange)
              updateFormattingState()
         }
     }
@@ -1353,10 +1368,9 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func deleteEquation() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let equationRange = EquationDetector.findEquationRange(in: textView.string, at: range.location) {
-             textView.insertText("", replacementRange: equationRange)
+        let range = selectedRange
+        if let equationRange = EquationDetector.findEquationRange(in: sourceCode, at: range.location) {
+             insertText("", replacementRange: equationRange)
              updateFormattingState()
         }
     }
@@ -1364,9 +1378,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     // --- Commenting Actions ---
     
     func toggleLineComment() {
-        guard let textView = textView else { return }
-        let nsString = textView.string as NSString
-        let range = textView.selectedRange()
+        let nsString = sourceCode as NSString
+        let range = selectedRange
         let lineRange = nsString.lineRange(for: range)
         let selectedLinesText = nsString.substring(with: lineRange)
         
@@ -1392,26 +1405,24 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         }
         
         let replacement = newLines.joined(separator: "\n")
-        textView.insertText(replacement, replacementRange: lineRange)
+        insertText(replacement, replacementRange: lineRange)
     }
     
     func toggleBlockComment() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        let nsString = textView.string as NSString
+        let range = selectedRange
+        let nsString = sourceCode as NSString
         let selectedText = nsString.substring(with: range)
         
         if selectedText.hasPrefix("/*") && selectedText.hasSuffix("*/") {
             let inner = String(selectedText.dropFirst(2).dropLast(2))
-            textView.insertText(inner, replacementRange: range)
+            insertText(inner, replacementRange: range)
         } else {
-            textView.insertText("/* \(selectedText) */", replacementRange: range)
+            insertText("/* \(selectedText) */", replacementRange: range)
         }
     }
     
     func toggleQuote() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         
         // Reset state
         currentQuoteRange = nil
@@ -1420,14 +1431,14 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         isQuoteBlock = true
         
         // If cursor is inside a quote, parse it
-        if let quoteInfo = FormatDetector.parseQuote(in: textView.string, at: range.location) {
+        if let quoteInfo = FormatDetector.parseQuote(in: sourceCode, at: range.location) {
             currentQuoteRange = quoteInfo.range
             currentQuoteContent = quoteInfo.content
             currentQuoteAttribution = quoteInfo.attribution
             isQuoteBlock = quoteInfo.isBlock
         } else if range.length > 0 {
             // If text is selected but not a quote, use it as initial content
-            let nsString = textView.string as NSString
+            let nsString = sourceCode as NSString
             currentQuoteContent = nsString.substring(with: range)
         }
         
@@ -1435,8 +1446,6 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func insertQuote(text: String, attribution: String, isBlock: Bool) {
-        guard let textView = textView else { return }
-        
         var params: [String] = []
         if isBlock { params.append("block: true") }
         if !attribution.isEmpty { params.append("attribution: \"\(attribution)\"") }
@@ -1444,8 +1453,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         let paramStr = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
         let snippet = "#quote\(paramStr)[\(text)]"
         
-        let rangeToReplace = currentQuoteRange ?? textView.selectedRange()
-        textView.insertText(snippet, replacementRange: rangeToReplace)
+        let rangeToReplace = currentQuoteRange ?? selectedRange
+        insertText(snippet, replacementRange: rangeToReplace)
         showQuoteEditor = false
     }
     
@@ -1455,23 +1464,21 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func insertPageBreak() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let existingRange = FormatDetector.findPageBreakRange(in: textView.string, at: range.location) {
-            textView.insertText("", replacementRange: existingRange)
+        let range = selectedRange
+        if let existingRange = FormatDetector.findPageBreakRange(in: sourceCode, at: range.location) {
+            insertText("", replacementRange: existingRange)
         } else {
-            textView.insertText("#pagebreak()\n", replacementRange: range)
+            insertText("#pagebreak()\n", replacementRange: range)
         }
         updateFormattingState()
     }
     
     func insertHorizontalLine() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        if let existingRange = FormatDetector.findHorizontalLineRange(in: textView.string, at: range.location) {
-            textView.insertText("", replacementRange: existingRange)
+        let range = selectedRange
+        if let existingRange = FormatDetector.findHorizontalLineRange(in: sourceCode, at: range.location) {
+            insertText("", replacementRange: existingRange)
         } else {
-            textView.insertText("#line(length: 100%)\n", replacementRange: range)
+            insertText("#line(length: 100%)\n", replacementRange: range)
         }
         updateFormattingState()
     }
@@ -1481,8 +1488,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func toggleBibliography() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         
         // Reset state
         currentBibliographyRange = nil
@@ -1491,7 +1497,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         bibFull = false
         bibStyle = "apa"
         
-        if let info = BibliographyDetector.parseBibliography(in: textView.string, at: range.location) {
+        if let info = BibliographyDetector.parseBibliography(in: sourceCode, at: range.location) {
             currentBibliographyRange = info.range
             bibSources = info.sources
             bibTitle = info.title ?? ""
@@ -1503,8 +1509,6 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func insertBibliography(sources: String, title: String, full: Bool, style: String) {
-        guard let textView = textView else { return }
-        
         var params: [String] = []
         // sources is positional, but we can also use sources: if it's cleaner or needed
         // For Typst, it's usually #bibliography("sources") or #bibliography(("src1", "src2"))
@@ -1524,8 +1528,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         let paramStr = params.isEmpty ? "" : ", " + params.joined(separator: ", ")
         let snippet = "#bibliography(\(cleanedSources)\(paramStr))"
         
-        let rangeToReplace = currentBibliographyRange ?? textView.selectedRange()
-        textView.insertText(snippet, replacementRange: rangeToReplace)
+        let rangeToReplace = currentBibliographyRange ?? selectedRange
+        insertText(snippet, replacementRange: rangeToReplace)
         showBibliographyEditor = false
         updateFormattingState()
     }
@@ -1546,17 +1550,18 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func selectAll() {
-        textView?.selectAll(nil)
+        // Select entire text
+        let fullRange = NSRange(location: 0, length: sourceCode.count)
+        editorState.cursorPositions = [.init(range: fullRange)]
     }
     
     // Opens the visual equation editor for a new equation at the cursor
     func openNewEquationEditor() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
+        let range = selectedRange
         
         // Priority: Check if cursor or selection is inside an existing equation
-        if let equationRange = EquationDetector.findEquationRange(in: textView.string, at: range.location) {
-            let fullText = textView.string as NSString
+        if let equationRange = EquationDetector.findEquationRange(in: sourceCode, at: range.location) {
+            let fullText = sourceCode as NSString
             let content = fullText.substring(with: equationRange)
             var innerContent = content
             
@@ -1575,7 +1580,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
         // Fallback: If there is a selection, use it as initial content (stripping $ if present)
         var initialContent = ""
         if range.length > 0 {
-             let selectedText = (textView.string as NSString).substring(with: range)
+             let selectedText = (sourceCode as NSString).substring(with: range)
              // Simple strip of surrounding $
              initialContent = selectedText.trimmingCharacters(in: CharacterSet(charactersIn: "$"))
         }
@@ -1589,10 +1594,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     @MainActor
     func goToLine(_ lineNumber: Int) {
-        guard let textView = textView,
-              let layoutManager = textView.layoutManager else { return }
-        
-        let text = textView.string as NSString
+        let text = sourceCode as NSString
         var currentLine = 1
         var charIndex = 0
         
@@ -1603,30 +1605,28 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
             charIndex += 1
         }
         
-        let glyphIndex = layoutManager.glyphIndexForCharacter(at: charIndex)
-        let rect = layoutManager.boundingRect(forGlyphRange: NSRange(location: glyphIndex, length: 1), in: textView.textContainer!)
-        textView.scrollToVisible(rect)
-        textView.setSelectedRange(NSRange(location: charIndex, length: 0))
+        self.selectedRange = NSRange(location: charIndex, length: 0)
+        // Note: CodeEditSourceEditor automatically scrolls to selection usually
     }
     
     func toggleLink() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        let text = textView.string
+        let range = selectedRange
+        let text = sourceCode
+        let nsText = text as NSString
         
         if let linkRange = FormatDetector.findLinkRange(in: text, at: range.location) {
             // Edit existing
             self.currentLinkRange = linkRange
-            let linkSnippet = (text as NSString).substring(with: linkRange)
+            let linkSnippet = nsText.substring(with: linkRange)
             
             // Basic parsing of #link("url")[text]
-            if let urlRange = linkSnippet.range(of: "(?<=\"|')[^\"']+(?=\"|')", options: .regularExpression) {
+            if let urlRange = linkSnippet.range(of: "(?<=\"|')[^\"']+(?=\"|')", options: String.CompareOptions.regularExpression) {
                 self.currentLinkURL = String(linkSnippet[urlRange])
             } else {
                 self.currentLinkURL = ""
             }
             
-            if let textRange = linkSnippet.range(of: "(?<=\\[)[^\\]]+(?=\\])", options: .regularExpression) {
+            if let textRange = linkSnippet.range(of: "(?<=\\[)[^\\]]+(?=\\])", options: String.CompareOptions.regularExpression) {
                 self.currentLinkText = String(linkSnippet[textRange])
             } else {
                 self.currentLinkText = ""
@@ -1636,7 +1636,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
             self.currentLinkRange = nil
             self.currentLinkURL = ""
             if range.length > 0 {
-                self.currentLinkText = (text as NSString).substring(with: range)
+                self.currentLinkText = nsText.substring(with: range)
             } else {
                 self.currentLinkText = ""
             }
@@ -1646,8 +1646,6 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     }
     
     func insertLink(url: String, text: String) {
-        guard let textView = textView else { return }
-        
         var snippet = ""
         if text.isEmpty {
             snippet = "#link(\"\(url)\")"
@@ -1655,8 +1653,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
             snippet = "#link(\"\(url)\")[\(text)]"
         }
         
-        let rangeToReplace = currentLinkRange ?? textView.selectedRange()
-        textView.insertText(snippet, replacementRange: rangeToReplace)
+        let rangeToReplace = currentLinkRange ?? selectedRange
+        insertText(snippet, replacementRange: rangeToReplace)
         
         showLinkEditor = false
         updateFormattingState()
@@ -1666,9 +1664,8 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     /// Opens the appropriate editor based on what's at the cursor position
     func openContextualEditor() {
-        guard let textView = textView else { return }
-        let range = textView.selectedRange()
-        let text = textView.string
+        let range = selectedRange
+        let text = sourceCode
         
         // Check in order of priority:
         // 1. Equation
@@ -1738,14 +1735,7 @@ class EditorController: NSObject, ObservableObject, TypstEditorTextViewDelegate 
     
     @MainActor
     private func setupScrollNotification() {
-        guard let scrollView = textView?.enclosingScrollView else { return }
-        
-        NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification,
-            object: scrollView.contentView,
-            queue: .main
-        ) { [weak self] _ in
-            self?.objectWillChange.send()
-        }
+        // Scroll notification is handled differently with CodeEditSourceEditor or not needed in the same way.
+        // For now, we stub it.
     }
 }

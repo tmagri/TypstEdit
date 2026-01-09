@@ -8,11 +8,19 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
+    products: [
+        // It's good practice to declare the executable product explicitly, though optional for simple CLI tools
+        .executable(name: "TypstEdit", targets: ["TypstEdit"])
+    ],
+    dependencies: [
+        .package(url: "https://github.com/CodeEditApp/CodeEditSourceEditor.git", from: "0.15.1")
+    ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .executableTarget(
             name: "TypstEdit",
+            dependencies: [
+                "CodeEditSourceEditor"
+            ],
             path: "Sources",
             resources: [
                 .process("Resources")
