@@ -304,49 +304,15 @@ struct ContentView: View {
         }
     }
     
-    private var customTheme: EditorTheme {
-        func color(_ nsColor: NSColor) -> NSColor {
-            nsColor.usingColorSpace(.sRGB) ?? nsColor
-        }
-        
-        let editorBg = NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.25)
-        let txtColor = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.9)
-
-        return EditorTheme(
-            text: EditorTheme.Attribute(color: color(txtColor)),
-            insertionPoint: color(txtColor),
-            invisibles: EditorTheme.Attribute(color: color(NSColor.quaternaryLabelColor)),
-            background: color(editorBg),
-            lineHighlight: color(NSColor.unemphasizedSelectedContentBackgroundColor),
-            selection: color(NSColor.selectedTextBackgroundColor),
-            keywords: EditorTheme.Attribute(color: color(NSColor.systemPink), bold: true),
-            commands: EditorTheme.Attribute(color: color(NSColor.systemPurple)), // Functions
-            types: EditorTheme.Attribute(color: color(NSColor.systemBlue), bold: true), // Headers and Types
-            attributes: EditorTheme.Attribute(color: color(NSColor.systemPink)), // Named arguments
-            variables: EditorTheme.Attribute(color: color(NSColor.systemYellow)), // Math and Variables
-            values: EditorTheme.Attribute(color: color(NSColor.systemYellow)),
-            numbers: EditorTheme.Attribute(color: color(NSColor.systemMint)),
-            strings: EditorTheme.Attribute(color: color(NSColor.systemGreen)),
-            characters: EditorTheme.Attribute(color: color(NSColor.systemOrange)),
-            comments: EditorTheme.Attribute(color: color(NSColor.systemGray), italic: true)
-        )
-    }
-
     private var editorContent: some View {
         Group {
             if editorController.currentFileType == .typst || editorController.currentFileType == .text {
                 SourceEditor(
                     $editorController.sourceCode,
                     language: .typst,
-                    configuration: SourceEditorConfiguration(
-                        appearance: .init(
-                            theme: customTheme,
-                            font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                            wrapLines: true,
-                            tabWidth: 2
-                        )
-                    ),
-                    state: $editorController.editorState
+                    configuration: editorController.editorConfiguration,
+                    state: $editorController.editorState,
+                    coordinators: [editorController.sourceEditorBridge]
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .id(editorController.currentFileURL?.absoluteString ?? "none")
@@ -553,6 +519,7 @@ struct ContentView: View {
                     self.editorController.syncSavedContent(self.editorController.sourceCode)
                     self.scheduleCompilation(with: self.editorController.sourceCode)
                     self.lastSaved = Date()
+                    self.editorController.showStatus("File Saved")
                     withAnimation { self.showSavePopup = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { withAnimation { self.showSavePopup = false } }
                 }

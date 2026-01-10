@@ -117,27 +117,52 @@ class EditorController: NSObject, ObservableObject {
         
         guard let stringRange = Range(range, in: sourceCode) else { 
              print("[EditorController] insertText FAILED: Invalid range \(range) for len \(sourceCode.count)")
+             showStatus("Insert failed: invalid range")
              return 
         }
         
         sourceCode.replaceSubrange(stringRange, with: text)
         
+        // --- Sync with actual editor if available ---
+        // This is necessary because SourceEditor's binding is one-way (upwards) in some versions
+        if let tvc = textViewController {
+             print("[EditorController] Syncing with TextViewController: \(ObjectIdentifier(tvc))")
+             // Use surgical update to avoid resetting the entire highlighter (fixes "going white")
+             tvc.textView.replaceCharacters(in: range, with: text)
+        } else {
+             print("[EditorController] WARNING: No TextViewController available for sync")
+        }
+        
         if let explicitCursor = newCursorRange {
             editorState.cursorPositions = [.init(range: explicitCursor)]
+            textViewController?.setCursorPositions([.init(range: explicitCursor)], scrollToVisible: true)
         } else {
             // Default behavior: move to end
             if let newEndIndex = sourceCode.index(stringRange.lowerBound, offsetBy: text.count, limitedBy: sourceCode.endIndex) {
-                 // Convert index back to NSRange via helper or direct calculation?
-                 // sourceCode calculation is safer.
-                 let utf16View = sourceCode.utf16
                  let loc = newEndIndex.utf16Offset(in: sourceCode)
                  let newRange = NSRange(location: loc, length: 0)
                  editorState.cursorPositions = [.init(range: newRange)]
+                 textViewController?.setCursorPositions([.init(range: newRange)], scrollToVisible: true)
             }
         }
     }
 
-    // MARK: - Symbol Insertion
+    override init() {
+        super.init()
+        self.sourceEditorBridge = SourceEditorBridge(controller: self)
+        setupDefaultConfiguration()
+    }
+    
+    private func setupDefaultConfiguration() {
+        self.editorConfiguration = SourceEditorConfiguration(
+            appearance: .init(
+                theme: customTheme,
+                font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                wrapLines: true,
+                tabWidth: 2
+            )
+        )
+    }
     func insertSymbol(code: String, unicode: String) {
         // Detect if we are in math mode ($ ... $)
         let index = selectedRange.location
@@ -147,6 +172,7 @@ class EditorController: NSObject, ObservableObject {
         
         let contentToInsert = isMathMode ? code : unicode
         insertText(contentToInsert)
+        showStatus("Inserted Symbol")
     }
     
     
@@ -235,6 +261,65 @@ class EditorController: NSObject, ObservableObject {
                  updateFormattingState()
             }
         }
+    }
+    
+    // Bridge to the actual editor for programmatic updates
+    var sourceEditorBridge: SourceEditorBridge!
+    weak var textViewController: TextViewController?
+    
+    // Stable configuration to prevent "going white" due to frequent resets
+    var editorConfiguration: SourceEditorConfiguration!
+    
+    private var _customTheme: EditorTheme?
+    var customTheme: EditorTheme {
+        if let theme = _customTheme { return theme }
+        
+        func safeColor(_ color: NSColor) -> NSColor {
+            return color.usingColorSpace(.sRGB) ?? color
+        }
+        
+        func attr(_ color: NSColor, bold: Bool = false, italic: Bool = false) -> EditorTheme.Attribute {
+            return EditorTheme.Attribute(color: safeColor(color), bold: bold, italic: italic)
+        }
+        
+        // One Dark Inspired Palette
+        let oneDarkBg = NSColor(red: 40/255, green: 44/255, blue: 52/255, alpha: 1.0)
+        let oneDarkFg = NSColor(red: 171/255, green: 178/255, blue: 191/255, alpha: 1.0)
+        let oneDarkRed = NSColor(red: 224/255, green: 108/255, blue: 117/255, alpha: 1.0)
+        let oneDarkGreen = NSColor(red: 152/255, green: 195/255, blue: 121/255, alpha: 1.0)
+        let oneDarkYellow = NSColor(red: 229/255, green: 192/255, blue: 123/255, alpha: 1.0)
+        let oneDarkBlue = NSColor(red: 97/255, green: 175/255, blue: 239/255, alpha: 1.0)
+        let oneDarkPurple = NSColor(red: 198/255, green: 120/255, blue: 221/255, alpha: 1.0)
+        let oneDarkTeal = NSColor(red: 86/255, green: 182/255, blue: 194/255, alpha: 1.0)
+        let oneDarkGray = NSColor(red: 92/255, green: 99/255, blue: 112/255, alpha: 1.0)
+        
+        let insertionPoint: NSColor
+        if #available(macOS 14.0, *) {
+            insertionPoint = safeColor(NSColor.textInsertionPointColor)
+        } else {
+            insertionPoint = oneDarkFg
+        }
+        
+        let theme = EditorTheme(
+            text: attr(oneDarkFg),
+            insertionPoint: insertionPoint,
+            invisibles: attr(oneDarkGray.withAlphaComponent(0.5)),
+            background: safeColor(oneDarkBg),
+            lineHighlight: safeColor(NSColor.white.withAlphaComponent(0.05)),
+            selection: safeColor(NSColor.selectedTextBackgroundColor).withAlphaComponent(0.4),
+            keywords: attr(oneDarkRed, bold: true),
+            commands: attr(oneDarkPurple),
+            types: attr(oneDarkYellow),
+            attributes: attr(oneDarkTeal),
+            variables: attr(oneDarkBlue),
+            values: attr(oneDarkTeal),
+            numbers: attr(oneDarkYellow),
+            strings: attr(oneDarkGreen),
+            characters: attr(oneDarkGreen),
+            comments: attr(oneDarkGray, italic: true)
+        )
+        _customTheme = theme
+        return theme
     }
 
     
@@ -334,6 +419,7 @@ class EditorController: NSObject, ObservableObject {
         print("[DEBUG] EditorController: syncSavedContent (len=\(content.count))")
         DispatchQueue.main.async {
             self.hasUnsavedChanges = false
+            self.showStatus("File Loaded")
         }
     }
 
@@ -925,7 +1011,7 @@ class EditorController: NSObject, ObservableObject {
     
     private func toggleListPrefix(_ prefix: String) {
         let range = selectedRange
-        guard let r = Range(range, in: sourceCode) else { return }
+        guard Range(range, in: sourceCode) != nil else { return }
         
         let nsText = sourceCode as NSString
         let lineRange = nsText.lineRange(for: range)
@@ -1080,6 +1166,7 @@ class EditorController: NSObject, ObservableObject {
     // Entoure la sélection actuelle avec un préfixe et un suffixe
     func wrapSelection(prefix: String, suffix: String) {
         let range = selectedRange
+        print("[EditorController] wrapSelection prefix='\(prefix)' suffix='\(suffix)' at \(range)")
         
         if range.length == 0 {
             // Insert markers and place cursor in between
@@ -1090,14 +1177,6 @@ class EditorController: NSObject, ObservableObject {
              if let r = Range(range, in: sourceCode) {
                  let selectedText = sourceCode[r]
                  let newText = prefix + selectedText + suffix
-                 // Cursor should wrap the whole new text? Or stay at end?
-                 // Default insertText moves to end. This is usually fine for selection wrap.
-                 // Unless we want to keep selection?
-                 // Usually wrapping keeps selection?
-                 // TypstEdit behavior: select "foo" -> "*foo*" -> Cursor at end.
-                 // If we want to keep selection "*[foo]*":
-                 // let newCursor = NSRange(location: range.location + prefix.count, length: range.length)
-                 // But let's stick to default (cursor at end) for now unless requested.
                  insertText(newText, replacementRange: range)
              }
         }
@@ -1250,8 +1329,10 @@ class EditorController: NSObject, ObservableObject {
         let range = selectedRange
         if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location) {
             unwrapFormatting(range: boldRange, prefixLen: 1, suffixLen: 1)
+            showStatus("Removed Bold")
         } else {
             wrapSelection(prefix: "*", suffix: "*")
+            showStatus("Applied Bold")
         }
         updateFormattingState()
     }
@@ -1260,8 +1341,10 @@ class EditorController: NSObject, ObservableObject {
         let range = selectedRange
         if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location) {
             unwrapFormatting(range: italicRange, prefixLen: 1, suffixLen: 1)
+            showStatus("Removed Italic")
         } else {
             wrapSelection(prefix: "_", suffix: "_")
+            showStatus("Applied Italic")
         }
         updateFormattingState()
     }
@@ -1723,13 +1806,16 @@ class EditorController: NSObject, ObservableObject {
     }
     
     /// Shows a temporary status message to the user
-    private func showStatus(_ message: String, duration: TimeInterval = 2.0) {
+    func showStatus(_ message: String, duration: TimeInterval = 2.0) {
         statusMessage = message
         showStatusMessage = true
         
-        // Auto-hide after duration
+        // Auto-hide after duration (slightly longer for success messages)
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
-            self.showStatusMessage = false
+            // Only hide if the message hasn't been changed in the meantime
+            if self.statusMessage == message {
+                self.showStatusMessage = false
+            }
         }
     }
     
@@ -1737,5 +1823,41 @@ class EditorController: NSObject, ObservableObject {
     private func setupScrollNotification() {
         // Scroll notification is handled differently with CodeEditSourceEditor or not needed in the same way.
         // For now, we stub it.
+    }
+}
+
+/// A bridge between the EditorController and the SourceEditor's underlying TextViewController.
+/// This allows for programmatic text updates which are not supported by the SourceEditor binding directly.
+@MainActor
+class SourceEditorBridge: TextViewCoordinator {
+    weak var controller: EditorController?
+    
+    init(controller: EditorController) {
+        self.controller = controller
+    }
+    
+    nonisolated func prepareCoordinator(controller: TextViewController) {
+        let ptr = ObjectIdentifier(controller)
+        print("[SourceEditorBridge] prepareCoordinator for \(ptr)")
+        MainActor.assumeIsolated {
+            self.controller?.textViewController = controller
+        }
+    }
+    
+    nonisolated func destroy() {
+        print("[SourceEditorBridge] destroy")
+        // NOTE: We don't set self.controller?.textViewController = nil here
+        // because SwiftUI may destroy the old coordinator AFTER creating the new one
+        // when switching files, causing a race condition where the new valid ref is cleared.
+    }
+    
+    nonisolated func textViewDidChangeText(controller: TextViewController) {
+        // Sync back to EditorController if needed (usually handled by binding, but as a backup)
+        // Guard against infinite loops if we are already in an update
+        MainActor.assumeIsolated {
+            if self.controller?.sourceCode != controller.text {
+                 self.controller?.sourceCode = controller.text
+            }
+        }
     }
 }

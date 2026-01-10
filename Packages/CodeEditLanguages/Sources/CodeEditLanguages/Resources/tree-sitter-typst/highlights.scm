@@ -1,12 +1,19 @@
-(call
-  item: (ident) @function)
-(call
-  item: (field field: (ident) @function.method))
+; HEADINGS
+(heading "=" @type) @markup.heading.1
+(heading "==" @type) @markup.heading.2
+(heading "===" @type) @markup.heading.3
+(heading "====" @type) @markup.heading.4
+(heading "=====" @type) @markup.heading.5
+(heading "======" @type) @markup.heading.6
+
+; FUNCTIONS & COMMANDS
+(call item: (ident) @function)
+(call item: (field field: (ident) @function.method))
 (tagged field: (ident) @attribute)
 (field field: (ident) @attribute)
-(comment) @comment
+"#" @keyword.operator
 
-; CONTROL
+; KEYWORDS
 (let "let" @keyword.storage.type)
 (branch ["if" "else"] @keyword.control.conditional)
 (while "while" @keyword.control.repeat)
@@ -20,13 +27,13 @@
 (set (ident) @function)
 (return "return" @keyword.control)
 (flow ["break" "continue"] @keyword.control)
-
-; OPERATOR
 (in ["in" "not"] @keyword.operator)
 (context "context" @keyword.control)
 (and "and" @keyword.operator)
 (or "or" @keyword.operator)
 (not "not" @keyword.operator)
+
+; OPERATORS
 (sign ["+" "-"] @operator)
 (add "+" @operator)
 (sub "-" @operator)
@@ -37,44 +44,38 @@
 (fac "!" @operator)
 (attach ["^" "_"] @operator)
 (wildcard) @operator
+(align) @operator
 
-; VALUE
-(raw_blck "```" @operator) @markup.raw.block
-(raw_span "`" @operator) @markup.raw.block
-(raw_blck lang: (ident) @attribute)
-(label) @attribute
-(ref) @attribute
+; VALUES & CONSTANTS
 (number) @constant.numeric
 (string) @string
-(content ["[" "]"] @operator)
 (bool) @constant.builtin.boolean
 (none) @constant.builtin
 (auto) @constant.builtin
 (ident) @variable
+(label) @attribute
+(ref) @attribute
 
 ; MARKUP
-(item "-" @markup.list)
-(term ["/" ":"] @markup.list)
-(heading "=" @type) @type
-(heading "==" @type) @type
-(heading "===" @type) @type
-(heading "====" @type) @type
-(heading "=====" @type) @type
-(heading "======" @type) @type
-(url) @tag
-(emph) @comment
-(strong) @keyword
+(comment) @comment
+(emph) @comment ; Italic
+(strong) @keyword ; Bold
 (symbol) @constant.character
 (shorthand) @constant.builtin
 (quote) @markup.quote
-(align) @operator
 (letter) @constant.character
 (linebreak) @constant.builtin
+(url) @tag
+(raw_blck "```" @operator) @markup.raw.block
+(raw_span "`" @operator) @markup.raw.block
+(raw_blck lang: (ident) @attribute)
+(content ["[" "]"] @operator)
 
-(math "$" @operator)
-"#" @keyword
+; MATH
+(math "$" @operator) @keyword.operator
 "end" @operator
 
+; MISC
 (escape) @constant.character.escape
 ["(" ")" "{" "}"] @punctuation.bracket
 ["," ";" ".." ":" "sep"] @punctuation.delimiter
