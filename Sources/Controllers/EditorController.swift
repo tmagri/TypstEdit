@@ -282,7 +282,7 @@ class EditorController: NSObject, ObservableObject {
             return EditorTheme.Attribute(color: safeColor(color), bold: bold, italic: italic)
         }
         
-        // One Dark Inspired Palette
+        // One Dark Inspired Palette (Refined for Typst)
         let oneDarkBg = NSColor(red: 40/255, green: 44/255, blue: 52/255, alpha: 1.0)
         let oneDarkFg = NSColor(red: 171/255, green: 178/255, blue: 191/255, alpha: 1.0)
         let oneDarkRed = NSColor(red: 224/255, green: 108/255, blue: 117/255, alpha: 1.0)
@@ -307,13 +307,13 @@ class EditorController: NSObject, ObservableObject {
             background: safeColor(oneDarkBg),
             lineHighlight: safeColor(NSColor.white.withAlphaComponent(0.05)),
             selection: safeColor(NSColor.selectedTextBackgroundColor).withAlphaComponent(0.4),
-            keywords: attr(oneDarkRed, bold: true),
+            keywords: attr(oneDarkPurple, bold: true),   // Bold markup [*...*] (Purple + Bold)
             commands: attr(oneDarkPurple),
-            types: attr(oneDarkYellow),
-            attributes: attr(oneDarkTeal),
-            variables: attr(oneDarkBlue),
+            types: attr(oneDarkBlue, bold: true),      // Headings [= ...] (Blue + Bold)
+            attributes: attr(oneDarkPurple, italic: true), // Italic markup [_..._] (Purple + Italic)
+            variables: attr(oneDarkPurple),            // Hashtag commands [#set, etc] (Purple)
             values: attr(oneDarkTeal),
-            numbers: attr(oneDarkYellow),
+            numbers: attr(oneDarkYellow),              // Math blocks [$...$] (Yellow)
             strings: attr(oneDarkGreen),
             characters: attr(oneDarkGreen),
             comments: attr(oneDarkGray, italic: true)
