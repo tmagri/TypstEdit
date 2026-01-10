@@ -17,8 +17,11 @@ struct BibliographyDetector {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
         
         let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+        // Safety check: Clamp index
+        let safeIndex = max(0, min(index, nsText.length))
+        
         for match in matches {
-            if NSLocationInRange(index, match.range) {
+            if NSLocationInRange(safeIndex, match.range) {
                 return match.range
             }
         }

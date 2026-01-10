@@ -25,6 +25,9 @@ struct TableDetector {
         
         let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         
+        // Safety check: Clamp index
+        let safeIndex = max(0, min(index, length))
+        
         for match in matches {
             let start = match.range.location
             // Find matching )
@@ -39,7 +42,7 @@ struct TableDetector {
             
             if depth == 0 {
                 let range = NSRange(location: start, length: i - start)
-                if index >= range.location && index <= (range.location + range.length) {
+                if safeIndex >= range.location && safeIndex <= (range.location + range.length) {
                     return range
                 }
             }

@@ -8,6 +8,9 @@ struct EquationDetector {
         let nsText = text as NSString
         let length = nsText.length
         
+        // Safety check: Clamp index
+        let safeIndex = max(0, min(index, length))
+        
         // Pattern: Matches $...$ but skips escaped \$
         // Using lookbehind/lookahead for escapes or just simple match and filter
         // Typst math: $...$ for both inline and display.
@@ -30,14 +33,14 @@ struct EquationDetector {
             let range = match.range
             
             // If the cursor is inside the range (inclusive)
-            if index >= range.location && index <= (range.location + range.length) {
+            if safeIndex >= range.location && safeIndex <= (range.location + range.length) {
                 let content = nsText.substring(with: range)
                 print("[DEBUG] EquationDetector: Match found at \(range) content: '\(content)'")
                 return range
             }
             
             // Check adjacency (click just after)
-            if index == range.location + range.length {
+            if safeIndex == range.location + range.length {
                 let content = nsText.substring(with: range)
                 print("[DEBUG] EquationDetector: Adjacent match found at \(range) content: '\(content)'")
                 return range

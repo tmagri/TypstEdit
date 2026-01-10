@@ -18,12 +18,15 @@ struct ImageDetector {
         
         let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
         
+        // Safety check: Clamp index
+        let safeIndex = max(0, min(index, nsText.length))
+        
         for match in matches.reversed() {
-            if match.range.location <= index {
+            if match.range.location <= safeIndex {
                 // Potential start. Now find the matching closing parenthesis.
                 if let contentRange = findClosingParenthesis(in: text, startingAt: match.range.location + match.range.length) {
                     let fullRange = NSRange(location: match.range.location, length: contentRange.upperBound - match.range.location)
-                    if NSLocationInRange(index, fullRange) {
+                    if NSLocationInRange(safeIndex, fullRange) {
                         return fullRange
                     }
                 }

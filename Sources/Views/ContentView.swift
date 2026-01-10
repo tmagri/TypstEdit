@@ -410,11 +410,15 @@ struct ContentView: View {
         
         if self.editorController.hasUnsavedChanges, let prev = currentlyLoadedFile {
             if let appDelegate = AppDelegate.shared {
-                if !appDelegate.showSaveWarningIfNeeded(for: prev) {
-                    self.isInternalSelectionChange = true
-                    self.selectedFile = prev
-                    return
+                appDelegate.showSaveWarningAsync(for: prev) { proceed in
+                    if proceed {
+                        self.loadFile(url: newValue)
+                    } else {
+                        self.isInternalSelectionChange = true
+                        self.selectedFile = prev
+                    }
                 }
+                return
             }
         }
         self.loadFile(url: newValue)

@@ -38,18 +38,20 @@ struct FormatDetector {
     
     private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
         let nsText = text as NSString
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
         guard let regex = try? NSRegularExpression(pattern: prefixPattern, options: []) else { return nil }
         
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         
         for match in matches.reversed() {
-            if match.range.location <= index {
+            if match.range.location <= safeIndex {
                 let opener = nsText.substring(with: NSRange(location: match.range.location + match.range.length - 1, length: 1))
                 let closer = opener == "[" ? "]" : ")"
                 
                 if let contentRange = findClosingMarker(in: text, startingAt: match.range.location + match.range.length, opener: opener, closer: closer) {
                     let fullRange = NSRange(location: match.range.location, length: contentRange.upperBound - match.range.location)
-                    if NSLocationInRange(index, fullRange) {
+                    if NSLocationInRange(safeIndex, fullRange) {
                         return fullRange
                     }
                 }
@@ -61,7 +63,9 @@ struct FormatDetector {
     /// Detects the heading level (0-6) of the line at the given index.
     static func detectHeadingLevel(in text: String, at index: Int) -> Int {
         let nsText = text as NSString
-        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange)
         
         // Typst headings start with some number of = followed by whitespace
@@ -80,7 +84,9 @@ struct FormatDetector {
     /// Detects if the cursor at the given index is on a bullet list line.
     static func isBulletListActive(in text: String, at index: Int) -> Bool {
         let nsText = text as NSString
-        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
         return line.hasPrefix("- ")
     }
@@ -88,7 +94,9 @@ struct FormatDetector {
     /// Detects if the cursor at the given index is on a numerical list line.
     static func isNumberListActive(in text: String, at index: Int) -> Bool {
         let nsText = text as NSString
-        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
         return line.hasPrefix("+ ")
     }
@@ -96,7 +104,9 @@ struct FormatDetector {
     /// Finds the range of the heading prefix (e.g., "== ") for the line at the given index.
     static func findHeadingRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
-        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange)
         
         let pattern = #"^(=+)\s"#
@@ -113,9 +123,12 @@ struct FormatDetector {
         let nsText = text as NSString
         let length = nsText.length
         
+        // Safety check: Clamped index
+        let safeIndex = max(0, min(index, length))
+        
         // Search backwards for the opener
         var openerIndex = -1
-        var i = index - 1
+        var i = safeIndex - 1
         while i >= 0 {
             let char = nsText.substring(with: NSRange(location: i, length: 1))
             if char == marker {
@@ -136,8 +149,9 @@ struct FormatDetector {
         
         // Search forwards for the closer
         var closerIndex = -1
-        i = index
+        i = safeIndex
         while i < length {
+            if i < 0 { i += 1; continue }
             let char = nsText.substring(with: NSRange(location: i, length: 1))
             if char == marker {
                 // Check if it's not escaped
@@ -181,6 +195,7 @@ struct FormatDetector {
     static func findCodeRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
         let length = nsText.length
+        let safeIndex = max(0, min(index, length))
         
         // Pattern for triple backticks (multiline) and single backticks (inline)
         // Order matters: match triple first
@@ -191,7 +206,7 @@ struct FormatDetector {
             let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
             
             for match in matches {
-                if index >= match.range.location && index <= match.range.upperBound {
+                if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
                     return match.range
                 }
             }
@@ -203,11 +218,14 @@ struct FormatDetector {
         let pattern = #"#link\("([^"]+)"\)(?:\[(.*?)\])?"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
         
-        let range = NSRange(location: 0, length: text.utf16.count)
-        let matches = regex.matches(in: text, options: [], range: range)
+        let nsText = text as NSString
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         
         for match in matches {
-            if NSLocationInRange(index, match.range) {
+            if NSLocationInRange(safeIndex, match.range) {
                 return match.range
             }
         }
@@ -221,11 +239,14 @@ struct FormatDetector {
         let pattern = #"```[\s\S]*?```"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
         
-        let range = NSRange(location: 0, length: text.utf16.count)
-        let matches = regex.matches(in: text, options: [], range: range)
+        let nsText = text as NSString
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         
         for match in matches {
-            if NSLocationInRange(index, match.range) {
+            if NSLocationInRange(safeIndex, match.range) {
                 return match.range
             }
         }
@@ -242,7 +263,9 @@ struct FormatDetector {
 
     static func findPageBreakRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
-        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
         if line.contains("#pagebreak()") {
             return lineRange
@@ -252,7 +275,9 @@ struct FormatDetector {
 
     static func findHorizontalLineRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
-        let lineRange = nsText.lineRange(for: NSRange(location: index, length: 0))
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
         if line.contains("#line(length: 100%)") {
             return lineRange
@@ -352,10 +377,12 @@ struct FormatDetector {
     /// This uses a heuristic of counting unescaped dollar signs from the beginning of text.
     static func isMathMode(in text: String, at index: Int) -> Bool {
         let nsText = text as NSString
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
         var dollarCount = 0
         var i = 0
         
-        while i < index && i < nsText.length {
+        while i < safeIndex && i < length {
             let char = nsText.substring(with: NSRange(location: i, length: 1))
             
             if char == "\\" {

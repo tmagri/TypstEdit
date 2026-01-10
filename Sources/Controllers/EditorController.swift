@@ -417,19 +417,21 @@ class EditorController: NSObject, ObservableObject {
     func syncSavedContent(_ content: String) {
         self.savedContent = content
         print("[DEBUG] EditorController: syncSavedContent (len=\(content.count))")
-        DispatchQueue.main.async {
-            self.hasUnsavedChanges = false
-            self.showStatus("File Loaded")
-        }
+        self.hasUnsavedChanges = false
+        self.showStatus("File Loaded")
     }
 
     func checkUnsavedChanges(currentContent: String) {
-        let dirty = (currentContent != savedContent)
+        // Normalize by trimming trailing whitespace/newlines to avoid SourceEditor auto-adjustments
+        // from triggering a false "dirty" state immediately after load.
+        let normalizedCurrent = currentContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSaved = savedContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let dirty = (normalizedCurrent != normalizedSaved)
+        
         if self.hasUnsavedChanges != dirty {
             print("[DEBUG] EditorController(\(ObjectIdentifier(self))): checkUnsavedChanges changing to \(dirty) (prev=\(self.hasUnsavedChanges))")
-            DispatchQueue.main.async {
-                self.hasUnsavedChanges = dirty
-            }
+            self.hasUnsavedChanges = dirty
         }
     }
     

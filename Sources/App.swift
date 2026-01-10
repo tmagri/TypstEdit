@@ -17,7 +17,55 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         print("[DEBUG] AppDelegate: init")
     }
     
-    // Shared logic for save warning
+    // Shared logic for save warning (Async)
+    func showSaveWarningAsync(for url: URL? = nil, completion: @escaping (Bool) -> Void) {
+        print("[DEBUG] showSaveWarningAsync entry: editorController is nil? \(editorController == nil), hasUnsavedChanges=\(editorController?.hasUnsavedChanges ?? false), url=\(url?.lastPathComponent ?? "nil")")
+        guard let controller = editorController, controller.hasUnsavedChanges else {
+            completion(true) // Proceed
+            return
+        }
+        
+        let fileName = url?.lastPathComponent ?? "the document"
+        
+        let alert = NSAlert()
+        alert.messageText = "Do you want to save the changes made to \(fileName)?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Don't Save")
+        
+        // Find the main window
+        guard let window = NSApplication.shared.windows.first(where: { $0.isVisible && $0.isKeyWindow }) ?? NSApplication.shared.mainWindow else {
+            // Fallback to sync if no window found (unlikely but safe)
+            let response = alert.runModal()
+            switch response {
+            case .alertFirstButtonReturn:
+                NotificationCenter.default.post(name: .requestSave, object: url)
+                completion(true)
+            case .alertSecondButtonReturn:
+                completion(false)
+            default:
+                completion(true)
+            }
+            return
+        }
+        
+        alert.beginSheetModal(for: window) { response in
+            switch response {
+            case .alertFirstButtonReturn: // Save
+                NotificationCenter.default.post(name: .requestSave, object: url)
+                completion(true)
+            case .alertSecondButtonReturn: // Cancel
+                completion(false)
+            case .alertThirdButtonReturn: // Don't Save
+                completion(true)
+            default:
+                completion(false)
+            }
+        }
+    }
+    
+    // Legacy sync version
     func showSaveWarningIfNeeded(for url: URL? = nil) -> Bool {
         print("[DEBUG] showSaveWarningIfNeeded entry: editorController is nil? \(editorController == nil), hasUnsavedChanges=\(editorController?.hasUnsavedChanges ?? false), url=\(url?.lastPathComponent ?? "nil")")
         guard let controller = editorController, controller.hasUnsavedChanges else {
