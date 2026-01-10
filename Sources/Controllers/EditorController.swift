@@ -157,7 +157,7 @@ class EditorController: NSObject, ObservableObject {
         self.editorConfiguration = SourceEditorConfiguration(
             appearance: .init(
                 theme: customTheme,
-                font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                font: NSFont(name: "Menlo", size: 13) ?? .monospacedSystemFont(ofSize: 13, weight: .regular),
                 wrapLines: true,
                 tabWidth: 2
             )
@@ -307,10 +307,10 @@ class EditorController: NSObject, ObservableObject {
             background: safeColor(oneDarkBg),
             lineHighlight: safeColor(NSColor.white.withAlphaComponent(0.05)),
             selection: safeColor(NSColor.selectedTextBackgroundColor).withAlphaComponent(0.4),
-            keywords: attr(oneDarkPurple, bold: true),   // Bold markup [*...*] (Purple + Bold)
+            keywords: attr(oneDarkPurple, bold: true),   // Strong markup [*bold*] (Purple + Bold)
             commands: attr(oneDarkPurple),
             types: attr(oneDarkBlue, bold: true),      // Headings [= ...] (Blue + Bold)
-            attributes: attr(oneDarkPurple, italic: true), // Italic markup [_..._] (Purple + Italic)
+            attributes: attr(oneDarkPurple, italic: true), // Emph markup [_italic_] (Purple + Italic)
             variables: attr(oneDarkPurple),            // Hashtag commands [#set, etc] (Purple)
             values: attr(oneDarkTeal),
             numbers: attr(oneDarkYellow),              // Math blocks [$...$] (Yellow)
