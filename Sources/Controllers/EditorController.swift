@@ -445,6 +445,39 @@ class EditorController: NSObject, ObservableObject {
         // textView?.undoManager?.redo()
     }
     
+    func cutSelection() {
+        let range = selectedRange
+        if range.length > 0, let r = Range(range, in: sourceCode) {
+            let text = String(sourceCode[r])
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            insertText("", replacementRange: range)
+        }
+    }
+    
+    func copySelection() {
+        let range = selectedRange
+        if range.length > 0, let r = Range(range, in: sourceCode) {
+            let text = String(sourceCode[r])
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+    }
+    
+    func pasteSelection() {
+        if let items = NSPasteboard.general.pasteboardItems?.first,
+           let text = items.string(forType: .string) {
+            insertText(text)
+        }
+    }
+    
+    func deleteSelection() {
+        let range = selectedRange
+        if range.length > 0 {
+            insertText("", replacementRange: range)
+        }
+    }
+    
     // --- Snippet Functions ---
     
     func insertTableSnippet() {
@@ -1150,7 +1183,12 @@ class EditorController: NSObject, ObservableObject {
     func scrollToMatch(at index: Int) {
         if index >= 0 && index < searchMatches.count {
             let range = searchMatches[index]
-            selectedRange = range
+            self.selectedRange = range
+            
+            // Explicitly scroll using the bridge
+            DispatchQueue.main.async {
+                self.textViewController?.setCursorPositions([.init(range: range)], scrollToVisible: true)
+            }
         }
     }
     
@@ -1638,6 +1676,10 @@ class EditorController: NSObject, ObservableObject {
         // Select entire text
         let fullRange = NSRange(location: 0, length: sourceCode.count)
         editorState.cursorPositions = [.init(range: fullRange)]
+        // Ensure UI update
+        DispatchQueue.main.async {
+             self.textViewController?.setCursorPositions([.init(range: fullRange)], scrollToVisible: false)
+        }
     }
     
     // Opens the visual equation editor for a new equation at the cursor
@@ -1691,7 +1733,12 @@ class EditorController: NSObject, ObservableObject {
         }
         
         self.selectedRange = NSRange(location: charIndex, length: 0)
-        // Note: CodeEditSourceEditor automatically scrolls to selection usually
+        
+        // Explicitly scroll to the new position
+        DispatchQueue.main.async {
+            let newPos = CursorPosition(range: NSRange(location: charIndex, length: 0))
+            self.textViewController?.setCursorPositions([newPos], scrollToVisible: true)
+        }
     }
     
     func toggleLink() {

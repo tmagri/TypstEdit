@@ -73,6 +73,28 @@ struct AppMenuCommands: Commands {
             
             Divider()
             
+            Button("Cut") {
+                NotificationCenter.default.post(name: .menuCommand, object: "cut")
+            }
+            .keyboardShortcut("x", modifiers: .command)
+            
+            Button("Copy") {
+                NotificationCenter.default.post(name: .menuCommand, object: "copy")
+            }
+            .keyboardShortcut("c", modifiers: .command)
+            
+            Button("Paste") {
+                NotificationCenter.default.post(name: .menuCommand, object: "paste")
+            }
+            .keyboardShortcut("v", modifiers: .command)
+            
+            Button("Delete") {
+                NotificationCenter.default.post(name: .menuCommand, object: "delete")
+            }
+            .keyboardShortcut(.delete, modifiers: [])
+            
+            Divider()
+            
             Button("Search and Replace") {
                 withAnimation {
                     editorController.isSearchVisible.toggle()

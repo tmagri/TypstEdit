@@ -623,8 +623,43 @@ struct ContentView: View {
         case "exportSVG": handleExport(format: "svg")
         case "undo": editorController.undo()
         case "redo": editorController.redo()
+        case "cut": editorController.cutSelection()
+        case "copy": editorController.copySelection()
+        case "paste": editorController.pasteSelection()
+        case "delete": editorController.deleteSelection()
         case "goToLine": editorController.showGoToLineAlert = true
         case "selectAll": editorController.selectAll()
+        
+        // Formatting
+        case "toggleBold": editorController.toggleBold()
+        case "toggleItalic": editorController.toggleItalic()
+        case "toggleUnderline": editorController.toggleUnderline()
+        case "toggleHighlight": editorController.toggleHighlight()
+        case "toggleStrike": editorController.toggleStrike()
+        case "toggleSubscript": editorController.toggleSubscript()
+        case "toggleSuperscript": editorController.toggleSuperscript()
+        case "toggleLineComment": editorController.toggleLineComment()
+        case "toggleBlockComment": editorController.toggleBlockComment()
+        
+        // Lists & Code
+        case "toggleBulletList": editorController.toggleBulletList()
+        case "toggleNumberList": editorController.toggleNumberList()
+        case "toggleCode": editorController.toggleCode()
+        case "toggleCodeBlock": editorController.toggleCodeBlock()
+        case "toggleQuote": editorController.toggleQuote()
+        
+        // Insert / Open Editors
+        case "insertPageBreak": editorController.insertPageBreak()
+        case "insertHorizontalLine": editorController.insertHorizontalLine()
+        case "insertFootnote": editorController.openFootnoteEditor() // "insertFootnote" menu item usually opens editor or inserts default
+        case "insertBibliography": editorController.toggleBibliography()
+        case "openContextualEditor": editorController.openContextualEditor()
+        case "openFigureEditor": editorController.openFigureEditor()
+        case "openSymbolPicker": editorController.showSymbolPicker = true
+        case "openOutlineEditor": editorController.openOutlineEditor()
+        case "openExternalDataEditor": editorController.openExternalDataEditor()
+        case "showHelp": editorController.showHelp = true
+            
         // Note: For SourceEditor, selection/cursor logic might need to be hooked up to `editorState`
         case "toggleSidebar": withAnimation { editorController.isSidebarVisible.toggle() }
         case "viewEditorOnly": withAnimation { editorController.viewMode = .editorOnly }
