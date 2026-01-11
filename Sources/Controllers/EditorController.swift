@@ -7,6 +7,7 @@ extension Notification.Name {
 }
 
 import CodeEditSourceEditor
+import Combine
 
 @MainActor
 class EditorController: NSObject, ObservableObject {
@@ -228,7 +229,6 @@ class EditorController: NSObject, ObservableObject {
     
     @Published var zoomLevel: CGFloat = 1.0
     @Published var isSidebarVisible: Bool = true
-    @Published var isSearchVisible: Bool = false
     @Published var wrapLines: Bool = true
     @Published var isBulletListActive: Bool = false
     @Published var isNumberListActive: Bool = false
@@ -285,7 +285,8 @@ class EditorController: NSObject, ObservableObject {
         // One Dark Inspired Palette (Refined for Typst)
         let oneDarkBg = NSColor(red: 40/255, green: 44/255, blue: 52/255, alpha: 1.0)
         let oneDarkFg = NSColor(red: 171/255, green: 178/255, blue: 191/255, alpha: 1.0)
-        let oneDarkRed = NSColor(red: 224/255, green: 108/255, blue: 117/255, alpha: 1.0)
+        // let oneDarkRed = NSColor(red: 224/255, green: 108/255, blue: 117/255, alpha: 1.0) // Unused
+
         let oneDarkGreen = NSColor(red: 152/255, green: 195/255, blue: 121/255, alpha: 1.0)
         let oneDarkYellow = NSColor(red: 229/255, green: 192/255, blue: 123/255, alpha: 1.0)
         let oneDarkBlue = NSColor(red: 97/255, green: 175/255, blue: 239/255, alpha: 1.0)
@@ -393,19 +394,8 @@ class EditorController: NSObject, ObservableObject {
 
     
     // Recherche
-    @Published var searchQuery: String = "" {
-        didSet {
-            if searchQuery != oldValue {
-                performSearch()
-            }
-        }
-    }
-    @Published var searchMatches: [NSRange] = []
-    @Published var currentMatchIndex: Int = -1
-    
-    var matchCount: Int {
-        searchMatches.count
-    }
+    // Search state removed in favor of native find panel
+
     
     // Demande de redessiner la règle (numéros de ligne)
     // Demande de redessiner la règle (numéros de ligne)
@@ -1132,70 +1122,120 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Search Functions ---
     
-    func performSearch() {
-        guard !searchQuery.isEmpty else {
-            clearSearch()
+    // --- Search Functions ---
+    
+    func showFindPanel() {
+        // Trigger the native find panel via editor state
+        // CodeEditSourceEditor observes this state and shows/hides the panel
+        
+        // 1. Pre-populate find text from selection if not empty
+        let selectedText = (sourceCode as NSString).substring(with: selectedRange)
+        if !selectedText.isEmpty && !selectedText.contains("\n") {
+             editorState.findText = selectedText
+        }
+        
+        // 2. Show the panel
+        editorState.findPanelVisible = true
+        
+        // 3. Force Focus & Layout Fix
+        // We need to access the FindViewController to adjust constraints and focus the panel.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self,
+                  let textViewController = self.textViewController else { return }
+            
+            // Access internal findViewController via Mirror
+            let tvcMirror = Mirror(reflecting: textViewController)
+            guard let findVCChild = tvcMirror.children.first(where: { $0.label == "findViewController" }),
+                  let findVC = self.unwrap(findVCChild.value) as? NSViewController else { return }
+            
+            let containerView = findVC.view
+            
+            // Find the panel (z=1000)
+            guard let findPanel = containerView.subviews.first(where: { $0.layer?.zPosition == 1000 }) else { return }
+            
+            // Find the editor view (childView). It's likely textViewController.view, but let's be safe
+            // In FindViewController, childView is added. It should be the other subview.
+            guard let editorView = containerView.subviews.first(where: { $0 != findPanel }) else { return }
+            
+            // Force focus
+            containerView.window?.makeFirstResponder(findPanel)
+            
+            // 4. Layout: Shift Editor Below Find Panel
+            // Remove existing top constraint on editorView
+            let topConstraints = containerView.constraints.filter { constraint in
+                return (constraint.firstItem === editorView && constraint.firstAttribute == .top) ||
+                       (constraint.secondItem === editorView && constraint.secondAttribute == .top)
+            }
+            
+            if !topConstraints.isEmpty {
+                containerView.removeConstraints(topConstraints)
+            }
+            
+            // Add new constraint: editorView.top == findPanel.bottom
+            let newConstraint = editorView.topAnchor.constraint(equalTo: findPanel.bottomAnchor)
+            newConstraint.isActive = true
+            
+            // 5. Setup Observers for Scrolling
+            self.setupFindPanelObservers()
+        }
+    }
+    
+    private var findPanelCancellables: Set<AnyCancellable> = []
+    
+    private func setupFindPanelObservers() {
+        findPanelCancellables.removeAll()
+        
+        // Use Mirror to access internal properties to avoid build errors.
+        guard let textViewController = textViewController else { return }
+        
+        let tvcMirror = Mirror(reflecting: textViewController)
+        guard let findVCChild = tvcMirror.children.first(where: { $0.label == "findViewController" }) else { return }
+        
+        // Unwrap the Optional<FindViewController>
+        guard let findVC = unwrap(findVCChild.value) else { return }
+        
+        // Get ViewModel from FindViewController
+        let vcMirror = Mirror(reflecting: findVC)
+        guard let vmChild = vcMirror.children.first(where: { $0.label == "viewModel" }) else { return }
+        guard let viewModel = unwrap(vmChild.value) else { return }
+        
+        // Get Published properties from ViewModel
+        let vmMirror = Mirror(reflecting: viewModel)
+        
+        guard var currentMatchProp = vmMirror.children.first(where: { $0.label == "_currentFindMatchIndex" })?.value as? Published<Int?>,
+              var findMatchesProp = vmMirror.children.first(where: { $0.label == "_findMatches" })?.value as? Published<[NSRange]> else {
             return
         }
         
-        // Simple case insensitive search
-        searchMatches = []
-        let nsString = sourceCode as NSString
-        var searchRange = NSRange(location: 0, length: nsString.length)
-        
-        while searchRange.location < nsString.length {
-            let foundRange = nsString.range(of: searchQuery, options: .caseInsensitive, range: searchRange)
-            if foundRange.location != NSNotFound {
-                searchMatches.append(foundRange)
-                searchRange.location = foundRange.location + foundRange.length
-                searchRange.length = nsString.length - searchRange.location
-            } else {
-                break
+        // CombineLatest to get both index and matches when either changes
+        Publishers.CombineLatest(currentMatchProp.projectedValue, findMatchesProp.projectedValue)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] (index, matches) in
+                guard let self = self,
+                      let index = index,
+                      index >= 0,
+                      index < matches.count else { return }
+                
+                let matchRange = matches[index]
+                
+                // Update cursor to match the selection (without auto-scroll)
+                self.textViewController?.setCursorPositions([.init(range: matchRange)], scrollToVisible: false)
+                
+                // Explicitly scroll using the more robust method
+                self.textViewController?.textView.scrollToRange(matchRange, center: true)
             }
+            .store(in: &findPanelCancellables)
+    }
+    
+    /// Helper to unwrap optional values inside Any
+    private func unwrap(_ any: Any) -> Any? {
+        let mirror = Mirror(reflecting: any)
+        if mirror.displayStyle != .optional {
+            return any
         }
-
         
-        if !searchMatches.isEmpty {
-            currentMatchIndex = 0
-            scrollToMatch(at: 0)
-        }
-    }
-    
-    func highlightMatches() {
-        // Search highlighting not implemented for CodeEditSourceEditor yet
-        // TODO: Implement highlighting for search matches
-    }
-    
-    func nextMatch() {
-        guard !searchMatches.isEmpty else { return }
-        currentMatchIndex = (currentMatchIndex + 1) % searchMatches.count
-        highlightMatches()
-        scrollToMatch(at: currentMatchIndex)
-    }
-    
-    func previousMatch() {
-        guard !searchMatches.isEmpty else { return }
-        currentMatchIndex = (currentMatchIndex - 1 + searchMatches.count) % searchMatches.count
-        highlightMatches()
-        scrollToMatch(at: currentMatchIndex)
-    }
-    
-    func scrollToMatch(at index: Int) {
-        if index >= 0 && index < searchMatches.count {
-            let range = searchMatches[index]
-            self.selectedRange = range
-            
-            // Explicitly scroll using the bridge
-            DispatchQueue.main.async {
-                self.textViewController?.setCursorPositions([.init(range: range)], scrollToVisible: true)
-            }
-        }
-    }
-    
-    func clearSearch() {
-        searchMatches = []
-        currentMatchIndex = -1
-        // Highlighting cleanup stub
+        if mirror.children.count == 0 { return nil }
+        return mirror.children.first!.value
     }
     
     // --- Commandes d'édition de texte ---

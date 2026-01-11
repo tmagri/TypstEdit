@@ -96,9 +96,7 @@ struct AppMenuCommands: Commands {
             Divider()
             
             Button("Search and Replace") {
-                withAnimation {
-                    editorController.isSearchVisible.toggle()
-                }
+                editorController.showFindPanel()
             }
             .keyboardShortcut("f", modifiers: .command)
             
@@ -297,7 +295,8 @@ struct AppMenuCommands: Commands {
             Toggle("File Panel", isOn: $editorController.isSidebarVisible)
                 .keyboardShortcut("0", modifiers: .command)
             
-            Toggle("Search Panel", isOn: $editorController.isSearchVisible)
+            // Search Panel toggle removed as we rely on native panel
+
             
             Divider()
             

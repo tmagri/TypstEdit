@@ -231,7 +231,12 @@ struct ContentView: View {
         }
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 8) {
-                if editorController.isSearchVisible { searchBar }
+                Button(action: { editorController.showFindPanel() }) {
+                    Image(systemName: "magnifyingglass").foregroundColor(themeManager.textColor)
+                        .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
+                }
+                .help("Search (Cmd+F)").buttonStyle(.plain)
+                
                 Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1, height: 16)
                 HStack(spacing: 8) {
                     Button(action: { saveFile() }) {
@@ -259,35 +264,8 @@ struct ContentView: View {
         }
     }
     
-    private var searchBar: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundColor(.secondary).font(.system(size: 13))
-                TextField("Search", text: $editorController.searchQuery)
-                    .textFieldStyle(.plain).frame(width: 130).foregroundColor(themeManager.textColor)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(Color.black.opacity(0.3)).cornerRadius(8)
-            
-            if !editorController.searchQuery.isEmpty && editorController.matchCount > 0 { searchResultsPopup }
-        }
-    }
-    
-    private var searchResultsPopup: some View {
-        HStack(spacing: 8) {
-            Text("\(editorController.currentMatchIndex + 1) of \(editorController.matchCount)")
-                .font(.caption).foregroundColor(themeManager.secondaryTextColor)
-            Divider().frame(height: 12)
-            Button(action: { editorController.previousMatch() }) { Image(systemName: "chevron.up").font(.system(size: 10)) }.buttonStyle(.plain)
-            Button(action: { editorController.nextMatch() }) { Image(systemName: "chevron.down").font(.system(size: 10)) }.buttonStyle(.plain)
-            Divider().frame(height: 12)
-            Button(action: { editorController.searchQuery = ""; editorController.clearSearch() }) {
-                Image(systemName: "xmark").font(.system(size: 10))
-            }.buttonStyle(.plain)
-        }
-        .padding(.horizontal, 8).padding(.vertical, 6)
-        .background(Color.black.opacity(0.3)).cornerRadius(6).offset(y: 2)
-    }
+    // Custom search bar removed in favor of native panel
+
     
     private var toolbarArea: some View {
         Group {
