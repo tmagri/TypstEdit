@@ -273,6 +273,39 @@ struct FormatDetector {
         return nil
     }
 
+    static func findFigureRange(in text: String, at index: Int) -> NSRange? {
+        guard let range = findBracketedRange(in: text, at: index, prefixPattern: #"#figure(?:\s*\([^)]*\))?\s*[\[(]"#) else { return nil }
+        
+        // Try to include trailing label <label>
+        let nsText = text as NSString
+        var currentEnd = range.upperBound
+        let length = nsText.length
+        
+        // Skip whitespace
+        while currentEnd < length {
+            let char = nsText.substring(with: NSRange(location: currentEnd, length: 1))
+            if char.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                currentEnd += 1
+            } else {
+                break
+            }
+        }
+        
+        if currentEnd < length && nsText.substring(with: NSRange(location: currentEnd, length: 1)) == "<" {
+            var labelEnd = currentEnd + 1
+            while labelEnd < length {
+                let char = nsText.substring(with: NSRange(location: labelEnd, length: 1))
+                if char == ">" {
+                    return NSRange(location: range.location, length: labelEnd + 1 - range.location)
+                }
+                if char == "\n" { break } // Labels don't usually span lines
+                labelEnd += 1
+            }
+        }
+        
+        return range
+    }
+
     static func findHorizontalLineRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
         let length = nsText.length
@@ -373,6 +406,98 @@ struct FormatDetector {
         return QuoteInfo(range: range, content: content, attribution: attribution, isBlock: isBlock)
     }
     
+    struct FigureInfo {
+        let range: NSRange
+        let content: String
+        let caption: String
+        let label: String
+        let kind: String?
+        let supplement: String?
+    }
+
+    static func parseFigure(in text: String, at index: Int) -> FigureInfo? {
+        guard let range = findFigureRange(in: text, at: index) else { return nil }
+        let nsText = text as NSString
+        let snippet = nsText.substring(with: range)
+        
+        var content = ""
+        var caption = ""
+        var label = ""
+        var kind: String? = nil
+        var supplement: String? = nil
+        
+        // Extract content: it's the first argument in #figure(...) or the content in #figure[...]
+        if snippet.hasPrefix("#figure[") {
+            if let start = snippet.firstIndex(of: "["), let end = snippet.lastIndex(of: "]") {
+                content = String(snippet[snippet.index(after: start)..<end])
+            }
+        } else if snippet.hasPrefix("#figure(") {
+            // Find the end of the first argument (comma or closing paren)
+            // This is naive and won't handle nested parens perfectly without a stack, 
+            // but let's try a decent regex for common cases.
+            if let start = snippet.firstIndex(of: "(") {
+                let afterStart = snippet[snippet.index(after: start)...]
+                // Look for first comma that isn't inside nested parens/brackets
+                var depth = 0
+                var firstArgEnd = afterStart.endIndex
+                for (idx, char) in afterStart.enumerated() {
+                    let stringIdx = afterStart.index(afterStart.startIndex, offsetBy: idx)
+                    if char == "(" || char == "[" { depth += 1 }
+                    else if char == ")" || char == "]" { 
+                        if depth == 0 { firstArgEnd = stringIdx; break }
+                        depth -= 1 
+                    }
+                    else if char == "," && depth == 0 { firstArgEnd = stringIdx; break }
+                }
+                content = String(afterStart[..<firstArgEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        // Extract metadata from () params
+        if let parenStart = snippet.firstIndex(of: "("), let parenEnd = snippet.lastIndex(of: ")") {
+            let params = String(snippet[snippet.index(after: parenStart)..<parenEnd])
+            
+            // Caption: [...] or "..."
+            let captionPattern = #"caption:\s*(?:\[(.*?)\]|"(.*?)")"#
+            if let regex = try? NSRegularExpression(pattern: captionPattern, options: [.dotMatchesLineSeparators]) {
+                if let match = regex.firstMatch(in: params, options: [], range: NSRange(location: 0, length: params.count)) {
+                    if let r1 = Range(match.range(at: 1), in: params) { caption = String(params[r1]) }
+                    else if let r2 = Range(match.range(at: 2), in: params) { caption = String(params[r2]) }
+                }
+            }
+            
+            // Kind: "..."
+            let kindPattern = #"kind:\s*"([^"]*)""#
+            if let regex = try? NSRegularExpression(pattern: kindPattern, options: []) {
+                if let match = regex.firstMatch(in: params, options: [], range: NSRange(location: 0, length: params.count)) {
+                    if let r = Range(match.range(at: 1), in: params) { kind = String(params[r]) }
+                }
+            }
+            
+            // Supplement: [...] or "..."
+            let supplementPattern = #"supplement:\s*(?:\[(.*?)\]|"(.*?)")"#
+            if let regex = try? NSRegularExpression(pattern: supplementPattern, options: [.dotMatchesLineSeparators]) {
+                if let match = regex.firstMatch(in: params, options: [], range: NSRange(location: 0, length: params.count)) {
+                    if let r1 = Range(match.range(at: 1), in: params) { supplement = String(params[r1]) }
+                    else if let r2 = Range(match.range(at: 2), in: params) { supplement = String(params[r2]) }
+                }
+            }
+        }
+        
+        // Extract label: either label: <tag> inside or <tag> outside
+        let labelPattern = #"<([^>]+)>"#
+        if let regex = try? NSRegularExpression(pattern: labelPattern, options: []) {
+            let matches = regex.matches(in: snippet, options: [], range: NSRange(location: 0, length: snippet.count))
+            if let lastMatch = matches.last {
+                if let r = Range(lastMatch.range(at: 1), in: snippet) {
+                    label = String(snippet[r])
+                }
+            }
+        }
+        
+        return FigureInfo(range: range, content: content, caption: caption, label: label, kind: kind, supplement: supplement)
+    }
+
     /// Detects if the cursor at the given index is likely inside a Typst math block ($ ... $).
     /// This uses a heuristic of counting unescaped dollar signs from the beginning of text.
     static func isMathMode(in text: String, at index: Int) -> Bool {

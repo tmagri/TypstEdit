@@ -114,6 +114,10 @@ struct FigureEditorView: View {
         .frame(width: 450, height: 500)
         .onAppear {
             self.content = controller.currentFigureContent
+            self.caption = controller.currentFigureCaption
+            self.label = controller.currentFigureLabel
+            self.kind = controller.currentFigureKind
+            self.supplement = controller.currentFigureSupplement
         }
     }
 }

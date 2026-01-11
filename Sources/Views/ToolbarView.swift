@@ -101,7 +101,7 @@ struct ToolbarView: View {
                          }
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "function", tooltip: "Insert Symbol (Cmd+Ctrl+S)", isActive: controller.showSymbolPicker) { controller.showSymbolPicker.toggle() }
-                             ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure (Cmd+Ctrl+F)", action: controller.openFigureEditor)
+                             ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure (Cmd+Ctrl+F)", isActive: controller.isFigureActive, action: controller.openFigureEditor)
                              ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline (Cmd+Ctrl+O)", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
                              ToolbarButton(icon: "server.rack", tooltip: "External Data (Cmd+Ctrl+D)", action: controller.openExternalDataEditor)
                          }

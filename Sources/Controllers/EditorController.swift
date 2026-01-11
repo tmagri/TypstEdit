@@ -88,7 +88,13 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Figure Editor State ---
     @Published var showFigureEditor: Bool = false
+    @Published var isFigureActive: Bool = false
+    @Published var currentFigureRange: NSRange?
     @Published var currentFigureContent: String = ""
+    @Published var currentFigureCaption: String = ""
+    @Published var currentFigureLabel: String = ""
+    @Published var currentFigureKind: String = ""
+    @Published var currentFigureSupplement: String = ""
     
     // --- External Data Editor State ---
     @Published var showExternalDataEditor: Bool = false
@@ -991,28 +997,49 @@ class EditorController: NSObject, ObservableObject {
     // --- Figure Functions ---
     
     func openFigureEditor() {
-         let range = selectedRange
-         if range.length > 0 {
-             if let r = Range(range, in: sourceCode) {
-                 currentFigureContent = String(sourceCode[r])
-             }
-         } else {
-             currentFigureContent = ""
-         }
-         self.showFigureEditor = true
+        let range = selectedRange
+        
+        // Reset state
+        self.currentFigureContent = ""
+        self.currentFigureCaption = ""
+        self.currentFigureLabel = ""
+        self.currentFigureKind = ""
+        self.currentFigureSupplement = ""
+        self.currentFigureRange = nil
+        
+        if let info = FormatDetector.parseFigure(in: sourceCode, at: range.location) {
+            self.currentFigureRange = info.range
+            self.currentFigureContent = info.content
+            self.currentFigureCaption = info.caption
+            self.currentFigureLabel = info.label
+            self.currentFigureKind = info.kind ?? ""
+            self.currentFigureSupplement = info.supplement ?? ""
+        } else if range.length > 0 {
+            if let r = Range(range, in: sourceCode) {
+                currentFigureContent = String(sourceCode[r])
+            }
+        }
+        
+        self.showFigureEditor = true
     }
     
     func insertFigure(content: String, caption: String, label: String, kind: String?, supplement: String?) {
         var params: [String] = []
         
-        params.append(ensureTypstContent(content))
+        // Content: If it starts with a function call like image( or table(, don't wrap in []
+        let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedContent.hasPrefix("image(") || trimmedContent.hasPrefix("table(") || trimmedContent.hasPrefix("grid(") || trimmedContent.hasPrefix("[") {
+            params.append(trimmedContent)
+        } else {
+            params.append("[\(trimmedContent)]")
+        }
         
         if !caption.isEmpty {
             params.append("caption: [\(caption)]")
         }
         
         if let kind = kind, !kind.isEmpty {
-             params.append("kind: \(kind)")
+             params.append("kind: \"\(kind)\"")
         }
         
         if let supplement = supplement, !supplement.isEmpty {
@@ -1025,14 +1052,15 @@ class EditorController: NSObject, ObservableObject {
             snippet += " <\(label)>"
         }
         
-        let range = selectedRange
-        if range.length > 0 {
-             insertText(snippet, replacementRange: range)
+        let rangeToReplace = currentFigureRange ?? selectedRange
+        if rangeToReplace.location != NSNotFound {
+             insertText(snippet, replacementRange: rangeToReplace)
         } else {
              insertText(snippet)
         }
         
         showFigureEditor = false
+        updateFormattingState()
     }
     
     // --- External Data Functions ---
@@ -1374,6 +1402,7 @@ class EditorController: NSObject, ObservableObject {
             self.isFootnoteActive = FormatDetector.findFootnoteRange(in: text, at: range.location) != nil
             self.isPageBreakActive = FormatDetector.findPageBreakRange(in: text, at: range.location) != nil
             self.isHorizontalLineActive = FormatDetector.findHorizontalLineRange(in: text, at: range.location) != nil
+            self.isFigureActive = FormatDetector.findFigureRange(in: text, at: range.location) != nil
         }
     }
     
@@ -1944,25 +1973,31 @@ class EditorController: NSObject, ObservableObject {
             return
         }
         
-        // 4. Link
+        // 4. Figure
+        if FormatDetector.findFigureRange(in: text, at: range.location) != nil {
+            openFigureEditor()
+            return
+        }
+        
+        // 5. Link
         if FormatDetector.findLinkRange(in: text, at: range.location) != nil {
             toggleLink()
             return
         }
         
-        // 5. Bibliography
+        // 6. Bibliography
         if BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil {
             toggleBibliography()
             return
         }
         
-        // 6. Outline
+        // 7. Outline
         if OutlineDetector.findOutlineRange(in: text, at: range.location) != nil {
             openOutlineEditor()
             return
         }
         
-        // 7. Footnote
+        // 8. Footnote
         if FormatDetector.findFootnoteRange(in: text, at: range.location) != nil {
             openFootnoteEditor()
             return
