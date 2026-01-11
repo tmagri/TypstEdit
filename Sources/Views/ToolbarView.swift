@@ -16,8 +16,8 @@ struct ToolbarView: View {
             let collapseLayout = width < 360
             
             HStack(alignment: .top, spacing: 4) {
-                // --- Group 1: Layout ---
-                ToolbarGroup(title: "Layout", icon: "doc.text", isCompact: collapseLayout) {
+                // --- Group 1: Document ---
+                ToolbarGroup(title: "Document", icon: "doc.text", isCompact: collapseLayout) {
                      VStack(spacing: 4) {
                         HStack(spacing: 4) {
                             Menu {
@@ -33,7 +33,7 @@ struct ToolbarView: View {
                             .menuStyle(.borderlessButton)
                             .frame(width: 56)
                             
-                            ToolbarButton(icon: "doc.badge.gearshape", tooltip: "Page Layout", action: controller.openLayoutEditor)
+                            ToolbarButton(icon: "doc.badge.gearshape", tooltip: "Document Styles", action: controller.openLayoutEditor)
                         }
                     }
                 }
@@ -102,14 +102,14 @@ struct ToolbarView: View {
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "function", tooltip: "Insert Symbol (Cmd+Ctrl+S)", isActive: controller.showSymbolPicker) { controller.showSymbolPicker.toggle() }
                              ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure (Cmd+Ctrl+F)", action: controller.openFigureEditor)
-                             ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart (Cmd+Ctrl+C)", action: controller.insertChartSnippet)
-                             ToolbarButton(icon: "calendar", tooltip: "Insert Timeline (Cmd+Ctrl+L)", action: controller.insertTimelineSnippet)
-                         }
-                         HStack(spacing: 2) {
                              ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline (Cmd+Ctrl+O)", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
                              ToolbarButton(icon: "server.rack", tooltip: "External Data (Cmd+Ctrl+D)", action: controller.openExternalDataEditor)
+                         }
+                         HStack(spacing: 2) {
                              ToolbarButton(icon: "minus", tooltip: "Horizontal Line (Cmd+Opt+-)", isActive: controller.isHorizontalLineActive, action: controller.insertHorizontalLine)
                              ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", isActive: controller.isPageBreakActive, action: controller.insertPageBreak)
+                             ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart (Cmd+Ctrl+C)", action: controller.insertChartSnippet)
+                             ToolbarButton(icon: "calendar", tooltip: "Insert Timeline (Cmd+Ctrl+L)", action: controller.insertTimelineSnippet)
                          }
                      }
                 }

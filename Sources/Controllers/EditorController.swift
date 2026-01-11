@@ -861,13 +861,15 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func insertChartSnippet() {
-        // guard let textView = textView else { return }
-        // SnippetsManager.shared.insertSnippet("chart", into: textView)
+        if let snippet = SnippetsManager.shared.snippets["chart"] {
+            insertText(snippet.template)
+        }
     }
     
     func insertTimelineSnippet() {
-        // guard let textView = textView else { return }
-        // SnippetsManager.shared.insertSnippet("timeline", into: textView)
+        if let snippet = SnippetsManager.shared.snippets["timeline"] {
+            insertText(snippet.template)
+        }
     }
     
     func openLayoutEditor() {
@@ -1199,32 +1201,66 @@ class EditorController: NSObject, ObservableObject {
         guard let vmChild = vcMirror.children.first(where: { $0.label == "viewModel" }) else { return }
         guard let viewModel = unwrap(vmChild.value) else { return }
         
-        // Get Published properties from ViewModel
-        let vmMirror = Mirror(reflecting: viewModel)
+        // Observe objectWillChange (type erased) to detect updates.
+        // We cannot observe Published properties via Mirror because we get a copy of the struct.
+        guard let observableParams = viewModel as? any ObservableObject else { return }
         
-        guard var currentMatchProp = vmMirror.children.first(where: { $0.label == "_currentFindMatchIndex" })?.value as? Published<Int?>,
-              var findMatchesProp = vmMirror.children.first(where: { $0.label == "_findMatches" })?.value as? Published<[NSRange]> else {
-            return
+        // Define a generic helper to "open" the existential and access objectWillChange
+        func observe<T: ObservableObject>(_ vm: T) {
+            vm.objectWillChange
+                .eraseToAnyPublisher() // Erase type to avoid associated type complexity
+                .receive(on: DispatchQueue.main)
+                // Delay slightly to let the change propagate
+                .delay(for: .milliseconds(10), scheduler: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self = self else { return }
+                    
+                    // Read current values via Mirror
+                    let vmMirror = Mirror(reflecting: vm) // reflect on vm directly
+                    
+                    var currentIndex: Int? = nil
+                    var currentMatches: [NSRange] = []
+                    
+                    // Helper to extract value
+                    func extractValue<V>(_ name: String, type: V.Type) -> V? {
+                        let child = vmMirror.children.first(where: { $0.label == name || $0.label == "_\(name)" })
+                        
+                        if let val = child?.value as? V {
+                            return val
+                        }
+                        
+                        // If it's a Published struct wrapper
+                        if let published = child?.value {
+                            let pMirror = Mirror(reflecting: published)
+                            if let val = pMirror.children.first(where: { $0.label == "value" || $0.label == "wrappedValue" })?.value as? V {
+                                 return val
+                            }
+                        }
+                        return nil
+                    }
+                    
+                    currentIndex = extractValue("currentFindMatchIndex", type: Int?.self) ?? nil
+                    currentMatches = extractValue("findMatches", type: [NSRange].self) ?? []
+
+                    // React to changes
+                    guard let index = currentIndex,
+                          index >= 0,
+                          index < currentMatches.count else { return }
+                    
+                    let matchRange = currentMatches[index]
+                    
+                    // Update cursor without auto-scroll
+                    self.textViewController?.setCursorPositions([.init(range: matchRange)], scrollToVisible: false)
+                    
+                    // Explicitly scroll using the robust method
+                    self.textViewController?.textView.scrollToRange(matchRange, center: true)
+                    self.textViewController?.textView.selectionManager.setSelectedRanges([matchRange])
+                }
+                .store(in: &findPanelCancellables)
         }
         
-        // CombineLatest to get both index and matches when either changes
-        Publishers.CombineLatest(currentMatchProp.projectedValue, findMatchesProp.projectedValue)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] (index, matches) in
-                guard let self = self,
-                      let index = index,
-                      index >= 0,
-                      index < matches.count else { return }
-                
-                let matchRange = matches[index]
-                
-                // Update cursor to match the selection (without auto-scroll)
-                self.textViewController?.setCursorPositions([.init(range: matchRange)], scrollToVisible: false)
-                
-                // Explicitly scroll using the more robust method
-                self.textViewController?.textView.scrollToRange(matchRange, center: true)
-            }
-            .store(in: &findPanelCancellables)
+        // Call the generic helper
+        observe(observableParams)
     }
     
     /// Helper to unwrap optional values inside Any

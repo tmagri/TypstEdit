@@ -6,7 +6,7 @@ struct LayoutEditorView: View {
     @Binding var isPresented: Bool
     
     // Tab State
-    @State private var selectedTab: String = "page" // page, text
+    @State private var selectedTab: String = "text" // text, par, align, page
     
     // --- Page Settings State ---
     @State private var paperSize: String = "a4"
@@ -20,7 +20,10 @@ struct LayoutEditorView: View {
     @State private var marginRight: String = "2.5cm"
     @State private var columns: Int = 1
     @State private var pageNumbering: String = ""
+    @State private var pageNumberAlign: String = "center" // New
     @State private var pageFill: String = ""
+    @State private var pageHeader: String = "" // New
+    @State private var pageFooter: String = "" // New
     @State private var applyTo: String = "document" // document, next_page
     @State private var pageValidationError: String? = nil
     
@@ -30,14 +33,34 @@ struct LayoutEditorView: View {
     @State private var textWeight: String = "regular"
     @State private var textStyle: String = "normal"
     @State private var textColor: String = ""
+    @State private var textStrokeColor: String = "" // New
+    @State private var textStrokeThickness: String = "" // New
+    @State private var textStretch: Double = 100 // New (percentage)
+    @State private var textDirection: String = "ltr" // New
+    @State private var textScript: String = "" // New
     @State private var textLang: String = "en"
     @State private var textRegion: String = ""
+    
+    // --- Paragraph Settings State (New) ---
+    @State private var parJustify: Bool = false
+    @State private var parHyphenate: Bool = false
+    @State private var parLeading: String = "" // e.g. 1.5em
+    @State private var parSpacing: String = "" // e.g. 1.2em
+    @State private var parIndent: String = "" // First line indent
+    @State private var parHangingIndent: String = ""
+    
+    // --- Alignment Settings State (New) ---
+    @State private var alignHorizontal: String = "start" // left, center, right, start, end
+    @State private var alignVertical: String = "top" // top, horizon, bottom
     
     // Data Sources
     let paperSizes = ["a4", "us-letter", "us-legal", "a3", "a5", "iso-b5"]
     @State private var availableFonts: [String] = []
     let weights = ["thin", "extralight", "light", "regular", "medium", "semibold", "bold", "extrabold", "black"]
     let styles = ["normal", "italic", "oblique"]
+    let directions = ["ltr", "rtl"]
+    let alignHorizons = ["start", "left", "center", "right", "end"]
+    let alignVerticals = ["top", "horizon", "bottom"]
     
     var body: some View {
         VStack(spacing: 0) {
@@ -46,7 +69,7 @@ struct LayoutEditorView: View {
                 Image(systemName: "doc.plaintext")
                     .font(.title2)
                     .foregroundColor(.accentColor)
-                Text("Layout & Style")
+                Text("Document Styles")
                     .font(.headline)
                 Spacer()
                 Button(action: { isPresented = false }) {
@@ -62,8 +85,10 @@ struct LayoutEditorView: View {
             
             // Tab Picker
             Picker("", selection: $selectedTab) {
-                Text("Page Layout").tag("page")
-                Text("Text Style").tag("text")
+                Text("Text").tag("text")
+                Text("Paragraph").tag("par")
+                Text("Align").tag("align")
+                Text("Page").tag("page")
             }
             .pickerStyle(.segmented)
             .padding(.horizontal)
@@ -74,10 +99,14 @@ struct LayoutEditorView: View {
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if selectedTab == "page" {
-                        pageSettingsView
-                    } else {
+                    if selectedTab == "text" {
                         textSettingsView
+                    } else if selectedTab == "par" {
+                        paragraphSettingsView
+                    } else if selectedTab == "align" {
+                        alignmentSettingsView
+                    } else if selectedTab == "page" {
+                        pageSettingsView
                     }
                 }
                 .padding()
@@ -103,10 +132,12 @@ struct LayoutEditorView: View {
                 Spacer()
                 
                 Button("Insert Code") {
-                    if selectedTab == "page" {
-                        insertPageLayout()
-                    } else {
-                        insertTextLayout()
+                    switch selectedTab {
+                    case "text": insertTextLayout()
+                    case "par": insertParagraphLayout()
+                    case "align": insertAlignmentLayout()
+                    case "page": insertPageLayout()
+                    default: break
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -216,8 +247,16 @@ struct LayoutEditorView: View {
                     Text("Page Numbers:")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    TextField("e.g. \"1 / 1\"", text: $pageNumbering)
-                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        TextField("e.g. \"1 / 1\"", text: $pageNumbering)
+                            .textFieldStyle(.roundedBorder)
+                        Picker("", selection: $pageNumberAlign) {
+                            ForEach(alignHorizons, id: \.self) { align in
+                                Text(align.capitalized).tag(align)
+                            }
+                        }
+                        .frame(width: 100)
+                    }
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
@@ -225,6 +264,30 @@ struct LayoutEditorView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                     TextField("e.g. #f0f0f0", text: $pageFill)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+            
+            Divider()
+            
+            // Header & Footer
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Header & Footer", systemImage: "macwindow.on.rectangle")
+                    .font(.subheadline.bold())
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Header:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("Content", text: $pageHeader)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Footer:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("Content", text: $pageFooter)
                         .textFieldStyle(.roundedBorder)
                 }
             }
@@ -316,6 +379,54 @@ struct LayoutEditorView: View {
             
             Divider()
             
+            // Stroke & Stretch
+            Label("Advanced Typography", systemImage: "sparkles")
+                .font(.subheadline.bold())
+            
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Stroke Color:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("e.g. black", text: $textStrokeColor)
+                        .textFieldStyle(.roundedBorder)
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Thickness:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("0.5pt", text: $textStrokeThickness)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+            }
+            
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Stretch (\(Int(textStretch))%):")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Slider(value: $textStretch, in: 50...200, step: 5)
+                }
+                
+                Spacer()
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Direction:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $textDirection) {
+                        ForEach(directions, id: \.self) { d in
+                            Text(d.uppercased()).tag(d)
+                        }
+                    }
+                    .frame(width: 100)
+                }
+            }
+            
+            Divider()
+            
             Label("Localization", systemImage: "globe")
                 .font(.subheadline.bold())
             
@@ -339,8 +450,100 @@ struct LayoutEditorView: View {
                         .frame(width: 60)
                 }
                 
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Script:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextField("latn", text: $textScript)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                }
+                
                 Spacer()
             }
+        }
+    }
+    
+    // MARK: - New Views
+    
+    var paragraphSettingsView: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Paragraph Layout", systemImage: "paragraphsign")
+                .font(.subheadline.bold())
+            
+            HStack(spacing: 20) {
+                Toggle("Justify Text", isOn: $parJustify)
+                Toggle("Hyphenate", isOn: $parHyphenate)
+            }
+            
+            Divider()
+            
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Leading (Line Spacing):")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("e.g. 1.5em", text: $parLeading)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Paragraph Spacing:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("e.g. 1.2em", text: $parSpacing)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("First Line Indent:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("e.g. 2em", text: $parIndent)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Hanging Indent:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("e.g. 0pt", text: $parHangingIndent)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+        }
+    }
+    
+    var alignmentSettingsView: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Content Alignment", systemImage: "align.horizontal.center")
+                .font(.subheadline.bold())
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Horizontal Alignment:")
+                Picker("", selection: $alignHorizontal) {
+                    ForEach(alignHorizons, id: \.self) { a in
+                        Text(a.capitalized).tag(a)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Vertical Alignment:")
+                Picker("", selection: $alignVertical) {
+                    ForEach(alignVerticals, id: \.self) { a in
+                        Text(a.capitalized).tag(a)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            
+            Spacer()
         }
     }
     
@@ -390,10 +593,21 @@ struct LayoutEditorView: View {
         if columns > 1 { params.append("columns: \(columns)") }
         
         // Numbering
-        if !pageNumbering.isEmpty { params.append("numbering: \"\(pageNumbering)\"") }
+        if !pageNumbering.isEmpty { 
+            params.append("numbering: \"\(pageNumbering)\"") 
+            if pageNumberAlign != "center" {
+                 params.append("number-align: \(pageNumberAlign)")
+            }
+        }
         
         // Fill
         if !pageFill.isEmpty { params.append("fill: \(pageFill)") }
+        
+        // Header
+        if !pageHeader.isEmpty { params.append("header: [\(pageHeader)]") }
+        
+        // Footer
+        if !pageFooter.isEmpty { params.append("footer: [\(pageFooter)]") }
         
         let paramString = params.joined(separator: ", ")
         let snippet: String
@@ -408,6 +622,7 @@ struct LayoutEditorView: View {
         isPresented = false
     }
     
+    // ... validateTypstLength ... (unchanged)
     private func validateTypstLength(_ length: String) -> Bool {
         let trimmed = length.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return false }
@@ -447,6 +662,24 @@ struct LayoutEditorView: View {
         // Color
         if !textColor.isEmpty { params.append("fill: \(textColor)") }
         
+        // Stroke
+        if !textStrokeColor.isEmpty {
+            if !textStrokeThickness.isEmpty {
+                params.append("stroke: (paint: \(textStrokeColor), thickness: \(textStrokeThickness))")
+            } else {
+                params.append("stroke: \(textStrokeColor)")
+            }
+        }
+        
+        // Stretch
+        if textStretch != 100 { params.append("stretch: \(Int(textStretch))%") }
+        
+        // Direction
+        if textDirection != "ltr" { params.append("dir: \(textDirection)") }
+        
+        // Script
+        if !textScript.isEmpty { params.append("script: \"\(textScript)\"") }
+        
         // Lang
         if !textLang.isEmpty { params.append("lang: \"\(textLang)\"") }
         
@@ -458,5 +691,54 @@ struct LayoutEditorView: View {
         
         controller.insertText(snippet)
         isPresented = false
+    }
+    
+    func insertParagraphLayout() {
+        pageValidationError = nil
+        var params: [String] = []
+        
+        if parJustify { params.append("justify: true") }
+        if parHyphenate { params.append("hyphenate: true") }
+        
+        if !parLeading.isEmpty {
+           if !validateTypstLength(parLeading) {
+               pageValidationError = "Invalid leading unit: '\(parLeading)'"
+               return
+           }
+           params.append("leading: \(parLeading)")
+        }
+        
+        if !parSpacing.isEmpty {
+           if !validateTypstLength(parSpacing) {
+               pageValidationError = "Invalid spacing unit: '\(parSpacing)'"
+               return
+           }
+           params.append("spacing: \(parSpacing)")
+        }
+        
+        if !parIndent.isEmpty { params.append("first-line-indent: \(parIndent)") }
+        if !parHangingIndent.isEmpty { params.append("hanging-indent: \(parHangingIndent)") }
+        
+        let paramString = params.joined(separator: ", ")
+        let snippet = "#set par(\(paramString))\n"
+        controller.insertText(snippet)
+        isPresented = false
+    }
+    
+    func insertAlignmentLayout() {
+        var alignParts: [String] = []
+        
+        if alignHorizontal != "start" { alignParts.append(alignHorizontal) }
+        if alignVertical != "top" { alignParts.append(alignVertical) }
+        
+        let alignContent = alignParts.joined(separator: " + ")
+        if !alignContent.isEmpty {
+            let snippet = "#set align(\(alignContent))\n"
+            controller.insertText(snippet)
+            isPresented = false
+        } else {
+            // Default/Empty
+            isPresented = false
+        }
     }
 }

@@ -599,6 +599,7 @@ struct ContentView: View {
         case "exportPDF": handleExport(format: "pdf")
         case "exportPNG": handleExport(format: "png")
         case "exportSVG": handleExport(format: "svg")
+        case "openLayoutEditor": editorController.openLayoutEditor()
         case "undo": editorController.undo()
         case "redo": editorController.redo()
         case "cut": editorController.cutSelection()

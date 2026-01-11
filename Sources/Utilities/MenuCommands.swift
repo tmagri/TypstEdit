@@ -252,6 +252,13 @@ struct AppMenuCommands: Commands {
                     NotificationCenter.default.post(name: .menuCommand, object: "openExternalDataEditor")
                 }
                 .keyboardShortcut("d", modifiers: [.command, .control])
+                
+                Divider()
+                
+                Button("Document Styles...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "openLayoutEditor")
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
             }
             .disabled(!editorController.isTypstFile)
             
