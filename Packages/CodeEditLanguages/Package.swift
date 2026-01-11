@@ -17,10 +17,7 @@ let package = Package(
             url: "https://github.com/ChimeHQ/SwiftTreeSitter.git",
             from: "0.9.0"
         ),
-        .package(
-            url: "https://github.com/uben0/tree-sitter-typst",
-            branch: "master"
-        ),
+        .package(path: "../tree-sitter-typst"),
     ],
     targets: [
         .target(

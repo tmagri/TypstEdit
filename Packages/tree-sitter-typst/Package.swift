@@ -10,40 +10,17 @@ let package = Package(
     dependencies: [],
     targets: [
         .target(name: "TreeSitterTypst",
-                path: ".",
+                path: "src",
                 exclude: [
-                    "Cargo.toml",
-                    "Makefile",
-                    "binding.gyp",
-                    "bindings/c",
-                    "bindings/go",
-                    "bindings/node",
-                    "bindings/python",
-                    "bindings/rust",
-                    "prebuilds",
-                    "grammar.js",
-                    "package.json",
-                    "package-lock.json",
-                    "pyproject.toml",
-                    "setup.py",
-                    "test",
-                    "examples",
-                    ".editorconfig",
-                    ".github",
-                    ".gitignore",
-                    ".gitattributes",
-                    ".gitmodules",
+                    "grammar.json",
+                    "node-types.json",
                 ],
                 sources: [
-                    "src/parser.c",
-                    "src/scanner.c",
-                    // NOTE: if your language has an external scanner, add it here.
+                    "parser.c",
+                    "scanner.c",
                 ],
-                resources: [
-                    .copy("queries")
-                ],
-                publicHeadersPath: "bindings/swift",
-                cSettings: [.headerSearchPath("src")])
+                publicHeadersPath: "include",
+                cSettings: [.headerSearchPath(".")])
     ],
     cLanguageStandard: .c11
 )

@@ -154,15 +154,53 @@ class EditorController: NSObject, ObservableObject {
         setupDefaultConfiguration()
     }
     
-    private func setupDefaultConfiguration() {
+    func setupDefaultConfiguration() {
         self.editorConfiguration = SourceEditorConfiguration(
             appearance: .init(
                 theme: customTheme,
                 font: NSFont(name: "Menlo", size: 13) ?? .monospacedSystemFont(ofSize: 13, weight: .regular),
-                wrapLines: true,
+                wrapLines: wrapLines,
                 tabWidth: 2
             )
         )
+        updateTextViewWrapping()
+    }
+    
+    func updateTextViewWrapping() {
+        guard let tvc = textViewController,
+              let textView = tvc.textView,
+              let scrollView = tvc.scrollView else { return }
+        
+        textView.translatesAutoresizingMaskIntoConstraints = true
+        textView.wrapLines = wrapLines
+        
+        if wrapLines {
+            textView.autoresizingMask = [.width, .height]
+            scrollView.hasHorizontalScroller = false
+        } else {
+            textView.autoresizingMask = [.height]
+            
+            scrollView.hasHorizontalScroller = true
+            scrollView.horizontalScroller?.isHidden = false
+            scrollView.autohidesScrollers = false
+            scrollView.hasVerticalScroller = true
+            
+            // Force the layout manager to recalculate visible lines with infinite width
+            textView.layoutManager.setNeedsLayout()
+            textView.layoutManager.layoutLines()
+            
+            textView.needsLayout = true
+            textView.updateFrameIfNeeded()
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                textView.translatesAutoresizingMaskIntoConstraints = true
+                textView.layoutManager.layoutLines()
+                textView.updateFrameIfNeeded()
+                scrollView.hasHorizontalScroller = true
+                scrollView.horizontalScroller?.isHidden = false
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+        }
     }
     func insertSymbol(code: String, unicode: String) {
         // Detect if we are in math mode ($ ... $)
@@ -229,7 +267,11 @@ class EditorController: NSObject, ObservableObject {
     
     @Published var zoomLevel: CGFloat = 1.0
     @Published var isSidebarVisible: Bool = true
-    @Published var wrapLines: Bool = true
+    @Published var wrapLines: Bool = true {
+        didSet {
+            setupDefaultConfiguration()
+        }
+    }
     @Published var isBulletListActive: Bool = false
     @Published var isNumberListActive: Bool = false
     @Published var isFootnoteActive: Bool = false
@@ -268,7 +310,7 @@ class EditorController: NSObject, ObservableObject {
     weak var textViewController: TextViewController?
     
     // Stable configuration to prevent "going white" due to frequent resets
-    var editorConfiguration: SourceEditorConfiguration!
+    @Published var editorConfiguration: SourceEditorConfiguration!
     
     private var _customTheme: EditorTheme?
     var customTheme: EditorTheme {
@@ -1966,6 +2008,10 @@ class SourceEditorBridge: TextViewCoordinator {
         print("[SourceEditorBridge] prepareCoordinator for \(ptr)")
         MainActor.assumeIsolated {
             self.controller?.textViewController = controller
+            // Delay to allow component to finish its own internal setup before we override
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.controller?.setupDefaultConfiguration()
+            }
         }
     }
     
@@ -1983,6 +2029,17 @@ class SourceEditorBridge: TextViewCoordinator {
             if self.controller?.sourceCode != controller.text {
                  self.controller?.sourceCode = controller.text
             }
+            // Aggressively re-apply wrapping settings
+            self.controller?.updateTextViewWrapping()
+        }
+    }
+
+    nonisolated func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
+        MainActor.assumeIsolated {
+            // Aggressively re-apply wrapping settings
+            self.controller?.updateTextViewWrapping()
+            // Update formatting state (bold/italic detection)
+            self.controller?.updateFormattingState()
         }
     }
 }
