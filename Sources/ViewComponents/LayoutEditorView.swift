@@ -53,6 +53,38 @@ struct LayoutEditorView: View {
     @State private var alignHorizontal: String = "start" // left, center, right, start, end
     @State private var alignVertical: String = "top" // top, horizon, bottom
     
+    // --- Elements Settings State (New) ---
+    @State private var selectedElementCategory: String = "containers"
+    @State private var selectedElement: String = "block"
+    
+    // Generic Element Params
+    @State private var elWidth: String = ""
+    @State private var elHeight: String = ""
+    @State private var elFill: String = ""
+    @State private var elStroke: String = ""
+    @State private var elRadius: String = ""
+    @State private var elInset: String = ""
+    @State private var elOutset: String = ""
+    
+    // Grid/Stack
+    @State private var elColumns: String = ""
+    @State private var elRows: String = ""
+    @State private var elGutter: String = ""
+    @State private var elDir: String = "ltr"
+    
+    // Transforms & Position
+    @State private var elAngle: String = ""
+    @State private var elScaleX: Double = 100
+    @State private var elScaleY: Double = 100
+    @State private var elSkewX: String = ""
+    @State private var elSkewY: String = ""
+    @State private var elDX: String = ""
+    @State private var elDY: String = ""
+    
+    // Spacing
+    @State private var elAmount: String = ""
+    @State private var elWeak: Bool = false
+    
     // Data Sources
     let paperSizes = ["a4", "us-letter", "us-legal", "a3", "a5", "iso-b5"]
     @State private var availableFonts: [String] = []
@@ -89,6 +121,7 @@ struct LayoutEditorView: View {
                 Text("Paragraph").tag("par")
                 Text("Align").tag("align")
                 Text("Page").tag("page")
+                Text("Elements").tag("elements")
             }
             .pickerStyle(.segmented)
             .padding(.horizontal)
@@ -107,6 +140,8 @@ struct LayoutEditorView: View {
                         alignmentSettingsView
                     } else if selectedTab == "page" {
                         pageSettingsView
+                    } else if selectedTab == "elements" {
+                        elementsSettingsView
                     }
                 }
                 .padding()
@@ -137,6 +172,7 @@ struct LayoutEditorView: View {
                     case "par": insertParagraphLayout()
                     case "align": insertAlignmentLayout()
                     case "page": insertPageLayout()
+                    case "elements": insertElementLayout()
                     default: break
                     }
                 }
@@ -740,5 +776,251 @@ struct LayoutEditorView: View {
             // Default/Empty
             isPresented = false
         }
+    }
+    
+    var elementsSettingsView: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Layout Elements", systemImage: "square.dashed")
+                .font(.subheadline.bold())
+            
+            // Category Picker
+            Picker("", selection: $selectedElementCategory) {
+                Text("Containers").tag("containers")
+                Text("Transforms").tag("transforms")
+                Text("Spacing").tag("spacing")
+                Text("Utils").tag("utils")
+            }
+            .pickerStyle(.segmented)
+            
+            Divider()
+            
+            // Sub-Element Picker
+            HStack {
+                Text("Element:")
+                Spacer()
+                Picker("", selection: $selectedElement) {
+                    if selectedElementCategory == "containers" {
+                        Text("Block").tag("block")
+                        Text("Box").tag("box")
+                        Text("Grid").tag("grid")
+                        Text("Stack").tag("stack")
+                    } else if selectedElementCategory == "transforms" {
+                        Text("Rotate").tag("rotate")
+                        Text("Scale").tag("scale")
+                        Text("Skew").tag("skew")
+                        Text("Move").tag("move")
+                        Text("Place").tag("place")
+                    } else if selectedElementCategory == "spacing" {
+                        Text("Pad").tag("pad")
+                        Text("Horz (h)").tag("h")
+                        Text("Vert (v)").tag("v")
+                        Text("Hide").tag("hide")
+                        Text("Repeat").tag("repeat")
+                    } else if selectedElementCategory == "utils" {
+                        Text("Col Break").tag("colbreak")
+                        Text("Page Break").tag("pagebreak")
+                    }
+                }
+                .frame(width: 150)
+            }
+            
+            Divider()
+            
+            // Category Specific Fields
+            Group {
+                // Dimensions & Styling (Block, Box, Pad, Place)
+                if ["block", "box", "pad", "place"].contains(selectedElement) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Width:")
+                            TextField("auto", text: $elWidth).textFieldStyle(.roundedBorder)
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Height:")
+                            TextField("auto", text: $elHeight).textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    
+                    if selectedElement != "pad" && selectedElement != "place" {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Fill:")
+                                TextField("none", text: $elFill).textFieldStyle(.roundedBorder)
+                            }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Radius:")
+                                TextField("0pt", text: $elRadius).textFieldStyle(.roundedBorder)
+                            }
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Stroke:")
+                            TextField("none", text: $elStroke).textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    
+                    if ["block", "box", "pad"].contains(selectedElement) {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Inset:")
+                                TextField("0pt", text: $elInset).textFieldStyle(.roundedBorder)
+                            }
+                            if selectedElement != "pad" {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Outset:")
+                                    TextField("0pt", text: $elOutset).textFieldStyle(.roundedBorder)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Grid / Stack
+                if selectedElement == "grid" {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Columns:")
+                        TextField("(1fr, 1fr)", text: $elColumns).textFieldStyle(.roundedBorder)
+                        
+                        Text("Rows:")
+                        TextField("auto", text: $elRows).textFieldStyle(.roundedBorder)
+                        
+                        Text("Gutter:")
+                        TextField("0pt", text: $elGutter).textFieldStyle(.roundedBorder)
+                        
+                        Text("Stroke/Fill:")
+                        HStack {
+                            TextField("Stroke", text: $elStroke).textFieldStyle(.roundedBorder)
+                            TextField("Fill", text: $elFill).textFieldStyle(.roundedBorder)
+                        }
+                    }
+                } else if selectedElement == "stack" {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Direction:")
+                        Picker("", selection: $elDir) {
+                            Text("LTR").tag("ltr")
+                            Text("RTL").tag("rtl")
+                            Text("TTB").tag("ttb")
+                            Text("BTT").tag("btt")
+                        }
+                        
+                        Text("Spacing:")
+                        TextField("0pt", text: $elGutter).textFieldStyle(.roundedBorder)
+                    }
+                }
+                
+                // Transforms
+                if selectedElement == "rotate" {
+                    Text("Angle:")
+                    TextField("90deg", text: $elAngle).textFieldStyle(.roundedBorder)
+                } else if selectedElement == "scale" {
+                    HStack {
+                        VStack { Text("X %"); TextField("100", value: $elScaleX, formatter: NumberFormatter()).textFieldStyle(.roundedBorder) }
+                        VStack { Text("Y %"); TextField("100", value: $elScaleY, formatter: NumberFormatter()).textFieldStyle(.roundedBorder) }
+                    }
+                } else if selectedElement == "skew" {
+                    HStack {
+                        VStack { Text("AX"); TextField("0deg", text: $elSkewX).textFieldStyle(.roundedBorder) }
+                        VStack { Text("AY"); TextField("0deg", text: $elSkewY).textFieldStyle(.roundedBorder) }
+                    }
+                } else if ["move", "place"].contains(selectedElement) {
+                    HStack {
+                        VStack { Text("DX"); TextField("0pt", text: $elDX).textFieldStyle(.roundedBorder) }
+                        VStack { Text("DY"); TextField("0pt", text: $elDY).textFieldStyle(.roundedBorder) }
+                    }
+                }
+                
+                // Spacing
+                if ["h", "v", "repeat"].contains(selectedElement) {
+                    Text("Amount/Gap:")
+                    TextField("1em", text: $elAmount).textFieldStyle(.roundedBorder)
+                }
+                
+                if ["h", "v", "colbreak", "pagebreak"].contains(selectedElement) {
+                    Toggle("Weak", isOn: $elWeak)
+                }
+            }
+        }
+    }
+    
+    func insertElementLayout() {
+        var params: [String] = []
+        var name = selectedElement
+        var hasContent = true
+        
+        switch selectedElement {
+        case "block", "box":
+            if !elWidth.isEmpty { params.append("width: \(elWidth)") }
+            if !elHeight.isEmpty { params.append("height: \(elHeight)") }
+            if !elFill.isEmpty { params.append("fill: \(elFill)") }
+            if !elStroke.isEmpty { params.append("stroke: \(elStroke)") }
+            if !elRadius.isEmpty { params.append("radius: \(elRadius)") }
+            if !elInset.isEmpty { params.append("inset: \(elInset)") }
+            if !elOutset.isEmpty { params.append("outset: \(elOutset)") }
+            
+        case "grid":
+            if !elColumns.isEmpty { params.append("columns: \(elColumns)") }
+            if !elRows.isEmpty { params.append("rows: \(elRows)") }
+            if !elGutter.isEmpty { params.append("gutter: \(elGutter)") }
+            if !elFill.isEmpty { params.append("fill: \(elFill)") }
+            if !elStroke.isEmpty { params.append("stroke: \(elStroke)") }
+            
+        case "stack":
+            if !elDir.isEmpty { params.append("dir: \(elDir)") }
+            if !elGutter.isEmpty { params.append("spacing: \(elGutter)") }
+            
+        case "rotate":
+            if !elAngle.isEmpty { params.append(elAngle) }
+            
+        case "scale":
+            if elScaleX != 100 { params.append("x: \(elScaleX)%") }
+            if elScaleY != 100 { params.append("y: \(elScaleY)%") }
+            
+        case "skew":
+            if !elSkewX.isEmpty { params.append("ax: \(elSkewX)") }
+            if !elSkewY.isEmpty { params.append("ay: \(elSkewY)") }
+            
+        case "move":
+            if !elDX.isEmpty { params.append("dx: \(elDX)") }
+            if !elDY.isEmpty { params.append("dy: \(elDY)") }
+            
+        case "place":
+            if !alignHorizontal.isEmpty && alignHorizontal != "start" { params.append(alignHorizontal) }
+            if !elDX.isEmpty { params.append("dx: \(elDX)") }
+            if !elDY.isEmpty { params.append("dy: \(elDY)") }
+            // place typically takes content
+            
+        case "pad":
+             if !elInset.isEmpty { params.append("result: \(elInset)") } // Basic param for pad is rest
+             else {
+                 if !elWidth.isEmpty { params.append("left: \(elWidth)") } // abusing width for left to reuse vars
+                 if !elHeight.isEmpty { params.append("top: \(elHeight)") }
+             }
+             
+        case "h", "v":
+             if !elAmount.isEmpty { params.append(elAmount) }
+             if elWeak { params.append("weak: true") }
+             hasContent = false
+             
+        case "colbreak", "pagebreak":
+             if elWeak { params.append("weak: true") }
+             hasContent = false
+             
+        case "hide", "repeat":
+             if !elAmount.isEmpty && selectedElement == "repeat" { params.append("gap: \(elAmount)") }
+             
+        default: break
+        }
+        
+        let paramString = params.joined(separator: ", ")
+        let snippet: String
+        
+        if hasContent {
+            snippet = "#\(name)(\(paramString))[\n  \n]\n"
+        } else {
+            snippet = "#\(name)(\(paramString))\n"
+        }
+        
+        controller.insertText(snippet)
+        isPresented = false
     }
 }
