@@ -8,6 +8,7 @@ import AppKit
 struct ContentView: View {
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
+    @ObservedObject private var aiService = AICompletionService.shared
     
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
@@ -380,8 +381,22 @@ struct ContentView: View {
                     HStack {
                         Text("Words: \(editorController.wordCount)").font(.caption).monospacedDigit().foregroundColor(themeManager.textColor)
                         Spacer()
-                        if editorController.showStatusMessage {
-                            Text(editorController.statusMessage).font(.caption).foregroundColor(.secondary).transition(.opacity)
+                        if editorController.showStatusMessage || aiService.isFetching {
+                            HStack(spacing: 6) {
+                                if aiService.isFetching {
+                                    HStack(spacing: 4) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .scaleEffect(0.6)
+                                        Text("AI")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                                if editorController.showStatusMessage {
+                                    Text(editorController.statusMessage).font(.caption).foregroundColor(.secondary).transition(.opacity)
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 4)

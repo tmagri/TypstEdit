@@ -1,22 +1,38 @@
 import Foundation
 
-enum AIError: Error {
+enum AIError: LocalizedError {
     case invalidURL
     case noData
     case parsingError
     case apiError(String)
+    
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL: return "Invalid URL"
+        case .noData: return "No data received from provider"
+        case .parsingError: return "Failed to parse AI response"
+        case .apiError(let msg): return msg
+        }
+    }
 }
 
 @MainActor
-class AICompletionService {
+class AICompletionService: ObservableObject {
     static let shared = AICompletionService()
+    
+    @Published var isFetching: Bool = false
     
     private init() {}
     
     func fetchCompletion(prompt: String) async throws -> String {
+        isFetching = true
+        defer { isFetching = false }
+        
         let settings = AISettingsManager.shared
-        guard !settings.apiKey.isEmpty else {
-            throw AIError.apiError("API Key is missing")
+        
+        // Only require API key for non-custom providers, or if custom provider is not localhost
+        if settings.provider != .custom && settings.apiKey.isEmpty {
+            throw AIError.apiError("API Key is missing for \(settings.provider.rawValue)")
         }
         
         let endpoint: String
@@ -78,5 +94,10 @@ class AICompletionService {
         }
         
         return content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    /// Verifies the connection to the AI provider by sending a minimal prompt.
+    func testConnection() async throws -> String {
+        return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
     }
 }

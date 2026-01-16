@@ -59,8 +59,50 @@ struct AISettingsView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                
+                Section {
+                    Button(action: {
+                        testConnection()
+                    }) {
+                        if isTesting {
+                            ProgressView()
+                                .controlSize(.small)
+                                .padding(.trailing, 5)
+                        }
+                        Text(isTesting ? "Testing..." : "Test Connection")
+                    }
+                    .disabled(isTesting)
+                    
+                    if let result = testResult {
+                        Text(result)
+                            .font(.caption)
+                            .foregroundColor(testSuccess ? .green : .red)
+                    }
+                }
             }
         }
         .padding()
+    }
+    
+    @State private var isTesting = false
+    @State private var testResult: String?
+    @State private var testSuccess = false
+    
+    private func testConnection() {
+        isTesting = true
+        testResult = "Connecting..."
+        testSuccess = false
+        
+        Task {
+            do {
+                let response = try await AICompletionService.shared.testConnection()
+                testResult = "Success: Received response '\(response)'"
+                testSuccess = true
+            } catch {
+                testResult = "Error: \(error.localizedDescription)"
+                testSuccess = false
+            }
+            isTesting = false
+        }
     }
 }

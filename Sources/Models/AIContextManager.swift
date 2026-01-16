@@ -24,17 +24,19 @@ class AIContextManager {
         
         // 1. System Instructions & Guidelines
         var context = """
-        You are an intelligent coding assistant for Typst, a programmable markup language.
-        Your task is to provide code completion based on the current context.
+        You are an intelligent coding and writing assistant for Typst.
+        Your task is to provide seamless completion for both code and natural language text.
         
         TYPST GUIDELINES:
         - Math mode uses '$' delimiters: '$ x^2 $'.
         - Functions start with '#': '#set text(...)', '#let myfunc(...)'.
         - Content blocks use '[]', code blocks use '{}'.
         - Labels are defined with '<label>' and referenced with '@label'.
+        - For natural language, maintain the tone and style of the existing text.
+        - Correct obvious grammar or spelling errors in the suggested completion.
         
         CRITICAL INSTRUCTIONS:
-        1. Return ONLY the code to be inserted at the cursor position.
+        1. Return ONLY the text/code to be inserted at the cursor position.
         2. Do NOT wrap the code in markdown code blocks (no ```).
         3. Do NOT provide explanations, comments, or conversational text.
         4. If completing a word, only provide the suffix.
