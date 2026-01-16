@@ -222,6 +222,8 @@ class EditorController: NSObject, ObservableObject {
     
     
     // MARK: - Typst Insertion Logic
+    lazy var aiCompletionProvider = AICompletionProvider(controller: self)
+    
     @Published var currentFileURL: URL? {
         didSet {
             updateFileType()

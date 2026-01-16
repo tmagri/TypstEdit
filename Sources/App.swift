@@ -153,5 +153,10 @@ struct TypstEditApp: App {
         .commands {
             AppMenuCommands(themeManager: themeManager, selectedFile: $selectedFile, editorController: editorController)
         }
+        
+        Settings {
+            SettingsView()
+                .environmentObject(themeManager)
+        }
     }
 }

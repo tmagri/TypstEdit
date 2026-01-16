@@ -292,7 +292,8 @@ struct ContentView: View {
                     language: .typst,
                     configuration: editorController.editorConfiguration,
                     state: $editorController.editorState,
-                    coordinators: [editorController.sourceEditorBridge]
+                    coordinators: [editorController.sourceEditorBridge],
+                    completionDelegate: editorController.aiCompletionProvider
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .id(editorController.currentFileURL?.absoluteString ?? "none")
