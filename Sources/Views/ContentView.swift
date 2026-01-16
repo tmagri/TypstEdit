@@ -30,6 +30,8 @@ struct ContentView: View {
     @State private var newFileName: String = ""
     @State private var currentLoadID: UUID = UUID()
     @State private var isInternalSelectionChange: Bool = false
+    @State private var showRecoveryAlert: Bool = false
+    @State private var recoveryContentToRestore: String?
     @EnvironmentObject var themeManager: ThemeManager
 
     // MARK: - Editor State
@@ -357,6 +359,21 @@ struct ContentView: View {
                 .alert("File Not Found", isPresented: $editorController.showFileNotFoundAlert) {
                     Button("OK", role: .cancel) { }
                 } message: { Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.") }
+                .alert("Recover Unsaved Changes?", isPresented: $showRecoveryAlert) {
+                    Button("Recover") {
+                        if let content = recoveryContentToRestore {
+                            editorController.restoreContent(content)
+                            editorController.showStatus("Recovered unsaved changes")
+                        }
+                    }
+                    Button("Discard", role: .destructive) {
+                        if let url = selectedFile {
+                            AutoRecoveryManager.shared.clearRecovery(for: url)
+                        }
+                    }
+                } message: {
+                    Text("Unsaved changes were found for this file. Do you want to recover them?")
+                }
             
                 if editorController.isTypstFile {
                     HStack {
@@ -464,7 +481,27 @@ struct ContentView: View {
                     // Better to reset state for new file
                     self.editorController.editorState = .init()
                     
+
+                    
                     self.scheduleCompilation(with: content)
+                    
+                    // Check for recovery
+                    if AutoRecoveryManager.shared.hasRecovery(for: url) {
+                        if let recovered = AutoRecoveryManager.shared.restoreContent(for: url) {
+                            // Only offer recovery if it differs from what we just loaded
+                             let normalizedDisk = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                             let normalizedRecovery = recovered.trimmingCharacters(in: .whitespacesAndNewlines)
+                             
+                             if normalizedDisk != normalizedRecovery {
+                                 self.recoveryContentToRestore = recovered
+                                 self.showRecoveryAlert = true
+                             } else {
+                                 // Recovery is same as disk (maybe user saved but validation didn't clear?)
+                                 AutoRecoveryManager.shared.clearRecovery(for: url)
+                             }
+                        }
+                    }
+                    
                     print("[DEBUG] loadFile: Complete")
                 }
             } catch {
@@ -502,6 +539,7 @@ struct ContentView: View {
                     self.scheduleCompilation(with: self.editorController.sourceCode)
                     self.lastSaved = Date()
                     self.editorController.showStatus("File Saved")
+                    AutoRecoveryManager.shared.clearRecovery(for: url) // Clear recovery on save
                     withAnimation { self.showSavePopup = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { withAnimation { self.showSavePopup = false } }
                 }

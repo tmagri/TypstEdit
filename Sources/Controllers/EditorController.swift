@@ -471,7 +471,39 @@ class EditorController: NSObject, ObservableObject {
             print("[DEBUG] EditorController(\(ObjectIdentifier(self))): checkUnsavedChanges changing to \(dirty) (prev=\(self.hasUnsavedChanges))")
             self.hasUnsavedChanges = dirty
         }
+        
+        // Auto-Recovery: Update if dirty, Clear if clean (e.g. reverted to saved state manually)
+        if let url = currentFileURL {
+            if dirty {
+                AutoRecoveryManager.shared.updateRecovery(content: currentContent, for: url)
+            } else {
+                // If it became clean (e.g. undo until saved state), we can clear recovery
+                AutoRecoveryManager.shared.clearRecovery(for: url)
+            }
+        }
     }
+    
+    func restoreContent(_ content: String) {
+        self.sourceCode = content
+        
+        // Force update the underlying text view if available
+        if let tvc = textViewController {
+            // Replace entire content
+             let fullRange = NSRange(location: 0, length: tvc.textView.string.utf16.count)
+             if fullRange.length > 0 {
+                 tvc.textView.replaceCharacters(in: fullRange, with: content)
+             } else {
+                 tvc.textView.string = content
+             }
+        }
+        
+        // Reset cursor to start
+        self.editorState = .init()
+        
+        // Check unsaved changes (will likely match 'content' but differ from 'savedContent')
+        checkUnsavedChanges(currentContent: content)
+    }
+
     
     // --- Undo/Redo Functions ---
     
