@@ -9,6 +9,7 @@ struct ContentView: View {
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
     @ObservedObject private var aiService = AICompletionService.shared
+    @ObservedObject private var aiSettings = AISettingsManager.shared
     
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
@@ -381,21 +382,27 @@ struct ContentView: View {
                     HStack {
                         Text("Words: \(editorController.wordCount)").font(.caption).monospacedDigit().foregroundColor(themeManager.textColor)
                         Spacer()
-                        if editorController.showStatusMessage || aiService.isFetching {
-                            HStack(spacing: 6) {
-                                if aiService.isFetching {
-                                    HStack(spacing: 4) {
+                        HStack(spacing: 8) {
+                            // AI / Intellisense Status Indicator
+                            if aiService.isFetching || (aiSettings.isEnabled && aiSettings.provider == .offline) {
+                                HStack(spacing: 4) {
+                                    if aiService.isFetching {
                                         ProgressView()
                                             .controlSize(.small)
                                             .scaleEffect(0.6)
-                                        Text("AI")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(.blue)
                                     }
+                                    Text(aiSettings.provider == .offline ? "Intellisense" : "AI")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(aiSettings.provider == .offline ? .green : .blue)
                                 }
-                                if editorController.showStatusMessage {
-                                    Text(editorController.statusMessage).font(.caption).foregroundColor(.secondary).transition(.opacity)
-                                }
+                            }
+                            
+                            // Editor Status Message (e.g., "File Saved")
+                            if editorController.showStatusMessage {
+                                Text(editorController.statusMessage)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .transition(.opacity)
                             }
                         }
                     }

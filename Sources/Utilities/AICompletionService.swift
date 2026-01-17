@@ -36,10 +36,14 @@ class AICompletionService: ObservableObject {
         }
         
         let endpoint: String
+        let isGemini = settings.provider == .gemini
+        
         switch settings.provider {
         case .openAI: endpoint = "https://api.openai.com/v1/chat/completions"
         case .openRouter: endpoint = "https://openrouter.ai/api/v1/chat/completions"
+        case .gemini: endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(settings.model):generateContent?key=\(settings.apiKey)"
         case .custom: endpoint = settings.customEndpoint
+        case .offline: throw AIError.apiError("Offline mode selected")
         }
         
         guard let url = URL(string: endpoint) else {
@@ -48,7 +52,11 @@ class AICompletionService: ObservableObject {
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.addValue("Bearer \(settings.apiKey)", forHTTPHeaderField: "Authorization")
+        
+        // Gemini API key is in URL query parameter, not header
+        if !isGemini {
+            request.addValue("Bearer \(settings.apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
         // OpenRouter specific headers
@@ -57,20 +65,39 @@ class AICompletionService: ObservableObject {
             request.addValue("TypstEdit", forHTTPHeaderField: "X-Title")
         }
         
-        let messages: [[String: String]] = [
-            ["role": "system", "content": "You are a precise code completion engine. Output only the code to insert at the cursor."],
-            ["role": "user", "content": prompt]
-        ]
-        
-        let body: [String: Any] = [
-            "model": settings.model,
-            "messages": messages,
-            "max_tokens": 64, // Short completion
-            "temperature": 0.2, // Deterministic
-            "stream": false
-        ]
-        
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        // Gemini Body Format
+        if isGemini {
+            let body: [String: Any] = [
+                "contents": [
+                    [
+                        "parts": [
+                            ["text": "You are a precise code completion engine. Output only the code to insert at the cursor. \n\n" + prompt]
+                        ]
+                    ]
+                ],
+                "generationConfig": [
+                    "maxOutputTokens": 64,
+                    "temperature": 0.2
+                ]
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } 
+        // OpenAI / Standard Format
+        else {
+            let messages: [[String: String]] = [
+                ["role": "system", "content": "You are a precise code completion engine. Output only the code to insert at the cursor."],
+                ["role": "user", "content": prompt]
+            ]
+            
+            let body: [String: Any] = [
+                "model": settings.model,
+                "messages": messages,
+                "max_tokens": 64, // Short completion
+                "temperature": 0.2, // Deterministic
+                "stream": false
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -83,17 +110,32 @@ class AICompletionService: ObservableObject {
             throw AIError.apiError("Status \(httpResponse.statusCode): \(errorMsg)")
         }
         
-        // Parse Response
-        // OpenAI Format: choices[0].message.content
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let message = firstChoice["message"] as? [String: Any],
-              let content = message["content"] as? String else {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AIError.parsingError
         }
         
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Parse Gemini Response
+        if isGemini {
+            if let candidates = json["candidates"] as? [[String: Any]],
+               let firstCandidate = candidates.first,
+               let contentObj = firstCandidate["content"] as? [String: Any],
+               let parts = contentObj["parts"] as? [[String: Any]],
+               let firstPart = parts.first,
+               let text = firstPart["text"] as? String {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            throw AIError.parsingError
+        }
+        
+        // Parse OpenAI Response
+        if let choices = json["choices"] as? [[String: Any]],
+           let firstChoice = choices.first,
+           let message = firstChoice["message"] as? [String: Any],
+           let content = message["content"] as? String {
+            return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        throw AIError.parsingError
     }
     
     /// Verifies the connection to the AI provider by sending a minimal prompt.

@@ -4,6 +4,8 @@ import Combine
 enum AIProvider: String, CaseIterable, Identifiable {
     case openAI = "OpenAI"
     case openRouter = "OpenRouter"
+    case gemini = "Google Gemini"
+    case offline = "Offline / Manual"
     case custom = "Custom (Ollama/LMStudio)"
     
     var id: String { self.rawValue }
@@ -17,6 +19,7 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiProvider") var provider: AIProvider = .openAI
     @AppStorage("openAIApiKey") var openAIApiKey: String = ""
     @AppStorage("openRouterApiKey") var openRouterApiKey: String = ""
+    @AppStorage("geminiApiKey") var geminiApiKey: String = ""
     @AppStorage("customApiKey") var customApiKey: String = ""
     @AppStorage("customEndpoint") var customEndpoint: String = "http://localhost:11434/v1/chat/completions"
     @AppStorage("aiModel") var model: String = "gpt-4o"
@@ -29,6 +32,8 @@ class AISettingsManager: ObservableObject {
         switch provider {
         case .openAI: return openAIApiKey
         case .openRouter: return openRouterApiKey
+        case .gemini: return geminiApiKey
+        case .offline: return ""
         case .custom: return customApiKey
         }
     }
