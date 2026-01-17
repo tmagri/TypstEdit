@@ -1245,126 +1245,177 @@ class EditorController: NSObject, ObservableObject {
         
         // 3. Force Focus & Layout Fix
         // We need to access the FindViewController to adjust constraints and focus the panel.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self = self,
                   let textViewController = self.textViewController else { return }
             
-            // Access internal findViewController via Mirror
-            let tvcMirror = Mirror(reflecting: textViewController)
-            guard let findVCChild = tvcMirror.children.first(where: { $0.label == "findViewController" }),
-                  let findVC = self.unwrap(findVCChild.value) as? NSViewController else { return }
+            // Access findViewController directly (now public)
+            guard let findVC = textViewController.findViewController else { return }
             
             let containerView = findVC.view
             
-            // Find the panel (z=1000)
-            guard let findPanel = containerView.subviews.first(where: { $0.layer?.zPosition == 1000 }) else { return }
+            // Find the panel. Instead of relying on ZPosition which is fragile, we look for visual characteristics
+            // The FindPanel usually has a background or visual effect view.
+            // But checking subviews: one is the editor (NSScrollView/subclass), one is the panel.
+            // The panel is usually smaller in height or topmost.
             
-            // Find the editor view (childView). It's likely textViewController.view, but let's be safe
-            // In FindViewController, childView is added. It should be the other subview.
-            guard let editorView = containerView.subviews.first(where: { $0 != findPanel }) else { return }
+            // Heuristic: The editor view is the one that matches textViewController.view (or contains it)
+            // But textViewController.view is the containerView itself in some setups?
+            // In CodeEditSourceEditor, TextViewController wraps FindViewController? No, FindViewController wraps TextViewController.
+            // Wait, FindViewController adds the editor's view as a child.
             
-            // Force focus
-            containerView.window?.makeFirstResponder(findPanel)
+            // Let's identify the editor view first. contentViewController is likely the editor part.
+            // But we don't have access to children easily.
+            
+            // Revised Heuristic: The Find Panel is the subview with the smallest height (if visible) or topmost geometry.
+            // Or simply, the one that is NOT the main editor scroll/text view.
+            
+            let subviews = containerView.subviews
+            guard subviews.count >= 2 else { return } // Need at least editor + panel
+            
+            // The editor view is likely a NSScrollView or Custom wrapper. The panel is a NSView/VisualEffectView.
+            // The panel is usually at the top (y=0) or bottom. In CodeEdit, it's at the top.
+            
+            // Let's assume the one with the greater height is the editor, OR the one that isn't the found panel.
+            // zPosition=1000 was the previous check. Let's keep it but also check frame.
+            
+            var findPanel: NSView?
+            var editorView: NSView?
+            
+            if let zPanel = subviews.first(where: { $0.layer?.zPosition == 1000 }) {
+                findPanel = zPanel
+                editorView = subviews.first(where: { $0 != zPanel })
+            } else {
+                // Fallback: The panel is likely the one with smaller height
+                let sorted = subviews.sorted(by: { $0.frame.height < $1.frame.height })
+                findPanel = sorted.first
+                editorView = sorted.last
+            }
+            
+            guard let panel = findPanel, let editor = editorView else { return }
+            
+            // FORCE FOCUS to the text field inside the panel
+            // Do a recursive search for NSTextField (search field)
+            if let searchField = self.findFirstTextField(in: panel) {
+                containerView.window?.makeFirstResponder(searchField)
+            } else {
+                 containerView.window?.makeFirstResponder(panel)
+            }
+
             
             // 4. Layout: Shift Editor Below Find Panel
-            // Remove existing top constraint on editorView
-            let topConstraints = containerView.constraints.filter { constraint in
-                return (constraint.firstItem === editorView && constraint.firstAttribute == .top) ||
-                       (constraint.secondItem === editorView && constraint.secondAttribute == .top)
+            // Check if we already have the constraint
+            let existingConstraints = containerView.constraints.filter { c in
+                (c.firstItem === editor && c.secondItem === panel && c.firstAttribute == .top && c.secondAttribute == .bottom)
             }
             
-            if !topConstraints.isEmpty {
-                containerView.removeConstraints(topConstraints)
+            if existingConstraints.isEmpty {
+                // Remove conflicting top constraints
+                let topConstraints = containerView.constraints.filter { constraint in
+                    return (constraint.firstItem === editor && constraint.firstAttribute == .top) ||
+                           (constraint.secondItem === editor && constraint.secondAttribute == .top)
+                }
+                
+                if !topConstraints.isEmpty {
+                    containerView.removeConstraints(topConstraints)
+                }
+                
+                // Add new constraint: editorView.top == findPanel.bottom
+                let newConstraint = editor.topAnchor.constraint(equalTo: panel.bottomAnchor)
+                newConstraint.isActive = true
+                
+                // Also ensure editor bottom is anchored to container bottom
+                // (It usually is, but let's make sure we don't break it)
             }
-            
-            // Add new constraint: editorView.top == findPanel.bottom
-            let newConstraint = editorView.topAnchor.constraint(equalTo: findPanel.bottomAnchor)
-            newConstraint.isActive = true
             
             // 5. Setup Observers for Scrolling
             self.setupFindPanelObservers()
         }
     }
     
+    // Helper to find search field
+    private func findFirstTextField(in view: NSView) -> NSTextField? {
+        if let tf = view as? NSTextField { return tf }
+        for sub in view.subviews {
+            if let found = findFirstTextField(in: sub) { return found }
+        }
+        return nil
+    }
+    
     private var findPanelCancellables: Set<AnyCancellable> = []
     
     private func setupFindPanelObservers() {
+        print("[DEBUG] FindBar: Setting up observers...")
         findPanelCancellables.removeAll()
         
-        // Use Mirror to access internal properties to avoid build errors.
-        guard let textViewController = textViewController else { return }
-        
-        let tvcMirror = Mirror(reflecting: textViewController)
-        guard let findVCChild = tvcMirror.children.first(where: { $0.label == "findViewController" }) else { return }
-        
-        // Unwrap the Optional<FindViewController>
-        guard let findVC = unwrap(findVCChild.value) else { return }
-        
-        // Get ViewModel from FindViewController
-        let vcMirror = Mirror(reflecting: findVC)
-        guard let vmChild = vcMirror.children.first(where: { $0.label == "viewModel" }) else { return }
-        guard let viewModel = unwrap(vmChild.value) else { return }
-        
-        // Observe objectWillChange (type erased) to detect updates.
-        // We cannot observe Published properties via Mirror because we get a copy of the struct.
-        guard let observableParams = viewModel as? any ObservableObject else { return }
-        
-        // Define a generic helper to "open" the existential and access objectWillChange
-        func observe<T: ObservableObject>(_ vm: T) {
-            vm.objectWillChange
-                .eraseToAnyPublisher() // Erase type to avoid associated type complexity
-                .receive(on: DispatchQueue.main)
-                // Delay slightly to let the change propagate
-                .delay(for: .milliseconds(10), scheduler: DispatchQueue.main)
-                .sink { [weak self] _ in
-                    guard let self = self else { return }
-                    
-                    // Read current values via Mirror
-                    let vmMirror = Mirror(reflecting: vm) // reflect on vm directly
-                    
-                    var currentIndex: Int? = nil
-                    var currentMatches: [NSRange] = []
-                    
-                    // Helper to extract value
-                    func extractValue<V>(_ name: String, type: V.Type) -> V? {
-                        let child = vmMirror.children.first(where: { $0.label == name || $0.label == "_\(name)" })
-                        
-                        if let val = child?.value as? V {
-                            return val
-                        }
-                        
-                        // If it's a Published struct wrapper
-                        if let published = child?.value {
-                            let pMirror = Mirror(reflecting: published)
-                            if let val = pMirror.children.first(where: { $0.label == "value" || $0.label == "wrappedValue" })?.value as? V {
-                                 return val
-                            }
-                        }
-                        return nil
-                    }
-                    
-                    currentIndex = extractValue("currentFindMatchIndex", type: Int?.self) ?? nil
-                    currentMatches = extractValue("findMatches", type: [NSRange].self) ?? []
-
-                    // React to changes
-                    guard let index = currentIndex,
-                          index >= 0,
-                          index < currentMatches.count else { return }
-                    
-                    let matchRange = currentMatches[index]
-                    
-                    // Update cursor without auto-scroll
-                    self.textViewController?.setCursorPositions([.init(range: matchRange)], scrollToVisible: false)
-                    
-                    // Explicitly scroll using the robust method
-                    self.textViewController?.textView.scrollToRange(matchRange, center: true)
-                    self.textViewController?.textView.selectionManager.setSelectedRanges([matchRange])
-                }
-                .store(in: &findPanelCancellables)
+        guard let textViewController = textViewController else { 
+            print("[DEBUG] FindBar: textViewController is nil")
+            return 
         }
         
-        // Call the generic helper
-        observe(observableParams)
+        // Use direct public access now that we've exposed the internal classes
+        guard let findVC = textViewController.findViewController else {
+            print("[DEBUG] FindBar: findViewController is nil")
+            return
+        }
+        
+        let viewModel = findVC.viewModel
+        print("[DEBUG] FindBar: Successfully attached to ViewModel directly")
+        
+        // Observe objectWillChange
+        viewModel.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .delay(for: .milliseconds(100), scheduler: DispatchQueue.main)
+            .sink { [weak self, weak viewModel] _ in
+                guard let self = self, let viewModel = viewModel else { return }
+                
+                let matches = viewModel.findMatches
+                let index = viewModel.currentFindMatchIndex
+                
+                print("[DEBUG] FindBar: Result - Index: \(String(describing: index)), Matches Count: \(matches.count)")
+
+                if let index = index, index >= 0, index < matches.count {
+                    let matchRange = matches[index]
+                    print("[DEBUG] FindBar: Found match at range: \(matchRange)")
+                    
+                    if let nsTextView = self.textViewController?.textView as? NSTextView,
+                       let layoutManager = nsTextView.layoutManager,
+                       let textContainer = nsTextView.textContainer {
+                            
+                        layoutManager.ensureLayout(for: textContainer)
+                        let glyphRange = layoutManager.glyphRange(forCharacterRange: matchRange, actualCharacterRange: nil)
+                        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+                        
+                        if let scrollView = nsTextView.enclosingScrollView {
+                            let clipView = scrollView.contentView
+                            let viewportHeight = clipView.bounds.height
+                            let targetY = max(0, rect.origin.y - (viewportHeight / 2) + (rect.height / 2))
+                            let targetPoint = CGPoint(x: 0, y: targetY)
+                            
+                            print("[DEBUG] FindBar: Final Target Scroll Origin: \(targetPoint)")
+                            
+                            var newState = self.editorState
+                            newState.scrollPosition = targetPoint
+                            self.editorState = newState
+                            
+                            // FORCE IMPERATIVE SCROLL as well
+                            clipView.scroll(to: targetPoint)
+                            scrollView.reflectScrolledClipView(clipView)
+                            
+                            self.textViewController?.setCursorPositions([.init(range: matchRange)], scrollToVisible: false)
+                            nsTextView.selectedRanges = [NSValue(range: matchRange)]
+                        } else {
+                            print("[DEBUG] FindBar: No scroll view found for scroll origin update")
+                        }
+                    } else {
+                        print("[DEBUG] FindBar: Falling back to scrollToRange")
+                        self.textViewController?.textView.scrollToRange(matchRange, center: true)
+                    }
+                } else {
+                    print("[DEBUG] FindBar: No valid match to scroll to")
+                }
+            }
+            .store(in: &findPanelCancellables)
     }
     
     /// Helper to unwrap optional values inside Any
