@@ -243,6 +243,11 @@ struct AppMenuCommands: Commands {
                 }
                 .keyboardShortcut("s", modifiers: [.command, .control])
                 
+                Button("AI Prompt...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "aiPrompt")
+                }
+                .keyboardShortcut("a", modifiers: [.command, .control])
+                
                 Button("Timeline") {
                     NotificationCenter.default.post(name: .insertSnippet, object: "timeline")
                 }
