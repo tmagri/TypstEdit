@@ -106,6 +106,7 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline (Cmd+Ctrl+O)", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
                              ToolbarButton(icon: "server.rack", tooltip: "External Data (Cmd+Ctrl+D)", action: controller.openExternalDataEditor)
                              ToolbarButton(icon: "text.redaction", tooltip: "Scoped Block (Cmd+Ctrl+B)", isActive: controller.isScopedBlockActive, action: controller.toggleScopedBlock)
+                             ToolbarButton(icon: "shippingbox", tooltip: "Insert Foundation (Cmd+Ctrl+I)", isActive: controller.showFoundationEditor, action: controller.openFoundationEditor)
                          }
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "minus", tooltip: "Horizontal Line (Cmd+Opt+-)", isActive: controller.isHorizontalLineActive, action: controller.insertHorizontalLine)

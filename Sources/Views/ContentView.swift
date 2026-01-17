@@ -348,6 +348,7 @@ struct ContentView: View {
                 .sheet(isPresented: $editorController.showFigureEditor) { FigureEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showExternalDataEditor) { ExternalDataEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showFootnoteEditor) { FootnoteEditorView(controller: editorController) }
+                .sheet(isPresented: $editorController.showFoundationEditor) { FoundationEditorView(controller: editorController) }
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }
                     Button("Cancel", role: .cancel) { }
@@ -729,6 +730,7 @@ struct ContentView: View {
         case "toggleCodeBlock": editorController.toggleCodeBlock()
         case "toggleScopedBlock": editorController.toggleScopedBlock()
         case "aiPrompt": editorController.openAIPromptEditor()
+        case "openFoundationEditor": editorController.openFoundationEditor()
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()
         default: break

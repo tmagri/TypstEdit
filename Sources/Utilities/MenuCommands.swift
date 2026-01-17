@@ -268,6 +268,11 @@ struct AppMenuCommands: Commands {
                 }
                 .keyboardShortcut("b", modifiers: [.command, .control])
                 
+                Button("Insert Foundation...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "openFoundationEditor")
+                }
+                .keyboardShortcut("i", modifiers: [.command, .control])
+                
                 Divider()
                 
                 Button("Document Styles...") {

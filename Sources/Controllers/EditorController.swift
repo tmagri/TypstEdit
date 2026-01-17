@@ -276,6 +276,7 @@ class EditorController: NSObject, ObservableObject {
     @Published var lastExportError: String = ""
     @Published var missingFileName: String = ""
     @Published var targetLineNumber: String = ""
+    @Published var showFoundationEditor: Bool = false
     
     // --- Status Message ---
     @Published var statusMessage: String = ""
@@ -2216,6 +2217,10 @@ class EditorController: NSObject, ObservableObject {
     func openAIPromptEditor() {
         self.aiPromptText = ""
         self.showAIPromptEditor = true
+    }
+
+    func openFoundationEditor() {
+        self.showFoundationEditor = true
     }
     
     func generateFromPrompt(_ prompt: String) {
