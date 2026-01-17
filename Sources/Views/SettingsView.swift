@@ -16,11 +16,12 @@ struct AISettingsView: View {
     var body: some View {
         Form {
             Section {
+                Toggle("Enable Manual Intellisense", isOn: $settings.intellisenseEnabled)
                 Toggle("Enable AI Completion", isOn: $settings.isEnabled)
             }
             
             if settings.isEnabled {
-                Section {
+                Section(header: Text("AI Provider")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Provider")
                             .font(.headline)
@@ -47,39 +48,33 @@ struct AISettingsView: View {
                         SecureField("Gemini API Key", text: $settings.geminiApiKey)
                             .textContentType(.password)
                         TextField("Model (e.g. gemini-1.5-flash)", text: $settings.model)
-                    } else if settings.provider == .offline {
-                        VStack(alignment: .leading) {
-                            Text("Offline Mode Active")
-                                .font(.subheadline.bold())
-                            Text("Uses built-in Typst command list and basic grammar correction.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.vertical, 4)
                     } else {
                         TextField("Endpoint URL", text: $settings.customEndpoint)
                         SecureField("API Key (Optional)", text: $settings.customApiKey)
                             .textContentType(.password)
                         TextField("Model (e.g. llama3)", text: $settings.model)
                     }
+                    
+                    Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
+                        .padding(.top, 5)
+                    Text("Extracts content from markdown code blocks in the AI response.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
                 
-                if settings.provider != .offline {
-                    Section(header: Text("Context")) {
-                        Toggle("Include Project Context (MCP)", isOn: $settings.includeProjectContext)
-                        if settings.includeProjectContext {
-                            Text("Includes open files and project structure to improve accuracy.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                Section(header: Text("Context")) {
+                    Toggle("Include Project Context (MCP)", isOn: $settings.includeProjectContext)
+                    if settings.includeProjectContext {
+                        Text("Includes open files and project structure to improve accuracy.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 
                 Section {
-                    if settings.provider != .offline {
-                        Button(action: {
-                            testConnection()
-                        }) {
+                    Button(action: {
+                        testConnection()
+                    }) {
                         if isTesting {
                             ProgressView()
                                 .controlSize(.small)
@@ -89,11 +84,10 @@ struct AISettingsView: View {
                     }
                     .disabled(isTesting)
                     
-                        if let result = testResult {
-                            Text(result)
-                                .font(.caption)
-                                .foregroundColor(testSuccess ? .green : .red)
-                        }
+                    if let result = testResult {
+                        Text(result)
+                            .font(.caption)
+                            .foregroundColor(testSuccess ? .green : .red)
                     }
                 }
             }

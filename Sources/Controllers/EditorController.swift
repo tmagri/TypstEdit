@@ -99,6 +99,12 @@ class EditorController: NSObject, ObservableObject {
     // --- External Data Editor State ---
     @Published var showExternalDataEditor: Bool = false
     
+    // --- AI Prompt Editor State ---
+    @Published var showAIPromptEditor: Bool = false
+    @Published var aiPromptText: String = ""
+    @Published var isAIGenerating: Bool = false
+    @Published var useMCPForPrompt: Bool = true
+    
     // MARK: - New Features (Symbol Picker & Word Count)
     @Published var showSymbolPicker: Bool = false
     @Published var wordCount: Int = 0
@@ -2110,6 +2116,57 @@ class EditorController: NSObject, ObservableObject {
     private func setupScrollNotification() {
         // Scroll notification is handled differently with CodeEditSourceEditor or not needed in the same way.
         // For now, we stub it.
+    }
+    
+    // MARK: - AI Prompt Logic
+    
+    func openAIPromptEditor() {
+        self.aiPromptText = ""
+        self.showAIPromptEditor = true
+    }
+    
+    func generateFromPrompt(_ prompt: String) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        
+        self.isAIGenerating = true
+        
+        Task {
+            do {
+                var finalPrompt = trimmed
+                
+                if self.useMCPForPrompt {
+                    // Enrich with project context and guidelines from AIContextManager
+                    let context = AIContextManager.shared.generateContext(
+                        text: self.sourceCode,
+                        cursorIndex: self.selectedRange.location,
+                        fileURL: self.currentFileURL,
+                        errors: self.errors
+                    )
+                    finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)\n\nOutput only the resulting Typst code."
+                }
+                
+                let systemPrompt = "You are an expert Typst and software developer. Generate precise Typst code or content based on the user's request. Output only the content to be inserted, without any conversational filler. If the user asks for a chart or table, provide the full Typst code for it."
+                let result = try await AICompletionService.shared.fetchCompletion(
+                    prompt: finalPrompt,
+                    systemPrompt: systemPrompt,
+                    maxTokens: 512
+                )
+                
+                await MainActor.run {
+                    self.insertText(result)
+                    self.showAIPromptEditor = false
+                    self.isAIGenerating = false
+                    self.showStatus("AI Code Generated")
+                }
+            } catch {
+                await MainActor.run {
+                    print("[ERROR] AI Generation failed: \(error)")
+                    self.isAIGenerating = false
+                    self.showStatus("AI Generation failed")
+                }
+            }
+        }
     }
 }
 

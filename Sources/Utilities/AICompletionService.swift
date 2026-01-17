@@ -24,7 +24,7 @@ class AICompletionService: ObservableObject {
     
     private init() {}
     
-    func fetchCompletion(prompt: String) async throws -> String {
+    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output only the code to insert at the cursor.", maxTokens: Int = 128) async throws -> String {
         isFetching = true
         defer { isFetching = false }
         
@@ -43,7 +43,6 @@ class AICompletionService: ObservableObject {
         case .openRouter: endpoint = "https://openrouter.ai/api/v1/chat/completions"
         case .gemini: endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(settings.model):generateContent?key=\(settings.apiKey)"
         case .custom: endpoint = settings.customEndpoint
-        case .offline: throw AIError.apiError("Offline mode selected")
         }
         
         guard let url = URL(string: endpoint) else {
@@ -71,12 +70,12 @@ class AICompletionService: ObservableObject {
                 "contents": [
                     [
                         "parts": [
-                            ["text": "You are a precise code completion engine. Output only the code to insert at the cursor. \n\n" + prompt]
+                            ["text": systemPrompt + "\n\n" + prompt]
                         ]
                     ]
                 ],
                 "generationConfig": [
-                    "maxOutputTokens": 64,
+                    "maxOutputTokens": maxTokens,
                     "temperature": 0.2
                 ]
             ]
@@ -85,14 +84,14 @@ class AICompletionService: ObservableObject {
         // OpenAI / Standard Format
         else {
             let messages: [[String: String]] = [
-                ["role": "system", "content": "You are a precise code completion engine. Output only the code to insert at the cursor."],
+                ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": prompt]
             ]
             
             let body: [String: Any] = [
                 "model": settings.model,
                 "messages": messages,
-                "max_tokens": 64, // Short completion
+                "max_tokens": maxTokens,
                 "temperature": 0.2, // Deterministic
                 "stream": false
             ]
@@ -114,6 +113,7 @@ class AICompletionService: ObservableObject {
             throw AIError.parsingError
         }
         
+        let rawResult: String
         // Parse Gemini Response
         if isGemini {
             if let candidates = json["candidates"] as? [[String: Any]],
@@ -122,20 +122,41 @@ class AICompletionService: ObservableObject {
                let parts = contentObj["parts"] as? [[String: Any]],
                let firstPart = parts.first,
                let text = firstPart["text"] as? String {
-                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                rawResult = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                throw AIError.parsingError
             }
-            throw AIError.parsingError
-        }
-        
+        } 
         // Parse OpenAI Response
-        if let choices = json["choices"] as? [[String: Any]],
+        else if let choices = json["choices"] as? [[String: Any]],
            let firstChoice = choices.first,
            let message = firstChoice["message"] as? [String: Any],
            let content = message["content"] as? String {
-            return content.trimmingCharacters(in: .whitespacesAndNewlines)
+            rawResult = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            throw AIError.parsingError
         }
         
-        throw AIError.parsingError
+        if settings.forceCodeOutput {
+            return extractCode(from: rawResult)
+        }
+        return rawResult
+    }
+    
+    private func extractCode(from text: String) -> String {
+        // Look for content between ``` and ```
+        let pattern = "```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return text
+        }
+        
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        if let match = regex.firstMatch(in: text, options: [], range: nsRange),
+           let range = Range(match.range(at: 1), in: text) {
+            return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        return text
     }
     
     /// Verifies the connection to the AI provider by sending a minimal prompt.

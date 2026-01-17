@@ -37,73 +37,103 @@ class AICompletionProvider: CodeSuggestionDelegate {
         textView: TextViewController,
         cursorPosition: CursorPosition
     ) async -> (windowPosition: CursorPosition, items: [any CodeSuggestionEntry])? {
-        guard AISettingsManager.shared.isEnabled else { return nil }
-        
-        // Fallback: If passed position is invalid (-1, -1), use text view's current selection
-        let pos = cursorPosition.start.line != -1 ? cursorPosition : (textView.cursorPositions.first ?? cursorPosition)
-        print("[AICompletionProvider] Request for \(pos.start) (original was \(cursorPosition.start))")
-        
         let settings = AISettingsManager.shared
+        guard settings.isEnabled || settings.intellisenseEnabled else { return nil }
         
-        // Offline / Manual Mode
-        if settings.provider == .offline {
-            let text = textView.text
-            let index = cursorIndex(from: pos.start, in: text)
-            print("[AICompletionProvider] Offline request at index \(index)")
-            
-            // OfflineCompletionService is @MainActor, so we can call it directly as we are on @MainActor
-            let suggestions = OfflineCompletionService.shared.provideCompletion(text: text, cursorIndex: index)
-            
-            if !suggestions.isEmpty {
-                let items = suggestions.map { suggestion in
-                    AICompletionItem(
-                        label: suggestion,
-                        detail: "Offline",
-                        documentation: "Manual / Autocorrect Suggestion",
-                        image: Image(systemName: "text.book.closed")
-                    )
-                }
-                return (windowPosition: pos, items: items)
-            }
-            return nil
-        }
-        
-        // Cancel any pending request
-        debounceTask?.cancel()
-        
+        let pos = cursorPosition.start.line != -1 ? cursorPosition : (textView.cursorPositions.first ?? cursorPosition)
         let text = textView.text
-        let url = controller?.currentFileURL
+        let index = cursorIndex(from: pos.start, in: text)
+        let prefix = getWordPrefix(text: text, cursorIndex: index)
         
-        // Debounce: Wait for user to stop typing briefly (Only for CLOUD AI)
-        do {
-            try await Task.sleep(nanoseconds: 700 * 1_000_000) // 700ms debounce
-        } catch {
-            return nil
+        var allItems: [any CodeSuggestionEntry] = []
+        
+        // 1. Manual Intellisense (Immediate)
+        if settings.intellisenseEnabled {
+            let suggestions = OfflineCompletionService.shared.provideCompletion(text: text, cursorIndex: index)
+            let items = suggestions.map { suggestion in
+                AICompletionItem(
+                    label: suggestion,
+                    detail: "Offline",
+                    documentation: "Manual / Autocorrect Suggestion",
+                    image: Image(systemName: "text.book.closed")
+                )
+            }
+            allItems.append(contentsOf: items)
         }
         
-        if Task.isCancelled { return nil }
-        
-        // Prepare Prompt
-        let context = AIContextManager.shared.generateContext(
-            text: text,
-            cursorIndex: cursorIndex(from: pos.start, in: text),
-            fileURL: url,
-            errors: controller?.errors ?? []
-        )
-        
-        do {
-            let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context)
+        // 2. AI Completion (Async)
+        if settings.isEnabled {
+            // Cancel any pending request
+            debounceTask?.cancel()
             
-            if !completionCode.isEmpty {
-                let item = AICompletionItem(
-                    label: completionCode,
-                    detail: "AI",
-                    documentation: "AI Generated Suggestion"
-                )
-                return (windowPosition: pos, items: [item])
+            let url = controller?.currentFileURL
+            let errors = controller?.errors ?? []
+            
+            debounceTask = Task {
+                do {
+                    // Debounce: Wait for user to stop typing briefly (Only for CLOUD AI)
+                    try await Task.sleep(nanoseconds: 700 * 1_000_000)
+                    
+                    if Task.isCancelled { return }
+                    
+                    // Prepare Context
+                    let context = AIContextManager.shared.generateContext(
+                        text: text,
+                        cursorIndex: index,
+                        fileURL: url,
+                        errors: errors
+                    )
+                    
+                    let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context)
+                    
+                    if Task.isCancelled { return }
+                    
+                    if !completionCode.isEmpty {
+                        let aiItem = AICompletionItem(
+                            label: completionCode,
+                            detail: "AI",
+                            documentation: "AI Generated Suggestion"
+                        )
+                        
+                        await MainActor.run {
+                            // Only update if we're still on the same editor and potentially the same or similar prefix
+                            guard let model = SuggestionController.shared.model as SuggestionViewModel?,
+                                  model.activeTextView === textView else {
+                                return
+                            }
+                            
+                            // To prevent appending to a stale list, we check if the prefix is still valid
+                            let currentIndex = cursorIndex(from: textView.cursorPositions.first?.start ?? pos.start, in: textView.text)
+                            let currentPrefix = getWordPrefix(text: textView.text, cursorIndex: currentIndex)
+                            
+                            // If user is still typing the same prefix (or it's empty and we're just starting), or if the window is visible
+                            // We merge the AI result.
+                            if currentPrefix.hasPrefix(prefix) || prefix.hasPrefix(currentPrefix) {
+                                // Add to items if not already present (based on label)
+                                if !model.items.contains(where: { $0.label == aiItem.label }) {
+                                    model.items.append(aiItem)
+                                    print("[AICompletionProvider] AI result added to suggestions")
+                                }
+                            }
+                        }
+                    }
+                } catch is CancellationError {
+                    // Ignore
+                } catch {
+                    print("AI Completion task error: \(error)")
+                }
             }
-        } catch {
-            print("AI Completion Error: \(error)")
+        }
+        
+        if !allItems.isEmpty {
+            return (windowPosition: pos, items: allItems)
+        } else if settings.isEnabled {
+            // If only AI is enabled, we return an empty list so the window appears (or we could wait)
+            // But returning nil might prevent the window from showing at all.
+            // Let's return an empty list to indicate "Loading..." or just wait for the first AI result.
+            // Actually, if we return nil, showCompletions might not show anything.
+            // Let's return empty if AI is loading.
+            return (windowPosition: pos, items: [])
         }
         
         return nil

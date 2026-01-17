@@ -97,6 +97,7 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "photo", tooltip: "Insert Image (Cmd+Ctrl+I)", isActive: controller.isImageActive, action: controller.insertImageSnippet)
                              ToolbarButton(icon: "tablecells", tooltip: "Insert Table (Cmd+Ctrl+T)", isActive: controller.isTableActive, action: controller.insertTableSnippet)
                              ToolbarButton(icon: "sum", tooltip: "Insert Equation (Cmd+Ctrl+E)", isActive: controller.isEquationActive, action: controller.openNewEquationEditor)
+                             ToolbarButton(icon: "sparkles", tooltip: "AI Prompt (Cmd+Ctrl+A)", isActive: controller.showAIPromptEditor, action: controller.openAIPromptEditor) // Added AI Prompt
                              ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive, action: controller.toggleLink)
                          }
                          HStack(spacing: 2) {

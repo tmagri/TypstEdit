@@ -328,6 +328,7 @@ struct ContentView: View {
                     ImageEditorView(controller: editorController, onInsert: { editorController.saveImageSnippet() }, onCancel: { editorController.showImageEditor = false })
                 }
                 .sheet(isPresented: $editorController.showSymbolPicker) { SymbolPickerView(controller: editorController) }
+                .sheet(isPresented: $editorController.showAIPromptEditor) { AIPromptView(controller: editorController).environmentObject(themeManager) }
                 .sheet(isPresented: $editorController.showQuoteEditor) {
                     QuoteEditorView(controller: editorController, onInsert: { t, a, b in editorController.insertQuote(text: t, attribution: a, isBlock: b) }, onCancel: { editorController.showQuoteEditor = false })
                 }
@@ -384,16 +385,24 @@ struct ContentView: View {
                         Spacer()
                         HStack(spacing: 8) {
                             // AI / Intellisense Status Indicator
-                            if aiService.isFetching || (aiSettings.isEnabled && aiSettings.provider == .offline) {
+                            if aiService.isFetching || aiSettings.intellisenseEnabled || aiSettings.isEnabled {
                                 HStack(spacing: 4) {
                                     if aiService.isFetching {
                                         ProgressView()
                                             .controlSize(.small)
                                             .scaleEffect(0.6)
+                                        Text("AI")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundColor(.blue)
+                                    } else if aiSettings.intellisenseEnabled {
+                                        Text("Intellisense")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundColor(.green)
+                                    } else if aiSettings.isEnabled {
+                                        Text("AI")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundColor(.blue.opacity(0.7))
                                     }
-                                    Text(aiSettings.provider == .offline ? "Intellisense" : "AI")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(aiSettings.provider == .offline ? .green : .blue)
                                 }
                             }
                             
@@ -707,6 +716,7 @@ struct ContentView: View {
         case "viewBothPanels": withAnimation { editorController.viewMode = .both }
         case "splitVertical": withAnimation { editorController.isVerticalSplit = true }
         case "splitHorizontal": withAnimation { editorController.isVerticalSplit = false }
+        case "aiPrompt": editorController.openAIPromptEditor()
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()
         default: break
