@@ -1158,8 +1158,19 @@ class EditorController: NSObject, ObservableObject {
         let hadTrailingNewline = lineContent.hasSuffix("\n")
         let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
         
-        if isSingleLineRepresentation && lineContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            insertText(prefix, replacementRange: lineRange)
+        let trimmed = lineContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isSingleLineRepresentation && (trimmed.isEmpty || trimmed == prefix.trimmingCharacters(in: .whitespaces)) {
+            if trimmed == prefix.trimmingCharacters(in: .whitespaces) {
+                // Remove prefix
+                let newText = hadTrailingNewline ? "\n" : ""
+                let newCursor = NSRange(location: lineRange.location, length: 0)
+                insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+            } else {
+                // Add prefix
+                let newText = prefix + (hadTrailingNewline ? "\n" : "")
+                let newCursor = NSRange(location: lineRange.location + prefix.utf16.count, length: 0)
+                insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+            }
             return
         }
         
@@ -1548,14 +1559,22 @@ class EditorController: NSObject, ObservableObject {
         let hadTrailingNewline = lineContent.hasSuffix("\n")
         let isSingleLineRepresentation = (lineRange.length > 0)
         
-        // --- Special Case: Single empty line ---
-        if isSingleLineRepresentation && lineContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty {
+        // --- Special Case: Single empty line or marker-only line ---
+        let markerOnlyPattern = #"^(=+)\s*$"#
+        let isMarkerOnly = (lineContent.range(of: markerOnlyPattern, options: .regularExpression) != nil)
+        let isEmptyLine = lineContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
+        
+        if isSingleLineRepresentation && (isEmptyLine || isMarkerOnly) {
             if level > 0 {
                 let prefix = String(repeating: "=", count: level) + " "
-                insertText(prefix + "\n", replacementRange: lineRange)
+                let newText = prefix + (hadTrailingNewline ? "\n" : "")
+                let newCursor = NSRange(location: lineRange.location + prefix.utf16.count, length: 0)
+                insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
             } else {
-                // Remove heading (it was empty anyway, but ensure clean state)
-                insertText("\n", replacementRange: lineRange)
+                // Remove heading marker/Body mode
+                let newText = hadTrailingNewline ? "\n" : ""
+                let newCursor = NSRange(location: lineRange.location, length: 0)
+                insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
             }
             updateFormattingState()
             return
