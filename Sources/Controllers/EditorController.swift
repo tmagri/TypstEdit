@@ -266,6 +266,7 @@ class EditorController: NSObject, ObservableObject {
     @Published var isBibliographyActive: Bool = false
     @Published var isOutlineActive: Bool = false
     @Published var isCodeActive: Bool = false
+    @Published var isScopedBlockActive: Bool = false
     @Published var showDeleteEquationAlert: Bool = false
     @Published var showDeleteCodeAlert: Bool = false
     @Published var showGoToLineAlert: Bool = false
@@ -1551,6 +1552,7 @@ class EditorController: NSObject, ObservableObject {
             self.isPageBreakActive = FormatDetector.findPageBreakRange(in: text, at: range.location) != nil
             self.isHorizontalLineActive = FormatDetector.findHorizontalLineRange(in: text, at: range.location) != nil
             self.isFigureActive = FormatDetector.findFigureRange(in: text, at: range.location) != nil
+            self.isScopedBlockActive = FormatDetector.findScopedBlockRange(in: text, at: range.location) != nil
         }
     }
     
@@ -1771,10 +1773,15 @@ class EditorController: NSObject, ObservableObject {
     
     func toggleCode() {
         if isCodeActive {
-            showDeleteCodeAlert = true
+            if let range = FormatDetector.findCodeRange(in: sourceCode, at: selectedRange.location) {
+                unwrapFormatting(range: range, prefixLen: 1, suffixLen: 1)
+                showStatus("Removed Inline Code")
+            }
         } else {
             wrapSelection(prefix: "`", suffix: "`")
+            showStatus("Applied Inline Code")
         }
+        updateFormattingState()
     }
     
     func deleteCodeBlock() {
@@ -1885,8 +1892,29 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func toggleCodeBlock() {
-        // Simple wrap for now
-        wrapSelection(prefix: "```\n", suffix: "\n```")
+        if isCodeBlockActive {
+            if let range = FormatDetector.findCodeBlockRange(in: sourceCode, at: selectedRange.location) {
+                unwrapFormatting(range: range, prefixLen: 4, suffixLen: 4) // ```\n and \n```
+                showStatus("Removed Code Block")
+            }
+        } else {
+            wrapSelection(prefix: "```\n", suffix: "\n```")
+            showStatus("Applied Code Block")
+        }
+        updateFormattingState()
+    }
+
+    func toggleScopedBlock() {
+        if isScopedBlockActive {
+            if let range = FormatDetector.findScopedBlockRange(in: sourceCode, at: selectedRange.location) {
+                unwrapFormatting(range: range, prefixLen: 2, suffixLen: 1) // #[ and ]
+                showStatus("Removed Scoped Block")
+            }
+        } else {
+            wrapSelection(prefix: "#[", suffix: "]")
+            showStatus("Applied Scoped Block")
+        }
+        updateFormattingState()
     }
     
     func insertPageBreak() {

@@ -726,6 +726,8 @@ struct ContentView: View {
         case "viewBothPanels": withAnimation { editorController.viewMode = .both }
         case "splitVertical": withAnimation { editorController.isVerticalSplit = true }
         case "splitHorizontal": withAnimation { editorController.isVerticalSplit = false }
+        case "toggleCodeBlock": editorController.toggleCodeBlock()
+        case "toggleScopedBlock": editorController.toggleScopedBlock()
         case "aiPrompt": editorController.openAIPromptEditor()
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()

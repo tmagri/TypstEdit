@@ -51,7 +51,8 @@ struct FormatDetector {
                 
                 if let contentRange = findClosingMarker(in: text, startingAt: match.range.location + match.range.length, opener: opener, closer: closer) {
                     let fullRange = NSRange(location: match.range.location, length: contentRange.upperBound - match.range.location)
-                    if NSLocationInRange(safeIndex, fullRange) {
+                    // Be inclusive of boundaries (safeIndex == fullRange.upperBound should also match)
+                    if safeIndex >= fullRange.location && safeIndex <= fullRange.upperBound {
                         return fullRange
                     }
                 }
@@ -149,16 +150,16 @@ struct FormatDetector {
         
         // Search forwards for the closer
         var closerIndex = -1
-        i = safeIndex
+        i = max(openerIndex + marker.count, safeIndex)
         while i < length {
-            if i < 0 { i += 1; continue }
+            // Check if not escaped
+            if i > 0 && nsText.substring(with: NSRange(location: i - 1, length: 1)) == "\\" {
+                i += 1
+                continue
+            }
+            
             let char = nsText.substring(with: NSRange(location: i, length: 1))
             if char == marker {
-                // Check if it's not escaped
-                if i > 0 && nsText.substring(with: NSRange(location: i - 1, length: 1)) == "\\" {
-                    i += 1
-                    continue
-                }
                 closerIndex = i
                 break
             }
@@ -225,7 +226,7 @@ struct FormatDetector {
         let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         
         for match in matches {
-            if NSLocationInRange(safeIndex, match.range) {
+            if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
                 return match.range
             }
         }
@@ -246,7 +247,7 @@ struct FormatDetector {
         let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         
         for match in matches {
-            if NSLocationInRange(safeIndex, match.range) {
+            if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
                 return match.range
             }
         }
@@ -259,6 +260,13 @@ struct FormatDetector {
 
     static func findFootnoteRange(in text: String, at index: Int) -> NSRange? {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#footnote\s*[\[(]"#)
+    }
+
+    /// Finds the range of a scoped block (#[...]) surrounding the index.
+    static func findScopedBlockRange(in text: String, at index: Int) -> NSRange? {
+        // We look specifically for #[...]
+        // Note: findBracketedRange handles nesting.
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#\["#)
     }
 
     static func findPageBreakRange(in text: String, at index: Int) -> NSRange? {

@@ -263,6 +263,11 @@ struct AppMenuCommands: Commands {
                 }
                 .keyboardShortcut("d", modifiers: [.command, .control])
                 
+                Button("Scoped Block") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleScopedBlock")
+                }
+                .keyboardShortcut("b", modifiers: [.command, .control])
+                
                 Divider()
                 
                 Button("Document Styles...") {
