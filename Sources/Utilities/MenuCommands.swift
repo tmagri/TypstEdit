@@ -18,6 +18,11 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("o", modifiers: .command)
             
+            Button("Import LyX File...") {
+                NotificationCenter.default.post(name: .menuCommand, object: "importLyx")
+            }
+            .keyboardShortcut("i", modifiers: [.command, .shift])
+            
             Divider()
             
             Button("Rename File") {

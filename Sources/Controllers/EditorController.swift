@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 extension Notification.Name {
     static let refreshProjectSidebar = Notification.Name("refreshProjectSidebar")
+    static let openProjectAndFile = Notification.Name("openProjectAndFile")
 }
 
 import CodeEditSourceEditor
@@ -558,6 +559,51 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Snippet Functions ---
     
+    
+    func importLyx() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "lyx")!]
+        panel.title = "Import LyX File"
+        
+        if panel.runModal() == .OK, let selectedURL = panel.url {
+            do {
+                let content = try String(contentsOf: selectedURL, encoding: .utf8)
+                let converter = LyxToTypstConverter(content: content)
+                let typstContent = converter.convert()
+                
+                let fileName = selectedURL.deletingPathExtension().lastPathComponent
+                let targetFileName = "\(fileName).typ"
+                
+                let targetURL: URL
+                if let projectRoot = projectRootURL {
+                    targetURL = projectRoot.appendingPathComponent(targetFileName)
+                } else {
+                    let docDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+                    let newProjectDir = docDir.appendingPathComponent(fileName)
+                    try FileManager.default.createDirectory(at: newProjectDir, withIntermediateDirectories: true)
+                    targetURL = newProjectDir.appendingPathComponent(targetFileName)
+                }
+                
+                try typstContent.write(to: targetURL, atomically: true, encoding: .utf8)
+                
+                if projectRootURL == nil {
+                    NotificationCenter.default.post(name: .openProjectAndFile, object: targetURL)
+                } else {
+                    NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+                    NotificationCenter.default.post(name: .fileDidCreate, object: targetURL)
+                }
+                
+                showStatus("LyX File Imported")
+            } catch {
+                print("[ERROR] Failed to import LyX file: \(error.localizedDescription)")
+                showStatus("Import failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     func insertTableSnippet() {
         let range = selectedRange
         setupTableEditor(at: range.location)

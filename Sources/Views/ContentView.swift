@@ -66,6 +66,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
             if let command = notification.object as? String { handleMenuCommand(command) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
+            if let url = notification.object as? URL {
+                self.selectedFile = url
+                self.loadFile(url: url)
+                let folder = url.deletingLastPathComponent()
+                fileSystem.currentFolder = folder
+                fileSystem.loadFiles()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
             if let url = notification.object as? URL { self.selectedFile = url }
         }
@@ -664,6 +673,7 @@ struct ContentView: View {
         switch command {
         case "newFile": fileSystem.createNewFile()
         case "uploadFile": fileSystem.importFile()
+        case "importLyx": editorController.importLyx()
         case "renameFile": if let url = selectedFile { self.renameTargetURL = url; self.newFileName = url.lastPathComponent; self.showRenameAlert = true }
         case "quickExportPDF": if let url = selectedFile { exportPDF(from: url) }
         case "exportPDF": handleExport(format: "pdf")
