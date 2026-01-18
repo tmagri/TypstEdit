@@ -58,6 +58,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case .alertSecondButtonReturn: // Cancel
                 completion(false)
             case .alertThirdButtonReturn: // Don't Save
+                if let targetURL = url ?? self.editorController?.currentFileURL {
+                    AutoRecoveryManager.shared.clearRecovery(for: targetURL)
+                }
                 completion(true)
             default:
                 completion(false)
@@ -90,6 +93,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .alertSecondButtonReturn: // Cancel
             return false // Abort
         case .alertThirdButtonReturn: // Don't Save
+            if let targetURL = url ?? self.editorController?.currentFileURL {
+                AutoRecoveryManager.shared.clearRecovery(for: targetURL)
+            }
             return true // Proceed without saving
         default:
             return false

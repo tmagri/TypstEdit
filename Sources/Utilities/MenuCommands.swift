@@ -33,12 +33,6 @@ struct AppMenuCommands: Commands {
             
             Divider()
             
-            Button("Quick Export PDF") {
-                NotificationCenter.default.post(name: .menuCommand, object: "quickExportPDF")
-            }
-            .keyboardShortcut("s", modifiers:[.command, .shift])
-            .disabled(!editorController.isTypstFile)
-            
             Menu("Export As") {
                 Button("PDF") {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportPDF")
