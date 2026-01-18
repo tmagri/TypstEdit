@@ -24,7 +24,8 @@ extension String {
     
     func sanitizedLabel() -> String {
         let invalidCharSet = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._:").inverted
-        return self.components(separatedBy: invalidCharSet).joined(separator: "-")
+        let cleaned = self.components(separatedBy: invalidCharSet).joined(separator: "-")
+        return cleaned.replacingRegex(pattern: "-+", with: "-").trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 }
 
@@ -56,9 +57,20 @@ class LyxToTypstConverter {
     
     func convert() -> String {
         // Preamble
-        outputLines.append("#set text(font: \"Segoe UI\", size: 11pt)")
-        outputLines.append("#set page(paper: \"a4\", margin: (x: 2cm, y: 2.5cm))")
-        outputLines.append("#set heading(numbering: \"1.1\")")
+        let (fontName, fontSize) = parseFontSettings()
+        let (paperSize, numbering) = parsePageSettings()
+        
+        if let font = fontName {
+            outputLines.append("#set text(font: \"\(font)\", size: \(fontSize ?? "11pt"))")
+        } else if let size = fontSize {
+            outputLines.append("#set text(size: \(size))")
+        }
+        
+        outputLines.append("#set page(paper: \"\(paperSize)\", margin: (x: 2cm, y: 2.5cm))")
+        
+        if numbering {
+            outputLines.append("#set heading(numbering: \"1.1\")")
+        }
         outputLines.append("")
         
         while currentLineIndex < sourceLines.count {
@@ -75,6 +87,64 @@ class LyxToTypstConverter {
     
     // MARK: - Post Processing
     
+    // Parses header info from sourceLines to determine font usage
+    private func parseFontSettings() -> (String?, String?) {
+        var font: String? = nil
+        var size: String? = "11pt"
+        var foundPreambleFont = false
+        
+        // 1. Scan for preamble \setmainfont
+        for line in sourceLines {
+            if line.contains("\\setmainfont") {
+                if let range = line.range(of: "\\setmainfont{") {
+                   let suffix = line[range.upperBound...]
+                   if let endRange = suffix.range(of: "}") {
+                       font = String(suffix[..<endRange.lowerBound])
+                       foundPreambleFont = true
+                       break
+                   }
+                }
+            }
+        }
+        
+        // 2. Scan for LyX font settings if no preamble set found
+        if !foundPreambleFont {
+             for line in sourceLines {
+                 if line.hasPrefix("\\font_roman") {
+                     let parts = line.components(separatedBy: "\"")
+                     if parts.count >= 4 {
+                         let val = parts[3] 
+                         if val != "default" { font = val }
+                     }
+                 }
+             }
+        }
+
+        return (font, size)
+    }
+
+    private func parsePageSettings() -> (String, Bool) {
+        var paper = "a4" // Default
+        var numbering = false
+        
+        for line in sourceLines {
+            if line.hasPrefix("\\papersize") {
+                let parts = line.components(separatedBy: " ")
+                if parts.count > 1 {
+                    let val = parts[1].trimmingCharacters(in: .whitespaces)
+                    if val != "default" { paper = val }
+                }
+            }
+            if line.hasPrefix("\\secnumdepth") {
+                let parts = line.components(separatedBy: " ")
+                if parts.count > 1, let depth = Int(parts[1]), depth > 0 {
+                    numbering = true
+                }
+            }
+        }
+        return (paper, numbering)
+    }
+
     private func postProcess(_ lines: [String]) -> [String] {
         var cleanLines: [String] = []
         
@@ -94,7 +164,8 @@ class LyxToTypstConverter {
             // Fix common typos or conversion artifacts
             l = l.replacingOccurrences(of: "@subsec:On-Hold.", with: "@subsec:On-Hold).") // missing paren in original
             l = l.replacingOccurrences(of: ":_*__", with: ":_*") // doubled underscores
-            l = l.replacingOccurrences(of: ":*__", with: ":*") 
+            l = l.replacingOccurrences(of: ":*__", with: ":*")
+            l = l.replacingOccurrences(of: "__", with: "_") // General double underscore fix 
             
             cleanLines.append(l)
         }
@@ -257,10 +328,10 @@ class LyxToTypstConverter {
             
             // Process the content inside the figure block
             // 1. Specific match for the most common case: rotatebox{90}{\includegraphics{...}}
-            figBlock = figBlock.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}\\s?\\}", with: "#rotate(-90deg)[#image(\"$2\")]", options: opts)
+            figBlock = figBlock.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}\\s?\\}", with: "#rotate(-90deg, reflow: true)[#image(\"$2\")]", options: opts)
             
             // 2. Individual replacements if they didn't match the combined one
-            figBlock = figBlock.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", with: "#rotate(-90deg)[$1]", options: opts)
+            figBlock = figBlock.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", with: "#rotate(-90deg, reflow: true)[$1]", options: opts)
             figBlock = figBlock.replacingRegex(pattern: "\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}", with: "#image(\"$2\")", options: opts)
             figBlock = figBlock.replacingOccurrences(of: "\\centering", with: "#set align(center)\n")
             
@@ -277,7 +348,7 @@ class LyxToTypstConverter {
         content = content.replacingRegex(pattern: "\\\\begin\\{titlepage\\}", with: "", options: opts)
         content = content.replacingRegex(pattern: "\\\\end\\{titlepage\\}", with: "#pagebreak()", options: opts)
         content = content.replacingOccurrences(of: "\\centering", with: "#set align(center)\n")
-        content = content.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", with: "#rotate(-90deg)[$1]", options: opts)
+        content = content.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", with: "#rotate(-90deg, reflow: true)[$1]", options: opts)
         content = content.replacingOccurrences(of: "\\Huge", with: "#set text(size: 24pt)\n")
         content = content.replacingOccurrences(of: "\\Large", with: "#set text(size: 18pt)\n")
         content = content.replacingOccurrences(of: "\\scshape", with: "#set text(features: (\"smcp\",))\n")
@@ -317,10 +388,10 @@ class LyxToTypstConverter {
         case .enumerate: textBuffer += "\(indent)+ "
         case .description: textBuffer += "\(indent)/ "
         case .labeling: textBuffer += "\(indent)- " 
-        case .title: outputLines.append("#align(center, text(17pt, weight: \"bold\")[")
-        case .author: outputLines.append("#align(center, text(12pt)[")
+        case .title: outputLines.append("#align(center, text(24pt, weight: \"bold\")[")
+        case .author: outputLines.append("#align(center, text(18pt)[")
         case .code: outputLines.append("```")
-        case .caption: textBuffer += "*Figure:* "
+        case .caption: textBuffer += "" // Caption text handled by semantic figure if possible, or just removed prefix to let Typst handle it
         default: if nestingLevel > 0 { textBuffer += indent }
         }
     }
@@ -349,6 +420,8 @@ class LyxToTypstConverter {
             // If it's a labeling layout, we want the colon OUTSIDE the formatting or at least handled consistently.
             // Let's put the colon right after the text, then close bold.
             if currentLayout == .labeling && !textBuffer.trimmingCharacters(in: .whitespaces).hasSuffix(":") {
+                // Ensure no space before colon for labeling
+                if textBuffer.hasSuffix(" ") { textBuffer.removeLast() }
                 textBuffer += ":"
             }
             textBuffer += "*"
@@ -360,7 +433,8 @@ class LyxToTypstConverter {
                  outputLines.append("*")
             } else {
                 if currentLayout == .labeling && !lastLine.trimmingCharacters(in:.whitespaces).hasSuffix(":") {
-                    lastLine += ":"
+                     if lastLine.hasSuffix(" ") { lastLine.removeLast() }
+                     lastLine += ":"
                 }
                 lastLine += "*"
                 outputLines.append(lastLine)
@@ -438,15 +512,29 @@ class LyxToTypstConverter {
     
     private func parseGraphicsInset() {
         currentLineIndex += 1
+        var filename = ""
+        var width: String?
+        var height: String?
+        
         while currentLineIndex < sourceLines.count {
             let line = sourceLines[currentLineIndex].trimLeading()
             if line == "\\end_inset" { break }
             if line.hasPrefix("filename") {
-                let path = line.replacingOccurrences(of: "filename ", with: "")
-                flushBuffer()
-                outputLines.append("#image(\"\(path)\")") 
+                filename = line.replacingOccurrences(of: "filename ", with: "")
+            } else if line.hasPrefix("width") {
+                width = line.replacingOccurrences(of: "width ", with: "").replacingOccurrences(of: "\"", with: "").replacingOccurrences(of: "line%", with: "%")
+            } else if line.hasPrefix("height") {
+                height = line.replacingOccurrences(of: "height ", with: "").replacingOccurrences(of: "\"", with: "")
             }
             currentLineIndex += 1
+        }
+        
+        if !filename.isEmpty {
+            flushBuffer()
+            var args = ""
+            if let w = width, !w.contains("0pt") { args += ", width: \(w)" }
+            if let h = height, !h.contains("0pt") { args += ", height: \(h)" }
+            outputLines.append("#image(\"\(filename)\"\(args))")
         }
     }
     
@@ -545,7 +633,9 @@ class LyxToTypstConverter {
         m = m.replacingOccurrences(of: "$", with: "")
         m = m.replacingRegex(pattern: "\\\\frac\\{([^}]*)\\}\\{([^}]*)\\}", with: "($1)/($2)")
         m = m.replacingOccurrences(of: "\\cdot", with: "dot")
-        m = m.replacingOccurrences(of: "\\times", with: "times")
+        m = m.replacingOccurrences(of: "\\times", with: " times ")
+        m = m.replacingRegex(pattern: "\\\\mathrm\\{([^}]+)\\}", with: "$1")    
+        m = m.replacingRegex(pattern: "\\\\text\\{([^}]+)\\}", with: "\"$1\"") // Better text handling
         m = m.replacingOccurrences(of: "\\sum", with: "sum")
         m = m.replacingOccurrences(of: "\\prod", with: "product")
         m = m.replacingOccurrences(of: "\\int", with: "integral")
@@ -563,9 +653,13 @@ class LyxToTypstConverter {
             m = m.replacingOccurrences(of: "\\\\\(g.capitalized)", with: g.capitalized, options: .regularExpression)
         }
         
+        m = m.replacingOccurrences(of: "\\text", with: "&quot;", options: .regularExpression) // simplistic text handling
         m = m.replacingOccurrences(of: "\\", with: "")
         m = m.replacingOccurrences(of: "{", with: "(")
         m = m.replacingOccurrences(of: "}", with: ")")
+        
+        // Clean up empty parens from brace conversion if any
+        m = m.replacingOccurrences(of: "()", with: "")
         
         return m.trimmingCharacters(in: .whitespacesAndNewlines)
     }
