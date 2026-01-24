@@ -3,7 +3,9 @@ import SwiftUI
 struct AIPromptView: View {
     @ObservedObject var controller: EditorController
     @State private var promptText: String = ""
-    @FocusState private var isEditorFocused: Bool
+    @State private var generatedResult: String = ""
+    @State private var isEditorFocused: Bool = false
+    @FocusState private var editorFocus: Bool
     
     var body: some View {
         VStack(spacing: 20) {
@@ -27,8 +29,8 @@ struct AIPromptView: View {
                     .font(.subheadline.bold())
                 
                 TextEditor(text: $promptText)
-                    .focused($isEditorFocused)
-                    .frame(height: 200)
+                    .focused($editorFocus)
+                    .frame(height: 100)
                     .padding(4)
                     .background(Color(NSColor.controlBackgroundColor))
                     .cornerRadius(8)
@@ -45,6 +47,33 @@ struct AIPromptView: View {
                     .help("Includes relevant project snippets and Typst patterns to improve quality.")
             }
             
+            if !generatedResult.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Result (Preview)")
+                        .font(.subheadline.bold())
+                    
+                    TextEditor(text: $generatedResult)
+                        .frame(height: 100)
+                        .padding(4)
+                        .background(Color(NSColor.controlBackgroundColor))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.green.opacity(0.5), lineWidth: 1)
+                        )
+                        .font(.system(.body, design: .monospaced))
+                    
+                    HStack {
+                        Spacer()
+                        Button("Insert Selection") {
+                            controller.applyAIFix(generatedResult)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .transition(.opacity)
+            }
+            
             HStack {
                 Button("Cancel") {
                     controller.showAIPromptEditor = false
@@ -58,7 +87,21 @@ struct AIPromptView: View {
                 Spacer()
                 
                 Button(action: {
-                    controller.generateFromPrompt(promptText)
+                    Task {
+                        controller.isAIGenerating = true
+                        do {
+                            let result = try await controller.generateAIContent(from: promptText)
+                            await MainActor.run {
+                                self.generatedResult = result
+                                controller.isAIGenerating = false
+                            }
+                        } catch {
+                            await MainActor.run {
+                                print("AI Error: \(error)")
+                                controller.isAIGenerating = false
+                            }
+                        }
+                    }
                 }) {
                     HStack {
                         if controller.isAIGenerating {
@@ -66,9 +109,9 @@ struct AIPromptView: View {
                                 .controlSize(.small)
                                 .scaleEffect(0.6)
                         } else {
-                            Image(systemName: "paperplane.fill")
+                            Image(systemName: "arrow.right.circle.fill")
                         }
-                        Text(controller.isAIGenerating ? "Generating..." : "Generate & Insert")
+                        Text(controller.isAIGenerating ? "Generating..." : (generatedResult.isEmpty ? "Generate" : "Regenerate"))
                     }
                 }
                 .disabled(promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || controller.isAIGenerating)
@@ -84,7 +127,10 @@ struct AIPromptView: View {
         .padding(.horizontal, 24)
         .frame(width: 500)
         .onAppear {
-            isEditorFocused = true
+            self.promptText = controller.aiPromptText
+            self.editorFocus = true
         }
     }
 }
+
+

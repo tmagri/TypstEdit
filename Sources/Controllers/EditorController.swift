@@ -8,6 +8,7 @@ extension Notification.Name {
 }
 
 import CodeEditSourceEditor
+import CodeEditTextView
 import Combine
 
 @MainActor
@@ -165,6 +166,7 @@ class EditorController: NSObject, ObservableObject {
         super.init()
         self.sourceEditorBridge = SourceEditorBridge(controller: self)
         setupDefaultConfiguration()
+        setupErrorSubscription()
     }
     
     func setupDefaultConfiguration() {
@@ -445,6 +447,85 @@ class EditorController: NSObject, ObservableObject {
         
         showEquationEditor = false
     }
+    
+    // --- Error Highlighting ---
+    
+    private var errorAttributes: [NSAttributedString.Key: Any] {
+        return [
+            .underlineStyle: NSUnderlineStyle.single.rawValue | NSUnderlineStyle.thick.rawValue,
+            .underlineColor: NSColor.red
+        ]
+    }
+    
+    func setupErrorSubscription() {
+        NotificationCenter.default.addObserver(self, selector: #selector(handleTypstErrors(_:)), name: .typstErrorsUpdated, object: nil)
+    }
+    
+    @objc private func handleTypstErrors(_ notification: Notification) {
+        if let errors = notification.object as? [TypstError] {
+             self.errors = errors
+             DispatchQueue.main.async {
+                 self.updateErrorHighlights(errors: errors)
+             }
+        }
+    }
+    
+    func updateErrorHighlights(errors: [TypstError]) {
+        guard let tvc = textViewController else { return }
+        let textStorage = tvc.textView.textStorage!
+        
+        print("[EditorController] Updating error highlights: \(errors.count) errors")
+        
+        // Remove existing error highlights
+        // Since we don't track exact ranges of previous errors easily without state,
+        // and we can't just clear *all* underlines (might be used by markdown),
+        // we ideally should track them.
+        // For now, let's assume we can clear specific attributes if we used a custom key, 
+        // but standard keys are safer for rendering. 
+        // Let's rely on clearing the whole document's error style if possible, 
+        // OR better: keep track of old error ranges.
+        
+        // Simpler approach for now: clear underline color/style for the whole length.
+        // This might conflict if other things use specific red underlines.
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        if fullRange.length > 0 {
+            textStorage.removeAttribute(.underlineColor, range: fullRange)
+            textStorage.removeAttribute(.underlineStyle, range: fullRange)
+            textStorage.removeAttribute(.toolTip, range: fullRange)
+        }
+        
+        for error in errors {
+            if let range = getRangeForLine(error.line) {
+                // Ensure range is valid
+                if range.location + range.length <= textStorage.length {
+                    textStorage.addAttributes(errorAttributes, range: range)
+                    textStorage.addAttribute(.toolTip, value: error.message, range: range)
+                }
+            }
+        }
+        
+        // Force layout update and redraw
+        tvc.textView.layoutManager.setNeedsLayout()
+        tvc.textView.needsDisplay = true
+    }
+    
+    func getRangeForLine(_ line: Int) -> NSRange? {
+        guard line > 0 else { return nil }
+        let s = sourceCode as NSString
+        var numberOfLines = 0
+        var index = 0
+        
+        while index < s.length {
+            numberOfLines += 1
+            let lineRange = s.lineRange(for: NSRange(location: index, length: 0))
+            if numberOfLines == line {
+                return lineRange
+            }
+            index = NSMaxRange(lineRange)
+        }
+        return nil
+    }
+
     @Published var errors: [TypstError] = []
     @Published var scrollPosition: CGFloat = 0
     
@@ -2068,8 +2149,30 @@ class EditorController: NSObject, ObservableObject {
         
         // Explicitly scroll to the new position
         DispatchQueue.main.async {
+            guard let tvc = self.textViewController else { return }
+            
+            // 1. Set Cursor
             let newPos = CursorPosition(range: NSRange(location: charIndex, length: 0))
-            self.textViewController?.setCursorPositions([newPos], scrollToVisible: true)
+            tvc.setCursorPositions([newPos], scrollToVisible: false) // We handle scroll manually
+            
+            // 2. Calculate Scroll Position
+            if let layoutManager = tvc.textView.layoutManager,
+               let rect = layoutManager.rectForOffset(charIndex) {
+                   
+                if let scrollView = tvc.scrollView {
+                    let clipView = scrollView.contentView
+                    let viewportHeight = clipView.bounds.height
+                    // Center the line
+                    let targetY = max(0, rect.origin.y - (viewportHeight / 2) + (rect.height / 2))
+                    let targetPoint = CGPoint(x: 0, y: targetY)
+                    
+                    clipView.scroll(to: targetPoint)
+                    scrollView.reflectScrolledClipView(clipView)
+                }
+            } else {
+                 // Fallback if layout not ready?
+                 tvc.setCursorPositions([newPos], scrollToVisible: true)
+            }
         }
     }
     
@@ -2223,48 +2326,111 @@ class EditorController: NSObject, ObservableObject {
         self.showFoundationEditor = true
     }
     
-    func generateFromPrompt(_ prompt: String) {
+    func generateAIContent(from prompt: String) async throws -> String {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return "" }
         
-        self.isAIGenerating = true
+        var finalPrompt = trimmed
         
-        Task {
-            do {
-                var finalPrompt = trimmed
-                
-                if self.useMCPForPrompt {
-                    // Enrich with project context and guidelines from AIContextManager
-                    let context = AIContextManager.shared.generateContext(
-                        text: self.sourceCode,
-                        cursorIndex: self.selectedRange.location,
-                        fileURL: self.currentFileURL,
-                        errors: self.errors
-                    )
-                    finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)\n\nOutput only the resulting Typst code."
-                }
-                
-                let systemPrompt = "You are an expert Typst and software developer. Generate precise Typst code or content based on the user's request. Output only the content to be inserted, without any conversational filler. If the user asks for a chart or table, provide the full Typst code for it."
-                let result = try await AICompletionService.shared.fetchCompletion(
-                    prompt: finalPrompt,
-                    systemPrompt: systemPrompt,
-                    maxTokens: 512
-                )
-                
-                await MainActor.run {
-                    self.insertText(result)
-                    self.showAIPromptEditor = false
-                    self.isAIGenerating = false
-                    self.showStatus("AI Code Generated")
-                }
-            } catch {
-                await MainActor.run {
-                    print("[ERROR] AI Generation failed: \(error)")
-                    self.isAIGenerating = false
-                    self.showStatus("AI Generation failed")
-                }
+        if self.useMCPForPrompt {
+            // Enrich with project context and guidelines from AIContextManager
+            let context = AIContextManager.shared.generateContext(
+                text: self.sourceCode,
+                cursorIndex: self.selectedRange.location,
+                fileURL: self.currentFileURL,
+                errors: self.errors
+            )
+            finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)\n\nOutput only the resulting Typst code."
+        }
+        
+        let systemPrompt = "You are an expert Typst and software developer. Generate precise Typst code or content based on the user's request. Output only the content to be inserted, without any conversational filler. If the user asks for a chart or table, provide the full Typst code for it."
+        
+        return try await AICompletionService.shared.fetchCompletion(
+            prompt: finalPrompt,
+            systemPrompt: systemPrompt,
+            maxTokens: 512
+        )
+    }
+    func requestAIFix(for error: TypstError) {
+        // Construct a prompt for the fix
+        let range = getRangeForLine(error.line)
+        var contextCode = ""
+        if let range = range, let r = Range(range, in: sourceCode) {
+            contextCode = String(sourceCode[r])
+        }
+        
+        // Get surrounding lines for context (e.g. 5 lines before/after)
+        var surroundingContext = ""
+        if let range = range {
+            let nsText = sourceCode as NSString
+            let startLine = nsText.lineRange(for: NSRange(location: range.location, length: 0))
+            // This is getting complicated to extract efficiently without helper.
+            // Let's just use the error line content for now + error message.
+            surroundingContext = contextCode
+        }
+        
+        let prompt = """
+        I have a Typst compilation error:
+        Error: "\(error.message)"
+        
+        Code at line \(error.line):
+        ```typ
+        \(surroundingContext)
+        ```
+        
+        Please provide a corrected version of this line or block to fix the error.
+        Explain briefly what was wrong.
+        """
+        
+        // Open AI Prompt Editor with this prompt pre-filled
+        self.aiPromptText = prompt
+        self.aiReplacementRange = range
+        self.showAIPromptEditor = true
+        
+        // Select the range to visually indicate what will be replaced
+        if let range = range {
+            self.selectedRange = range
+            self.textViewController?.setCursorPositions([CursorPosition(range: range)], scrollToVisible: true)
+        }
+    }
+    
+    // Store range to replace
+    var aiReplacementRange: NSRange? = nil
+    
+    func applyAIFix(_ text: String) {
+        if let range = aiReplacementRange {
+            insertText(text, replacementRange: range)
+        } else {
+            insertText(text)
+        }
+        aiReplacementRange = nil // Reset
+        showAIPromptEditor = false
+        showStatus("AI Fix Applied")
+    }
+    
+    func buildContextMenu(for event: NSEvent, in controller: TextViewController) -> NSMenu? {
+        let point = controller.textView.convert(event.locationInWindow, from: nil)
+        // Adjust for scroll? convert(from: nil) uses window coordinates, which should work if view is in window.
+        
+        guard let index = controller.textView.layoutManager.textOffsetAtPoint(point) else { return nil }
+        
+        for error in self.errors {
+            if let range = getRangeForLine(error.line), NSLocationInRange(index, range) {
+                let menu = NSMenu()
+                let item = NSMenuItem(title: "✨ Fix with AI", action: #selector(fixErrorWithAI(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = error
+                menu.addItem(item)
+                menu.addItem(NSMenuItem.separator())
+                return menu
             }
         }
+        return nil
+    }
+    
+    @objc func fixErrorWithAI(_ sender: NSMenuItem) {
+        guard let error = sender.representedObject as? TypstError else { return }
+        self.requestAIFix(for: error)
     }
 }
 
@@ -2316,5 +2482,10 @@ class SourceEditorBridge: TextViewCoordinator {
             // Update formatting state (bold/italic detection)
             self.controller?.updateFormattingState()
         }
+    }
+    
+    @MainActor
+    func menu(for event: NSEvent, in controller: TextViewController) -> NSMenu? {
+        return self.controller?.buildContextMenu(for: event, in: controller)
     }
 }

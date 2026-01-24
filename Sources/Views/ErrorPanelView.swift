@@ -5,6 +5,7 @@ struct ErrorPanelView: View {
     @ObservedObject var editorController: EditorController
     @EnvironmentObject var themeManager: ThemeManager
     @State private var isExpanded: Bool = true
+    @State private var showAllErrors: Bool = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -13,10 +14,20 @@ struct ErrorPanelView: View {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                     .font(.caption)
                     .foregroundColor(themeManager.secondaryTextColor)
+                    .onTapGesture {
+                        withAnimation {
+                            isExpanded.toggle()
+                        }
+                    }
                 
                 Text("Errors")
                     .font(.headline)
                     .foregroundColor(themeManager.textColor)
+                    .onTapGesture {
+                        withAnimation {
+                            isExpanded.toggle()
+                        }
+                    }
                 
                 Spacer()
                 
@@ -28,18 +39,25 @@ struct ErrorPanelView: View {
                         .padding(.vertical, 2)
                         .background(Color.red)
                         .cornerRadius(10)
+                        
+                    // Pop-out button
+                    Button(action: {
+                        showAllErrors = true
+                    }) {
+                        Image(systemName: "arrow.up.forward.app")
+                            .font(.caption)
+                            .foregroundColor(themeManager.secondaryTextColor)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.leading, 4)
+                    .help("Show all errors in a separate window")
                 }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(themeManager.sidebarOverlay.opacity(0.5))
-            .onTapGesture {
-                withAnimation {
-                    isExpanded.toggle()
-                }
-            }
             
-            // Error List
+            // Error List (Inline - limit to first few)
             if isExpanded {
                 if compiler.errors.isEmpty {
                     HStack {
@@ -53,11 +71,22 @@ struct ErrorPanelView: View {
                 } else {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 4) {
-                            ForEach(compiler.errors) { error in
+                            ForEach(Array(compiler.errors.prefix(5))) { error in
                                 ErrorRowView(error: error, onClick: {
                                     editorController.goToLine(error.line)
                                 })
                                 .environmentObject(themeManager)
+                            }
+                            
+                            if compiler.errors.count > 5 {
+                                Button(action: { showAllErrors = true }) {
+                                    Text("Show \(compiler.errors.count - 5) more...")
+                                        .font(.caption)
+                                        .foregroundColor(themeManager.accentColor)
+                                        .padding(.vertical, 4)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                         .padding(8)
@@ -65,6 +94,37 @@ struct ErrorPanelView: View {
                     .frame(maxHeight: 200)
                 }
             }
+        }
+        .sheet(isPresented: $showAllErrors) {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Compilation Errors (\(compiler.errors.count))")
+                        .font(.headline)
+                        .foregroundColor(themeManager.textColor)
+                    Spacer()
+                    Button("Close") {
+                        showAllErrors = false
+                    }
+                    .keyboardShortcut(.escape, modifiers: [])
+                }
+                .padding()
+                .background(themeManager.sidebarBackground)
+                
+                List {
+                    ForEach(compiler.errors) { error in
+                        ErrorRowView(error: error, onClick: {
+                            editorController.goToLine(error.line)
+                            showAllErrors = false // Auto-close on selection? Optional.
+                        })
+                        .environmentObject(themeManager)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                        .listRowBackground(Color.clear)
+                    }
+                }
+                .listStyle(.plain)
+            }
+            .frame(width: 500, height: 400)
+            .background(themeManager.sidebarBackground)
         }
     }
 }
@@ -81,6 +141,7 @@ struct ErrorRowView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundColor(.red)
                     .font(.caption)
+                    .padding(.top, 2)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Line \(error.line)")
@@ -91,7 +152,7 @@ struct ErrorRowView: View {
                     Text(error.message)
                         .font(.caption)
                         .foregroundColor(themeManager.textColor)
-                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.leading)
                 }
                 

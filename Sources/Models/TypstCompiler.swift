@@ -82,6 +82,16 @@ class TypstCompiler: ObservableObject {
                 finalSource = darkModePreamble + source
             }
             try finalSource.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
+            
+            // Clear errors on new content update
+            // This ensures we don't accumulate stale errors if typst doesn't report success explicitly on next run
+            // (though it usually reports *something*)
+            Task { @MainActor in
+                if !self.errors.isEmpty {
+                    self.errors = []
+                    NotificationCenter.default.post(name: .typstErrorsUpdated, object: [])
+                }
+            }
         } catch {
             self.compilationStatus = "Error writing shadow file: \(error)"
             return
@@ -154,6 +164,13 @@ class TypstCompiler: ObservableObject {
                          DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                              NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
                          }
+                         // Also clear errors if success? Ideally yes.
+                         // But if we have warnings? Typst prints warnings too.
+                         // If "compiled successfully", usually no errors.
+                         if !self.errors.isEmpty {
+                             self.errors = []
+                             NotificationCenter.default.post(name: .typstErrorsUpdated, object: [])
+                         }
                     } else if output.contains("error:") {
                         print("[TYPST] Detected error message")
                         self.compilationStatus = "Compilation Error"
@@ -165,36 +182,49 @@ class TypstCompiler: ObservableObject {
     }
     
     private func parseErrors(from output: String) {
-        // Example: "error: expected semi-colon\n  at file.typ:10:5"
-        // Simple regex to find line numbers
-        // We look for ":(\d+):\d+" pattern which usually indicates line:col
+        // Regex to match "error: message" and subsequent "  at file:line:col"
+        // Typst error format often looks like:
+        // error: expected length, found string
+        //    at file.typ:15:10
+        //
+        // Or sometimes just "error: ..." if no location.
+        // We will iterate line by line to build a list.
         
         let lines = output.components(separatedBy: .newlines)
-        var newErrors: [TypstError] = []
+        // Accumulate errors instead of resetting.
+        // We rely on updateContent() or specific "success" messages to clear old errors.
+        var newErrors: [TypstError] = self.errors 
         
-        // Very basic parser - captures the last error seen
-        var currentMessage = "Error"
+        var currentErrorMsg: String? = nil
         
         for line in lines {
-            if line.contains("error:") {
-                currentMessage = line.replacingOccurrences(of: "error: ", with: "")
-            }
-            // Check for line info "at file:line:col" or "file:line:col"
-            // Regex for ":\d+:\d+"
-            if let range = line.range(of: ":\\d+:\\d+", options: .regularExpression) {
-                let match = String(line[range])
-                // match is like ":10:5"
+            if line.starts(with: "error: ") {
+                // If we had a previous error pending without a location, maybe add it? 
+                // But usually we want location. For now, let's start a new error.
+                currentErrorMsg = String(line.dropFirst("error: ".count))
+            } else if let msg = currentErrorMsg, let range = line.range(of: ":\\d+:\\d+", options: .regularExpression) {
+                // We found a location line for the current error
+                // Extract line number
+                let match = String(line[range]) // ":10:5"
                 let parts = match.split(separator: ":")
                 if parts.count >= 1, let lineNum = Int(parts[0]) {
                     let adjustedLine = isDarkMode ? max(1, lineNum - preambleLineCount) : lineNum
-                    newErrors.append(TypstError(line: adjustedLine, message: currentMessage))
+                    
+                    // Avoid duplicate errors for the same line if possible, or just allow them
+                    // Check if we already have this error
+                    let error = TypstError(line: adjustedLine, message: msg)
+                    if !newErrors.contains(where: { $0.line == adjustedLine && $0.message == msg }) {
+                        newErrors.append(error)
+                    }
                 }
+                currentErrorMsg = nil // Consumed
             }
         }
         
-        if !newErrors.isEmpty {
-            self.errors = newErrors // Replace errors
-            NotificationCenter.default.post(name: .typstErrorsUpdated, object: nil)
+        // Update errors if changed.
+        if self.errors != newErrors {
+            self.errors = newErrors
+            NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
         }
     }
     
@@ -254,3 +284,5 @@ extension Notification.Name {
     static let pdfDidUpdate = Notification.Name("pdfDidUpdate")
     static let typstErrorsUpdated = Notification.Name("typstErrorsUpdated")
 }
+
+
