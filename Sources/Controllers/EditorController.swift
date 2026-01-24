@@ -2410,23 +2410,77 @@ class EditorController: NSObject, ObservableObject {
     
     func buildContextMenu(for event: NSEvent, in controller: TextViewController) -> NSMenu? {
         let point = controller.textView.convert(event.locationInWindow, from: nil)
-        // Adjust for scroll? convert(from: nil) uses window coordinates, which should work if view is in window.
         
         guard let index = controller.textView.layoutManager.textOffsetAtPoint(point) else { return nil }
         
         for error in self.errors {
+            // Check if click is on the error line
             if let range = getRangeForLine(error.line), NSLocationInRange(index, range) {
                 let menu = NSMenu()
+                
+                // Static Fixes
+                // Get line content
+                var lineCode = ""
+                if let r = Range(range, in: sourceCode) {
+                    lineCode = String(sourceCode[r])
+                    // Strip newline for analysis if needed, but replacement usually handles it.
+                    // TypstSuggestionEngine expects line content (possibly with newline).
+                    // If replacement includes newline, great.
+                    // Actually, sourceCode[r] includes the newline if getRangeForLine returns lineRange.
+                    // Let's trim for the engine, but remember to preserve newline in replacement if we want?
+                    // The engine mimics the input. If input has newline, output typically should.
+                    // Let's pass the raw line.
+                }
+                
+                // let fixes = TypstSuggestionEngine.shared.suggestFixes(for: error, in: lineCode)
+                
+                if !lineCode.isEmpty { // Only offer fixes if we have line content
+                    let headerItem = NSMenuItem(title: "Quick Fixes", action: nil, keyEquivalent: "")
+                    headerItem.isEnabled = false
+                    menu.addItem(headerItem)
+                    
+                    // Let's handle newline logic here to be safe and robust.
+                    var cleanLine = lineCode
+                    var suffix = ""
+                    if lineCode.hasSuffix("\n") {
+                        cleanLine = String(lineCode.dropLast())
+                        suffix = "\n"
+                    }
+                    
+                    // Engine works on clean line
+                    let cleanFixes = TypstSuggestionEngine.shared.suggestFixes(for: error, in: cleanLine)
+                    
+                    // Use the clean logic
+                    for cleanFix in cleanFixes {
+                         let finalReplacement = cleanFix.replacement + suffix
+                         let rangeFix = TypstFix(title: cleanFix.title, replacement: finalReplacement, range: range)
+                         
+                         let item = NSMenuItem(title: cleanFix.title, action: #selector(applyStaticFix(_:)), keyEquivalent: "")
+                         item.target = self
+                         item.representedObject = rangeFix
+                         menu.addItem(item)
+                    }
+                    menu.addItem(NSMenuItem.separator())
+                }
+                
+                // AI Fix
                 let item = NSMenuItem(title: "✨ Fix with AI", action: #selector(fixErrorWithAI(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = error
                 menu.addItem(item)
-                menu.addItem(NSMenuItem.separator())
+                
                 return menu
             }
         }
         return nil
     }
+    
+    @objc func applyStaticFix(_ sender: NSMenuItem) {
+        guard let fix = sender.representedObject as? TypstFix, let range = fix.range else { return }
+        
+        insertText(fix.replacement, replacementRange: range)
+        showStatus("Fixed: \(fix.title)")
+    } 
     
     @objc func fixErrorWithAI(_ sender: NSMenuItem) {
         guard let error = sender.representedObject as? TypstError else { return }
