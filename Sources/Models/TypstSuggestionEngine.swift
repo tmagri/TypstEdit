@@ -42,14 +42,25 @@ struct TypstSuggestionEngine {
         
         // 4. Unknown Variable
         if msg.contains("unknown variable") {
-            if let range = msg.range(of: "(?<=unknown variable: )\\S+", options: .regularExpression) {
-                let varName = String(msg[range])
-                // Suggest defining it before? Hard to do with just line replacement.
-                // Maybe replace with a definition?
-                // "x" -> "#let x = 0; x" ? No that's messy.
-                // Let's suggest changing it to "content" or wrapping strings?
-                // If it looks like text, maybe wrap in quotes?
-                fixes.append(TypstFix(title: "Quote '\(varName)'", replacement: code.replacingOccurrences(of: varName, with: "\"\(varName)\""), range: nil))
+            // Use original message for extraction to preserve case
+            let originalMsg = error.message
+            // Matches "unknown variable: <name>" and ignores trailing punctuation (like '.')
+            if let range = originalMsg.range(of: "(?<=unknown variable: )[a-zA-Z0-9_\\-]+", options: .regularExpression) {
+                let varName = String(originalMsg[range])
+                
+                // Use regex replacement to match whole words only
+                // Escape varName for regex safety just in case, though standard vars are safe
+                let pattern = "\\b\(NSRegularExpression.escapedPattern(for: varName))\\b"
+                
+                if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                    let range = NSRange(code.startIndex..<code.endIndex, in: code)
+                    let replaced = regex.stringByReplacingMatches(in: code, options: [], range: range, withTemplate: "\"\(varName)\"")
+                    
+                    // Only suggest if replacement actually changed something
+                    if replaced != code {
+                        fixes.append(TypstFix(title: "Quote '\(varName)'", replacement: replaced, range: nil))
+                    }
+                }
             }
         }
         

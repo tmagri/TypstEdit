@@ -14,7 +14,9 @@ class TypstCompiler: ObservableObject {
     @Published var errors: [TypstError] = []
     
     var isDarkMode: Bool = false
-    private let preambleLineCount = 3 
+    private var preambleLineCount: Int {
+        darkModePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+    }
     private let darkModePreamble = 
 """
 #set page(fill: rgb("#1a1a1a"))
