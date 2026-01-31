@@ -652,8 +652,34 @@ class EditorController: NSObject, ObservableObject {
         panel.title = "Import LyX File"
         
         if panel.runModal() == .OK, let selectedURL = panel.url {
+            var shouldCopy = true
+            
+            if let projectRoot = projectRootURL {
+                let isOutside = !selectedURL.path.hasPrefix(projectRoot.path)
+                if isOutside {
+                    let alert = NSAlert()
+                    alert.messageText = "Import LyX File"
+                    alert.informativeText = "The LyX file is outside your current project. Would you like to copy it into your project or open its directory as a new project?"
+                    alert.addButton(withTitle: "Copy to Project")
+                    alert.addButton(withTitle: "Open Directory")
+                    alert.addButton(withTitle: "Cancel")
+                    
+                    let response = alert.runModal()
+                    if response == .alertFirstButtonReturn {
+                        shouldCopy = true
+                    } else if response == .alertSecondButtonReturn {
+                        shouldCopy = false
+                    } else {
+                        return // Cancel
+                    }
+                }
+            } else {
+                shouldCopy = false // No project open, so we'll open the directory by default
+            }
+            
             do {
-                let content = try String(contentsOf: selectedURL, encoding: .utf8)
+                let content = try LyxToTypstConverter.load(from: selectedURL)
+                
                 let converter = LyxToTypstConverter(content: content)
                 let typstContent = converter.convert()
                 
@@ -661,18 +687,20 @@ class EditorController: NSObject, ObservableObject {
                 let targetFileName = "\(fileName).typ"
                 
                 let targetURL: URL
-                if let projectRoot = projectRootURL {
+                if shouldCopy, let projectRoot = projectRootURL {
                     targetURL = projectRoot.appendingPathComponent(targetFileName)
+                } else if let projectRoot = projectRootURL, !shouldCopy {
+                     // Specifically requested "Open Directory" while a project was open
+                     targetURL = selectedURL.deletingPathExtension().appendingPathExtension("typ")
                 } else {
-                    let docDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-                    let newProjectDir = docDir.appendingPathComponent(fileName)
-                    try FileManager.default.createDirectory(at: newProjectDir, withIntermediateDirectories: true)
-                    targetURL = newProjectDir.appendingPathComponent(targetFileName)
+                    // No project root - original behavior or open in place?
+                    // Let's stick to opening in place if no project root is set.
+                    targetURL = selectedURL.deletingPathExtension().appendingPathExtension("typ")
                 }
                 
                 try typstContent.write(to: targetURL, atomically: true, encoding: .utf8)
                 
-                if projectRootURL == nil {
+                if projectRootURL == nil || !shouldCopy {
                     NotificationCenter.default.post(name: .openProjectAndFile, object: targetURL)
                 } else {
                     NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)

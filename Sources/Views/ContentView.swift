@@ -487,7 +487,7 @@ struct ContentView: View {
         // 2. Pre-check file type for non-textual files to avoid delay
         // Check extension manually since editorController.currentFileURL isn't updated yet
         let ext = url.pathExtension.lowercased()
-        let isTextual = ["typ", "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg"].contains(ext)
+        let isTextual = ["typ", "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg", "lyx"].contains(ext)
 
         if !isTextual && ext != "pdf" && ext != "png" && ext != "jpg" { // Basic check
              // For non-text, update immediately as there is no content to read
@@ -500,7 +500,7 @@ struct ContentView: View {
         print("[DEBUG] loadFile: Dispatching background read")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let content = try String(contentsOf: url, encoding: .utf8)
+                let content = try LyxToTypstConverter.load(from: url)
                 print("[DEBUG] loadFile: Read success (len: \(content.count)). Dispatching main update (id: \(loadID))")
                 DispatchQueue.main.async {
                     guard self.currentLoadID == loadID else { 
