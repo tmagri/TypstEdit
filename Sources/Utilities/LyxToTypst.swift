@@ -29,6 +29,41 @@ extension String {
     }
 }
 
+// MARK: - Typst Validator
+
+class TypstValidator {
+    static func validate(content: String, compilerPath: String = Bundle.main.bundlePath + "/Contents/Resources/typst-universal") -> [String] {
+        let tempUrl = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".typ")
+        do {
+            try content.write(to: tempUrl, atomically: true, encoding: .utf8)
+            
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: compilerPath)
+            process.arguments = ["compile", tempUrl.path]
+            
+            let pipe = Pipe()
+            process.standardError = pipe
+            process.standardOutput = pipe
+            
+            try process.run()
+            process.waitUntilExit()
+            
+            if process.terminationStatus != 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let output = String(data: data, encoding: .utf8) {
+                    return output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+                }
+                return ["Unknown Typst Compiler Error"]
+            }
+            
+            try? FileManager.default.removeItem(at: tempUrl)
+            return [] // No errors
+        } catch {
+            return ["Validation Error: \(error.localizedDescription)"]
+        }
+    }
+}
+
 // MARK: - LyxToTypst Converter
 
 class LyxToTypstConverter {
@@ -50,6 +85,7 @@ class LyxToTypstConverter {
     private var isBold = false
     private var isItalic = false
     private var nestingLevel = 0
+    private var baseFontSize = "11pt"
     
     init(content: String) {
         self.sourceLines = content.components(separatedBy: .newlines)
@@ -60,10 +96,12 @@ class LyxToTypstConverter {
         let (fontName, fontSize) = parseFontSettings()
         let (paperSize, numbering) = parsePageSettings()
         
+        if let size = fontSize { self.baseFontSize = size }
+
         if let font = fontName {
-            outputLines.append("#set text(font: \"\(font)\", size: \(fontSize ?? "11pt"))")
-        } else if let size = fontSize {
-            outputLines.append("#set text(size: \(size))")
+            outputLines.append("#set text(font: \"\(font)\", size: \(baseFontSize))")
+        } else {
+            outputLines.append("#set text(size: \(baseFontSize))")
         }
         
         outputLines.append("#set page(paper: \"\(paperSize)\", margin: (x: 2cm, y: 2.5cm))")
@@ -162,10 +200,11 @@ class LyxToTypstConverter {
             l = l.replacingOccurrences(of: "#image(\"\")", with: "")
             
             // Fix common typos or conversion artifacts
-            l = l.replacingOccurrences(of: "@subsec:On-Hold.", with: "@subsec:On-Hold).") // missing paren in original
-            l = l.replacingOccurrences(of: ":_*__", with: ":_*") // doubled underscores
+            l = l.replacingOccurrences(of: "@subsec:On-Hold.", with: "@subsec:On-Hold).")
+            l = l.replacingOccurrences(of: ":_*__", with: ":_*")
             l = l.replacingOccurrences(of: ":*__", with: ":*")
-            l = l.replacingOccurrences(of: "__", with: "_") // General double underscore fix 
+            l = l.replacingOccurrences(of: "__", with: "") 
+            l = l.replacingOccurrences(of: "**", with: "") 
             
             cleanLines.append(l)
         }
@@ -189,6 +228,7 @@ class LyxToTypstConverter {
                 let content = line.replacingOccurrences(of: "\\begin_layout Plain Layout", with: "").trimLeading()
                 if !content.isEmpty { ertBuffer += content }
             } else if line == "\\backslash" { ertBuffer += "\\"
+            } else if line.hasPrefix("\\begin_inset") { skipInset()
             } else if line.hasPrefix("\\end_layout") { ertBuffer += "\n"
             } else if !line.hasPrefix("\\") && !line.hasPrefix("status") { ertBuffer += line }
             return
@@ -205,57 +245,87 @@ class LyxToTypstConverter {
             startLayout(layoutName)
             return
         }
-        if line.hasPrefix("\\end_layout") { flushBuffer(); endLayout(); return }
+        if line.hasPrefix("\\end_layout") { endLayout(); flushBuffer(); return }
         
-        // Insets
-        if line.hasPrefix("\\begin_inset") {
-            let insetType = line.replacingOccurrences(of: "\\begin_inset ", with: "")
-            parseInset(type: insetType)
+        // Mid-line Inset Handling
+        if line.contains("\\begin_inset") {
+            let parts = line.components(separatedBy: "\\begin_inset")
+            // Handle prefix text
+            if !parts[0].isEmpty {
+                let prefix = parts[0]
+                if !textBuffer.isEmpty && !textBuffer.hasSuffix(" ") && !prefix.hasPrefix(" ") { textBuffer += " " }
+                textBuffer += escapeTypstText(prefix)
+            }
+            
+            // Handle the inset
+            let insetPart = line.replacingRegex(pattern: ".*\\\\begin_inset ", with: "")
+            parseInset(type: insetPart)
             return
         }
 
-        // Formatting
+        // Standard commands
         if line.hasPrefix("\\series bold") {
             if !isBold {
-                ensureSpaceBeforeOpener()
-                textBuffer += "*"
+                let rest = line.replacingOccurrences(of: "\\series bold", with: "").trimmingCharacters(in: .whitespaces)
+                if currentLayout != .labeling {
+                    ensureSpaceBeforeOpener()
+                    textBuffer += "*"
+                }
                 isBold = true
+                if !rest.isEmpty {
+                    textBuffer += escapeTypstText(rest)
+                }
             }
             return
         }
         if line.hasPrefix("\\series default") {
             if isBold {
-                if isItalic { textBuffer += "_" } // Close inner italic
-                textBuffer += "*"
-                isBold = false
-                if currentLayout == .labeling && !textBuffer.trimmingCharacters(in: .whitespaces).hasSuffix(":") {
-                    textBuffer += ":"
+                let rest = line.replacingOccurrences(of: "\\series default", with: "").trimmingCharacters(in: .whitespaces)
+                if isItalic { textBuffer += "_" }
+                if currentLayout == .labeling || currentLayout == .description {
+                    if !textBuffer.trimmingCharacters(in: .whitespaces).hasSuffix(":") {
+                        textBuffer = textBuffer.trimmingCharacters(in: .whitespaces) + ":"
+                    }
+                } else if currentLayout != .labeling {
+                    textBuffer += "*"
                 }
-                if isItalic { textBuffer += "_" } // Re-open inner italic
+                isBold = false
+                if isItalic { textBuffer += "_" }
+                if !rest.isEmpty {
+                    textBuffer += escapeTypstText(rest)
+                }
             }
             return
         }
         if line.hasPrefix("\\emph on") || line.hasPrefix("\\shape italic") {
             if !isItalic {
+                let rest = line.replacingOccurrences(of: "\\emph on", with: "").replacingOccurrences(of: "\\shape italic", with: "").trimmingCharacters(in: .whitespaces)
                 ensureSpaceBeforeOpener()
                 textBuffer += "_"
                 isItalic = true
+                if !rest.isEmpty {
+                    textBuffer += escapeTypstText(rest)
+                }
             }
             return
         }
         if line.hasPrefix("\\emph default") || line.hasPrefix("\\shape default") {
             if isItalic {
+                let rest = line.replacingOccurrences(of: "\\emph default", with: "").replacingOccurrences(of: "\\shape default", with: "").trimmingCharacters(in: .whitespaces)
                 textBuffer += "_"
                 isItalic = false
+                if !rest.isEmpty {
+                    textBuffer += escapeTypstText(rest)
+                }
             }
             return
         }
 
         // Garbage Filtering
-        let garbagePrefixes = ["\\labelwidthstring", "\\align", "placement ", "alignment ", "wide ", "sideways ", "status open", "status collapsed", "\\family", "\\size", "\\bar", "\\strikeout", "\\xout", "\\uuline", "\\uwave", "\\noun", "\\color", "\\lang", "name \"", "reference \"", "clip", "keepaspectratio", "rotateOrigin", "lyxscale", "scale"]
+        let garbagePrefixes = ["\\labelwidthstring", "\\align", "placement ", "alignment ", "wide ", "sideways ", "status open", "status collapsed", "\\family", "\\size", "\\bar", "\\strikeout", "\\xout", "\\uuline", "\\uwave", "\\noun", "\\color", "\\lang", "name \"", "reference \"", "clip", "keepaspectratio", "rotateOrigin", "lyxscale", "scale", "\\series ", "\\shape ", "\\emph "]
         if garbagePrefixes.contains(where: { line.hasPrefix($0) }) { return }
         
-        // Text
+        // Literal commands
         if line.hasPrefix("\\") && !line.contains(" ") {
             let command = line.dropFirst()
             switch command {
@@ -275,11 +345,12 @@ class LyxToTypstConverter {
                 let lastChar = textBuffer.last
                 let isFormatOpener = (lastChar == "*" && isBold) || (lastChar == "_" && isItalic)
                 let startsWithPunctuation = ",.:;?!)]}".contains(line.first ?? " ")
-                if !isFormatOpener && !startsWithPunctuation { textBuffer += " " }
+                if !isFormatOpener && !startsWithPunctuation && !textBuffer.hasSuffix("\n") && !textBuffer.hasSuffix("/") { textBuffer += " " }
             }
             textBuffer += escapeTypstText(line)
         }
     }
+
     
     private func ensureSpaceBeforeOpener() {
         if !textBuffer.isEmpty {
@@ -346,7 +417,7 @@ class LyxToTypstConverter {
 
         // Remaining Commands
         content = content.replacingRegex(pattern: "\\\\begin\\{titlepage\\}", with: "", options: opts)
-        content = content.replacingRegex(pattern: "\\\\end\\{titlepage\\}", with: "#pagebreak()", options: opts)
+        content = content.replacingRegex(pattern: "\\\\end\\{titlepage\\}", with: "#pagebreak() \n #set text(size: \(baseFontSize)) \n #set align(left) \n", options: opts)
         content = content.replacingOccurrences(of: "\\centering", with: "#set align(center)\n")
         content = content.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", with: "#rotate(-90deg, reflow: true)[$1]", options: opts)
         content = content.replacingOccurrences(of: "\\Huge", with: "#set text(size: 24pt)\n")
@@ -357,7 +428,7 @@ class LyxToTypstConverter {
         content = content.replacingRegex(pattern: "\\\\textit\\{([^}]+)\\}", with: "_$1_", options: opts)
         content = content.replacingRegex(pattern: "\\\\vspace\\*?\\{[^}]+\\}", with: "#v(2em)", options: opts)
         content = content.replacingOccurrences(of: "\\vfill", with: "#v(1fr)")
-        content = content.replacingOccurrences(of: "\\\\", with: "\\\n") 
+        content = content.replacingOccurrences(of: "\\\\", with: " \n") 
         content = content.replacingOccurrences(of: "~", with: " ") 
         content = content.replacingRegex(pattern: "\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}", with: "#image(\"$2\")", options: opts)
         content = content.replacingRegex(pattern: "\\\\label\\{([^}]+)\\}", with: " <$1>", options: opts)
@@ -369,8 +440,9 @@ class LyxToTypstConverter {
         content = content.replacingOccurrences(of: "\\newpage", with: "#pagebreak()")
         content = content.replacingOccurrences(of: "\\thispagestyle{empty}", with: "") 
 
-        content = content.replacingOccurrences(of: "{", with: "[")
-        content = content.replacingOccurrences(of: "}", with: "]")
+        // Strip literal braces that weren't part of recognized commands
+        content = content.replacingOccurrences(of: "{", with: "")
+        content = content.replacingOccurrences(of: "}", with: "")
 
         let cleanLines = content.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         outputLines.append(contentsOf: cleanLines)
@@ -387,7 +459,7 @@ class LyxToTypstConverter {
         case .itemize: textBuffer += "\(indent)- "
         case .enumerate: textBuffer += "\(indent)+ "
         case .description: textBuffer += "\(indent)/ "
-        case .labeling: textBuffer += "\(indent)- " 
+        case .labeling: textBuffer += "\(indent)/ " 
         case .title: outputLines.append("#align(center, text(24pt, weight: \"bold\")[")
         case .author: outputLines.append("#align(center, text(18pt)[")
         case .code: outputLines.append("```")
@@ -395,73 +467,34 @@ class LyxToTypstConverter {
         default: if nestingLevel > 0 { textBuffer += indent }
         }
     }
-    
-   private func endLayout() {
-    // PHASE 1: State-Aware Closure
-    // Inspect the boolean flags. If true, the LyX layout ended without explicitly
-    // turning off formatting. We must enforce closure now.
-    
-    // 1. Close Italics
-    if isItalic {
-        if !textBuffer.isEmpty {
+       private func endLayout() {
+        // 1. Handle lingering Bold/Italic
+        if isItalic {
             if !textBuffer.hasSuffix("_") { textBuffer += "_" }
             isItalic = false
-        } else if !outputLines.isEmpty {
-            var lastLine = outputLines.removeLast()
-            if !lastLine.hasSuffix("_") { lastLine += "_" }
-            outputLines.append(lastLine)
-            isItalic = false
         }
-    }
-    
-    // 2. Close Bold
-    if isBold {
-        if !textBuffer.isEmpty {
-            // If it's a labeling layout, we want the colon OUTSIDE the formatting or at least handled consistently.
-            // Let's put the colon right after the text, then close bold.
-            if currentLayout == .labeling && !textBuffer.trimmingCharacters(in: .whitespaces).hasSuffix(":") {
-                // Ensure no space before colon for labeling
-                if textBuffer.hasSuffix(" ") { textBuffer.removeLast() }
-                textBuffer += ":"
-            }
-            textBuffer += "*"
-        } else if !outputLines.isEmpty {
-            var lastLine = outputLines.removeLast()
-            if lastLine.hasPrefix("#") {
-                 // Don't append formatting to structural commands
-                 outputLines.append(lastLine)
-                 outputLines.append("*")
-            } else {
-                if currentLayout == .labeling && !lastLine.trimmingCharacters(in:.whitespaces).hasSuffix(":") {
-                     if lastLine.hasSuffix(" ") { lastLine.removeLast() }
-                     lastLine += ":"
+        if isBold {
+            if currentLayout == .labeling || currentLayout == .description {
+                if !textBuffer.trimmingCharacters(in: .whitespaces).hasSuffix(":") {
+                    textBuffer = textBuffer.trimmingCharacters(in: .whitespaces) + ":"
                 }
-                lastLine += "*"
-                outputLines.append(lastLine)
+            } else {
+                if !textBuffer.hasSuffix("*") { textBuffer += "*" }
             }
+            isBold = false
         }
-    }
 
-    // PHASE 2: Structural Closure
-    // Now that character formatting is secure, we close the block-level elements.
-    switch currentLayout {
-    case .title, .author: 
-        // These layouts wrap content in #align(center,...) functions.
-        outputLines.append("])\n")
-    case .code: 
-        // Closes the triple-backtick block for raw code.
-        outputLines.append("```\n")
-    default: 
-        // Standard paragraphs simply need a separation from the next block.
-        outputLines.append("") 
+        // 2. Structural Closure
+        switch currentLayout {
+        case .title, .author: 
+            outputLines.append("])\n")
+        case .code: 
+            outputLines.append("```\n")
+        default: 
+            outputLines.append("") 
+        }
+        currentLayout = .standard
     }
-    
-    // PHASE 3: Safe State Reset
-    currentLayout = .standard
-    isBold = false
-    isItalic = false
-}
-    
     private func mapLayoutType(_ name: String) -> LayoutType {
         let cleanName = name.components(separatedBy: " ").first ?? name
         switch cleanName {
@@ -491,7 +524,148 @@ class LyxToTypstConverter {
         else if type.hasPrefix("Newpage") { flushBuffer(); outputLines.append("#pagebreak()"); skipInset() }
         else if type.hasPrefix("Flex URL") { parseUrlInset() }
         else if type.hasPrefix("space") { textBuffer += " "; skipInset() }
-        else { if type.contains("Float") { return }; skipInset() }
+        else if type.hasPrefix("Float") { parseFloatInset(type: type) } // Handle Float
+        else { skipInset() }
+    }
+    
+    private func parseFloatInset(type: String) {
+        // Float wrapper often has "Float figure" or just "Float"
+        // We scan for inner insets: Caption, Graphics, CommandInset label
+        
+        currentLineIndex += 1
+        var captionText: String? = nil
+        var labelText: String? = nil
+        var imageCode: String? = nil
+        var otherContent: String = ""
+        
+        while currentLineIndex < sourceLines.count {
+            let line = sourceLines[currentLineIndex].trimLeading()
+            if line == "\\end_inset" { break }
+            
+            if line.hasPrefix("\\begin_inset Caption") {
+                let (cap, lbl) = extractCaptionContent()
+                captionText = cap
+                if let l = lbl { labelText = l } // Prefer caption label if found
+            } else if line.hasPrefix("\\begin_inset Graphics") {
+                imageCode = extractGraphicsContent()
+            } else if line.hasPrefix("\\begin_inset CommandInset label") {
+                // If label is outside caption (less common for floats, but possible)
+                if labelText == nil { labelText = extractLabelContent() }
+                else { skipInset() } // Already have a label
+            } else if !line.hasPrefix("\\") && !line.isEmpty {
+                 // Capture miscellaneous text inside the float if not a command
+                 // But be careful of layout commands
+            }
+            // Advance if not handled by extractors (extractors advance themselves)
+            // If we didn't call an extractor, we must advance manually
+            if !line.hasPrefix("\\begin_inset") {
+                 currentLineIndex += 1
+            }
+        }
+        
+        print("DEBUG: Float Loop Finished. ImageCode: \(String(describing: imageCode)). Caption: \(String(describing: captionText))")
+        flushBuffer()
+        
+        // Build Figure
+        var figContent = imageCode ?? ""
+        if figContent.isEmpty && !otherContent.isEmpty { figContent = otherContent }
+        
+        var params: [String] = []
+        if let cap = captionText { params.append("caption: [\(cap)]") }
+        params.append("gap: 1em")
+        
+        let header = "#figure(\(params.joined(separator: ", ")))["
+        outputLines.append(header)
+        if !figContent.isEmpty { outputLines.append(figContent) }
+        outputLines.append("]")
+        if let lbl = labelText { 
+            let lastIdx = outputLines.count - 1
+            outputLines[lastIdx] += " <\(lbl)>" 
+        }
+        outputLines.append("")
+    }
+
+    private func extractCaptionContent() -> (String, String?) {
+        print("DEBUG: Extracting Caption")
+        currentLineIndex += 1
+        var cap = ""
+        var label: String? = nil
+        
+        while currentLineIndex < sourceLines.count {
+            let line = sourceLines[currentLineIndex].trimLeading()
+            print("DEBUG: Caption Loop: index \(currentLineIndex), line <\(line)>")
+            if line == "\\end_inset" { currentLineIndex += 1; break } // Consume end_inset
+            
+            // Text content usually inside \begin_layout Plain Layout ... \end_layout
+            // We'll simplisticly grab text that isn't a command
+            if !line.hasPrefix("\\") {
+                if !cap.isEmpty { cap += " " }
+                cap += escapeTypstText(line)
+            } else if line.hasPrefix("\\begin_layout") {
+                 // ignore wrapper
+            } else if line.hasPrefix("\\end_layout") {
+                 // ignore wrapper
+            }
+            
+            // Recursively handle label inside caption
+            if line.hasPrefix("\\begin_inset CommandInset label") {
+               label = extractLabelContent()
+               continue
+            }
+            
+            currentLineIndex += 1
+        }
+        print("DEBUG: Extracted Caption: \(cap), Label: \(String(describing: label))")
+        return (cap, label)
+    }
+
+    private func extractGraphicsContent() -> String? {
+        currentLineIndex += 1
+        var filename = ""
+        var width: String?
+        var height: String?
+        
+        while currentLineIndex < sourceLines.count {
+            let line = sourceLines[currentLineIndex].trimLeading()
+            if line == "\\end_inset" { currentLineIndex += 1; break }
+            
+            if line.hasPrefix("filename") {
+                filename = line.replacingOccurrences(of: "filename ", with: "")
+            } else if line.hasPrefix("width") {
+                width = line.replacingOccurrences(of: "width ", with: "").replacingOccurrences(of: "\"", with: "").replacingOccurrences(of: "line%", with: "%")
+            } else if line.hasPrefix("height") {
+                height = line.replacingOccurrences(of: "height ", with: "").replacingOccurrences(of: "\"", with: "")
+            }
+            currentLineIndex += 1
+        }
+        
+        if !filename.isEmpty {
+            var args = ""
+            if let w = width, !w.contains("0pt") { args += ", width: \(w)" }
+            // if let h = height, !h.contains("0pt") { args += ", height: \(h)" } // Height often conflicts with width in Typst flow
+            return "#image(\"\(filename)\"\(args))"
+        }
+        return nil
+    }
+
+    private func extractLabelContent() -> String? {
+        currentLineIndex += 1
+        var label: String? = nil
+        while currentLineIndex < sourceLines.count {
+            let line = sourceLines[currentLineIndex].trimLeading()
+            if line == "\\end_inset" { currentLineIndex += 1; break }
+            
+            if line.contains("name \"") {
+                let parts = line.components(separatedBy: "name \"")
+                if parts.count > 1 {
+                    var l = parts[1].replacingOccurrences(of: "\"", with: "")
+                    l = l.replacingOccurrences(of: " ", with: "-")
+                    label = l.sanitizedLabel()
+                }
+            }
+            currentLineIndex += 1
+        }
+        return label
     }
     
     private func parseMathInset(type: String) {
@@ -586,7 +760,25 @@ class LyxToTypstConverter {
                 if parts.count > 1 {
                     var labelName = parts[1].replacingOccurrences(of: "\"", with: "")
                     labelName = labelName.replacingOccurrences(of: " ", with: "-")
-                    textBuffer += " <\(labelName.sanitizedLabel())>"
+                    let sanitized = labelName.sanitizedLabel()
+                    
+                    if currentLayout == .labeling {
+                        // Place label BEFORE the colon if possible
+                        if textBuffer.hasSuffix(":") { textBuffer.removeLast() }
+                        // textBuffer currently looks like "  / Term" or "  / Term "
+                        var termContent = textBuffer.trimmingCharacters(in: .whitespaces)
+                        if termContent.hasPrefix("/") { termContent.removeFirst() }
+                        termContent = termContent.trimmingCharacters(in: .whitespaces)
+                        
+                        if !termContent.isEmpty && !termContent.contains("#figure") {
+                           let indent = textBuffer.prefix(while: { $0 == " " })
+                           textBuffer = "\(indent)/ #figure(kind: \"term\", supplement: \"\", numbering: (..n) => [\(termContent)])[\(termContent)] <\(sanitized)>:"
+                        } else {
+                           textBuffer += " <\(sanitized)>:"
+                        }
+                    } else {
+                         textBuffer += " <\(sanitized)>"
+                    }
                 }
             }
             currentLineIndex += 1
@@ -605,23 +797,40 @@ class LyxToTypstConverter {
     }
     
     private func flushBuffer() {
-        if !textBuffer.isEmpty {
-            outputLines.append(textBuffer)
+        if textBuffer.isEmpty { return }
+        
+        let trimmed = textBuffer.trimmingCharacters(in: CharacterSet(charactersIn: "*_ \n"))
+        if trimmed.isEmpty {
             textBuffer = ""
+            if isBold && currentLayout != .labeling { textBuffer += "*" }
+            if isItalic { textBuffer += "_" }
+            return
         }
+
+        var content = textBuffer
+        // Close active formatting for this buffer segment if needed
+        // We ALWAYS append even if it ends with the char, because if formatting is active,
+        // any char at the end is either text or an opener.
+        if isBold && currentLayout != .labeling { content += "*" }
+        if isItalic { content += "_" }
+        
+        outputLines.append(content)
+        
+        // Reset and re-open for next segment if still active
+        textBuffer = ""
+        if isBold && currentLayout != .labeling { textBuffer += "*" }
+        if isItalic { textBuffer += "_" }
     }
     
     private func escapeTypstText(_ text: String) -> String {
         var res = text
         res = res.replacingOccurrences(of: "\\", with: "\\\\")
         res = res.replacingOccurrences(of: "#", with: "\\#")
-        res = res.replacingOccurrences(of: "@", with: "\\@")
-        res = res.replacingOccurrences(of: "[", with: "\\[")
-        res = res.replacingOccurrences(of: "]", with: "\\]")
         res = res.replacingOccurrences(of: "*", with: "\\*")
         res = res.replacingOccurrences(of: "_", with: "\\_")
         res = res.replacingOccurrences(of: "`", with: "\\`")
         res = res.replacingOccurrences(of: "$", with: "\\$")
+        res = res.replacingOccurrences(of: "@", with: "\\@")
         return res
     }
     
@@ -631,34 +840,59 @@ class LyxToTypstConverter {
         m = m.replacingOccurrences(of: "\\[", with: "")
         m = m.replacingOccurrences(of: "\\]", with: "")
         m = m.replacingOccurrences(of: "$", with: "")
-        m = m.replacingRegex(pattern: "\\\\frac\\{([^}]*)\\}\\{([^}]*)\\}", with: "($1)/($2)")
-        m = m.replacingOccurrences(of: "\\cdot", with: "dot")
+        
+        // 1. Map common LaTeX commands to Typst or intermediate forms
+        // Handle nested-prone commands first
+        m = m.replacingRegex(pattern: "\\\\mathrm\\s*\\{([^}]+)\\}", with: " upright(\"$1\") ")
+        m = m.replacingRegex(pattern: "\\\\text\\s*\\{([^}]+)\\}", with: " \"$1\" ")
+        m = m.replacingRegex(pattern: "\\\\textrm\\s*\\{([^}]+)\\}", with: " \"$1\" ")
+        m = m.replacingRegex(pattern: "\\\\textit\\s*\\{([^}]+)\\}", with: " italic(\"$1\") ")
+        m = m.replacingRegex(pattern: "\\\\textbf\\s*\\{([^}]+)\\}", with: " bold(\"$1\") ")
+        
+        // Handle fractions after inner commands are resolved
+        m = m.replacingRegex(pattern: "\\\\frac\\s*\\{([^}]*)\\}\\s*\\{([^}]*)\\}", with: "($1)/($2)")
+        
+        m = m.replacingOccurrences(of: "\\cdot", with: " dot ")
         m = m.replacingOccurrences(of: "\\times", with: " times ")
-        m = m.replacingRegex(pattern: "\\\\mathrm\\{([^}]+)\\}", with: "$1")    
-        m = m.replacingRegex(pattern: "\\\\text\\{([^}]+)\\}", with: "\"$1\"") // Better text handling
-        m = m.replacingOccurrences(of: "\\sum", with: "sum")
-        m = m.replacingOccurrences(of: "\\prod", with: "product")
-        m = m.replacingOccurrences(of: "\\int", with: "integral")
-        m = m.replacingOccurrences(of: "\\infty", with: "infinity")
-        m = m.replacingOccurrences(of: "\\rightarrow", with: "arrow.r")
-        m = m.replacingOccurrences(of: "\\leftarrow", with: "arrow.l")
-        m = m.replacingOccurrences(of: "\\mathbb{R}", with: "RR")
-        m = m.replacingOccurrences(of: "\\mathbb{N}", with: "NN")
-        m = m.replacingOccurrences(of: "\\mathbb{Z}", with: "ZZ")
-        m = m.replacingOccurrences(of: "\\in", with: "in")
+        m = m.replacingOccurrences(of: "\\sum", with: " sum ")
+        m = m.replacingOccurrences(of: "\\prod", with: " product ")
+        m = m.replacingOccurrences(of: "\\int", with: " integral ")
+        m = m.replacingOccurrences(of: "\\infty", with: " infinity ")
+        m = m.replacingOccurrences(of: "\\rightarrow", with: " arrow.r ")
+        m = m.replacingOccurrences(of: "\\leftarrow", with: " arrow.l ")
+        m = m.replacingOccurrences(of: "\\in", with: " in ")
+        m = m.replacingOccurrences(of: "\\{", with: " \"{\" ")
+        m = m.replacingOccurrences(of: "\\}", with: " \"}\" ")
         
         let greek = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega"]
         for g in greek {
-            m = m.replacingOccurrences(of: "\\\\\(g)", with: g, options: .regularExpression)
-            m = m.replacingOccurrences(of: "\\\\\(g.capitalized)", with: g.capitalized, options: .regularExpression)
+            m = m.replacingOccurrences(of: "\\\\\(g)", with: " \(g) ", options: .regularExpression)
+            m = m.replacingOccurrences(of: "\\\\\(g.capitalized)", with: " \(g.capitalized) ", options: .regularExpression)
         }
         
-        m = m.replacingOccurrences(of: "\\text", with: "&quot;", options: .regularExpression) // simplistic text handling
+        // 2. Quote multiletter identifiers (Packs, Volume, etc)
+        // We find words of 2+ letters that are not known functions or already in quotes
+        let words = m.components(separatedBy: CharacterSet(charactersIn: " ()[]{}*/+-=,.:;^$_"))
+        var toQuote = Set<String>()
+        let known = Set(["dot", "times", "sum", "product", "integral", "infinity", "in", "RR", "NN", "ZZ", "italic", "bold", "upright", "arrow", "r", "l"])
+        
+        for w in words {
+            let t = w.trimmingCharacters(in: .whitespaces)
+            if t.count > 1 {
+                if !greek.contains(t.lowercased()) && !known.contains(t.lowercased()) && !t.hasPrefix("\"") {
+                    toQuote.insert(t)
+                }
+            }
+        }
+        
+        for q in toQuote {
+            m = m.replacingRegex(pattern: "\\b\(q)\\b", with: "\"\(q)\"")
+        }
+
+        // 3. Final cleanup
         m = m.replacingOccurrences(of: "\\", with: "")
         m = m.replacingOccurrences(of: "{", with: "(")
         m = m.replacingOccurrences(of: "}", with: ")")
-        
-        // Clean up empty parens from brace conversion if any
         m = m.replacingOccurrences(of: "()", with: "")
         
         return m.trimmingCharacters(in: .whitespacesAndNewlines)
