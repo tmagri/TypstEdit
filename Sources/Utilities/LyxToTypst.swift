@@ -421,7 +421,9 @@ class LyxToTypstConverter {
             let command = line.dropFirst()
             switch command {
             case "_": textBuffer += "\\_"
+            case "*": textBuffer += "\\*"
             case "%": textBuffer += "\\%"
+            case "\\": textBuffer += "#linebreak()" // Correct hard break for Typst
             case "$": textBuffer += "\\$"
             case "&": textBuffer += "&"
             case "LyX": textBuffer += "LyX"
@@ -432,6 +434,13 @@ class LyxToTypstConverter {
         }
         
         if !line.isEmpty {
+            // Handle plain paragraph breaks if they appear as simple text lines
+            if line == "\\par" {
+                 flushBuffer()
+                 outputLines.append("")
+                 return
+            }
+
             if !textBuffer.isEmpty && !textBuffer.hasSuffix(" ") {
                 let lastChar = textBuffer.last
                 let isFormatOpener = (lastChar == "*" && isBold) || (lastChar == "_" && isItalic)
@@ -559,15 +568,23 @@ class LyxToTypstConverter {
         }
     }
        private func endLayout() {
-        // 1. Handle lingering Bold/Italic
-        if isItalic {
-            if !textBuffer.hasSuffix("_") { textBuffer += "_" }
-            isItalic = false
-        }
-        if isBold {
-            if !textBuffer.hasSuffix("*") { textBuffer += "*" }
-            isBold = false
-        }
+         // 0. Clean buffer if it only contains openers
+         let openers = (isBold && currentLayout != .labeling ? "*" : "") + (isItalic ? "_" : "")
+         if !openers.isEmpty && textBuffer == openers { 
+             textBuffer = ""
+             isBold = false
+             isItalic = false
+         }
+
+         // 1. Handle lingering Bold/Italic
+         if isItalic {
+             if !textBuffer.hasSuffix("_") { textBuffer += "_" }
+             isItalic = false
+         }
+         if isBold {
+             if !textBuffer.hasSuffix("*") { textBuffer += "*" }
+             isBold = false
+         }
         
         // Ensure Labeling and Description items end with a colon for Typst syntax
         if currentLayout == .labeling || currentLayout == .description {
@@ -1116,6 +1133,7 @@ class LyxToTypstConverter {
             "\\int": " integral ", "\\infty": " infinity ",
             "\\rightarrow": " arrow.r ", "\\leftarrow": " arrow.l ",
             "\\in": " in ", "\\{": " \"{\" ", "\\}": " \"}\" ",
+            "\\backslash": "\\\\",
             "\\ddots": " dots.down ", "\\ldots": " dots.h ", "\\cdots": " dots.c "
         ]
         for (k, v) in map {
@@ -1161,7 +1179,7 @@ class LyxToTypstConverter {
         var cellContents: [String] = []
         
         while currentLineIndex < sourceLines.count {
-            let line = sourceLines[currentLineIndex].trimLeading()
+            let line = sourceLines[currentLineIndex].trimmingCharacters(in: .whitespaces)
             if line == "\\end_inset" { break }
             
             if line.hasPrefix("<lyxtabular") {
@@ -1194,7 +1212,7 @@ class LyxToTypstConverter {
                          currentLineIndex += 1; continue
                      }
                      // Only skip end_inset if it matches the Text inset. 
-                     if innerLine == "\\end_inset" {
+                     if innerLine.trimmingCharacters(in: .whitespaces) == "\\end_inset" {
                          currentLineIndex += 1; continue
                      }
                      
@@ -1218,7 +1236,8 @@ class LyxToTypstConverter {
                         seg = "$" + math + "$"
                     } else {
                          // Basic text escaping
-                         seg = escapeTypstText(seg)
+                         if seg.trimmingCharacters(in: .whitespaces) == "\\backslash" { seg = "\\\\" }
+                         else { seg = escapeTypstText(seg) }
                     }
                     processedCell += seg + " "
                 }
