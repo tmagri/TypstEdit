@@ -56,10 +56,11 @@ class TypstUpdater: ObservableObject {
         }
         
         do {
-            try await syncRepository()
-            try await buildTypst()
+            let repoDir = storageDirectory.appendingPathComponent("git_repo", isDirectory: true)
+            try await syncRepository(into: repoDir)
+            try await buildTypst(in: repoDir)
             
-            let binaryPath = storageDirectory.appendingPathComponent("target/release/typst")
+            let binaryPath = repoDir.appendingPathComponent("target/release/typst")
             if FileManager.default.fileExists(atPath: binaryPath.path) {
                 setFinished(path: binaryPath.path)
             } else {
@@ -95,7 +96,7 @@ class TypstUpdater: ObservableObject {
             status = "Extracting binary..."
             progress = 0.8
             
-            let destinationDir = storageDirectory.appendingPathComponent("binary_install", isDirectory: true)
+            let destinationDir = storageDirectory.appendingPathComponent("stable_bin", isDirectory: true)
             try? FileManager.default.removeItem(at: destinationDir)
             try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
             
@@ -126,7 +127,31 @@ class TypstUpdater: ObservableObject {
         }
     }
     
+    private func resolveCommandPath(_ command: String) -> String? {
+        let commonPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            NSString(string: "~/.cargo/bin").expandingTildeInPath,
+            NSString(string: "~/bin").expandingTildeInPath
+        ]
+        
+        for dir in commonPaths {
+            let fullPath = (dir as NSString).appendingPathComponent(command)
+            if FileManager.default.isExecutableFile(atPath: fullPath) {
+                return fullPath
+            }
+        }
+        return nil
+    }
+
     private func checkCommand(_ command: String) async -> Bool {
+        if resolveCommandPath(command) != nil {
+            return true
+        }
+        
+        // Fallback to 'which' just in case
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = [command]
@@ -144,37 +169,52 @@ class TypstUpdater: ObservableObject {
         }
     }
     
-    private func syncRepository() async throws {
+    private func syncRepository(into repoDir: URL) async throws {
         setStatus("Syncing repository...", progress: 0.3)
         
-        let gitDir = storageDirectory.appendingPathComponent(".git")
+        let gitDir = repoDir.appendingPathComponent(".git")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         
+        try? FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        
         if FileManager.default.fileExists(atPath: gitDir.path) {
             process.arguments = ["pull"]
-            process.currentDirectoryURL = storageDirectory
+            process.currentDirectoryURL = repoDir
         } else {
+            // Ensure directory is empty for clone if it already exists
+            if FileManager.default.fileExists(atPath: repoDir.path) {
+                let contents = try FileManager.default.contentsOfDirectory(atPath: repoDir.path)
+                if !contents.isEmpty {
+                    try FileManager.default.removeItem(at: repoDir)
+                    try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+                }
+            }
+            
             process.arguments = ["clone", repoURL, "."]
-            process.currentDirectoryURL = storageDirectory
+            process.currentDirectoryURL = repoDir
         }
         
         try await runProcess(process)
     }
     
-    private func buildTypst() async throws {
+    private func buildTypst(in repoDir: URL) async throws {
         setStatus("Compiling Typst (this may take several minutes)...", progress: 0.5)
         
         let process = Process()
         let cargoPath = await runWhich("cargo") ?? "/usr/local/bin/cargo"
         process.executableURL = URL(fileURLWithPath: cargoPath)
         process.arguments = ["build", "--release"]
-        process.currentDirectoryURL = storageDirectory
+        process.currentDirectoryURL = repoDir
         
         try await runProcess(process)
     }
     
     private func runWhich(_ command: String) async -> String? {
+        if let resolved = resolveCommandPath(command) {
+            return resolved
+        }
+        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = [command]

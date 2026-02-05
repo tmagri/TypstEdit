@@ -271,7 +271,30 @@ struct TypstSettingsView: View {
         }
     }
     
+    private func resolveCommandPath(_ command: String) -> String? {
+        let commonPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            NSString(string: "~/.cargo/bin").expandingTildeInPath,
+            NSString(string: "~/bin").expandingTildeInPath
+        ]
+        
+        for dir in commonPaths {
+            let fullPath = (dir as NSString).appendingPathComponent(command)
+            if FileManager.default.isExecutableFile(atPath: fullPath) {
+                return fullPath
+            }
+        }
+        return nil
+    }
+    
     private func checkCommand(_ command: String) async -> Bool {
+        if resolveCommandPath(command) != nil {
+            return true
+        }
+        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = [command]
