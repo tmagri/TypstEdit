@@ -174,6 +174,11 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("7", modifiers: [.command, .shift])
             
+            Button("Description List") {
+                NotificationCenter.default.post(name: .menuCommand, object: "toggleDescriptionList")
+            }
+            .keyboardShortcut("9", modifiers: [.command, .shift])
+            
             Button("Inline Code") {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleCode")
             }
@@ -295,6 +300,20 @@ struct AppMenuCommands: Commands {
                 
                 Button("Code Block") {
                     NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
+                }
+                
+                Divider()
+                
+                Button("Bullet List") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleBulletList")
+                }
+                
+                Button("Numbered List") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleNumberList")
+                }
+                
+                Button("Description List") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleDescriptionList")
                 }
 
                 Divider()

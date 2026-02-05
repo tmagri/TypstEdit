@@ -293,6 +293,7 @@ class EditorController: NSObject, ObservableObject {
     }
     @Published var isBulletListActive: Bool = false
     @Published var isNumberListActive: Bool = false
+    @Published var isDescriptionListActive: Bool = false
     @Published var isFootnoteActive: Bool = false
     @Published var isPageBreakActive: Bool = false
     @Published var isHorizontalLineActive: Bool = false
@@ -1303,6 +1304,10 @@ class EditorController: NSObject, ObservableObject {
         toggleListPrefix("+ ")
     }
     
+    func toggleDescriptionList() {
+        toggleListPrefix("/ ")
+    }
+    
     private func toggleListPrefix(_ prefix: String) {
         let range = selectedRange
         guard Range(range, in: sourceCode) != nil else { return }
@@ -1335,7 +1340,7 @@ class EditorController: NSObject, ObservableObject {
         var lineStrings = lineContent.components(separatedBy: .newlines)
         if hadTrailingNewline { lineStrings.removeLast() }
         
-        let otherPrefix = prefix == "- " ? "+ " : "- "
+        let otherPrefixes = ["- ", "+ ", "/ "].filter { $0 != prefix }
         let headingPattern = #"^(=+)\s"#
         guard let headingRegex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
         
@@ -1343,7 +1348,6 @@ class EditorController: NSObject, ObservableObject {
             let headingPrefix: String
             let contentAfterHeading: String
             let hasTargetPrefix: Bool
-            let hasOtherPrefix: Bool
             let isBlank: Bool
         }
         
@@ -1363,7 +1367,6 @@ class EditorController: NSObject, ObservableObject {
                 headingPrefix: headingPrefix,
                 contentAfterHeading: remaining,
                 hasTargetPrefix: remaining.hasPrefix(prefix),
-                hasOtherPrefix: remaining.hasPrefix(otherPrefix),
                 isBlank: isBlank
             ))
         }
@@ -1384,9 +1387,15 @@ class EditorController: NSObject, ObservableObject {
             if allHaveTarget {
                 newContent = String(newContent.dropFirst(prefix.count))
             } else {
-                if info.hasOtherPrefix {
-                    newContent = prefix + String(newContent.dropFirst(otherPrefix.count))
-                } else if !info.hasTargetPrefix {
+                var replaced = false
+                for op in otherPrefixes {
+                    if newContent.hasPrefix(op) {
+                        newContent = prefix + String(newContent.dropFirst(op.count))
+                        replaced = true
+                        break
+                    }
+                }
+                if !replaced && !info.hasTargetPrefix {
                     newContent = prefix + newContent
                 }
             }
@@ -1658,6 +1667,7 @@ class EditorController: NSObject, ObservableObject {
             
             self.isBulletListActive = FormatDetector.isBulletListActive(in: text, at: range.location)
             self.isNumberListActive = FormatDetector.isNumberListActive(in: text, at: range.location)
+            self.isDescriptionListActive = FormatDetector.isDescriptionListActive(in: text, at: range.location)
             self.isFootnoteActive = FormatDetector.findFootnoteRange(in: text, at: range.location) != nil
             self.isPageBreakActive = FormatDetector.findPageBreakRange(in: text, at: range.location) != nil
             self.isHorizontalLineActive = FormatDetector.findHorizontalLineRange(in: text, at: range.location) != nil

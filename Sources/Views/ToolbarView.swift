@@ -79,6 +79,7 @@ struct ToolbarView: View {
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "list.bullet", tooltip: "Bullet List (Cmd+Shift+8)", isActive: controller.isBulletListActive, action: controller.toggleBulletList)
                              ToolbarButton(icon: "list.number", tooltip: "Number List (Cmd+Shift+7)", isActive: controller.isNumberListActive, action: controller.toggleNumberList)
+                             ToolbarButton(icon: "list.dash", tooltip: "Description List (Cmd+Shift+9)", isActive: controller.isDescriptionListActive, action: controller.toggleDescriptionList)
                              ToolbarButton(icon: "text.quote", tooltip: "Block Quote (Cmd+Shift+.)", isActive: controller.isQuoteActive, action: controller.toggleQuote)
                          }
                          HStack(spacing: 2) {

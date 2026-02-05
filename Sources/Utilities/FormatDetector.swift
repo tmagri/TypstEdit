@@ -102,6 +102,16 @@ struct FormatDetector {
         return line.hasPrefix("+ ")
     }
     
+    /// Detects if the cursor at the given index is on a description list line.
+    static func isDescriptionListActive(in text: String, at index: Int) -> Bool {
+        let nsText = text as NSString
+        let length = nsText.length
+        let safeIndex = max(0, min(index, length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
+        let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
+        return line.hasPrefix("/ ")
+    }
+    
     /// Finds the range of the heading prefix (e.g., "== ") for the line at the given index.
     static func findHeadingRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
