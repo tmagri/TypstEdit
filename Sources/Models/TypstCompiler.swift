@@ -30,6 +30,12 @@ class TypstCompiler: ObservableObject {
     
     // Check if typst makes sense or we need full path
     private func resolveTypstPath() -> String? {
+        // Priority 0: Check for custom user-built Typst
+        if GeneralSettingsManager.shared.useCustomTypst, 
+           let customPath = GeneralSettingsManager.shared.resolvedCustomTypstPath {
+            return customPath
+        }
+
         // Priority 1: Check if bundled with the app
         if let bundlePath = Bundle.main.resourcePath {
             let bundledTypst = "\(bundlePath)/bin/typst"

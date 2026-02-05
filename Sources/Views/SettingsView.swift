@@ -4,9 +4,19 @@ struct SettingsView: View {
     @EnvironmentObject var themeManager: ThemeManager
     
     var body: some View {
-        AISettingsView()
-            .padding()
-            .frame(width: 650, height: 500)
+        TabView {
+            AISettingsView()
+                .tabItem {
+                    Label("AI Assistant", systemImage: "sparkles")
+                }
+            
+            TypstSettingsView()
+                .tabItem {
+                    Label("Typst Compiler", systemImage: "terminal")
+                }
+        }
+        .padding()
+        .frame(width: 700, height: 550)
     }
 }
 
@@ -114,6 +124,168 @@ struct AISettingsView: View {
                 testSuccess = false
             }
             isTesting = false
+        }
+    }
+}
+
+struct TypstSettingsView: View {
+    @StateObject private var settings = GeneralSettingsManager.shared
+    @StateObject private var updater = TypstUpdater()
+    
+    @State private var hasGit: Bool = false
+    @State private var hasCargo: Bool = false
+    @State private var checkingDependencies: Bool = false
+    
+    var body: some View {
+        Form {
+            Section(header: Text("Configuration")) {
+                Toggle("Use Custom Typst (compiled or downloaded)", isOn: $settings.useCustomTypst)
+                
+                Picker("Update Mode", selection: $settings.updateMode) {
+                    ForEach(TypstUpdateMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.inline)
+                
+                if !settings.customTypstPath.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Current Path:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(settings.customTypstPath)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            
+            Section(header: Text("Update Typst")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(settings.updateMode == .bleedingEdgeSource ? 
+                        "This will clone the latest source from Git and compile it using Cargo." :
+                        "This will download the latest official pre-compiled binary from GitHub.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    
+                    if updater.isUpdating {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(updater.status)
+                                .font(.caption)
+                            ProgressView(value: updater.progress)
+                                .progressViewStyle(.linear)
+                        }
+                    } else {
+                        if let error = updater.lastError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        } else if updater.status != "Ready" {
+                            Text(updater.status)
+                                .font(.caption)
+                                .foregroundColor(.green)
+                        }
+                        
+                        Button(action: {
+                            updater.update()
+                        }) {
+                            Label(settings.updateMode == .bleedingEdgeSource ? "Build from Source" : "Download Latest Binary", 
+                                  systemImage: settings.updateMode == .bleedingEdgeSource ? "hammer.fill" : "arrow.down.circle")
+                        }
+                        .disabled(settings.updateMode == .bleedingEdgeSource && (!hasGit || !hasCargo))
+                    }
+                }
+                .padding(.vertical, 5)
+            }
+            
+            if settings.updateMode == .bleedingEdgeSource {
+                Section(header: Text("Source Dependencies")) {
+                    HStack {
+                        Image(systemName: hasGit ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(hasGit ? .green : .red)
+                        Text("Git")
+                        Spacer()
+                        if !hasGit {
+                            Text("Missing")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                    }
+                    
+                    HStack {
+                        Image(systemName: hasCargo ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(hasCargo ? .green : .red)
+                        Text("Rust (Cargo)")
+                        Spacer()
+                        if !hasCargo {
+                            Text("Missing")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                    }
+                    
+                    if !hasGit || !hasCargo {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Dependencies are required for source builds.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            Link("Install Rust & Cargo", destination: URL(string: "https://rustup.rs")!)
+                                .font(.caption)
+                            
+                            Text("Git is usually included with Xcode Command Line Tools.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+            } else {
+                Section(header: Text("Info")) {
+                    HStack {
+                        Image(systemName: "info.circle")
+                        Text("Binary downloads are recommended and do not require Git or Rust.")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding()
+        .onAppear {
+            checkDependencies()
+        }
+    }
+    
+    private func checkDependencies() {
+        checkingDependencies = true
+        Task {
+            let git = await checkCommand("git")
+            let cargo = await checkCommand("cargo")
+            await MainActor.run {
+                self.hasGit = git
+                self.hasCargo = cargo
+                self.checkingDependencies = false
+            }
+        }
+    }
+    
+    private func checkCommand(_ command: String) async -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [command]
+        
+        return await withCheckedContinuation { continuation in
+            process.terminationHandler = { process in
+                continuation.resume(returning: process.terminationStatus == 0)
+            }
+            
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
         }
     }
 }
