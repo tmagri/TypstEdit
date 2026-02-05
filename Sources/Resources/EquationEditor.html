@@ -63,17 +63,117 @@
 
             let latex = typst.trim();
 
-            // --- FIX 1: Robust Operator Matching ---
-            // Replaced \b suffix with (?![a-zA-Z]) to match "integral_" correctly
-            // (Since '_' is technically a word character in JS regex)
-            latex = latex.replace(/\bintegral(?![a-zA-Z])/g, '\\int');
-            latex = latex.replace(/\bsum(?![a-zA-Z])/g, '\\sum');
-            latex = latex.replace(/\bproduct(?![a-zA-Z])/g, '\\prod');
+            // --- 0. Escape Braces ---
+            // Escape literal braces for sets { ... }
+            latex = latex.replace(/\{/g, '\\{');
+            latex = latex.replace(/\}/g, '\\}');
 
-            // --- FIX 2: Grouping Handling ---
+            // --- 1. Shorthands (Non-word chars) ---
+            // Note: Order matters for overlapping shorthands
+            latex = latex.replace(/==/g, '\\equiv');
+            latex = latex.replace(/!=/g, '\\neq');
+            latex = latex.replace(/<=/g, '\\le');
+            latex = latex.replace(/>=/g, '\\ge');
+            latex = latex.replace(/=>/g, '\\Rightarrow'); // Double right arrow
+            latex = latex.replace(/->/g, '\\rightarrow'); // Right arrow
+            latex = latex.replace(/<-/g, '\\leftarrow');  // Left arrow
+            latex = latex.replace(/<=>/g, '\\Leftrightarrow');
+            latex = latex.replace(/\|->/g, '\\mapsto');
 
+            // --- 2. Greek Letters ---
+            const greek = [
+                'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa',
+                'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma', 'tau', 'phi', 'chi', 'psi', 'omega',
+                'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi', 'Sigma', 'Phi', 'Psi', 'Omega'
+            ];
+            greek.forEach(g => {
+                const re = new RegExp(`\\b${g}(?![a-zA-Z])`, 'g');
+                latex = latex.replace(re, `\\${g}`);
+            });
+
+            // --- 3. Named Operators & Relations ---
+            const operators = {
+                // Sets & Logic
+                'in': '\\in',
+                'notin': '\\notin',
+                'subset': '\\subset',
+                'supset': '\\supset',
+                'union': '\\cup',
+                'sect': '\\cap',
+                'emptyset': '\\emptyset',
+                'forall': '\\forall',
+                'exists': '\\exists',
+                'and': '\\land',
+                'or': '\\lor',
+                'not': '\\neg',
+
+                // Relations
+                'approx': '\\approx',
+                'equiv': '\\equiv',
+                'prop': '\\propto',
+                'perp': '\\perp',
+                'parallel': '\\parallel',
+
+                // Binary Ops
+                'times': '\\times',
+                'div': '\\div',
+                'ast': '\\ast',
+                'plus.minus': '\\pm',
+                'minus.plus': '\\mp',
+                'dot.op': '\\cdot',
+
+                // Calculus/Misc
+                'nabla': '\\nabla',
+                'partial': '\\partial',
+                'grad': '\\nabla',
+                'infty': '\\infty',
+                'degree': '^{\\circ}',
+                'angle': '\\angle',
+                'floor': '\\lfloor',
+                'ceil': '\\lceil',
+
+                // Dots
+                'dots': '\\dots',
+                'dots.h': '\\dots',
+                'dots.v': '\\vdots',
+                'dots.c': '\\cdots'
+            };
+
+            for (const [t, l] of Object.entries(operators)) {
+                const re = new RegExp(`\\b${t.replace('.', '\\.')}(?![a-zA-Z])`, 'g');
+                latex = latex.replace(re, l);
+            }
+
+            // --- 4. Special Functions ---
+            const bigOps = {
+                'integral': '\\int',
+                'integral.double': '\\iint',
+                'integral.triple': '\\iiint',
+                'integral.cont': '\\oint',
+                'sum': '\\sum',
+                'product': '\\prod'
+            };
+            for (const [t, l] of Object.entries(bigOps)) {
+                const re = new RegExp(`\\b${t.replace('.', '\\.')}(?![a-zA-Z])`, 'g');
+                latex = latex.replace(re, l);
+            }
+
+            // --- 5. Wrap-around Functions ---
+            // sqrt(...) -> \sqrt{...}
+            latex = latex.replace(/sqrt\s*\(([\s\S]*?)\)/g, '\\sqrt{$1}');
+            // abs(...) -> \left| ... \right|
+            latex = latex.replace(/abs\s*\(([\s\S]*?)\)/g, '\\left| $1 \\right|');
+            // norm(...) -> \left\| ... \right\|
+            latex = latex.replace(/norm\s*\(([\s\S]*?)\)/g, '\\left\\| $1 \\right\\|');
+
+            // Fonts
+            latex = latex.replace(/bold\s*\(([\s\S]*?)\)/g, '\\boldsymbol{$1}');
+            latex = latex.replace(/cal\s*\(([\s\S]*?)\)/g, '\\mathcal{$1}');
+            latex = latex.replace(/frak\s*\(([\s\S]*?)\)/g, '\\mathfrak{$1}');
+            latex = latex.replace(/bb\s*\(([\s\S]*?)\)/g, '\\mathbb{$1}');
+
+            // --- 6. Grouping & Sub/Superscripts ---
             // A. Handle Parentheses: _(i=0) -> _{i=0}
-            // Loop handles nested/multiple instances safely
             let oldLatex;
             do {
                 oldLatex = latex;
@@ -81,12 +181,10 @@
             } while (latex !== oldLatex);
 
             // B. Handle Digits: ^50 -> ^{50}
-            // This prevents "integral^50" from rendering as "integral to the 5, then 0"
             latex = latex.replace(/([_^])\s*(\d{2,})/g, '$1{$2}');
 
-            // --- Rest of standard logic ---
-
-            // 3. Handle mat(...)
+            // --- 7. Layout ---
+            // Matrix mat(...)
             latex = latex.replace(/mat\s*\(([\s\S]*?)\)/g, (match, content) => {
                 let env = "pmatrix";
                 let innerContent = content;
@@ -109,16 +207,10 @@
                 return `\\begin{${env}} ${latexRows} \\end{${env}}`;
             });
 
-            // 4. Handle fractions
+            // Fractions
             latex = latex.replace(/\(([^)]+)\)\s*\/\s*\(([^)]+)\)/g, '\\frac{$1}{$2}');
-
-            // 5. Handle Greek letters
-            // Updated to also use (?![a-zA-Z]) so "alpha_" converts correctly
-            const greek = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'pi', 'rho', 'sigma', 'tau', 'phi', 'chi', 'psi', 'omega'];
-            greek.forEach(g => {
-                const re = new RegExp(`\\b${g}(?![a-zA-Z])`, 'g');
-                latex = latex.replace(re, `\\${g}`);
-            });
+            // Simple fractions: a/b
+            latex = latex.replace(/(\b[a-zA-Z0-9]+)\s*\/\s*(\b[a-zA-Z0-9]+)/g, '\\frac{$1}{$2}');
 
             return latex;
         };
