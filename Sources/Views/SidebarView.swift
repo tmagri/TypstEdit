@@ -166,6 +166,15 @@ class FileSystemModel: ObservableObject {
             }
         }
     }
+    
+    func deleteFile(url: URL) {
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            loadFiles()
+        } catch {
+            print("Error deleting file: \(error)")
+        }
+    }
 }
 
 extension Notification.Name {
@@ -213,6 +222,7 @@ struct SidebarView: View {
                 // File Tree
                 List(model.rootNodes, children: \.children) { node in
                     SidebarRow(node: node, selectedFile: $selectedFile, editorController: editorController)
+                        .environmentObject(model)
                         .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
                         .listRowSeparator(.hidden)
                         .listRowBackground(
@@ -248,6 +258,9 @@ struct SidebarRow: View {
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
     @EnvironmentObject var themeManager: ThemeManager
+    @EnvironmentObject var fileSystemModel: FileSystemModel
+    
+    @State private var showDeleteAlert = false
     
     var isSelected: Bool {
         selectedFile == node.url
@@ -271,6 +284,33 @@ struct SidebarRow: View {
             if !node.isDirectory {
                 selectedFile = node.url
             }
+        }
+        .contextMenu {
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.selectFile(node.url.path, inFileViewerRootedAtPath: "")
+            }
+            
+            Button("Open in External Program") {
+                NSWorkspace.shared.open(node.url)
+            }
+            
+            Divider()
+            
+            Button("Delete", role: .destructive) {
+                showDeleteAlert = true
+            }
+        }
+        .alert("Delete \(node.name)?", isPresented: $showDeleteAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                fileSystemModel.deleteFile(url: node.url)
+                // If the deleted file was selected, clear the selection
+                if selectedFile == node.url {
+                    selectedFile = nil
+                }
+            }
+        } message: {
+            Text("This item will be moved to the Trash. This action cannot be undone.")
         }
     }
     
