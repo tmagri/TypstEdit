@@ -23,15 +23,44 @@
 
 ## ✨ Features
 
-* **⚡️ Live Preview:** Real-time compilation and preview of your document as you type.
+### Core Editing
+* **⚡️ Save Preview:** Real-time compilation and preview of your document as you save the document.
+* **🎨 Advanced Syntax Highlighting:** Refined native syntax highlighting for Typst with accurate keyword, function, and markup styling.
+* **🔍 Find and Replace:** Powerful search functionality with editor scrolling to results.
+* **🔢 Line Numbers:** Helpful ruler for code navigation.
+* **📝 Rich Text Formatting:** Support for bold, italic, underline, strikethrough, highlight, subscript, and superscript.
+* **📋 List Support:** Bullet lists, numbered lists, and **description lists** with one-click insertion.
+* **💬 Code Blocks & Quotes:** Inline code, code blocks, and block quotes with syntax support.
+
+### Visual Editors
+* **🧮 Visual Equation Editor:** Interactive equation editor with live LaTeX preview for mathematical expressions.
+* **🖼️ Figure Editor:** Visual interface for inserting and editing figures with captions and references.
+* **🔧 Foundation Item Picker:** Drill-down navigation for Typst foundation items (arrays, strings, datetime, calc, etc.) with searchable methods and properties.
+* **🎯 Contextual Editing:** Smart "Edit at Cursor" feature that detects and opens appropriate editors for tables, links, equations, and more.
+
+### Project & File Management
 * **🚀 Project Templates:** Start quickly with built-in templates for **Articles, Reports, Presentations, and Resumes**.
-* **🧩 Smart Snippets:** Quickly insert complex elements like **Tables, Charts, and Timelines** with one click.
-* **🎨 Syntax Highlighting:** Native syntax highlighting for Typst code.
+* **📁 Project Sidebar:** Easily navigate through your project files.
+* **📥 LyX Import:** Convert LyX documents to Typst format with automatic font, page size, and heading detection.
+* **📤 Export Options:** Export to PDF, PNG, or SVG formats.
+* **💾 Project Backup:** One-click project backup functionality.
+
+### Smart Snippets & Insertion
+* **🧩 Smart Snippets:** Quickly insert complex elements like **Tables, Charts, Timelines, and Outlines** with one click.
+* **🔗 Quick Insert Menu:** Easy access to symbols, external data, document styles, and more.
+* **⌨️ Comprehensive Keyboard Shortcuts:** Full keyboard shortcuts for all insert menu items and formatting options.
+
+### Typst Compiler Management
+* **🔄 Typst Compiler Updates:** Built-in updater to download and install the latest Typst compiler.
+* **⚙️ Flexible Update Modes:** Choose between stable pre-compiled binaries or bleeding-edge source builds.
+* **🛠️ Custom Compiler Path:** Support for custom Typst binary locations.
+
+### User Experience
 * **🍎 Native macOS Experience:** Built with SwiftUI. 100% Native, fast, and lightweight.
 * **🐞 Error Reporting:** Integrated error panel to quickly spot compilation issues.
-* **🔢 Line Numbers:** Helpful ruler for code navigation.
-* **📁 Project Sidebar:** Easily navigate through your project files.
 * **🌑 Dark Mode Optimized:** Designed for a comfortable, eye-friendly dark editing environment.
+* **♿️ Accessibility Features:** Color blindness simulation modes (Protanopia, Deuteranopia, Tritanopia).
+* **📐 Flexible Layout:** Split views vertically or horizontally, editor-only, preview-only, or both panels.
 
 ## 📥 Installation
 
@@ -94,7 +123,7 @@ This project is open source.
 
 MIT License
 
-Copyright (c) 2024 SuperMegaFort
+Copyright (c) 2024-2026 SuperMegaFort, tmagri
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
