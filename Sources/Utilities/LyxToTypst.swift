@@ -560,7 +560,7 @@ class LyxToTypstConverter {
         case .enumerate: textBuffer += "\(indent)+ "
         case .description: textBuffer += "\(indent)/ "
         case .labeling: textBuffer += "\(indent)/ " 
-        case .title: outputLines.append("#align(center, text(24pt, weight: \"bold\")[")
+        case .title: outputLines.append("#title[")
         case .author: outputLines.append("#align(center, text(18pt)[")
         case .code: outputLines.append("```")
         case .caption: textBuffer += "" // Caption text handled by semantic figure if possible, or just removed prefix to let Typst handle it
@@ -601,7 +601,9 @@ class LyxToTypstConverter {
 
         // 3. Structural Closure
         switch currentLayout {
-        case .title, .author: 
+        case .title:
+            outputLines.append("]\n")
+        case .author: 
             outputLines.append("])\n")
         case .code: 
             outputLines.append("```\n")

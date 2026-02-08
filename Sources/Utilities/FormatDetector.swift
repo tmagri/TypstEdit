@@ -35,6 +35,11 @@ struct FormatDetector {
     static func findSuperscriptRange(in text: String, at index: Int) -> NSRange? {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#super(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
+
+    /// Finds the range of title (#title[...]) surrounding the index.
+    static func findTitleRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#title(?:\s*\([^)]*\))?\s*[\[(]"#)
+    }
     
     private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
         let nsText = text as NSString
@@ -80,6 +85,11 @@ struct FormatDetector {
             }
         }
         return 0
+    }
+
+    /// Detects if the cursor is inside a #title[...] block.
+    static func detectIsTitle(in text: String, at index: Int) -> Bool {
+        return findTitleRange(in: text, at: index) != nil
     }
     
     /// Detects if the cursor at the given index is on a bullet list line.

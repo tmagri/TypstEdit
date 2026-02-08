@@ -261,6 +261,7 @@ class EditorController: NSObject, ObservableObject {
     @Published var isSuperscriptActive: Bool = false
     @Published var isQuoteActive: Bool = false
     @Published var isCodeBlockActive: Bool = false
+    @Published var isTitleActive: Bool = false
     @Published var currentHeadingLevel: Int = 0
     @Published var isEquationActive: Bool = false
     @Published var isTableActive: Bool = false
@@ -1657,6 +1658,7 @@ class EditorController: NSObject, ObservableObject {
             self.isSubscriptActive = FormatDetector.findSubscriptRange(in: text, at: range.location) != nil
             self.isSuperscriptActive = FormatDetector.findSuperscriptRange(in: text, at: range.location) != nil
             
+            self.isTitleActive = FormatDetector.detectIsTitle(in: text, at: range.location)
             self.currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
             
             self.isEquationActive = EquationDetector.findEquationRange(in: text, at: range.location) != nil
@@ -1773,6 +1775,15 @@ class EditorController: NSObject, ObservableObject {
                 content = String(line.dropFirst(match.range.length))
             }
             
+            // Remove title if existing
+            let titlePattern = #"^#title\s*\[(.*?)\]\s*$"#
+            if let titleRegex = try? NSRegularExpression(pattern: titlePattern, options: []),
+               let match = titleRegex.firstMatch(in: content, options: [], range: NSRange(location: 0, length: content.utf16.count)) {
+                if let r = Range(match.range(at: 1), in: content) {
+                    content = String(content[r])
+                }
+            }
+            
             if level > 0 {
                 let prefix = String(repeating: "=", count: level) + " "
                 newLines.append(prefix + content)
@@ -1785,6 +1796,47 @@ class EditorController: NSObject, ObservableObject {
         if hadTrailingNewline { replacement += "\n" }
         
         insertText(replacement, replacementRange: lineRange)
+        updateFormattingState()
+    }
+    
+    func setTitle() {
+        let range = selectedRange
+        let nsText = sourceCode as NSString
+        let lineRange = nsText.lineRange(for: range)
+        let lineContent = nsText.substring(with: lineRange)
+        
+        let hadTrailingNewline = lineContent.hasSuffix("\n")
+        var content = lineContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if content.isEmpty {
+            let snippet = "#title[]" + (hadTrailingNewline ? "\n" : "")
+            let newCursor = NSRange(location: lineRange.location + 7, length: 0)
+            insertText(snippet, replacementRange: lineRange, newCursorRange: newCursor)
+            updateFormattingState()
+            return
+        }
+        
+        // If already a title, remove it (toggle)
+        if let titleRange = FormatDetector.findTitleRange(in: sourceCode, at: range.location) {
+            // Basic unwrapping: find text inside []
+            let fullSnippet = nsText.substring(with: titleRange)
+            if let start = fullSnippet.firstIndex(of: "["), let end = fullSnippet.lastIndex(of: "]") {
+                let inside = String(fullSnippet[fullSnippet.index(after: start)..<end])
+                insertText(inside, replacementRange: titleRange)
+            }
+            updateFormattingState()
+            return
+        }
+        
+        // If it's a heading, strip the marker
+        let headingPattern = #"^(=+)\s"#
+        if let regex = try? NSRegularExpression(pattern: headingPattern, options: []),
+           let match = regex.firstMatch(in: content, options: [], range: NSRange(location: 0, length: content.utf16.count)) {
+            content = String(content.dropFirst(match.range.length))
+        }
+        
+        let snippet = "#title[\(content)]" + (hadTrailingNewline ? "\n" : "")
+        insertText(snippet, replacementRange: lineRange)
         updateFormattingState()
     }
     

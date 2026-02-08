@@ -21,13 +21,20 @@ struct ToolbarView: View {
                      VStack(spacing: 4) {
                         HStack(spacing: 4) {
                             Menu {
+                                 Button("Title", action: { controller.setTitle() })
+                                Divider()
                                 Button("Body", action: { controller.setHeadingLevel(0) })
                                 Divider()
                                 ForEach(1...6, id: \.self) { level in
                                     Button("Heading \(level)", action: { controller.setHeadingLevel(level) })
                                 }
                             } label: {
-                                ToolbarButton(text: controller.currentHeadingLevel == 0 ? "Body" : "H\(controller.currentHeadingLevel)", tooltip: "Heading Level", action: {})
+                                let labelText: String = {
+                                    if controller.isTitleActive { return "Title" }
+                                    if controller.currentHeadingLevel == 0 { return "Body" }
+                                    return "H\(controller.currentHeadingLevel)"
+                                }()
+                                ToolbarButton(text: labelText, tooltip: "Heading Level", action: {})
                                     .frame(width: 56)
                             }
                             .menuStyle(.borderlessButton)
