@@ -84,7 +84,7 @@ If you want to contribute or build the app yourself:
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/votre-nom-utilisateur/TypstEdit.git](https://github.com/votre-nom-utilisateur/TypstEdit.git)
+    git clone [https://github.com/tmagri/TypstEdit.git](https://github.com/tmagri/TypstEdit.git)
     cd TypstEdit
     ```
 
