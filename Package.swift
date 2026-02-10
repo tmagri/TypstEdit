@@ -13,7 +13,7 @@ let package = Package(
         .executable(name: "TypstEdit", targets: ["TypstEdit"])
     ],
     dependencies: [
-        .package(path: "Packages/CodeEditSourceEditor")
+        .package(path: "LocalPackages/CodeEditSourceEditor")
     ],
     targets: [
         .executableTarget(

@@ -1,0 +1,79 @@
+# SwiftLintPlugin
+
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Flukepistrol%2FSwiftLintPlugin%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/lukepistrol/SwiftLintPlugin)
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Flukepistrol%2FSwiftLintPlugin%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/lukepistrol/SwiftLintPlugin)
+[![](https://img.shields.io/github/license/lukepistrol/SwiftLintPlugin)](https://github.com/lukepistrol/SwiftLintPlugin/blob/main/LICENSE)
+[![Twitter: @lukeeep_](https://img.shields.io/badge/Twitter-@lukeeep_-1e9bf0.svg?style=flat)](https://twitter.com/lukeeep_)
+
+A Swift Package Plugin for [SwiftLint](https://github.com/realm/SwiftLint/) that will run SwiftLint on build time and show errors & warnings in Xcode.
+
+> **Note** 
+> There now is an official version in the [SwiftLint repo](https://github.com/realm/SwiftLint#plug-in-support)!
+> Though this package will still be maintained and updated since it brings the benefit of being a smaller repository and
+> therefore faster to download as a dependency
+
+## Add to Package
+
+First add a dependency from this package:
+
+```swift
+dependencies: [
+    // ...
+    .package(url: "https://github.com/lukepistrol/SwiftLintPlugin", from: "0.2.2"),
+]
+```
+
+Then add it to your targets as a plugin:
+
+```swift
+targets: [
+    .target(
+        name: "YOUR_TARGET",
+        dependencies: [],
+        plugins: [
+            .plugin(name: "SwiftLint", package: "SwiftLintPlugin")
+        ]
+    ),
+]
+```
+
+## Add to Project
+
+Starting with Xcode 14, plugins can also work on Xcode Project's targets. To do so, simply add this package to your SPM dependencies in Xcode. After that open your `target's settings > Build Phases` and add `SwiftLint` to `Run Build Tool Plug-ins` like shown below:
+
+<img width="285" alt="Screen Shot 2022-09-02 at 09 33 23" src="https://user-images.githubusercontent.com/9460130/188084164-49903dc4-39a4-42fc-aa6f-6c6a813a7239.png">
+
+> You may need to enable & trust the plugin before you can actually run it during builds.
+
+## Fix Warnings
+
+As of version `0.1.0` this package also includes a command plugin which can be called on any target.
+
+1. Select a project or package in the project navigator.
+2. Richt-click and select `SwiftLintFix`.
+   - alternatively you can select `File > Packages > SwiftLintFix`.
+3. Choose the target(s) to run the `swiftlint --fix` command on.
+
+<img width="224" alt="Screenshot 2022-10-31 at 12 59 53" src="https://user-images.githubusercontent.com/9460130/199005629-b214758f-e184-4b3b-8031-e6364c6549c7.png">
+
+## Run on CI
+
+Important to notice is that when building a package/project on any CI provider (e.g. GitHub Actions) it is mandatory to pass the `-skipPackagePluginValidation` flag to the `xcodebuild` command. This will skip the validation prompt which in Xcode looks like this:
+
+<img width="263" alt="Screenshot 2022-12-13 at 17 48 44" src="https://user-images.githubusercontent.com/9460130/207394170-9490e687-e066-4bfa-862c-a4f816b6b43b.png">
+
+### Example
+
+```bash
+xcodebuild  \
+    -scheme "$SCHEME" \
+    -destination "$PLATFORM" \
+    -skipPackagePluginValidation \ # this is mandatory
+    clean build
+```
+
+If you need to disable linting (for release/app store builds), you can set`DISABLE_SWIFTLINT` environment variable
+
+-----
+
+<a href="https://www.buymeacoffee.com/lukeeep" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
