@@ -77,11 +77,18 @@ class TypstCompiler: ObservableObject {
     
     // Writes content to the shadow file. If watch is not running, starts it.
     func updateContent(source: String, fileURL: URL) async {
-        let filename = fileURL.lastPathComponent
+        let tempDir = FileManager.default.temporaryDirectory
         let workingDirectory = fileURL.deletingLastPathComponent()
+        let filename = fileURL.lastPathComponent
         
+        // Store hidden shadow source in project folder to satisfy Typst root restrictions
         let shadowSourceURL = workingDirectory.appendingPathComponent(".\(filename).preview.typ")
-        let shadowPDFURL = workingDirectory.appendingPathComponent(".\(filename).preview.pdf")
+        
+        // Keep shadow PDF in temp directory to keep project folder clean
+        let fileHash = abs(fileURL.path.hashValue)
+        let shadowPDFURL = tempDir.appendingPathComponent("typst-edit-\(fileHash).preview.pdf")
+        
+        let projectRoot = workingDirectory
         
         // Write content to shadow file
         do {
@@ -92,8 +99,6 @@ class TypstCompiler: ObservableObject {
             try finalSource.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
             
             // Clear errors on new content update
-            // This ensures we don't accumulate stale errors if typst doesn't report success explicitly on next run
-            // (though it usually reports *something*)
             Task { @MainActor in
                 if !self.errors.isEmpty {
                     self.errors = []
@@ -105,7 +110,7 @@ class TypstCompiler: ObservableObject {
             return
         }
         
-        // If we are already watching THIS file, we are done (typst watch will pick it up)
+        // If we are already watching THIS file, we are done
         if let current = currentShadowSourceURL, current == shadowSourceURL, currentProcess?.isRunning == true {
              self.compilationStatus = "Compiling..." 
              return
@@ -113,10 +118,10 @@ class TypstCompiler: ObservableObject {
         
         // Otherwise, stop previous watch and start new one
         cleanUp()
-        startWatching(sourceURL: shadowSourceURL, outputURL: shadowPDFURL)
+        startWatching(sourceURL: shadowSourceURL, outputURL: shadowPDFURL, projectRoot: projectRoot)
     }
     
-    private func startWatching(sourceURL: URL, outputURL: URL) {
+    private func startWatching(sourceURL: URL, outputURL: URL, projectRoot: URL) {
         guard let typstPath = resolveTypstPath() else {
             self.compilationStatus = "Error: 'typst' executable not found."
             return
@@ -127,7 +132,9 @@ class TypstCompiler: ObservableObject {
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: typstPath)
-        process.arguments = ["watch", sourceURL.path, outputURL.path]
+        
+        // Use --root to ensure relative imports from the temporary file work correctly
+        process.arguments = ["watch", sourceURL.path, outputURL.path, "--root", projectRoot.path]
         
         let pipe = Pipe()
         process.standardError = pipe // typst often logs to stderr or stdout, check both? usually stderr for logs
@@ -284,6 +291,57 @@ class TypstCompiler: ObservableObject {
         } catch {
             print("[TYPST-EXPORT] Failed to run: \(error)")
             return (false, error.localizedDescription)
+        }
+    }
+
+    func compileClean(content: String, preferredDirectory: URL? = nil, projectRoot: URL?) async -> (success: Bool, pdfURL: URL?, error: String?) {
+        guard let typstPath = resolveTypstPath() else {
+            return (false, nil, "Error: 'typst' executable not found.")
+        }
+        
+        // Use preferred directory (e.g. sibling of source file) to ensure relative imports work
+        let tempDir = preferredDirectory ?? FileManager.default.temporaryDirectory
+        let tempID = preferredDirectory != nil ? ".clean-\(UUID().uuidString.prefix(8))" : UUID().uuidString
+        let sourceURL = tempDir.appendingPathComponent("\(tempID).typ")
+        let pdfURL = tempDir.appendingPathComponent("\(tempID).pdf")
+        
+        do {
+            try content.write(to: sourceURL, atomically: true, encoding: .utf8)
+        } catch {
+            return (false, nil, "Failed to write temp source: \(error.localizedDescription)")
+        }
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: typstPath)
+        
+        var arguments = ["compile", sourceURL.path, pdfURL.path]
+        if let root = projectRoot {
+            arguments.append(contentsOf: ["--root", root.path])
+            process.currentDirectoryURL = root
+        }
+        process.arguments = arguments
+        
+        let pipe = Pipe()
+        process.standardError = pipe
+        
+        defer {
+            // Clean up temp source file
+            try? FileManager.default.removeItem(at: sourceURL)
+        }
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            if process.terminationStatus != 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? "Unknown error"
+                return (false, nil, output)
+            }
+            
+            return (true, pdfURL, nil)
+        } catch {
+            return (false, nil, error.localizedDescription)
         }
     }
 }

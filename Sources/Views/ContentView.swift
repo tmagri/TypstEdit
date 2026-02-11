@@ -92,7 +92,6 @@ struct ContentView: View {
             if let url = notification.object as? URL {
                 self.currentPDFURL = url
                 self.reloadToken = UUID()
-                if let selectedFile = selectedFile { exportPDF(from: selectedFile) }
             }
         }
         .onChange(of: editorController.sourceCode) { newValue in editorController.checkUnsavedChanges(currentContent: newValue) }
@@ -259,14 +258,19 @@ struct ContentView: View {
                     .help("Save (Cmd+S)").keyboardShortcut("s", modifiers: .command).buttonStyle(.plain)
                     
                     if editorController.isTypstFile {
-                        Button(action: printPDF) {
+                        Button(action: { Task { await printPDF() } }) {
                             Image(systemName: "printer").foregroundColor(themeManager.textColor)
                                 .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
                         }
                         .help("Print").buttonStyle(.plain)
                         
-                        ShareButton(fileURL: exportedPDFURL).frame(width: 28, height: 28)
+                        ShareButton(fileURL: editorController.cleanPDFURL ?? exportedPDFURL).frame(width: 28, height: 28)
                             .padding(4).background(Color.black.opacity(0.3)).cornerRadius(8).help("Share")
+                            .onHover { inside in
+                                if inside && editorController.cleanPDFURL == nil {
+                                    Task { await editorController.generateCleanPDF(compiler: compiler, fileURL: selectedFile) }
+                                }
+                            }
                     }
                 }
                 if let lastSaved = lastSaved {
@@ -585,6 +589,7 @@ struct ContentView: View {
                 if url == self.selectedFile {
                     self.editorController.syncSavedContent(self.editorController.sourceCode)
                     self.scheduleCompilation(with: self.editorController.sourceCode)
+                    self.exportPDF(from: url) // Update clean PDF on disk on save
                     self.lastSaved = Date()
                     self.editorController.showStatus("File Saved")
                     AutoRecoveryManager.shared.clearRecovery(for: url) // Clear recovery on save
@@ -621,23 +626,37 @@ struct ContentView: View {
 
     func exportPDF(from sourceURL: URL) {
         let pdfDestination = sourceURL.deletingPathExtension().appendingPathExtension("pdf")
-        let workingDirectory = sourceURL.deletingLastPathComponent()
-        let filename = sourceURL.lastPathComponent
-        let shadowPDFURL = workingDirectory.appendingPathComponent(".\(filename).preview.pdf")
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            if FileManager.default.fileExists(atPath: shadowPDFURL.path) {
+        Task {
+            let result = await compiler.compileClean(content: editorController.sourceCode, 
+                                                     preferredDirectory: nil, // Use temp for export
+                                                     projectRoot: editorController.projectRootURL)
+            
+            if result.success, let tempPDF = result.pdfURL {
                 do {
-                    if FileManager.default.fileExists(atPath: pdfDestination.path) { try FileManager.default.removeItem(at: pdfDestination) }
-                    try FileManager.default.copyItem(at: shadowPDFURL, to: pdfDestination)
-                    self.exportedPDFURL = pdfDestination
-                } catch { print("[ERROR] Failed to export PDF: \(error)") }
+                    if FileManager.default.fileExists(atPath: pdfDestination.path) {
+                        try FileManager.default.removeItem(at: pdfDestination)
+                    }
+                    try FileManager.default.copyItem(at: tempPDF, to: pdfDestination)
+                    await MainActor.run {
+                        self.exportedPDFURL = pdfDestination
+                    }
+                } catch {
+                    print("[ERROR] Failed to export clean PDF: \(error)")
+                }
             }
         }
     }
     
-    func printPDF() {
-        guard let url = currentPDFURL, let document = PDFDocument(url: url) else { return }
+    func printPDF() async {
+        let pdfURLToPrint: URL?
+        if let cleanURL = editorController.cleanPDFURL {
+            pdfURLToPrint = cleanURL
+        } else {
+            pdfURLToPrint = await editorController.generateCleanPDF(compiler: compiler, fileURL: selectedFile)
+        }
+        
+        guard let url = pdfURLToPrint, let document = PDFDocument(url: url) else { return }
         let printInfo = NSPrintInfo.shared
         printInfo.topMargin = 0; printInfo.bottomMargin = 0; printInfo.leftMargin = 0; printInfo.rightMargin = 0
         document.printOperation(for: printInfo, scalingMode: .pageScaleToFit, autoRotate: true)?.run()

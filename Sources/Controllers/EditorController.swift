@@ -130,6 +130,9 @@ class EditorController: NSObject, ObservableObject {
     @Published var showSymbolPicker: Bool = false
     @Published var wordCount: Int = 0
     
+    // --- Print / Share Support ---
+    @Published var cleanPDFURL: URL? = nil
+    
     // MARK: - Symbol Insertion
     // MARK: - Helper Properties
     
@@ -333,7 +336,13 @@ class EditorController: NSObject, ObservableObject {
     @Published var cursorSize: CGFloat = 2.0 // Default thickness
     
     // --- CodeEditSourceEditor State ---
-    @Published var sourceCode: String = ""
+    @Published var sourceCode: String = "" {
+        didSet {
+            if sourceCode != oldValue {
+                cleanPDFURL = nil
+            }
+        }
+    }
     @Published var editorState: SourceEditorState = .init() {
         didSet {
             // Check if selection changed to update UI state
@@ -2519,6 +2528,21 @@ class EditorController: NSObject, ObservableObject {
         
         // If nothing is detected, show status message
         showStatus("No editable element at cursor")
+    }
+    
+    /// Generates a clean PDF (no dark mode, no filters) for Print or Share.
+    func generateCleanPDF(compiler: TypstCompiler, fileURL: URL?) async -> URL? {
+        showStatus("Preparing clean PDF...")
+        let preferredDir = fileURL?.deletingLastPathComponent()
+        let result = await compiler.compileClean(content: sourceCode, preferredDirectory: preferredDir, projectRoot: projectRootURL)
+        
+        if result.success, let url = result.pdfURL {
+            self.cleanPDFURL = url
+            return url
+        } else {
+            showStatus("Failed to generate clean PDF: \(result.error ?? "Unknown error")")
+            return nil
+        }
     }
     
     /// Shows a temporary status message to the user
