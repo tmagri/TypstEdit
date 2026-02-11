@@ -119,6 +119,8 @@ struct ToolbarView: View {
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "minus", tooltip: "Horizontal Line (Cmd+Opt+-)", isActive: controller.isHorizontalLineActive, action: controller.insertHorizontalLine)
                              ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", isActive: controller.isPageBreakActive, action: controller.insertPageBreak)
+                             ToolbarButton(icon: "square", tooltip: "Block (Cmd+Ctrl+B)", isActive: controller.isBlockActive, action: controller.openBlockEditor)
+                             ToolbarButton(icon: "grid", tooltip: "Grid (Cmd+Ctrl+G)", isActive: controller.isGridActive, action: controller.openGridEditor)
                              ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart (Cmd+Ctrl+C)", action: controller.insertChartSnippet)
                              ToolbarButton(icon: "calendar", tooltip: "Insert Timeline (Cmd+Ctrl+L)", action: controller.insertTimelineSnippet)
                          }

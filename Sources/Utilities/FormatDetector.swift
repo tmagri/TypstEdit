@@ -554,4 +554,141 @@ struct FormatDetector {
         // If odd number of dollars, we are likely inside a math block
         return dollarCount % 2 != 0
     }
+
+    // --- Block Range & Parsing ---
+
+    static func findBlockRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#block(?:\s*\([^)]*\))?\s*[\[(]"#)
+    }
+
+    struct BlockInfo {
+        let range: NSRange
+        let content: String
+        let fill: String?
+        let inset: String?
+        let radius: String?
+        let width: String?
+        let stroke: String?
+    }
+
+    static func parseBlock(in text: String, at index: Int) -> BlockInfo? {
+        guard let range = findBlockRange(in: text, at: index) else { return nil }
+        let nsText = text as NSString
+        let snippet = nsText.substring(with: range)
+        
+        var content = ""
+        var fill: String?
+        var inset: String?
+        var radius: String?
+        var width: String?
+        var stroke: String?
+        
+        // Extract content between []
+        // Note: We use lastIndex for the closer to handle nested blocks, but this is still slightly naive.
+        // For TypstEdit, it's usually sufficient since snippet is already the matched block.
+        if let bracketStart = snippet.firstIndex(of: "["), let bracketEnd = snippet.lastIndex(of: "]") {
+            let start = snippet.index(after: bracketStart)
+            content = String(snippet[start..<bracketEnd])
+        }
+        
+        // Extract params from () using proper nesting check
+        if let parenStart = snippet.firstIndex(of: "(") {
+            let nsSnippet = snippet as NSString
+            let startIdx = nsSnippet.range(of: "(").location + 1
+            if let paramsRange = findClosingMarker(in: snippet, startingAt: startIdx, opener: "(", closer: ")") {
+                // Exclude the closing paren
+                let internalRange = NSRange(location: paramsRange.location, length: paramsRange.length - 1)
+                let params = nsSnippet.substring(with: internalRange)
+                fill = extractParam(from: params, name: "fill")
+                inset = extractParam(from: params, name: "inset")
+                radius = extractParam(from: params, name: "radius")
+                width = extractParam(from: params, name: "width")
+                stroke = extractParam(from: params, name: "stroke")
+            }
+        }
+        
+        return BlockInfo(range: range, content: content, fill: fill, inset: inset, radius: radius, width: width, stroke: stroke)
+    }
+
+    // --- Grid Range & Parsing ---
+
+    static func findGridRange(in text: String, at index: Int) -> NSRange? {
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#grid\s*\("#)
+    }
+
+    struct GridInfo {
+        let range: NSRange
+        let columns: String?
+        let gutter: String?
+        let cells: [String]
+    }
+
+    static func parseGrid(in text: String, at index: Int) -> GridInfo? {
+        guard let range = findGridRange(in: text, at: index) else { return nil }
+        let nsText = text as NSString
+        let snippet = nsText.substring(with: range)
+        
+        var columns: String?
+        var gutter: String?
+        var cells: [String] = []
+        
+        if let parenStart = snippet.firstIndex(of: "(") {
+            let nsSnippet = snippet as NSString
+            let startIdx = nsSnippet.range(of: "(").location + 1
+            if let paramsRange = findClosingMarker(in: snippet, startingAt: startIdx, opener: "(", closer: ")") {
+                // Exclude closing paren
+                let internalRange = NSRange(location: paramsRange.location, length: paramsRange.length - 1)
+                let params = nsSnippet.substring(with: internalRange)
+                
+                columns = extractParam(from: params, name: "columns")
+                gutter = extractParam(from: params, name: "gutter")
+                
+                // Extract cells (everything else)
+                cells = splitParamsIgnoringNesting(params)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { cell in
+                        !cell.hasPrefix("columns:") && !cell.hasPrefix("gutter:") && !cell.isEmpty
+                    }
+            }
+        }
+        
+        return GridInfo(range: range, columns: columns, gutter: gutter, cells: cells)
+    }
+
+    private static func extractParam(from params: String, name: String) -> String? {
+        let segments = splitParamsIgnoringNesting(params)
+        for segment in segments {
+            let trimmed = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix(name + ":") {
+                let val = trimmed.dropFirst((name + ":").count).trimmingCharacters(in: .whitespacesAndNewlines)
+                return val
+            }
+        }
+        return nil
+    }
+
+    private static func splitParamsIgnoringNesting(_ params: String) -> [String] {
+        var results: [String] = []
+        var current = ""
+        var depth = 0
+        
+        for char in params {
+            if char == "(" || char == "[" || char == "{" {
+                depth += 1
+                current.append(char)
+            } else if char == ")" || char == "]" || char == "}" {
+                depth -= 1
+                current.append(char)
+            } else if char == "," && depth == 0 {
+                results.append(current)
+                current = ""
+            } else {
+                current.append(char)
+            }
+        }
+        if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            results.append(current)
+        }
+        return results
+    }
 }

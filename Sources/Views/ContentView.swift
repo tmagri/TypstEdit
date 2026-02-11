@@ -349,6 +349,12 @@ struct ContentView: View {
                 .sheet(isPresented: $editorController.showExternalDataEditor) { ExternalDataEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showFootnoteEditor) { FootnoteEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showFoundationEditor) { FoundationEditorView(controller: editorController) }
+                .sheet(isPresented: $editorController.showBlockEditor) {
+                    BlockEditorView(controller: editorController, onCancel: { editorController.showBlockEditor = false })
+                }
+                .sheet(isPresented: $editorController.showGridEditor) {
+                    GridEditorView(controller: editorController, onCancel: { editorController.showGridEditor = false })
+                }
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }
                     Button("Cancel", role: .cancel) { }
@@ -729,6 +735,8 @@ struct ContentView: View {
         case "splitHorizontal": withAnimation { editorController.isVerticalSplit = false }
 
         case "toggleScopedBlock": editorController.toggleScopedBlock()
+        case "openBlockEditor": editorController.openBlockEditor()
+        case "openGridEditor": editorController.openGridEditor()
         case "aiPrompt": editorController.openAIPromptEditor()
         case "openFoundationEditor": editorController.openFoundationEditor()
         case "zoomIn": editorController.zoomIn()

@@ -98,6 +98,25 @@ class EditorController: NSObject, ObservableObject {
     @Published var currentFigureKind: String = ""
     @Published var currentFigureSupplement: String = ""
     
+    // --- Block Editor State ---
+    @Published var isBlockActive: Bool = false
+    @Published var showBlockEditor: Bool = false
+    @Published var currentBlockRange: NSRange?
+    @Published var blockFill: String = ""
+    @Published var blockInset: String = ""
+    @Published var blockRadius: String = ""
+    @Published var blockWidth: String = ""
+    @Published var blockStroke: String = ""
+    @Published var blockContent: String = ""
+
+    // --- Grid Editor State ---
+    @Published var isGridActive: Bool = false
+    @Published var showGridEditor: Bool = false
+    @Published var currentGridRange: NSRange?
+    @Published var gridColumns: String = ""
+    @Published var gridGutter: String = ""
+    @Published var gridCells: [String] = []
+
     // --- External Data Editor State ---
     @Published var showExternalDataEditor: Bool = false
     
@@ -1268,6 +1287,109 @@ class EditorController: NSObject, ObservableObject {
         self.showExternalDataEditor = true
     }
     
+    // --- Block Functions ---
+    
+    func openBlockEditor() {
+        let range = selectedRange
+        
+        // Reset state
+        self.currentBlockRange = nil
+        self.blockFill = ""
+        self.blockInset = ""
+        self.blockRadius = ""
+        self.blockWidth = ""
+        self.blockStroke = ""
+        self.blockContent = ""
+        
+        if let info = FormatDetector.parseBlock(in: sourceCode, at: range.location) {
+            self.currentBlockRange = info.range
+            self.blockFill = info.fill ?? ""
+            self.blockInset = info.inset ?? ""
+            self.blockRadius = info.radius ?? ""
+            self.blockWidth = info.width ?? ""
+            self.blockStroke = info.stroke ?? ""
+            self.blockContent = info.content
+        } else if range.length > 0 {
+            if let r = Range(range, in: sourceCode) {
+                blockContent = String(sourceCode[r])
+            }
+        }
+        
+        self.showBlockEditor = true
+    }
+    
+    func insertBlock(fill: String, inset: String, radius: String, width: String, stroke: String, content: String) {
+        var params: [String] = []
+        
+        if !fill.isEmpty { params.append("fill: \(fill)") }
+        if !inset.isEmpty { params.append("inset: \(inset)") }
+        if !radius.isEmpty { params.append("radius: \(radius)") }
+        if !width.isEmpty { params.append("width: \(width)") }
+        if !stroke.isEmpty { params.append("stroke: \(stroke)") }
+        
+        let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = trimmedContent.isEmpty ? "[]" : (trimmedContent.hasPrefix("[") ? trimmedContent : "[\(trimmedContent)]")
+        
+        let paramStr = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
+        let snippet = "#block\(paramStr)\(body)"
+        
+        let rangeToReplace = currentBlockRange ?? selectedRange
+        if rangeToReplace.location != NSNotFound {
+            insertText(snippet, replacementRange: rangeToReplace)
+        } else {
+            insertText(snippet)
+        }
+        
+        showBlockEditor = false
+        updateFormattingState()
+    }
+    
+    // --- Grid Functions ---
+    
+    func openGridEditor() {
+        let range = selectedRange
+        
+        // Reset state
+        self.currentGridRange = nil
+        self.gridColumns = ""
+        self.gridGutter = ""
+        self.gridCells = []
+        
+        if let info = FormatDetector.parseGrid(in: sourceCode, at: range.location) {
+            self.currentGridRange = info.range
+            self.gridColumns = info.columns ?? ""
+            self.gridGutter = info.gutter ?? ""
+            self.gridCells = info.cells
+        }
+        
+        self.showGridEditor = true
+    }
+    
+    func insertGrid(columns: String, gutter: String, cells: [String]) {
+        var params: [String] = []
+        
+        if !columns.isEmpty { params.append("columns: \(columns)") }
+        if !gutter.isEmpty { params.append("gutter: \(gutter)") }
+        
+        let cellsContent = cells.map { cell in
+            let trimmed = cell.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.hasPrefix("[") || trimmed.hasPrefix("#") ? trimmed : "[\(trimmed)]"
+        }.joined(separator: ", ")
+        
+        let paramStr = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
+        let snippet = "#grid(\n  \(paramStr)\(paramStr.isEmpty ? "" : ",\n  ")\(cellsContent)\n)"
+        
+        let rangeToReplace = currentGridRange ?? selectedRange
+        if rangeToReplace.location != NSNotFound {
+            insertText(snippet, replacementRange: rangeToReplace)
+        } else {
+            insertText(snippet)
+        }
+        
+        showGridEditor = false
+        updateFormattingState()
+    }
+    
     func insertExternalData(filePath: String, type: String, variableName: String?) {
         // e.g. #let data = json("data.json")
         // type: json, csv, xml, yaml, toml
@@ -1675,6 +1797,8 @@ class EditorController: NSObject, ObservableObject {
             self.isHorizontalLineActive = FormatDetector.findHorizontalLineRange(in: text, at: range.location) != nil
             self.isFigureActive = FormatDetector.findFigureRange(in: text, at: range.location) != nil
             self.isScopedBlockActive = FormatDetector.findScopedBlockRange(in: text, at: range.location) != nil
+            self.isBlockActive = FormatDetector.findBlockRange(in: text, at: range.location) != nil
+            self.isGridActive = FormatDetector.findGridRange(in: text, at: range.location) != nil
         }
     }
     
@@ -2378,6 +2502,18 @@ class EditorController: NSObject, ObservableObject {
         // 8. Footnote
         if FormatDetector.findFootnoteRange(in: text, at: range.location) != nil {
             openFootnoteEditor()
+            return
+        }
+        
+        // 9. Block
+        if FormatDetector.findBlockRange(in: text, at: range.location) != nil {
+            openBlockEditor()
+            return
+        }
+        
+        // 10. Grid
+        if FormatDetector.findGridRange(in: text, at: range.location) != nil {
+            openGridEditor()
             return
         }
         

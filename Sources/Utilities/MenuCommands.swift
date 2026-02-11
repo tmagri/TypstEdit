@@ -267,6 +267,16 @@ struct AppMenuCommands: Commands {
                 }
                 .keyboardShortcut("b", modifiers: [.command, .control])
                 
+                Button("Block...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "openBlockEditor")
+                }
+                .keyboardShortcut("b", modifiers: [.command, .option]) // block can't be cmd+ctrl+b because that's scoped block. Let's use option or something else.
+                
+                Button("Grid...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "openGridEditor")
+                }
+                .keyboardShortcut("g", modifiers: [.command, .control])
+                
                 Button("Insert Foundation...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openFoundationEditor")
                 }
