@@ -105,6 +105,47 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Typst Source</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>typ</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.typst.typst-source</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.typst.typst-source</string>
+            <key>UTTypeDescription</key>
+            <string>Typst Source</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.source-code</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>typ</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>
 EOF

@@ -95,7 +95,7 @@ class FileSystemModel: ObservableObject {
         guard let folder = currentFolder else { return }
         let panel = NSSavePanel()
         panel.directoryURL = folder
-        panel.nameFieldStringValue = "untitle.typ"
+        panel.nameFieldStringValue = "untitled"
         panel.allowedContentTypes = [UTType(filenameExtension: "typ")!]
         
         if panel.runModal() == .OK, let url = panel.url {

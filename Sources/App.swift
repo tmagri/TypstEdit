@@ -153,6 +153,10 @@ struct TypstEditApp: App {
                     print("[DEBUG] TypstEditApp onAppear: assigning editorController to appDelegate")
                     appDelegate.editorController = editorController
                 }
+                .onOpenURL { url in
+                    print("[DEBUG] TypstEditApp: onOpenURL triggered for \(url.lastPathComponent)")
+                    NotificationCenter.default.post(name: .openProjectAndFile, object: url)
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
