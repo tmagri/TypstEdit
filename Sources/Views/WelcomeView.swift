@@ -58,6 +58,26 @@ struct WelcomeView: View {
                     .padding(.horizontal)
                 
                 HStack(spacing: 20) {
+                    Button(action: { model.createNewFile() }) {
+                        VStack {
+                            Image(systemName: "doc.badge.plus")
+                                .font(.system(size: 24))
+                                .padding(.bottom, 5)
+                                .foregroundColor(.blue)
+                            Text("New File")
+                                .font(.headline)
+                                .foregroundColor(themeManager.textColor)
+                        }
+                        .frame(width: 140, height: 100)
+                        .background(Color.white.opacity(0.1))
+                        .cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    
                     Button(action: { showingTemplateSelection = true }) {
                         VStack {
                             Image(systemName: "plus.square.fill")
@@ -158,6 +178,9 @@ struct WelcomeView: View {
                 model.createNewProject(template: template)
             }
             .environmentObject(themeManager)
+        }
+        .onAppear {
+            recents.validateRecentFiles()
         }
     }
 }

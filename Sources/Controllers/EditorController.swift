@@ -421,7 +421,7 @@ class EditorController: NSObject, ObservableObject {
     
     private func updateFileType() {
         guard let url = currentFileURL else {
-            currentFileType = .other
+            currentFileType = .typst // Default for new unsaved files
             return
         }
         

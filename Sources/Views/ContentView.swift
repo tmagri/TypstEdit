@@ -76,7 +76,19 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
-            if let url = notification.object as? URL { self.selectedFile = url }
+            if let url = notification.object as? URL {
+                self.selectedFile = url
+                fileSystem.isNewUnsavedFile = false
+            } else {
+                // New unsaved file
+                self.selectedFile = nil
+                self.editorController.currentFileURL = nil
+                self.editorController.sourceCode = ""
+                self.editorController.editorState = .init()
+                self.editorController.syncSavedContent("")
+                fileSystem.isNewUnsavedFile = true
+                self.editorController.isSidebarVisible = false
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
             if let url = notification.object as? URL {
@@ -105,13 +117,14 @@ struct ContentView: View {
     
     private var mainLayout: some View {
         Group {
-            if fileSystem.currentFolder == nil {
+            if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile {
                 WelcomeView(model: fileSystem, onOpen: { url in
                     self.selectedFile = url
                     self.loadFile(url: url) // Load immediately
                     let folder = url.deletingLastPathComponent()
                     fileSystem.currentFolder = folder
                     fileSystem.loadFiles()
+                    fileSystem.isNewUnsavedFile = false
                 })
                 .background(themeManager.mainBackground)
             } else {
@@ -124,7 +137,7 @@ struct ContentView: View {
                                 .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
                         }
                         
-                        if selectedFile != nil {
+                        if selectedFile != nil || fileSystem.isNewUnsavedFile {
                             editorPreviewArea
                         } else {
                             emptyStateView
@@ -581,12 +594,36 @@ struct ContentView: View {
     
     func saveFile(to url: URL? = nil) {
         let targetURL = url ?? selectedFile
+        
+        if targetURL == nil {
+            // Show save panel for unsaved file
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: "typ")!]
+            panel.nameFieldStringValue = "untitled.typ"
+            if panel.runModal() == .OK, let savedURL = panel.url {
+                 performSave(to: savedURL)
+                 fileSystem.isNewUnsavedFile = false
+                 self.selectedFile = savedURL
+                 self.editorController.isSidebarVisible = true
+                 // If no current folder, maybe set it to the saved location?
+                 if fileSystem.currentFolder == nil {
+                     fileSystem.currentFolder = savedURL.deletingLastPathComponent()
+                     fileSystem.loadFiles()
+                 }
+            }
+            return
+        }
+        
         guard let url = targetURL else { return }
+        performSave(to: url)
+    }
+    
+    private func performSave(to url: URL) {
         do {
             try editorController.sourceCode.write(to: url, atomically: true, encoding: .utf8)
             RecentFilesManager.shared.add(url: url)
             DispatchQueue.main.async {
-                if url == self.selectedFile {
+                if url == self.selectedFile || fileSystem.isNewUnsavedFile {
                     self.editorController.syncSavedContent(self.editorController.sourceCode)
                     self.scheduleCompilation(with: self.editorController.sourceCode)
                     self.exportPDF(from: url) // Update clean PDF on disk on save
@@ -663,9 +700,13 @@ struct ContentView: View {
     }
     
     func scheduleCompilation(with content: String? = nil) {
-        guard let url = selectedFile, editorController.isTypstFile else {
+        let isUnsaved = fileSystem.isNewUnsavedFile && selectedFile == nil
+        guard (selectedFile != nil || isUnsaved), editorController.isTypstFile else {
             compiler.cleanUp(); currentPDFURL = nil; return
         }
+        
+        let url = selectedFile ?? FileManager.default.temporaryDirectory.appendingPathComponent("untitled.typ")
+        
         workItem?.cancel()
         let currentSource = content ?? editorController.sourceCode
         let isDark = editorController.isPreviewDarkMode

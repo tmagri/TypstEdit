@@ -14,6 +14,7 @@ class FileSystemModel: ObservableObject {
     @Published var rootNodes: [FileNode] = []
     @Published var currentFolder: URL?
     @Published var expandedFolders: Set<URL> = []
+    @Published var isNewUnsavedFile: Bool = false
     
     func openFolder() {
         let panel = NSOpenPanel()
@@ -23,6 +24,7 @@ class FileSystemModel: ObservableObject {
         
         if panel.runModal() == .OK {
             self.currentFolder = panel.url
+            self.isNewUnsavedFile = false
             loadFiles()
         }
     }
@@ -76,6 +78,7 @@ class FileSystemModel: ObservableObject {
                 let content = template.content
                 try content.write(to: mainFile, atomically: true, encoding: .utf8)
                 self.currentFolder = url
+                self.isNewUnsavedFile = false
                 loadFiles()
             } catch {
                 print("Error creating project: \(error)")
@@ -92,22 +95,9 @@ class FileSystemModel: ObservableObject {
     }
     
     func createNewFile() {
-        guard let folder = currentFolder else { return }
-        let panel = NSSavePanel()
-        panel.directoryURL = folder
-        panel.nameFieldStringValue = "untitled"
-        panel.allowedContentTypes = [UTType(filenameExtension: "typ")!]
-        
-        if panel.runModal() == .OK, let url = panel.url {
-            do {
-                try "".write(to: url, atomically: true, encoding: .utf8)
-                loadFiles()
-                // We might want to notify ContentView to select this new file
-                NotificationCenter.default.post(name: .fileDidCreate, object: url)
-            } catch {
-                print("Error creating file: \(error)")
-            }
-        }
+        // Now "New File" starts as an unsaved buffer instead of immediate save
+        self.isNewUnsavedFile = true
+        NotificationCenter.default.post(name: .fileDidCreate, object: nil)
     }
     
     func importFile() {

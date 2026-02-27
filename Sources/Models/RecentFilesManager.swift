@@ -46,6 +46,18 @@ class RecentFilesManager: ObservableObject {
         saveRecents()
     }
     
+    func validateRecentFiles() {
+        let fileManager = FileManager.default
+        let existingFiles = recentFiles.filter { file in
+            fileManager.fileExists(atPath: file.url.path)
+        }
+        
+        if existingFiles.count != recentFiles.count {
+            recentFiles = existingFiles
+            saveRecents()
+        }
+    }
+    
     private func saveRecents() {
         if let data = try? JSONEncoder().encode(recentFiles) {
             UserDefaults.standard.set(data, forKey: key)
@@ -56,6 +68,7 @@ class RecentFilesManager: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: key),
            let decoded = try? JSONDecoder().decode([RecentFile].self, from: data) {
             recentFiles = decoded
+            validateRecentFiles()
         }
     }
 }
