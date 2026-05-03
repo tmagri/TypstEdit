@@ -32,12 +32,12 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Copy SPM Resources Bundle if exists
-RESOURCE_BUNDLE=$(find .build -type d -path "*arm64-apple-macosx*" -name "TypstEdit_TypstEdit.bundle" | head -n 1)
-if [ -d "$RESOURCE_BUNDLE" ]; then
-    echo "Copying resources bundle..."
-    cp -r "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/"
-fi
+# Copy all SPM resource bundles (TypstEdit, CodeEditLanguages, CodeEditSymbols, etc.)
+echo "Copying resources bundle..."
+find .build -type d -path "*arm64-apple-macosx/$CONFIG*" -name "*.bundle" | while read bundle; do
+    echo "  Copying: $(basename "$bundle")"
+    cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
+done
 
 # Copy Typst executable into the bundle
 echo "Bundling Typst executable..."

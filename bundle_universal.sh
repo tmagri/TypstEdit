@@ -35,6 +35,13 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BUILD_DIR/$APP_NAME-universal" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
+# Copy all SPM resource bundles (arch-independent; use arm64 release build as source)
+echo "Copying SPM resource bundles..."
+find "$BUILD_DIR/arm64-apple-macosx/release" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
+    echo "  Copying: $(basename "$bundle")"
+    cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
+done
+
 # Copy Typst executable into the bundle
 echo "Bundling Universal Typst executable..."
 mkdir -p "$APP_BUNDLE/Contents/Resources/bin"
