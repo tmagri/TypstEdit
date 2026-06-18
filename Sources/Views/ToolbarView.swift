@@ -57,12 +57,11 @@ struct ToolbarView: View {
                             ToolbarButton(icon: "strikethrough", tooltip: "Strikethrough (Cmd+Shift+S)", isActive: controller.isStrikeActive, action: controller.toggleStrike)
                         }
                         HStack(spacing: 2) {
-                             ToolbarButton(icon: "pencil.tip", tooltip: "Highlight (Cmd+Shift+H)", isActive: controller.isHighlightActive, action: controller.toggleHighlight)
-                             ToolbarButton(icon: "textformat.subscript", tooltip: "Subscript (Cmd+=)", isActive: controller.isSubscriptActive, action: controller.toggleSubscript)
-                             ToolbarButton(icon: "textformat.superscript", tooltip: "Superscript (Cmd++, Shift for +)", isActive: controller.isSuperscriptActive, action: controller.toggleSuperscript)
-                             
+                            ToolbarButton(icon: "pencil.tip", tooltip: "Highlight (Cmd+Shift+H)", isActive: controller.isHighlightActive, action: controller.toggleHighlight)
+                            ToolbarButton(icon: "textformat.subscript", tooltip: "Subscript (Cmd+Ctrl+-)", isActive: controller.isSubscriptActive, action: controller.toggleSubscript)
+                            ToolbarButton(icon: "textformat.superscript", tooltip: "Superscript (Cmd+Ctrl++)", isActive: controller.isSuperscriptActive, action: controller.toggleSuperscript) 
                              // Color Picker
-                             Menu {
+                            Menu {
                                  Button(action: { controller.applyTextColor("red") }) { Label("Red", systemImage: "circle.fill").foregroundColor(.red) }
                                  Button(action: { controller.applyTextColor("blue") }) { Label("Blue", systemImage: "circle.fill").foregroundColor(.blue) }
                                  Button(action: { controller.applyTextColor("green") }) { Label("Green", systemImage: "circle.fill").foregroundColor(.green) }
