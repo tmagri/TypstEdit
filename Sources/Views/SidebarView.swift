@@ -216,7 +216,7 @@ struct SidebarView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
                         .listRowSeparator(.hidden)
                         .listRowBackground(
-                            selectedFile == node.url ? Color.blue.opacity(0.2) : Color.clear
+                            selectedFile == node.url ? Color.accentColor.opacity(0.8) : Color.clear
                         )
                 }
                 .listStyle(.sidebar)

@@ -14,7 +14,7 @@ struct ContentView: View {
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
     
-
+    @Environment(\.colorScheme) var colorScheme
     
     // Legacy local state removed, using editorController.sourceCode
     @State private var currentPDFURL: URL?
@@ -109,9 +109,25 @@ struct ContentView: View {
         .onChange(of: editorController.sourceCode) { newValue in editorController.checkUnsavedChanges(currentContent: newValue) }
 
         .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in saveFile(to: notification.object as? URL) }
-        .onAppear { if let file = selectedFile { loadFile(url: file) } }
-        .preferredColorScheme(.dark)
-    }
+        .preferredColorScheme(themeManager.appTheme.colorScheme)
+        .onAppear { 
+            if let file = selectedFile { loadFile(url: file) }
+            applyAppKitAppearance(themeManager.appTheme)
+            editorController.applyTheme()
+            syncPreviewTheme()
+        }
+        .onChange(of: themeManager.appTheme) { newTheme in 
+            editorController.setupDefaultConfiguration()
+            applyAppKitAppearance(newTheme)
+            editorController.applyTheme() 
+            syncPreviewTheme()
+        }
+        .onChange(of: colorScheme) { _ in 
+            editorController.setupDefaultConfiguration()
+            editorController.applyTheme() 
+            syncPreviewTheme()
+        }
+    } // End of ZStack
     
     // MARK: - Subviews
     
@@ -222,7 +238,7 @@ struct ContentView: View {
                     Text("Saved!").font(.headline).foregroundColor(.white)
                 }
                 .padding(20)
-                .background(Color.black.opacity(0.8))
+                .background(Color.primary.opacity(0.8))
                 .cornerRadius(12)
                 .transition(.scale.combined(with: .opacity))
                 .zIndex(100)
@@ -236,13 +252,13 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Button(action: editorController.undo) {
                     Image(systemName: "arrow.uturn.backward").foregroundColor(themeManager.textColor)
-                        .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
+                        .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
                 }
                 .help("Undo (Cmd+Z)").buttonStyle(.plain)
                 
                 Button(action: editorController.redo) {
                     Image(systemName: "arrow.uturn.forward").foregroundColor(themeManager.textColor)
-                        .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
+                        .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
                 }
                 .help("Redo (Cmd+Shift+Z)").buttonStyle(.plain)
             }
@@ -252,13 +268,13 @@ struct ContentView: View {
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .foregroundColor(themeManager.textColor)
                 .padding(.horizontal, 10).padding(.vertical, 4)
-                .background(Color.black.opacity(0.3)).cornerRadius(8)
+                .background(Color.primary.opacity(0.3)).cornerRadius(8)
         }
         ToolbarItem(placement: .primaryAction) {
             HStack(spacing: 8) {
                 Button(action: { editorController.showFindPanel() }) {
                     Image(systemName: "magnifyingglass").foregroundColor(themeManager.textColor)
-                        .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
+                        .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
                 }
                 .help("Search (Cmd+F)").buttonStyle(.plain)
                 
@@ -266,19 +282,19 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Button(action: { saveFile() }) {
                         Image(systemName: "square.and.arrow.down").foregroundColor(themeManager.textColor)
-                            .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
+                            .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
                     }
                     .help("Save (Cmd+S)").keyboardShortcut("s", modifiers: .command).buttonStyle(.plain)
                     
                     if editorController.isTypstFile {
                         Button(action: { Task { await printPDF() } }) {
                             Image(systemName: "printer").foregroundColor(themeManager.textColor)
-                                .padding(6).background(Color.black.opacity(0.3)).cornerRadius(8)
+                                .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
                         }
                         .help("Print").buttonStyle(.plain)
                         
                         ShareButton(fileURL: editorController.cleanPDFURL ?? exportedPDFURL).frame(width: 28, height: 28)
-                            .padding(4).background(Color.black.opacity(0.3)).cornerRadius(8).help("Share")
+                            .padding(4).background(Color.primary.opacity(0.3)).cornerRadius(8).help("Share")
                             .onHover { inside in
                                 if inside && editorController.cleanPDFURL == nil {
                                     Task { await editorController.generateCleanPDF(compiler: compiler, fileURL: selectedFile) }
@@ -305,7 +321,7 @@ struct ContentView: View {
                     Spacer()
                 }
                 .padding(.trailing, 12).padding(.vertical, 8)
-                .background(Color.black.opacity(0.3))
+                .background(Color.primary.opacity(0.3))
                 .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -449,7 +465,7 @@ struct ContentView: View {
                         }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 4)
-                    .background(Color.black.opacity(0.3))
+                    .background(Color.primary.opacity(0.3))
                     .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
                 }
             }
@@ -802,6 +818,30 @@ struct ContentView: View {
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()
         default: break
+        }
+    }
+
+    private func applyAppKitAppearance(_ theme: AppTheme) {
+        switch theme {
+        case .light:
+            NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        case .system:
+            NSApp.appearance = nil // Reverts to following macOS System Settings
+        }
+    }
+
+    private func syncPreviewTheme() {
+        let isDark: Bool
+        switch themeManager.appTheme {
+        case .light: isDark = false
+        case .dark: isDark = true
+        case .system: isDark = (colorScheme == .dark)
+        }
+        
+        if editorController.isPreviewDarkMode != isDark {
+            editorController.isPreviewDarkMode = isDark
         }
     }
 }

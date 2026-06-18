@@ -1,70 +1,71 @@
 import SwiftUI
+import AppKit
+
+enum AppTheme: String, CaseIterable, Identifiable {
+    case system = "System"
+    case light = "Light"
+    case dark = "Dark"
+    var id: String { self.rawValue }
+    
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
 
 class ThemeManager: ObservableObject {
-    // Single dark theme - no theme switching needed
-    
-    // MARK: - Theme Colors
-    
-    // Backgrounds are clear to let VisualEffectView show through
-    var mainBackground: Color {
-        return .clear
+    @AppStorage("appTheme") var appTheme: AppTheme = .system {
+        willSet { objectWillChange.send() }
     }
     
-    var sidebarBackground: Color {
-        return .clear
-    }
+    var mainBackground: Color { .clear }
+    var sidebarBackground: Color { .clear }
     
-    // Editor and PDF are semi-transparent "plates"
     var editorBackground: Color {
-        return Color.black.opacity(0.25)
+        Color(NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 
+            NSColor.black.withAlphaComponent(0.25) : NSColor.white.withAlphaComponent(0.5)
+        })
     }
     
     var pdfBackground: Color {
-        return Color.black.opacity(0.35)
+        Color(NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 
+            NSColor.black.withAlphaComponent(0.35) : NSColor.black.withAlphaComponent(0.1)
+        })
     }
     
-    var textColor: Color {
-        return Color.white.opacity(0.9)
-    }
-    
-    var secondaryTextColor: Color {
-        return Color.white.opacity(0.6)
-    }
-    
-    var accentColor: Color {
-        return Color(red: 0.27, green: 0.60, blue: 0.96)
-    }
-    
-    var shadowColor: Color {
-        return Color.black.opacity(0.3)
-    }
-    
-    var shadowRadius: CGFloat {
-        return 10
-    }
-    
-    var contentOverlay: Color {
-        return Color.clear
-    }
+    var textColor: Color { Color.primary }
+    var secondaryTextColor: Color { Color.secondary }
+    var accentColor: Color { Color.accentColor }
+    var shadowColor: Color { Color.black.opacity(0.3) }
+    var shadowRadius: CGFloat { 10 }
+    var contentOverlay: Color { .clear }
     
     var sidebarOverlay: Color {
-        return Color.black
+        Color(NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 
+            NSColor.black : NSColor.white
+        })
     }
     
-    // Search panel
     var searchPanelBackground: Color {
-        return Color.black.opacity(0.6)
+        Color(NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 
+            NSColor.black.withAlphaComponent(0.6) : NSColor.white.withAlphaComponent(0.8)
+        })
     }
     
     var searchFieldBackground: Color {
-        return Color.black.opacity(0.3)
+        Color(NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 
+            NSColor.black.withAlphaComponent(0.3) : NSColor.black.withAlphaComponent(0.1)
+        })
     }
     
-    var searchMatchHighlight: Color {
-        return Color.yellow.opacity(0.3)
-    }
-    
-    var searchCurrentMatchHighlight: Color {
-        return Color.yellow.opacity(0.5)
-    }
+    var searchMatchHighlight: Color { Color.yellow.opacity(0.3) }
+    var searchCurrentMatchHighlight: Color { Color.yellow.opacity(0.5) }
 }

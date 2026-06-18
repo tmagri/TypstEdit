@@ -69,11 +69,11 @@ struct WelcomeView: View {
                                 .foregroundColor(themeManager.textColor)
                         }
                         .frame(width: 140, height: 100)
-                        .background(Color.white.opacity(0.1))
+                        .background(Color.primary.opacity(0.1))
                         .cornerRadius(12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                .stroke(Color.primary.opacity(0.2), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -89,11 +89,11 @@ struct WelcomeView: View {
                                 .foregroundColor(themeManager.textColor)
                         }
                         .frame(width: 140, height: 100)
-                        .background(Color.white.opacity(0.1))
+                        .background(Color.primary.opacity(0.1))
                         .cornerRadius(12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                .stroke(Color.primary.opacity(0.2), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -109,11 +109,11 @@ struct WelcomeView: View {
                                 .foregroundColor(themeManager.textColor)
                         }
                         .frame(width: 140, height: 100)
-                        .background(Color.white.opacity(0.1))
+                        .background(Color.primary.opacity(0.1))
                         .cornerRadius(12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                .stroke(Color.primary.opacity(0.2), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -130,7 +130,7 @@ struct WelcomeView: View {
             .frame(maxWidth: .infinity)
             
             // Divider
-            Rectangle().fill(Color.black.opacity(0.2)).frame(width: 1)
+            Rectangle().fill(Color.primary.opacity(0.2)).frame(width: 1)
             
             // Right Panel: Recent Files
             VStack(alignment: .leading, spacing: 0) {
@@ -169,7 +169,7 @@ struct WelcomeView: View {
                 .scrollContentBackground(.hidden)
             }
             .frame(width: 250)
-            .background(Color.black.opacity(0.1))
+            .background(Color.primary.opacity(0.1))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.mainBackground.ignoresSafeArea())

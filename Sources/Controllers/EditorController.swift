@@ -361,60 +361,74 @@ class EditorController: NSObject, ObservableObject {
     // Stable configuration to prevent "going white" due to frequent resets
     @Published var editorConfiguration: SourceEditorConfiguration!
     
+    // Locate the _customTheme variable around line 155
     private var _customTheme: EditorTheme?
+    private var _customThemeIsDark: Bool?
+    
     var customTheme: EditorTheme {
-        if let theme = _customTheme { return theme }
-        
-        func safeColor(_ color: NSColor) -> NSColor {
-            return color.usingColorSpace(.sRGB) ?? color
+        let appThemeString = UserDefaults.standard.string(forKey: "appTheme") ?? "System"
+        let isDark: Bool
+        switch appThemeString {
+        case "Light": isDark = false
+        case "Dark": isDark = true
+        default: isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         }
         
+        // Return cached theme if the color scheme hasn't changed
+        if let theme = _customTheme, _customThemeIsDark == isDark { return theme }
+        
+        func safeColor(_ color: NSColor) -> NSColor { return color.usingColorSpace(.sRGB) ?? color }
         func attr(_ color: NSColor, bold: Bool = false, italic: Bool = false) -> EditorTheme.Attribute {
             return EditorTheme.Attribute(color: safeColor(color), bold: bold, italic: italic)
         }
         
-        // One Dark Inspired Palette (Refined for Typst)
-        let oneDarkBg = NSColor(red: 40/255, green: 44/255, blue: 52/255, alpha: 1.0)
-        let oneDarkFg = NSColor(red: 171/255, green: 178/255, blue: 191/255, alpha: 1.0)
-        // let oneDarkRed = NSColor(red: 224/255, green: 108/255, blue: 117/255, alpha: 1.0) // Unused
+       let bg = isDark ? NSColor(red: 40/255, green: 44/255, blue: 52/255, alpha: 1.0) : NSColor.white
+       let fg = isDark ? NSColor(red: 171/255, green: 178/255, blue: 191/255, alpha: 1.0) : NSColor.black
 
-        let oneDarkGreen = NSColor(red: 152/255, green: 195/255, blue: 121/255, alpha: 1.0)
-        let oneDarkYellow = NSColor(red: 229/255, green: 192/255, blue: 123/255, alpha: 1.0)
-        let oneDarkBlue = NSColor(red: 97/255, green: 175/255, blue: 239/255, alpha: 1.0)
-        let oneDarkPurple = NSColor(red: 198/255, green: 120/255, blue: 221/255, alpha: 1.0)
-        let oneDarkTeal = NSColor(red: 86/255, green: 182/255, blue: 194/255, alpha: 1.0)
-        let oneDarkGray = NSColor(red: 92/255, green: 99/255, blue: 112/255, alpha: 1.0)
+        let green = isDark ? NSColor(red: 152/255, green: 195/255, blue: 121/255, alpha: 1.0) : NSColor(red: 24/255, green: 112/255, blue: 51/255, alpha: 1.0)
+        let yellow = isDark ? NSColor(red: 229/255, green: 192/255, blue: 123/255, alpha: 1.0) : NSColor(red: 136/255, green: 90/255, blue: 10/255, alpha: 1.0)
+        let blue = isDark ? NSColor(red: 97/255, green: 175/255, blue: 239/255, alpha: 1.0) : NSColor(red: 9/255, green: 80/255, blue: 208/255, alpha: 1.0)
+        let purple = isDark ? NSColor(red: 198/255, green: 120/255, blue: 221/255, alpha: 1.0) : NSColor(red: 130/255, green: 40/255, blue: 180/255, alpha: 1.0)
+        let teal = isDark ? NSColor(red: 86/255, green: 182/255, blue: 194/255, alpha: 1.0) : NSColor(red: 20/255, green: 120/255, blue: 130/255, alpha: 1.0)
+        let gray = isDark ? NSColor(red: 92/255, green: 99/255, blue: 112/255, alpha: 1.0) : NSColor(red: 120/255, green: 120/255, blue: 130/255, alpha: 1.0)
         
         let insertionPoint: NSColor
         if #available(macOS 14.0, *) {
             insertionPoint = safeColor(NSColor.textInsertionPointColor)
         } else {
-            insertionPoint = oneDarkFg
+            insertionPoint = fg
         }
         
         let theme = EditorTheme(
-            text: attr(oneDarkFg),
+            text: attr(fg),
             insertionPoint: insertionPoint,
-            invisibles: attr(oneDarkGray.withAlphaComponent(0.5)),
-            background: safeColor(oneDarkBg),
-            lineHighlight: safeColor(NSColor.white.withAlphaComponent(0.05)),
+            invisibles: attr(gray.withAlphaComponent(0.5)),
+            background: safeColor(bg),
+            lineHighlight: safeColor(isDark ? NSColor.white.withAlphaComponent(0.05) : NSColor.black.withAlphaComponent(0.05)),
             selection: safeColor(NSColor.selectedTextBackgroundColor).withAlphaComponent(0.4),
-            keywords: attr(oneDarkPurple, bold: true),   // Strong markup [*bold*] (Purple + Bold)
-            commands: attr(oneDarkPurple),
-            types: attr(oneDarkBlue, bold: true),      // Headings [= ...] (Blue + Bold)
-            attributes: attr(oneDarkPurple, italic: true), // Emph markup [_italic_] (Purple + Italic)
-            variables: attr(oneDarkPurple),            // Hashtag commands [#set, etc] (Purple)
-            values: attr(oneDarkTeal),
-            numbers: attr(oneDarkYellow),              // Math blocks [$...$] (Yellow)
-            strings: attr(oneDarkGreen),
-            characters: attr(oneDarkGreen),
-            comments: attr(oneDarkGray, italic: true)
+            keywords: attr(purple, bold: true),
+            commands: attr(purple),
+            types: attr(blue, bold: true),
+            attributes: attr(purple, italic: true),
+            variables: attr(purple),
+            values: attr(teal),
+            numbers: attr(yellow),
+            strings: attr(green),
+            characters: attr(green),
+            comments: attr(gray, italic: true)
         )
         _customTheme = theme
+        _customThemeIsDark = isDark
         return theme
     }
-
-    
+    func applyTheme() {
+        // Clear the cache to force a recalculation
+        _customTheme = nil 
+        _customThemeIsDark = nil
+        
+        // Regenerate the editor configuration to push the new theme to the source editor
+        self.setupDefaultConfiguration()
+    }
     var currentImageRange: NSRange? = nil
     
     @Published var currentFileType: SupportedFileType = .typst

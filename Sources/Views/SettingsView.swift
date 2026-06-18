@@ -5,6 +5,11 @@ struct SettingsView: View {
     
     var body: some View {
         TabView {
+            AppearanceSettingsView()
+                .tabItem {
+                    Label("Appearance", systemImage: "paintpalette")
+                }
+            
             AISettingsView()
                 .tabItem {
                     Label("AI Assistant", systemImage: "sparkles")
@@ -17,6 +22,25 @@ struct SettingsView: View {
         }
         .padding()
         .frame(width: 700, height: 550)
+    }
+}
+
+// Add this structural View right below SettingsView
+struct AppearanceSettingsView: View {
+    @EnvironmentObject var themeManager: ThemeManager
+    
+    var body: some View {
+        Form {
+            Section(header: Text("Theme")) {
+                Picker("Appearance", selection: $themeManager.appTheme) {
+                    ForEach(AppTheme.allCases) { theme in
+                        Text(theme.rawValue).tag(theme)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .padding()
     }
 }
 
