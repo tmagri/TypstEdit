@@ -169,10 +169,10 @@ struct ToolbarGroup<Content: View>: View {
             VStack(alignment: .center, spacing: 3) {
                  Button(action: { showPopover.toggle() }) {
                      Image(systemName: icon)
-                         .font(.system(size: 18))
-                         .frame(width: 32, height: 32)
+                         .font(.title3)
+                         .padding(8)
                          .background(isHovering ? Color.primary.opacity(0.1) : Color.clear)
-                         .cornerRadius(4)
+                         .cornerRadius(6)
                  }
                  .buttonStyle(.plain)
                  .popover(isPresented: $showPopover) {
@@ -184,11 +184,11 @@ struct ToolbarGroup<Content: View>: View {
                  .onHover { isHovering = $0 }
                 
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.caption2.weight(.medium))
                     .foregroundColor(.secondary)
                     .opacity(0.8)
             }
-            .frame(width: 50)
+            .frame(minWidth: 50)
             
         } else {
             // Expanded State
@@ -198,7 +198,7 @@ struct ToolbarGroup<Content: View>: View {
                 }
                 // Ribbon Title
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.caption2.weight(.medium))
                     .foregroundColor(.secondary)
                     .opacity(0.8)
             }
@@ -220,16 +220,17 @@ struct ToolbarButton: View {
             ZStack {
                 if let icon = icon {
                     Image(systemName: icon)
-                        .font(.system(size: 14))
+                        .imageScale(.medium)
                 } else if let text = text {
                     Text(text)
-                        .font(.system(size: 12, weight: .semibold)) // Slightly smaller text for compact grids
+                        .font(.callout.weight(.semibold)) 
                 }
             }
-            .frame(width: 26, height: 26)
+            .padding(6)
+            .frame(minWidth: 28, minHeight: 28) // Keeps a consistent hit target but allows scaling
             .background(isActive ? Color.accentColor : (isHovering ? Color.primary.opacity(0.1) : Color.clear))
             .foregroundColor(isActive ? .white : .primary)
-            .cornerRadius(4)
+            .cornerRadius(6)
         }
         .buttonStyle(.plain)
         .help(tooltip ?? (text ?? ""))

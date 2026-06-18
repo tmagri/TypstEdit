@@ -252,13 +252,13 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Button(action: editorController.undo) {
                     Image(systemName: "arrow.uturn.backward").foregroundColor(themeManager.textColor)
-                        .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
+                        .padding(6).background(Color.primary.opacity(0.05)).cornerRadius(8)
                 }
                 .help("Undo (Cmd+Z)").buttonStyle(.plain)
                 
                 Button(action: editorController.redo) {
                     Image(systemName: "arrow.uturn.forward").foregroundColor(themeManager.textColor)
-                        .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
+                        .padding(6).background(Color.primary.opacity(0.05)).cornerRadius(8)
                 }
                 .help("Redo (Cmd+Shift+Z)").buttonStyle(.plain)
             }
@@ -274,7 +274,7 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Button(action: { editorController.showFindPanel() }) {
                     Image(systemName: "magnifyingglass").foregroundColor(themeManager.textColor)
-                        .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
+                        .padding(6).background(Color.primary.opacity(0.05)).cornerRadius(8)
                 }
                 .help("Search (Cmd+F)").buttonStyle(.plain)
                 
@@ -282,14 +282,14 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Button(action: { saveFile() }) {
                         Image(systemName: "square.and.arrow.down").foregroundColor(themeManager.textColor)
-                            .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
+                            .padding(6).background(Color.primary.opacity(0.05)).cornerRadius(8)
                     }
                     .help("Save (Cmd+S)").keyboardShortcut("s", modifiers: .command).buttonStyle(.plain)
                     
                     if editorController.isTypstFile {
                         Button(action: { Task { await printPDF() } }) {
                             Image(systemName: "printer").foregroundColor(themeManager.textColor)
-                                .padding(6).background(Color.primary.opacity(0.3)).cornerRadius(8)
+                                .padding(6).background(Color.primary.opacity(0.05)).cornerRadius(8)
                         }
                         .help("Print").buttonStyle(.plain)
                         
@@ -320,10 +320,9 @@ struct ContentView: View {
                     ToolbarView(controller: editorController).padding(.leading, 44)
                     Spacer()
                 }
-                .padding(.trailing, 12).padding(.vertical, 8)
-                .background(Color.primary.opacity(0.3))
-                .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .bottom)
-                .fixedSize(horizontal: false, vertical: true)
+               .padding(.horizontal, 12).padding(.vertical, 4)
+               .background(Color(NSColor.controlBackgroundColor))
+               .overlay(Divider(), alignment: .top) 
             }
         }
     }

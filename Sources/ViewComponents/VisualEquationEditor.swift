@@ -78,21 +78,49 @@ struct WebViewWrapper: NSViewRepresentable {
         userContentController.add(context.coordinator, name: "equationEditor")
         webConfiguration.userContentController = userContentController
         
-        // Allow local file access
-        webConfiguration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
-        
         let webView = WKWebView(frame: .zero, configuration: webConfiguration)
+        
+        // Safely enable the Web Inspector for debugging (macOS 13.3+)
+        if #available(macOS 13.3, *) {
+            webView.isInspectable = true
+        }
+        
         context.coordinator.webView = webView // Set early
         webView.navigationDelegate = context.coordinator
         
-        // Load HTML file
-        if let htmlPath = Bundle.main.path(forResource: "EquationEditor", ofType: "html", inDirectory: "Sources/Resources") {
-             let url = URL(fileURLWithPath: htmlPath)
-             webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        // Helper to find resources whether SPM flattened them or kept the folder
+        func getResourceURL(name: String, ext: String) -> URL? {
+            return Bundle.module.url(forResource: name, withExtension: ext) ??
+                   Bundle.module.url(forResource: name, withExtension: ext, subdirectory: "Vendor") ??
+                   Bundle.main.url(forResource: name, withExtension: ext) ??
+                   Bundle.main.url(forResource: name, withExtension: ext, subdirectory: "Vendor")
+        }
+        
+        // Robust HTML loading & JS Injection
+        if let htmlURL = getResourceURL(name: "EquationEditor", ext: "html") {
+            let baseURL = htmlURL.deletingLastPathComponent()
+            
+            do {
+                var html = try String(contentsOf: htmlURL, encoding: .utf8)
+                
+                // Inject JS directly to bypass WKWebView local file restrictions and SPM path flattening
+                if let mURL = getResourceURL(name: "mathlive.min", ext: "js"),
+                   let tURL = getResourceURL(name: "tex2typst.min", ext: "js") {
+                    
+                    let mathliveJS = try String(contentsOf: mURL, encoding: .utf8)
+                    let tex2typstJS = try String(contentsOf: tURL, encoding: .utf8)
+                    
+                    html = html.replacingOccurrences(of: "<script defer src=\"./Vendor/mathlive.min.js\"></script>", with: "<script>\n\(mathliveJS)\n</script>")
+                    html = html.replacingOccurrences(of: "<script src=\"./Vendor/tex2typst.min.js\"></script>", with: "<script>\n\(tex2typstJS)\n</script>")
+                }
+                
+                webView.loadHTMLString(html, baseURL: baseURL)
+            } catch {
+                print("[ERROR] Fallback to loadFileURL: \(error)")
+                webView.loadFileURL(htmlURL, allowingReadAccessTo: baseURL)
+            }
         } else {
-             let knownPath = "/Users/troymagri/Desktop/TypstEdit/TypstEdit/Sources/Resources/EquationEditor.html"
-             let url = URL(fileURLWithPath: knownPath)
-             webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            print("[ERROR] Could not find EquationEditor.html in bundle.")
         }
         
         // Transparent background

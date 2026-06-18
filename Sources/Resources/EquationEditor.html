@@ -51,7 +51,7 @@
 </head>
 
 <body onclick="document.getElementById('math-field').focus()">
-    <math-field id="math-field" virtual-keyboard-mode="manual"></math-field>
+    <math-field id="math-field"></math-field>
 
     <script>
         // --- 1. Robust Typst -> LaTeX Converter ---
@@ -238,9 +238,15 @@
             if (window.customElements) await customElements.whenDefined('math-field');
             const mf = document.getElementById('math-field');
 
-            // Set keyboard shortcuts or config here if needed
             if (mf) {
-                mf.mathVirtualKeyboardPolicy = "manual";
+                // Allow the virtual keyboard to manage itself
+                mf.mathVirtualKeyboardPolicy = "auto";
+
+                // Force the keyboard to show up immediately
+                if (window.mathVirtualKeyboard) {
+                    window.mathVirtualKeyboard.show();
+                }
+
                 mf.focus();
             }
 

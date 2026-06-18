@@ -184,22 +184,54 @@ class EditorController: NSObject, ObservableObject {
         }
     }
 
+
+    private var scrollMonitor: Any?
     override init() {
         super.init()
         self.sourceEditorBridge = SourceEditorBridge(controller: self)
         setupDefaultConfiguration()
         setupErrorSubscription()
+        
+        // Listen for Ctrl+Scroll or Cmd+Scroll to zoom
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self = self else { return event }
+            
+            // Check if Control or Command is held down
+            if event.modifierFlags.contains(.control) || event.modifierFlags.contains(.command) {
+                // Trackpads provide precise scrolling deltas, mice provide standard deltas
+                let delta = event.hasPreciseScrollingDeltas ? (event.scrollingDeltaY * 0.01) : (event.deltaY * 0.1)
+                
+                // Adjust the zoom smoothly
+                self.adjustZoom(by: delta)
+                
+                return nil // Consume the event so the page doesn't scroll
+            }
+            return event
+        }
     }
     
     func setupDefaultConfiguration() {
+        let baseFontSize: CGFloat = 13.0
+        let scaledFontSize = baseFontSize * zoomLevel
+        
+        let newFont = NSFont(name: "Menlo", size: scaledFontSize) ?? .monospacedSystemFont(ofSize: scaledFontSize, weight: .regular)
+        
         self.editorConfiguration = SourceEditorConfiguration(
             appearance: .init(
                 theme: customTheme,
-                font: NSFont(name: "Menlo", size: 13) ?? .monospacedSystemFont(ofSize: 13, weight: .regular),
+                font: newFont,
                 wrapLines: wrapLines,
                 tabWidth: 2
             )
         )
+        
+        // Force the underlying native text view to accept the new font immediately
+        if let tvc = textViewController {
+            tvc.textView.font = newFont
+            tvc.textView.layoutManager.setNeedsLayout()
+            tvc.textView.needsDisplay = true
+        }
+        
         updateTextViewWrapping()
     }
     
@@ -307,7 +339,13 @@ class EditorController: NSObject, ObservableObject {
     @Published var statusMessage: String = ""
     @Published var showStatusMessage: Bool = false
     
-    @Published var zoomLevel: CGFloat = 1.0
+    @Published var zoomLevel: CGFloat = 1.0 {
+        didSet {
+            if zoomLevel != oldValue {
+                setupDefaultConfiguration()
+            }
+        }
+    }
     @Published var isSidebarVisible: Bool = true
     @Published var wrapLines: Bool = true {
         didSet {

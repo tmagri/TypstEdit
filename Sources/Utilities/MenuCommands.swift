@@ -155,12 +155,12 @@ struct AppMenuCommands: Commands {
             Button("Subscript") {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleSubscript")
             }
-            .keyboardShortcut("=", modifiers: .command)
+            .keyboardShortcut("-", modifiers: [.command, .control])
             
             Button("Superscript") {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleSuperscript")
             }
-            .keyboardShortcut("+", modifiers: .command)
+            .keyboardShortcut("+", modifiers: [.command, .control])
             
             Divider()
             
@@ -341,7 +341,7 @@ struct AppMenuCommands: Commands {
         
         
         // MARK: - View Menu
-        CommandMenu("View") {
+        CommandMenu("Editor") {
             Toggle("File Panel", isOn: $editorController.isSidebarVisible)
                 .keyboardShortcut("0", modifiers: .command)
             
