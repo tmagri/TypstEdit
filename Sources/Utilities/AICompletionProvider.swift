@@ -27,9 +27,9 @@ class AICompletionProvider: CodeSuggestionDelegate {
     private var debounceTask: Task<Void, Never>?
     
     func completionTriggerCharacters() -> Set<String> {
-        // Trigger on all letters, dots, #, space, (, and , to make it feel like real Intellisense
-        let letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.# (,"
-        return Set(letters.map { String($0) })
+        // Restricted to explicit Typst markers to prevent hijacking the Return key during normal typing.
+        let triggers = ".#@"
+        return Set(triggers.map { String($0) })
     }
 
     @MainActor
@@ -127,13 +127,6 @@ class AICompletionProvider: CodeSuggestionDelegate {
         
         if !allItems.isEmpty {
             return (windowPosition: pos, items: allItems)
-        } else if settings.isEnabled {
-            // If only AI is enabled, we return an empty list so the window appears (or we could wait)
-            // But returning nil might prevent the window from showing at all.
-            // Let's return an empty list to indicate "Loading..." or just wait for the first AI result.
-            // Actually, if we return nil, showCompletions might not show anything.
-            // Let's return empty if AI is loading.
-            return (windowPosition: pos, items: [])
         }
         
         return nil

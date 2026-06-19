@@ -99,23 +99,22 @@ struct ToolbarView: View {
 
                 // --- Group 4: Insert ---
                 ToolbarGroup(title: "Insert", icon: "plus.square", isCompact: collapseInsert) {
-                     VStack(spacing: 2) {
+                     VStack(alignment: .leading, spacing: 2) {
                          HStack(spacing: 2) {
+                             ToolbarButton(icon: "cursorarrow.rays", tooltip: "Edit at Cursor (Cmd+Shift+E)", action: controller.openContextualEditor)
                              ToolbarButton(icon: "photo", tooltip: "Insert Image (Cmd+Ctrl+I)", isActive: controller.isImageActive, action: controller.insertImageSnippet)
                              ToolbarButton(icon: "tablecells", tooltip: "Insert Table (Cmd+Ctrl+T)", isActive: controller.isTableActive, action: controller.insertTableSnippet)
                              ToolbarButton(icon: "sum", tooltip: "Insert Equation (Cmd+Ctrl+E)", isActive: controller.isEquationActive, action: controller.openNewEquationEditor)
-                             ToolbarButton(icon: "sparkles", tooltip: "AI Prompt (Cmd+Ctrl+A)", isActive: controller.showAIPromptEditor, action: controller.openAIPromptEditor) // Added AI Prompt
+                             ToolbarButton(icon: "sparkles", tooltip: "AI Prompt (Cmd+Ctrl+A)", isActive: controller.showAIPromptEditor, action: controller.openAIPromptEditor)
                              ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive, action: controller.toggleLink)
-                         }
-                         HStack(spacing: 2) {
                              ToolbarButton(icon: "function", tooltip: "Insert Symbol (Cmd+Ctrl+S)", isActive: controller.showSymbolPicker) { controller.showSymbolPicker.toggle() }
                              ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure (Cmd+Ctrl+F)", isActive: controller.isFigureActive, action: controller.openFigureEditor)
                              ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline (Cmd+Ctrl+O)", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
+                         }
+                         HStack(spacing: 2) {
                              ToolbarButton(icon: "server.rack", tooltip: "External Data (Cmd+Ctrl+D)", action: controller.openExternalDataEditor)
                              ToolbarButton(icon: "text.redaction", tooltip: "Scoped Block (Cmd+Ctrl+B)", isActive: controller.isScopedBlockActive, action: controller.toggleScopedBlock)
                              ToolbarButton(icon: "shippingbox", tooltip: "Insert Foundation (Cmd+Ctrl+I)", isActive: controller.showFoundationEditor, action: controller.openFoundationEditor)
-                         }
-                         HStack(spacing: 2) {
                              ToolbarButton(icon: "minus", tooltip: "Horizontal Line (Cmd+Opt+-)", isActive: controller.isHorizontalLineActive, action: controller.insertHorizontalLine)
                              ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", isActive: controller.isPageBreakActive, action: controller.insertPageBreak)
                              ToolbarButton(icon: "square", tooltip: "Block (Cmd+Ctrl+B)", isActive: controller.isBlockActive, action: controller.openBlockEditor)

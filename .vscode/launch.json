@@ -20,6 +20,26 @@
                 "--enable-test-discovery"
             ],
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:TypstEdit}",
+            "name": "Debug TypstEdit",
+            "target": "TypstEdit",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug TypstEdit"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:TypstEdit}",
+            "name": "Release TypstEdit",
+            "target": "TypstEdit",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release TypstEdit"
         }
     ]
 }

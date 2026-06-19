@@ -880,7 +880,7 @@ class LyxToTypstConverter {
             mathContent += line
             currentLineIndex += 1
         }
-        let typstMath = convertLatexMathToTypst(mathContent)
+        let typstMath = LyxToTypstConverter.convertLatexMathToTypst(mathContent)
         if mathContent.contains("\\[") || mathContent.contains("\\begin{equation}") { textBuffer += "$ \(typstMath) $" }
         else { textBuffer += "$\(typstMath)$" }
     }
@@ -1041,7 +1041,7 @@ class LyxToTypstConverter {
         return res
     }
     
-    private func convertLatexMathToTypst(_ latex: String) -> String {
+    static func convertLatexMathToTypst(_ latex: String) -> String {
         var m = latex
         // Clean basic wrappers
         m = m.replacingOccurrences(of: "\\begin_inset Formula ", with: "")
@@ -1234,7 +1234,7 @@ class LyxToTypstConverter {
                 for l in cellRawLines {
                     var seg = l
                     if seg.hasPrefix("\\begin_inset Formula") {
-                        let math = convertLatexMathToTypst(seg) // convert handles inline end_inset now hopefully
+                        let math = LyxToTypstConverter.convertLatexMathToTypst(seg) // convert handles inline end_inset now hopefully
                         seg = "$" + math + "$"
                     } else {
                          // Basic text escaping

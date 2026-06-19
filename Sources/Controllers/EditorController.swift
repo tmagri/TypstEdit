@@ -2645,7 +2645,7 @@ class EditorController: NSObject, ObservableObject {
             finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)\n\nOutput only the resulting Typst code."
         }
         
-        let systemPrompt = "You are an expert Typst and software developer. Generate precise Typst code or content based on the user's request. Output only the content to be inserted, without any conversational filler. If the user asks for a chart or table, provide the full Typst code for it."
+        let systemPrompt = "You are an expert Typst and software developer. Generate precise Typst code or content based on the user's request. Output only the content to be inserted, without any conversational filler. STRICTLY USE TYPST SYNTAX. DO NOT USE MARKDOWN (e.g., use '=' for headings, not '#'). If the user asks for a chart or table, provide the full Typst code for it."
         
         return try await AICompletionService.shared.fetchCompletion(
             prompt: finalPrompt,

@@ -137,10 +137,13 @@ class AICompletionService: ObservableObject {
             throw AIError.parsingError
         }
         
+       var finalResult = rawResult
         if settings.forceCodeOutput {
-            return extractCode(from: rawResult)
+            finalResult = extractCode(from: rawResult)
         }
-        return rawResult
+        
+        // Pass the result through our Markdown-to-Typst safety net
+        return sanitizeMarkdownToTypst(finalResult)
     }
     
     private func extractCode(from text: String) -> String {
@@ -162,5 +165,66 @@ class AICompletionService: ObservableObject {
     /// Verifies the connection to the AI provider by sending a minimal prompt.
     func testConnection() async throws -> String {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
+    }
+
+    private func sanitizeMarkdownToTypst(_ text: String) -> String {
+        var processed = text
+        
+        do {
+            // 1. Headings: "# Heading" -> "= Heading"
+            let h3 = try NSRegularExpression(pattern: "(?m)^###\\s+(.*)$")
+            processed = h3.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "=== $1")
+            
+            let h2 = try NSRegularExpression(pattern: "(?m)^##\\s+(.*)$")
+            processed = h2.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "== $1")
+            
+            let h1 = try NSRegularExpression(pattern: "(?m)^#\\s+(.*)$")
+            processed = h1.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "= $1")
+            
+            // 2. Bold: **text** -> *text*
+            let bold = try NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
+            processed = bold.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "*$1*")
+            
+            // 3. Links: [text](url) -> #link("url")[text]
+            let link = try NSRegularExpression(pattern: "(?<!\\!)\\[([^\\]]+)\\]\\(([^\\)]+)\\)")
+            processed = link.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#link(\"$2\")[$1]")
+            
+            // 4. Images: ![alt](url) -> #image("url", alt: "alt")
+            let img = try NSRegularExpression(pattern: "\\!\\[([^\\]]*)\\]\\(([^\\)]+)\\)")
+            processed = img.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#image(\"$2\", alt: \"$1\")")
+            
+            // 5. Equations: Convert LaTeX math to Typst math using our internal Lyx converter
+            // (?s) allows the dot (.) to match newlines for multiline math blocks
+            let mathPatterns = [
+                "(?s)\\$\\$(.+?)\\$\\$",              // $$...$$
+                "(?<!\\\\)\\$([^\\$]+?)(?<!\\\\)\\$", // $...$
+                "(?s)\\\\\\[(.+?)\\\\\\]",            // \[...\]
+                "(?s)\\\\\\((.+?)\\\\\\)"             // \(...\)
+            ]
+            
+            for pattern in mathPatterns {
+                if let regex = try? NSRegularExpression(pattern: pattern) {
+                    let matches = regex.matches(in: processed, range: NSRange(0..<processed.utf16.count))
+                    
+                    // Iterate in reverse so modifying the string doesn't mess up the ranges of upcoming matches
+                    for match in matches.reversed() {
+                        if let contentRange = Range(match.range(at: 1), in: processed),
+                           let fullRange = Range(match.range, in: processed) {
+                            
+                            let latexMath = String(processed[contentRange])
+                            let typstMath = LyxToTypstConverter.convertLatexMathToTypst(latexMath)
+                            
+                            // Wrap the clean Typst math in the standard Typst $ $ delimiters
+                            processed.replaceSubrange(fullRange, with: "$ \(typstMath) $")
+                        }
+                    }
+                }
+            }
+            
+        } catch {
+            print("Regex error in sanitization: \(error)")
+        }
+        
+        return processed
     }
 }

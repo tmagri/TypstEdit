@@ -28,13 +28,14 @@ class AIContextManager {
         Your task is to provide seamless completion for both code and natural language text.
         
         TYPST GUIDELINES:
+        - STRICTLY USE TYPST SYNTAX. DO NOT USE MARKDOWN.
+        - Headings use '=' (not '#'). Bold uses '*' (not '**'). Italic uses '_' (not '*').
         - Math mode uses '$' delimiters: '$ x^2 $'.
         - Functions start with '#': '#set text(...)', '#let myfunc(...)'.
         - Content blocks use '[]', code blocks use '{}'.
         - Labels are defined with '<label>' and referenced with '@label'.
         - For natural language, maintain the tone and style of the existing text.
-        - Correct obvious grammar or spelling errors in the suggested completion.
-        
+           
         CRITICAL INSTRUCTIONS:
         1. Return ONLY the text/code to be inserted at the cursor position.
         2. Do NOT wrap the code in markdown code blocks (no ```).
