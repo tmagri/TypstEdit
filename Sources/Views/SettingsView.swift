@@ -19,6 +19,11 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Typst Compiler", systemImage: "terminal")
                 }
+                
+            PackageManagerView()
+                .tabItem {
+                    Label("Packages", systemImage: "shippingbox")
+                }
         }
         .padding()
         .frame(width: 700, height: 550)

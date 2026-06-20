@@ -386,7 +386,7 @@ struct ContentView: View {
                 }
                 .sheet(isPresented: $editorController.showGridEditor) {
                     GridEditorView(controller: editorController, onCancel: { editorController.showGridEditor = false })
-                }
+                }              
                 .alert("Delete Equation?", isPresented: $editorController.showDeleteEquationAlert) {
                     Button("Delete", role: .destructive) { editorController.deleteEquation() }
                     Button("Cancel", role: .cancel) { }
@@ -504,9 +504,7 @@ struct ContentView: View {
             switch snippetKey {
             case "table": editorController.insertTableSnippet()
             case "image": editorController.insertImageSnippet()
-            case "chart": editorController.insertChartSnippet()
             case "equation": editorController.openNewEquationEditor()
-            case "timeline": editorController.insertTimelineSnippet()
             default: break
             }
         }

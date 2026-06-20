@@ -33,46 +33,6 @@ class SnippetsManager {
             name: "Image",
             template: "#figure(image(\"path/to/image.png\"), caption: [Caption])",
             cursorOffset: 15 // Position cursor at "path/to/image.png"
-        ),
-        "chart": TypstSnippet(
-            name: "Chart",
-            template: """
-            #import "@preview/cetz:0.2.0"
-            
-            #cetz.canvas({
-              import cetz.draw: *
-              
-              // Your chart code here
-              line((0, 0), (1, 1))
-            })
-            """,
-            cursorOffset: nil
-        ),
-        "timeline": TypstSnippet(
-            name: "Timeline",
-            template: """
-            #import "@preview/cetz:0.2.0"
-            
-            #cetz.canvas({
-              import cetz.draw: *
-              
-              // Draw the main line
-              line((0, 0), (10, 0), mark: (end: ">"))
-              
-              // Helper to draw an event
-              let event(x, label, sublabel) = {
-                circle((x, 0), radius: 0.1, fill: black)
-                content((x, 0.5), label)
-                content((x, -0.5), text(size: 8pt, gray, sublabel))
-              }
-              
-              // Add events
-              event(0, "Project Start", "2024-01-01")
-              event(5, "Milestone", "2024-06-01")
-              event(10, "Completion", "2024-12-31")
-            })
-            """,
-            cursorOffset: nil
         )
     ]
     

@@ -109,9 +109,9 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "link", tooltip: "Link (Cmd+K)", isActive: controller.isLinkActive, action: controller.toggleLink)
                              ToolbarButton(icon: "function", tooltip: "Insert Symbol (Cmd+Ctrl+S)", isActive: controller.showSymbolPicker) { controller.showSymbolPicker.toggle() }
                              ToolbarButton(icon: "photo.artframe", tooltip: "Insert Figure (Cmd+Ctrl+F)", isActive: controller.isFigureActive, action: controller.openFigureEditor)
-                             ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline (Cmd+Ctrl+O)", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
                          }
                          HStack(spacing: 2) {
+                             ToolbarButton(icon: "list.bullet.rectangle", tooltip: "Insert Outline (Cmd+Ctrl+O)", isActive: controller.isOutlineActive, action: controller.openOutlineEditor)
                              ToolbarButton(icon: "server.rack", tooltip: "External Data (Cmd+Ctrl+D)", action: controller.openExternalDataEditor)
                              ToolbarButton(icon: "text.redaction", tooltip: "Scoped Block (Cmd+Ctrl+B)", isActive: controller.isScopedBlockActive, action: controller.toggleScopedBlock)
                              ToolbarButton(icon: "shippingbox", tooltip: "Insert Foundation (Cmd+Ctrl+I)", isActive: controller.showFoundationEditor, action: controller.openFoundationEditor)
@@ -119,8 +119,6 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "doc.plaintext", tooltip: "Page Break (Cmd+Return)", isActive: controller.isPageBreakActive, action: controller.insertPageBreak)
                              ToolbarButton(icon: "square", tooltip: "Block (Cmd+Ctrl+B)", isActive: controller.isBlockActive, action: controller.openBlockEditor)
                              ToolbarButton(icon: "grid", tooltip: "Grid (Cmd+Ctrl+G)", isActive: controller.isGridActive, action: controller.openGridEditor)
-                             ToolbarButton(icon: "chart.bar", tooltip: "Insert Chart (Cmd+Ctrl+C)", action: controller.insertChartSnippet)
-                             ToolbarButton(icon: "calendar", tooltip: "Insert Timeline (Cmd+Ctrl+L)", action: controller.insertTimelineSnippet)
                          }
                      }
                 }

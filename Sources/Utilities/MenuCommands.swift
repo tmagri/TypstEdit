@@ -227,11 +227,6 @@ struct AppMenuCommands: Commands {
                 }
                 .keyboardShortcut("i", modifiers: [.command, .control])
                 
-                Button("Chart") {
-                    NotificationCenter.default.post(name: .insertSnippet, object: "chart")
-                }
-                .keyboardShortcut("c", modifiers: [.command, .control])
-                
                 Button("Figure...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openFigureEditor")
                 }
@@ -246,12 +241,7 @@ struct AppMenuCommands: Commands {
                     NotificationCenter.default.post(name: .menuCommand, object: "aiPrompt")
                 }
                 .keyboardShortcut("a", modifiers: [.command, .control])
-                
-                Button("Timeline") {
-                    NotificationCenter.default.post(name: .insertSnippet, object: "timeline")
-                }
-                .keyboardShortcut("l", modifiers: [.command, .control])
-                
+                    
                 Button("Outline...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openOutlineEditor")
                 }
@@ -288,7 +278,7 @@ struct AppMenuCommands: Commands {
                     NotificationCenter.default.post(name: .menuCommand, object: "openLayoutEditor")
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
-            }
+                }
             .disabled(!editorController.isTypstFile)
             
             Divider()

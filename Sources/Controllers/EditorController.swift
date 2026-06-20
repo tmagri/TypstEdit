@@ -337,6 +337,7 @@ class EditorController: NSObject, ObservableObject {
     @Published var missingFileName: String = ""
     @Published var targetLineNumber: String = ""
     @Published var showFoundationEditor: Bool = false
+    @Published var showPackageManager: Bool = false
     
     // --- Status Message ---
     @Published var statusMessage: String = ""
@@ -1190,17 +1191,7 @@ class EditorController: NSObject, ObservableObject {
         return relComponents.joined(separator: "/")
     }
     
-    func insertChartSnippet() {
-        if let snippet = SnippetsManager.shared.snippets["chart"] {
-            insertText(snippet.template)
-        }
-    }
-    
-    func insertTimelineSnippet() {
-        if let snippet = SnippetsManager.shared.snippets["timeline"] {
-            insertText(snippet.template)
-        }
-    }
+
     
     func openLayoutEditor() {
         self.showLayoutEditor = true
