@@ -56,8 +56,8 @@ public final class FindViewController: NSViewController {
         // When visible, it's set to 0.
 
         view.clipsToBounds = false
-        view.addSubview(findPanel)
         view.addSubview(childView)
+        view.addSubview(findPanel)
 
         // Ensure find panel is always on top
         findPanel.wantsLayer = true

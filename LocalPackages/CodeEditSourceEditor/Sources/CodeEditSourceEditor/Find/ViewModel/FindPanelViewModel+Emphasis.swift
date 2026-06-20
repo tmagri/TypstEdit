@@ -56,6 +56,9 @@ extension FindPanelViewModel {
 
         // Add the emphasis
         emphasisManager.addEmphases([emphasis], for: EmphasisGroup.find)
+        
+        // Scroll to the match
+        target.setCursorPositions([CursorPosition(range: currentMatch)], scrollToVisible: true)
     }
 
     func clearMatchEmphases() {
