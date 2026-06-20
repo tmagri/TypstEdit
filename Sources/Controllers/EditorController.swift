@@ -1670,8 +1670,15 @@ class EditorController: NSObject, ObservableObject {
             }
 
             
-            // 4. Layout: Shift Editor Below Find Panel
-            // Check if we already have the constraint
+            // 4. Layout: Shift Editor Below Find Panel and Fix Z-Index
+            
+            // Force the panel to the front so the floating scrollbar doesn't overlap the buttons
+            panel.wantsLayer = true
+            panel.layer?.zPosition = 9999
+            
+            // Add padding to force down the editor
+            let padding: CGFloat = 10 
+            
             let existingConstraints = containerView.constraints.filter { c in
                 (c.firstItem === editor && c.secondItem === panel && c.firstAttribute == .top && c.secondAttribute == .bottom)
             }
@@ -1687,12 +1694,12 @@ class EditorController: NSObject, ObservableObject {
                     containerView.removeConstraints(topConstraints)
                 }
                 
-                // Add new constraint: editorView.top == findPanel.bottom
-                let newConstraint = editor.topAnchor.constraint(equalTo: panel.bottomAnchor)
+                // Add new constraint: editorView.top == findPanel.bottom + padding
+                let newConstraint = editor.topAnchor.constraint(equalTo: panel.bottomAnchor, constant: padding)
                 newConstraint.isActive = true
-                
-                // Also ensure editor bottom is anchored to container bottom
-                // (It usually is, but let's make sure we don't break it)
+            } else if let constraint = existingConstraints.first {
+                // Ensure padding is maintained if the constraint already exists
+                constraint.constant = padding
             }
             
             // 5. Setup Observers for Scrolling
