@@ -13,13 +13,17 @@ let package = Package(
         .executable(name: "TypstEdit", targets: ["TypstEdit"])
     ],
     dependencies: [
-        .package(path: "LocalPackages/CodeEditSourceEditor")
+        .package(path: "LocalPackages/CodeEditSourceEditor"),
+        .package(path: "LocalPackages/CSQLite"),
+        .package(url: "https://github.com/sqliteai/sqlite-vector", from: "1.0.0")
     ],
     targets: [
         .executableTarget(
             name: "TypstEdit",
             dependencies: [
-                "CodeEditSourceEditor"
+                "CodeEditSourceEditor",
+                .product(name: "CSQLite", package: "CSQLite"),
+                .product(name: "vector", package: "sqlite-vector")
             ],
             path: "Sources",
             resources: [

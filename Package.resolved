@@ -1,0 +1,15 @@
+{
+  "originHash" : "4ac4c22fff2dc3800475639ef6017f297300a15f23c1e8ea31c387fd911ddd7a",
+  "pins" : [
+    {
+      "identity" : "sqlite-vector",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/sqliteai/sqlite-vector",
+      "state" : {
+        "revision" : "b68d34ac66ccbdb781a161b0060dc07020f3cbb2",
+        "version" : "1.0.0"
+      }
+    }
+  ],
+  "version" : 3
+}

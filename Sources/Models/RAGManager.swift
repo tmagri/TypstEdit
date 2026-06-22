@@ -1,65 +1,14 @@
 import Foundation
 import NaturalLanguage
 import Accelerate
+import CSQLite
+import vector
 
-// MARK: - Core Data Models
 // MARK: - Core Data Models
 struct DocumentChunk: Codable {
     let fileURL: URL
     let text: String
     let embedding: [Float]
-    
-    enum CodingKeys: String, CodingKey {
-        case fileURL
-        case text
-        case embedding
-    }
-    
-    // Normal initializer used during indexing
-    init(fileURL: URL, text: String, embedding: [Float]) {
-        self.fileURL = fileURL
-        self.text = text
-        self.embedding = embedding
-    }
-    
-    // Custom Decoder: Base64 String -> Raw Bytes -> [Float]
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.fileURL = try container.decode(URL.self, forKey: .fileURL)
-        self.text = try container.decode(String.self, forKey: .text)
-        
-        // Decode the Base64 string back into binary data
-        let data = try container.decode(Data.self, forKey: .embedding)
-        
-        // Safely bind the raw memory bytes back into an array of Floats
-        self.embedding = data.withUnsafeBytes { buffer in
-            Array(buffer.bindMemory(to: Float.self))
-        }
-    }
-    
-    // Custom Encoder: [Float] -> Raw Bytes -> Base64 String
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(fileURL, forKey: .fileURL)
-        try container.encode(text, forKey: .text)
-        
-        // Convert the Float array directly into binary Data
-        let data = embedding.withUnsafeBufferPointer { buffer in
-            Data(buffer: buffer)
-        }
-        
-        // JSONEncoder automatically converts Data into a Base64 string
-        try container.encode(data, forKey: .embedding)
-    }
-}
-struct FileIndex: Codable {
-    let lastModified: Date
-    let chunks: [DocumentChunk]
-}
-
-struct ProjectIndex: Codable {
-    // Key is the relative file path or file URL string
-    var files: [String: FileIndex] = [:]
 }
 
 enum EmbeddingError: Error {
@@ -100,14 +49,11 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
         var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         
-        // Ollama ignores the Bearer token, but OpenAI requires it. 
-        // Sending it always is safe for both.
         if !apiKey.isEmpty {
             request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        // Both OpenAI and Ollama's /v1/embeddings accept this exact body
         let cleanText = text.replacingOccurrences(of: "\n", with: " ")
         let body: [String: Any] = [
             "input": cleanText,
@@ -120,7 +66,6 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
             throw EmbeddingError.apiError("API failed. Make sure the endpoint is correct and running.")
         }
         
-        // Parse the OpenAI-compatible JSON response
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataArray = json["data"] as? [[String: Any]],
               let firstResult = dataArray.first,
@@ -134,27 +79,25 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
 
 @MainActor
 class RAGManager: ObservableObject {
-static let shared = RAGManager()
+    static let shared = RAGManager()
     
     @Published var isIndexing: Bool = false
     @Published var indexProgress: Double = 0.0     
     @Published var indexStatus: String = ""      
     
-    private var projectIndex = ProjectIndex()
     private var currentProjectDir: URL?
+    private var db: OpaquePointer?
     
     private init() {}
     
     // MARK: - Path Configuration
     
-    // Define the path to the project's local 'vectorcaches' folder
     private var cacheFolderURL: URL? {
         currentProjectDir?.appendingPathComponent("vectorcaches", isDirectory: true)
     }
     
-    // Store the JSON index cache file inside that specific folder
-    private var cacheFileURL: URL? {
-        cacheFolderURL?.appendingPathComponent("project_index_cache.json")
+    private var dbFileURL: URL? {
+        cacheFolderURL?.appendingPathComponent("project_index.sqlite")
     }
     
     private var activeProvider: EmbeddingProvider {
@@ -182,49 +125,79 @@ static let shared = RAGManager()
         }
     }
     
-    // MARK: - Cache Management
+    // MARK: - Database Management
     
-    /// Loads the cache from the local project's vectorcaches directory
-    private func loadCache() {
-        guard let cacheURL = cacheFileURL,
-              FileManager.default.fileExists(atPath: cacheURL.path),
-              let data = try? Data(contentsOf: cacheURL),
-              let decoded = try? JSONDecoder().decode(ProjectIndex.self, from: data) else {
-            projectIndex = ProjectIndex()
+    private func setupDatabase() {
+        guard let folderURL = cacheFolderURL, let fileURL = dbFileURL else { return }
+        
+        if !FileManager.default.fileExists(atPath: folderURL.path) {
+            try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true, attributes: nil)
+        }
+        
+        if db != nil {
+            sqlite3_close(db)
+            db = nil
+        }
+        
+        if sqlite3_open(fileURL.path, &db) != SQLITE_OK {
+            print("Failed to open vector DB.")
             return
         }
-        projectIndex = decoded
-    }
-    
-    /// Saves the cache and ensures the 'vectorcaches' folder exists
-    private func saveCache() {
-        guard let folderURL = cacheFolderURL, let fileURL = cacheFileURL else { return }
         
-        do {
-            if !FileManager.default.fileExists(atPath: folderURL.path) {
-                try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true, attributes: nil)
-            }
-            
-            let data = try JSONEncoder().encode(projectIndex)
-            try data.write(to: fileURL, options: .atomic)
-        } catch {
-            print("Failed to save vector cache locally: \(error.localizedDescription)")
+        sqlite3_enable_load_extension(db, 1)
+        var errMsg: UnsafeMutablePointer<Int8>?
+        // Compute path relative to the executable directory (Contents/MacOS/) where
+        // the bundle scripts copy vector.framework. This matches the @loader_path rpath
+        // that dyld already uses, so no install_name_tool rpath manipulation is needed.
+        let execDir = Bundle.main.executableURL?.deletingLastPathComponent().path ?? ""
+        let vectorExtPath = "\(execDir)/vector.framework/vector"
+        if sqlite3_load_extension(db, vectorExtPath, nil, &errMsg) != SQLITE_OK {
+            let msg = errMsg != nil ? String(cString: errMsg!) : "Unknown error"
+            print("Failed to load sqlite-vector: \(msg)")
+            sqlite3_free(errMsg)
         }
+        
+        let createSQL = """
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT UNIQUE,
+            last_modified REAL
+        );
+        CREATE TABLE IF NOT EXISTS chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER,
+            text TEXT,
+            embedding BLOB,
+            FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+        );
+        """
+        
+        if sqlite3_exec(db, createSQL, nil, nil, &errMsg) != SQLITE_OK {
+            print("Failed to create tables: \(String(cString: errMsg!))")
+            sqlite3_free(errMsg)
+        }
+        
+        let provider = activeProvider
+        let initVectorSQL = "SELECT vector_init('chunks', 'embedding', 'type=FLOAT32,dimension=\(provider.dimensions),distance=COSINE');"
+        sqlite3_exec(db, initVectorSQL, nil, nil, nil)
+        
+        sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nil, nil, nil)
     }
     
-    /// Clears the project index memory profile and removes the files from disk
     public func clearIndexCache() {
-        projectIndex = ProjectIndex()
-        guard let fileURL = cacheFileURL, FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        if db != nil {
+            sqlite3_close(db)
+            db = nil
+        }
+        guard let fileURL = dbFileURL, FileManager.default.fileExists(atPath: fileURL.path) else { return }
         try? FileManager.default.removeItem(at: fileURL)
-        print("Project vector cache cleared successfully.")
+        print("Project vector db cleared successfully.")
     }
     
     // MARK: - Indexing
     
-    /// Indexes the entire project directory intelligently, including subdirectories
     func indexProject(at projectDir: URL, forceReindex: Bool = false) async {
-        guard !isIndexing else { return } // Prevent duplicate runs
+        guard !isIndexing else { return }
         isIndexing = true
         indexProgress = 0.0
         indexStatus = "Gathering files..."
@@ -237,12 +210,38 @@ static let shared = RAGManager()
         
         self.currentProjectDir = projectDir
         
-        // If the user clicked the manual force button, wipe the cache first
         if forceReindex {
             clearIndexCache()
         }
         
-        loadCache() // Reads existing index from project_dir/vectorcaches/
+        setupDatabase()
+        guard let db = db else { return }
+        
+        let cleanupSQL = "SELECT id, path FROM files;"
+        var cleanupStmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, cleanupSQL, -1, &cleanupStmt, nil) == SQLITE_OK {
+            var idsToDelete: [Int64] = []
+            while sqlite3_step(cleanupStmt) == SQLITE_ROW {
+                let id = sqlite3_column_int64(cleanupStmt, 0)
+                let path = String(cString: sqlite3_column_text(cleanupStmt, 1))
+                let fullURL = projectDir.appendingPathComponent(path)
+                
+                if !FileManager.default.fileExists(atPath: fullURL.path) {
+                    idsToDelete.append(id)
+                }
+            }
+            sqlite3_finalize(cleanupStmt)
+            
+            if !idsToDelete.isEmpty {
+                sqlite3_exec(db, "BEGIN TRANSACTION;", nil, nil, nil)
+                for id in idsToDelete {
+                    let delSQL = "DELETE FROM files WHERE id = \(id);"
+                    sqlite3_exec(db, delSQL, nil, nil, nil)
+                }
+                sqlite3_exec(db, "COMMIT;", nil, nil, nil)
+                print("Cleaned up \(idsToDelete.count) deleted files from vector DB.")
+            }
+        }
         
         let provider = activeProvider
         let filesToProcess = gatherFiles(in: projectDir)
@@ -252,27 +251,41 @@ static let shared = RAGManager()
         guard totalFiles > 0 else { return }
         
         for (index, fileURL) in filesToProcess.enumerated() {
-            // 👉 CANCEL CHECK: If the user hit the stop button, break the loop
             guard isIndexing else { break }
             
-            // Update UI Progress
             self.indexProgress = Double(index) / Double(totalFiles)
             self.indexStatus = "Indexing \(fileURL.lastPathComponent)..."
             
             let ext = fileURL.pathExtension.lowercased()
             let attributes = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
-            guard let lastModified = attributes?.contentModificationDate else { continue }
+            guard let lastModifiedDate = attributes?.contentModificationDate else { continue }
+            let lastModified = lastModifiedDate.timeIntervalSince1970
             
             let fileKey = fileURL.path.replacingOccurrences(of: projectDir.path + "/", with: "")
             
-            // Skip if file hasn't changed since last build
-            if let existingIndex = projectIndex.files[fileKey], existingIndex.lastModified >= lastModified {
-                continue
+            var needsIndexing = true
+            var fileId: Int64 = -1
+            
+            let checkSQL = "SELECT id, last_modified FROM files WHERE path = ?;"
+            var checkStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, checkSQL, -1, &checkStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(checkStmt, 1, (fileKey as NSString).utf8String, -1, nil)
+                if sqlite3_step(checkStmt) == SQLITE_ROW {
+                    fileId = sqlite3_column_int64(checkStmt, 0)
+                    let storedModified = sqlite3_column_double(checkStmt, 1)
+                    if storedModified >= lastModified {
+                        needsIndexing = false
+                    }
+                }
             }
+            sqlite3_finalize(checkStmt)
+            
+            if !needsIndexing { continue }
             
             var extractedTextChunks: [String] = []
             
-            if ext == "typ" || ext == "md" {
+            let plaintextExtensions = ["typ", "md", "bib", "txt", "csv", "yaml", "yml"]
+            if plaintextExtensions.contains(ext) {
                 if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
                     extractedTextChunks = content.components(separatedBy: "\n\n")
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -288,42 +301,69 @@ static let shared = RAGManager()
                 }
             }
             
-            var newChunks: [DocumentChunk] = []
+            sqlite3_exec(db, "BEGIN TRANSACTION;", nil, nil, nil)
+            
+            if fileId != -1 {
+                let delSQL = "DELETE FROM files WHERE id = \(fileId);"
+                sqlite3_exec(db, delSQL, nil, nil, nil)
+            }
+            
+            let insertFileSQL = "INSERT INTO files (path, last_modified) VALUES (?, ?);"
+            var insertFileStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, insertFileSQL, -1, &insertFileStmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(insertFileStmt, 1, (fileKey as NSString).utf8String, -1, nil)
+                sqlite3_bind_double(insertFileStmt, 2, lastModified)
+                if sqlite3_step(insertFileStmt) == SQLITE_DONE {
+                    fileId = sqlite3_last_insert_rowid(db)
+                }
+            }
+            sqlite3_finalize(insertFileStmt)
+            
+            let insertChunkSQL = "INSERT INTO chunks (file_id, text, embedding) VALUES (?, ?, ?);"
+            var insertChunkStmt: OpaquePointer?
+            sqlite3_prepare_v2(db, insertChunkSQL, -1, &insertChunkStmt, nil)
+            
             for textChunk in extractedTextChunks {
                 do {
                     let vector = try await provider.getEmbedding(for: textChunk)
-                    newChunks.append(DocumentChunk(fileURL: fileURL, text: textChunk, embedding: vector))
+                    sqlite3_bind_int64(insertChunkStmt, 1, fileId)
+                    sqlite3_bind_text(insertChunkStmt, 2, (textChunk as NSString).utf8String, -1, nil)
+                    
+                    let vectorData = vector.withUnsafeBufferPointer { Data(buffer: $0) }
+                    _ = vectorData.withUnsafeBytes { rawBuffer in
+                        sqlite3_bind_blob(insertChunkStmt, 3, rawBuffer.baseAddress, Int32(rawBuffer.count), nil)
+                    }
+                    
+                    sqlite3_step(insertChunkStmt)
+                    sqlite3_reset(insertChunkStmt)
                 } catch {
                     print("[RAG Error] Failed to embed chunk in \(fileURL.lastPathComponent): \(error)")
                 }
             }
+            sqlite3_finalize(insertChunkStmt)
             
-            projectIndex.files[fileKey] = FileIndex(lastModified: lastModified, chunks: newChunks)
+            sqlite3_exec(db, "COMMIT;", nil, nil, nil)
             cacheUpdated = true
-            
-            // 👉 INCREMENTAL SAVE: Write to disk immediately after finishing this file!
-            saveCache()
         }
         
-        // Only show completion if it wasn't cancelled
         if isIndexing {
             self.indexProgress = 1.0
             self.indexStatus = "Finishing up..."
             
             if cacheUpdated {
-                print("Local project vectorcache updated successfully.")
+                print("Local project vector db updated successfully.")
             } else {
                 print("Using cached embeddings from local vectorcaches folder.")
             }
         }
     }
-    /// Synchronously crawls the directory to find target files
+
     private func gatherFiles(in projectDir: URL) -> [URL] {
-        let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .isDirectoryKey]
+        let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .isDirectoryKey, .fileSizeKey]
         guard let enumerator = FileManager.default.enumerator(
             at: projectDir,
             includingPropertiesForKeys: resourceKeys,
-            options: [.skipsHiddenFiles] // Automatically skips .git, .DS_Store, etc.
+            options: [.skipsHiddenFiles]
         ) else { return [] }
         
         var validFiles: [URL] = []
@@ -332,16 +372,20 @@ static let shared = RAGManager()
             let filename = fileURL.lastPathComponent
             let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             
-            // CRITICAL GUARD: Skip the local vectorcaches folder entirely
             if isDirectory && filename == "vectorcaches" {
-                enumerator.skipDescendants() // Stops the enumerator from diving into this folder
+                enumerator.skipDescendants()
                 continue
             }
             
             if isDirectory { continue }
             
+            if let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, fileSize > 2 * 1024 * 1024 {
+                continue
+            }
+            
             let ext = fileURL.pathExtension.lowercased()
-            if ext == "typ" || ext == "md" || ext == "json" {
+            let allowedExtensions = ["typ", "md", "json", "bib", "txt", "csv", "yaml", "yml"]
+            if allowedExtensions.contains(ext) {
                 validFiles.append(fileURL)
             }
         }
@@ -351,28 +395,55 @@ static let shared = RAGManager()
     
     // MARK: - Searching
     
-    /// Searches for the most relevant chunks using Cosine Similarity
     func search(query: String, topK: Int = 3) async -> [DocumentChunk] {
-        // Flatten the dictionary into a single array of chunks to search
-        let allChunks = projectIndex.files.values.flatMap { $0.chunks }
-        guard !allChunks.isEmpty else { return [] }
+        guard let db = db, let currentProjectDir = currentProjectDir else { return [] }
         
         do {
             let queryVector = try await activeProvider.getEmbedding(for: query)
+            let vectorData = queryVector.withUnsafeBufferPointer { Data(buffer: $0) }
             
-            // Score all chunks
-            let scoredChunks = allChunks.map { chunk -> (DocumentChunk, Float) in
-                let score = cosineSimilarity(a: queryVector, b: chunk.embedding)
-                return (chunk, score)
+            // Note: Since vector_init was called with COSINE distance, we can join with vector_full_scan
+            let searchSQL = """
+            SELECT c.text, f.path, c.embedding, v.distance 
+            FROM chunks AS c 
+            JOIN files AS f ON c.file_id = f.id
+            JOIN vector_full_scan('chunks', 'embedding', ?) AS v 
+            ON c.id = v.rowid
+            ORDER BY v.distance ASC
+            LIMIT \(topK);
+            """
+            
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, searchSQL, -1, &stmt, nil) != SQLITE_OK {
+                let err = String(cString: sqlite3_errmsg(db))
+                print("Search query prepare failed: \(err)")
+                return []
             }
             
-            // Sort descending and take top K
-            let topMatches = scoredChunks
-                .sorted { $0.1 > $1.1 }
-                .prefix(topK)
-                .map { $0.0 }
+            _ = vectorData.withUnsafeBytes { rawBuffer in
+                sqlite3_bind_blob(stmt, 1, rawBuffer.baseAddress, Int32(rawBuffer.count), nil)
+            }
             
-            return Array(topMatches)
+            var results: [DocumentChunk] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let text = String(cString: sqlite3_column_text(stmt, 0))
+                let path = String(cString: sqlite3_column_text(stmt, 1))
+                let embeddingBytes = sqlite3_column_blob(stmt, 2)
+                let embeddingLen = sqlite3_column_bytes(stmt, 2)
+                
+                var embedding: [Float] = []
+                if let embeddingBytes = embeddingBytes, embeddingLen > 0 {
+                    let floatCount = Int(embeddingLen) / MemoryLayout<Float>.size
+                    let pointer = embeddingBytes.bindMemory(to: Float.self, capacity: floatCount)
+                    embedding = Array(UnsafeBufferPointer(start: pointer, count: floatCount))
+                }
+                
+                let fileURL = currentProjectDir.appendingPathComponent(path)
+                results.append(DocumentChunk(fileURL: fileURL, text: text, embedding: embedding))
+            }
+            
+            sqlite3_finalize(stmt)
+            return results
         } catch {
             print("Search failed: \(error)")
             return []
@@ -381,21 +452,6 @@ static let shared = RAGManager()
     
     // MARK: - Helpers
     
-    /// Lightning-fast vector math using Apple's Accelerate framework
-    private func cosineSimilarity(a: [Float], b: [Float]) -> Float {
-        var dotProduct: Float = 0
-        var normA: Float = 0
-        var normB: Float = 0
-        
-        vDSP_dotpr(a, 1, b, 1, &dotProduct, vDSP_Length(a.count))
-        vDSP_svesq(a, 1, &normA, vDSP_Length(a.count))
-        vDSP_svesq(b, 1, &normB, vDSP_Length(b.count))
-        
-        guard normA > 0 && normB > 0 else { return 0 }
-        return dotProduct / (sqrt(normA) * sqrt(normB))
-    }
-
-    /// Generic recursive JSON Flattener 
     private func flattenJSON(_ json: Any, prefix: String = "") -> [String] {
         var result: [String] = []
         
@@ -410,28 +466,22 @@ static let shared = RAGManager()
                 result.append(contentsOf: flattenJSON(value, prefix: newPrefix))
             }
         } else if let str = json as? String {
-            // Only embed strings that have actual semantic value (ignore empty strings)
             if !str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.append("\(prefix): \(str)")
             }
         } else {
-            // Base case: Number, Boolean
             result.append("\(prefix): \(json)")
         }
         
         return result
     }
 
-// MARK: - Dynamic JSON Parsing
-    
-    /// Crawls any arbitrary JSON structure, accumulating short metadata to enrich large text blocks.
     private func extractSemanticChunks(from json: Any, path: String = "", parentMetadata: String = "", fileName: String) -> [String] {
         var chunks: [String] = []
         
         if let dict = json as? [String: Any] {
             var localMetadata = parentMetadata
             
-            // First pass: Gather local metadata (keys with numbers, bools, or short strings)
             for (key, value) in dict {
                 if let str = value as? String, str.count < 50 {
                     localMetadata += "\(key.capitalized): \(str), "
@@ -442,12 +492,10 @@ static let shared = RAGManager()
                 }
             }
             
-            // Second pass: Process long strings and nested objects
             for (key, value) in dict {
                 let currentPath = path.isEmpty ? key : "\(path) > \(key)"
                 
                 if let str = value as? String, str.count >= 50 {
-                    // This is a main content block! Combine it with the gathered metadata.
                     let cleanText = str.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
                     let chunk = "Source: \(fileName) | Path: \(currentPath)\nContext: \(localMetadata)\nContent: \(cleanText)"
                     chunks.append(chunk)
@@ -458,13 +506,11 @@ static let shared = RAGManager()
                 }
             }
         } else if let array = json as? [Any] {
-            // Handle arrays by passing the context down to each item
             for (index, value) in array.enumerated() {
                 let currentPath = "\(path)[\(index)]"
                 chunks.append(contentsOf: extractSemanticChunks(from: value, path: currentPath, parentMetadata: parentMetadata, fileName: fileName))
             }
         } else if let str = json as? String, str.count >= 50 {
-            // Handle raw strings sitting in arrays or at the root
             let cleanText = str.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
             let chunk = "Source: \(fileName) | Path: \(path)\nContext: \(parentMetadata)\nContent: \(cleanText)"
             chunks.append(chunk)
@@ -473,7 +519,6 @@ static let shared = RAGManager()
         return chunks
     }
 
-    /// Helper to bundle flattened JSON lines into larger semantic chunks
     private func chunkStrings(_ strings: [String], maxChunkSize: Int) -> [String] {
         var chunks: [String] = []
         var currentChunk = ""

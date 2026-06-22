@@ -35,12 +35,24 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BUILD_DIR/$APP_NAME-universal" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Copy all SPM resource bundles (arch-independent; use arm64 release build as source)
+# Strip debug symbols from the release binary to reduce size
+strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+# Copy all SPM resource bundles — use maxdepth 1 to avoid duplicates from nested build dirs
 echo "Copying SPM resource bundles..."
 find "$BUILD_DIR/arm64-apple-macosx/release" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
     echo "  Copying: $(basename "$bundle")"
     cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
 done
+
+# Copy vector.framework into Contents/MacOS/ so @loader_path rpath finds it at launch
+# Use the pre-built universal macOS slice from the XCFramework artifact
+echo "Copying vector.framework..."
+VECTOR_XCFW_MACOS="$BUILD_DIR/artifacts/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64"
+if [ -d "$VECTOR_XCFW_MACOS/vector.framework" ]; then
+    cp -r "$VECTOR_XCFW_MACOS/vector.framework" "$APP_BUNDLE/Contents/MacOS/"
+    echo "  Copied: vector.framework (universal)"
+fi
 
 # Copy Typst executable into the bundle
 echo "Bundling Universal Typst executable..."

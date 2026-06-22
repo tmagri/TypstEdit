@@ -32,12 +32,23 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Copy all SPM resource bundles (TypstEdit, CodeEditLanguages, CodeEditSymbols, etc.)
+# Copy all SPM resource bundles — use maxdepth 1 to avoid duplicates from nested build dirs
 echo "Copying resources bundle..."
-find .build -type d -path "*arm64-apple-macosx/$CONFIG*" -name "*.bundle" | while read bundle; do
+find ".build/arm64-apple-macosx/$CONFIG" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
     echo "  Copying: $(basename "$bundle")"
     cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
 done
+
+# Copy vector.framework into Contents/MacOS/ so @loader_path rpath finds it at launch
+echo "Copying vector.framework..."
+VECTOR_XCFW=".build/artifacts/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64"
+if [ -d "$VECTOR_XCFW/vector.framework" ]; then
+    cp -r "$VECTOR_XCFW/vector.framework" "$APP_BUNDLE/Contents/MacOS/"
+    echo "  Copied: vector.framework"
+elif [ -d ".build/arm64-apple-macosx/$CONFIG/vector.framework" ]; then
+    cp -r ".build/arm64-apple-macosx/$CONFIG/vector.framework" "$APP_BUNDLE/Contents/MacOS/"
+    echo "  Copied: vector.framework (from build)"
+fi
 
 # Copy Typst executable into the bundle
 echo "Bundling Typst executable..."
