@@ -76,8 +76,9 @@ class AICompletionProvider: CodeSuggestionDelegate {
                     
                     if Task.isCancelled { return }
                     
-                    // Prepare Context
-                    let context = AIContextManager.shared.generateContext(
+                   // Prepare Context
+                    let context = await AIContextManager.shared.generateContext(
+                        userPrompt: String(prefix.suffix(100)), // Use recent text as the semantic query
                         text: text,
                         cursorIndex: index,
                         fileURL: url,

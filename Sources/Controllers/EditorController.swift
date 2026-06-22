@@ -2448,7 +2448,8 @@ class EditorController: NSObject, ObservableObject {
         
         if self.useMCPForPrompt {
             // Enrich with project context and guidelines from AIContextManager
-            let context = AIContextManager.shared.generateContext(
+           let context = await AIContextManager.shared.generateContext(
+                userPrompt: trimmed,
                 text: self.sourceCode,
                 cursorIndex: self.selectedRange.location,
                 fileURL: self.currentFileURL,
@@ -2475,8 +2476,7 @@ class EditorController: NSObject, ObservableObject {
         
         // Get surrounding lines for context (e.g. 5 lines before/after)
         var surroundingContext = ""
-        if let range = range {
-            let nsText = sourceCode as NSString
+        if range != nil {
             // This is getting complicated to extract efficiently without helper.
             // Let's just use the error line content for now + error message.
             surroundingContext = contextCode

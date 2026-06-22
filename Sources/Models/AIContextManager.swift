@@ -3,18 +3,10 @@ import Foundation
 @MainActor
 class AIContextManager {
     static let shared = AIContextManager()
-    
     private init() {}
     
-    /// Generates a prompt context based on the current file state and cursor position.
-    /// - Parameters:
-    ///   - text: The entire content of the current file.
-    ///   - cursor: The current cursor position (1-indexed line, column).
-    ///   - fileURL: The URL of the current file.
-    ///   - otherFiles: Optional list of other relevant file URLs in the project.
-    /// - Returns: A formatted string containing the system instructions and context.
-    /// Generates a prompt context based on the current file state, cursor position, and project context.
-    func generateContext(text: String, cursorIndex: Int, fileURL: URL?, errors: [TypstError] = []) -> String {
+    // Change to async and require the user's prompt to perform the search
+    func generateContext(userPrompt: String, text: String, cursorIndex: Int, fileURL: URL?, errors: [TypstError] = []) async -> String {
         let settings = AISettingsManager.shared
         
         let safeIndex = min(max(0, cursorIndex), text.count)
@@ -22,47 +14,14 @@ class AIContextManager {
         let prefix = String(text[..<prefixIndex])
         let suffix = String(text[prefixIndex...])
         
-        // 1. System Instructions & Guidelines
         var context = """
         You are an intelligent coding and writing assistant for Typst.
-        Your task is to provide seamless completion for both code and natural language text.
-        
-        TYPST GUIDELINES:
-        - STRICTLY USE TYPST SYNTAX. DO NOT USE MARKDOWN.
-        - Headings use '=' (not '#'). Bold uses '*' (not '**'). Italic uses '_' (not '*').
-        - Math mode uses '$' delimiters: '$ x^2 $'.
-        - Functions start with '#': '#set text(...)', '#let myfunc(...)'.
-        - Content blocks use '[]', code blocks use '{}'.
-        - Labels are defined with '<label>' and referenced with '@label'.
-        - For natural language, maintain the tone and style of the existing text.
-           
-        CRITICAL INSTRUCTIONS:
-        1. Return ONLY the text/code to be inserted at the cursor position.
-        2. Do NOT wrap the code in markdown code blocks (no ```).
-        3. Do NOT provide explanations, comments, or conversational text.
-        4. If completing a word, only provide the suffix.
-        5. If defining a function or block, complete the structure.
+        ... (keep your existing guidelines here) ...
         
         """
         
-        // 2. Error Feedback
-        if !errors.isEmpty {
-            context += "CURRENT COMPILATION ERRORS (Fix these if possible):\n"
-            for error in errors.prefix(3) {
-                context += "- Line \(error.line): \(error.message)\n"
-            }
-            context += "\n"
-        }
-        
-        // 3. Document Symbols (Headings/Labels)
-        let symbols = scanSymbols(in: text)
-        if !symbols.isEmpty {
-            context += "DOCUMENT SYMBOLS (Headings/Labels):\n"
-            for sym in symbols.prefix(10) {
-                context += "- \(sym)\n"
-            }
-            context += "\n"
-        }
+        // Error Feedback and Document Symbols (Keep your existing logic here)
+        // ...
         
         context += """
         Current File: \(fileURL?.lastPathComponent ?? "Untitled.typ")
@@ -72,13 +31,16 @@ class AIContextManager {
         \(prefix)<CURSOR>\(suffix)
         """
         
-        // 4. MCP-style Project Context (Snippets)
-        if settings.includeProjectContext, let currentURL = fileURL {
-            let projectDir = currentURL.deletingLastPathComponent()
-            let snippets = gatherProjectSnippets(around: currentURL, projectDir: projectDir)
-            if !snippets.isEmpty {
-                context += "\n\nRELATED PROJECT SNIPPETS:\n"
-                context += snippets
+        // NEW RAG LOGIC
+        if settings.includeProjectContext {
+            let relevantChunks = await RAGManager.shared.search(query: userPrompt, topK: 3)
+            
+            if !relevantChunks.isEmpty {
+                context += "\n\nRELEVANT PROJECT CONTEXT (from semantic search):\n"
+                for chunk in relevantChunks {
+                    context += "--- File: \(chunk.fileURL.lastPathComponent) ---\n"
+                    context += "\(chunk.text)\n\n"
+                }
             }
         }
         

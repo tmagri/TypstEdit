@@ -60,11 +60,10 @@ struct AISettingsView: View {
             }
             
             if settings.isEnabled {
-                Section(header: Text("AI Provider")) {
+                
+                // MARK: - Chat Provider Setup
+                Section(header: Text("AI Provider (Chat)")) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Provider")
-                            .font(.headline)
-                        
                         Picker("Provider", selection: $settings.provider) {
                             ForEach(AIProvider.allCases) { provider in
                                 Text(provider.rawValue).tag(provider)
@@ -78,20 +77,20 @@ struct AISettingsView: View {
                     if settings.provider == .openAI {
                         SecureField("OpenAI API Key", text: $settings.openAIApiKey)
                             .textContentType(.password)
-                        TextField("Model (e.g. gpt-4o)", text: $settings.model)
+                        TextField("Chat Model (e.g. gpt-4o)", text: $settings.model)
                     } else if settings.provider == .openRouter {
                         SecureField("OpenRouter API Key", text: $settings.openRouterApiKey)
                             .textContentType(.password)
-                        TextField("Model (e.g. anthropic/claude-3-5-sonnet)", text: $settings.model)
+                        TextField("Chat Model (e.g. anthropic/claude-3-5-sonnet)", text: $settings.model)
                     } else if settings.provider == .gemini {
                         SecureField("Gemini API Key", text: $settings.geminiApiKey)
                             .textContentType(.password)
-                        TextField("Model (e.g. gemini-1.5-flash)", text: $settings.model)
+                        TextField("Chat Model (e.g. gemini-1.5-flash)", text: $settings.model)
                     } else {
-                        TextField("Endpoint URL", text: $settings.customEndpoint)
+                        TextField("Chat Endpoint URL", text: $settings.customEndpoint)
                         SecureField("API Key (Optional)", text: $settings.customApiKey)
                             .textContentType(.password)
-                        TextField("Model (e.g. llama3)", text: $settings.model)
+                        TextField("Chat Model (e.g. llama3)", text: $settings.model)
                     }
                     
                     Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
@@ -101,15 +100,37 @@ struct AISettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 
-                Section(header: Text("Context")) {
+                // MARK: - RAG & Embeddings Setup
+                Section(header: Text("Project Context (RAG & Embeddings)")) {
                     Toggle("Include Project Context (MCP)", isOn: $settings.includeProjectContext)
+                    
                     if settings.includeProjectContext {
-                        Text("Includes open files and project structure to improve accuracy.")
+                        Text("Searches your project files to provide highly relevant context.")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        
+                        Divider()
+                        
+                        if settings.provider == .custom {
+                            TextField("Embedding URL", text: $settings.customEmbeddingEndpoint)
+                            TextField("Embedding Model (e.g. nomic-embed-text)", text: $settings.customEmbeddingModel)
+                                .onChange(of: settings.customEmbeddingModel) { _ in
+                                    // TODO: Trigger RAGManager to wipe the vector cache here
+                                }
+                        } else if settings.provider == .openAI {
+                            TextField("Embedding Model", text: $settings.openAIEmbeddingModel)
+                                .onChange(of: settings.openAIEmbeddingModel) { _ in
+                                    // TODO: Trigger RAGManager to wipe the vector cache here
+                                }
+                        } else {
+                            Text("Using Apple Native Embeddings (Fast, Free & On-Device)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
                 
+                // MARK: - Test Connection
                 Section {
                     Button(action: {
                         testConnection()

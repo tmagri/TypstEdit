@@ -32,6 +32,9 @@ class AISettingsManager: ObservableObject {
     @AppStorage("geminiApiKey") var geminiApiKey: String = ""
     @AppStorage("customApiKey") var customApiKey: String = ""
     @AppStorage("customEndpoint") var customEndpoint: String = "http://localhost:11434/v1/chat/completions"
+    @AppStorage("customEmbeddingEndpoint") var customEmbeddingEndpoint: String = "http://localhost:11434/v1/embeddings"
+    @AppStorage("customEmbeddingModel") var customEmbeddingModel: String = "nomic-embed-text"
+    @AppStorage("openAIEmbeddingModel") var openAIEmbeddingModel: String = "text-embedding-3-small"
     @AppStorage("aiModel") var model: String = "gpt-4o"
     @AppStorage("aiForceCodeOutput") var forceCodeOutput: Bool = false
     
