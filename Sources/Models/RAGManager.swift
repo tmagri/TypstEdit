@@ -279,10 +279,12 @@ static let shared = RAGManager()
                         .filter { $0.count > 50 }
                 }
             } else if ext == "json" {
-                if let data = try? Data(contentsOf: fileURL),
+               if let data = try? Data(contentsOf: fileURL),
                    let json = try? JSONSerialization.jsonObject(with: data) {
-                    let flattenedLines = flattenJSON(json)
-                    extractedTextChunks = chunkStrings(flattenedLines, maxChunkSize: 400)
+                    extractedTextChunks = extractSemanticChunks(
+                        from: json, 
+                        fileName: fileURL.lastPathComponent
+                    )
                 }
             }
             
@@ -418,6 +420,57 @@ static let shared = RAGManager()
         }
         
         return result
+    }
+
+// MARK: - Dynamic JSON Parsing
+    
+    /// Crawls any arbitrary JSON structure, accumulating short metadata to enrich large text blocks.
+    private func extractSemanticChunks(from json: Any, path: String = "", parentMetadata: String = "", fileName: String) -> [String] {
+        var chunks: [String] = []
+        
+        if let dict = json as? [String: Any] {
+            var localMetadata = parentMetadata
+            
+            // First pass: Gather local metadata (keys with numbers, bools, or short strings)
+            for (key, value) in dict {
+                if let str = value as? String, str.count < 50 {
+                    localMetadata += "\(key.capitalized): \(str), "
+                } else if let num = value as? NSNumber {
+                    localMetadata += "\(key.capitalized): \(num), "
+                } else if let bool = value as? Bool {
+                    localMetadata += "\(key.capitalized): \(bool), "
+                }
+            }
+            
+            // Second pass: Process long strings and nested objects
+            for (key, value) in dict {
+                let currentPath = path.isEmpty ? key : "\(path) > \(key)"
+                
+                if let str = value as? String, str.count >= 50 {
+                    // This is a main content block! Combine it with the gathered metadata.
+                    let cleanText = str.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                    let chunk = "Source: \(fileName) | Path: \(currentPath)\nContext: \(localMetadata)\nContent: \(cleanText)"
+                    chunks.append(chunk)
+                } else if let nestedDict = value as? [String: Any] {
+                    chunks.append(contentsOf: extractSemanticChunks(from: nestedDict, path: currentPath, parentMetadata: localMetadata, fileName: fileName))
+                } else if let nestedArray = value as? [Any] {
+                    chunks.append(contentsOf: extractSemanticChunks(from: nestedArray, path: currentPath, parentMetadata: localMetadata, fileName: fileName))
+                }
+            }
+        } else if let array = json as? [Any] {
+            // Handle arrays by passing the context down to each item
+            for (index, value) in array.enumerated() {
+                let currentPath = "\(path)[\(index)]"
+                chunks.append(contentsOf: extractSemanticChunks(from: value, path: currentPath, parentMetadata: parentMetadata, fileName: fileName))
+            }
+        } else if let str = json as? String, str.count >= 50 {
+            // Handle raw strings sitting in arrays or at the root
+            let cleanText = str.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            let chunk = "Source: \(fileName) | Path: \(path)\nContext: \(parentMetadata)\nContent: \(cleanText)"
+            chunks.append(chunk)
+        }
+        
+        return chunks
     }
 
     /// Helper to bundle flattened JSON lines into larger semantic chunks
