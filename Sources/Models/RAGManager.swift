@@ -97,7 +97,10 @@ class RAGManager: ObservableObject {
     }
     
     private var dbFileURL: URL? {
-        cacheFolderURL?.appendingPathComponent("project_index.sqlite")
+        if AISettingsManager.shared.cacheEmbeddingsToDisk {
+            return cacheFolderURL?.appendingPathComponent("project_index.sqlite")
+        }
+        return nil
     }
     
     private var activeProvider: EmbeddingProvider {
@@ -128,10 +131,10 @@ class RAGManager: ObservableObject {
     // MARK: - Database Management
     
     private func setupDatabase() {
-        guard let folderURL = cacheFolderURL, let fileURL = dbFileURL else { return }
-        
-        if !FileManager.default.fileExists(atPath: folderURL.path) {
-            try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true, attributes: nil)
+       if let folderURL = cacheFolderURL, AISettingsManager.shared.cacheEmbeddingsToDisk {
+            if !FileManager.default.fileExists(atPath: folderURL.path) {
+                try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true, attributes: nil)
+            }
         }
         
         if db != nil {
@@ -139,7 +142,10 @@ class RAGManager: ObservableObject {
             db = nil
         }
         
-        if sqlite3_open(fileURL.path, &db) != SQLITE_OK {
+        // Use :memory: if dbFileURL is nil
+        let dbPath = dbFileURL?.path ?? ":memory:"
+        
+        if sqlite3_open(dbPath, &db) != SQLITE_OK {
             print("Failed to open vector DB.")
             return
         }
@@ -189,9 +195,13 @@ class RAGManager: ObservableObject {
             sqlite3_close(db)
             db = nil
         }
-        guard let fileURL = dbFileURL, FileManager.default.fileExists(atPath: fileURL.path) else { return }
-        try? FileManager.default.removeItem(at: fileURL)
-        print("Project vector db cleared successfully.")
+        
+        if let fileURL = dbFileURL, FileManager.default.fileExists(atPath: fileURL.path) {
+            try? FileManager.default.removeItem(at: fileURL)
+            print("Project vector db cleared successfully.")
+        } else {
+            print("In-memory vector db cleared successfully.")
+        }
     }
     
     // MARK: - Indexing

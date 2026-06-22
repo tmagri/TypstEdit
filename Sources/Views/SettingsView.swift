@@ -108,6 +108,11 @@ struct AISettingsView: View {
                         Text("Searches your project files to provide highly relevant context.")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                            
+                        Toggle("Cache Embeddings to Disk", isOn: $settings.cacheEmbeddingsToDisk)
+                        Text("If disabled, saves disk space but increases API costs and indexing time by regenerating embeddings on every launch.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                         
                         Divider()
                         

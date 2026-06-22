@@ -37,11 +37,9 @@ class AISettingsManager: ObservableObject {
     @AppStorage("openAIEmbeddingModel") var openAIEmbeddingModel: String = "text-embedding-3-small"
     @AppStorage("aiModel") var model: String = "gpt-4o"
     @AppStorage("aiForceCodeOutput") var forceCodeOutput: Bool = false
-    
-    // Additional settings for context awareness
     @AppStorage("aiMaxContextWindow") var maxContextWindow: Int = 4096
     @AppStorage("aiIncludeProjectContext") var includeProjectContext: Bool = true
-    
+    @AppStorage("aiCacheEmbeddingsToDisk") var cacheEmbeddingsToDisk: Bool = true
     var apiKey: String {
         switch provider {
         case .openAI: return openAIApiKey
