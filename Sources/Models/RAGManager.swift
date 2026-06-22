@@ -3,12 +3,55 @@ import NaturalLanguage
 import Accelerate
 
 // MARK: - Core Data Models
+// MARK: - Core Data Models
 struct DocumentChunk: Codable {
     let fileURL: URL
     let text: String
     let embedding: [Float]
+    
+    enum CodingKeys: String, CodingKey {
+        case fileURL
+        case text
+        case embedding
+    }
+    
+    // Normal initializer used during indexing
+    init(fileURL: URL, text: String, embedding: [Float]) {
+        self.fileURL = fileURL
+        self.text = text
+        self.embedding = embedding
+    }
+    
+    // Custom Decoder: Base64 String -> Raw Bytes -> [Float]
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.fileURL = try container.decode(URL.self, forKey: .fileURL)
+        self.text = try container.decode(String.self, forKey: .text)
+        
+        // Decode the Base64 string back into binary data
+        let data = try container.decode(Data.self, forKey: .embedding)
+        
+        // Safely bind the raw memory bytes back into an array of Floats
+        self.embedding = data.withUnsafeBytes { buffer in
+            Array(buffer.bindMemory(to: Float.self))
+        }
+    }
+    
+    // Custom Encoder: [Float] -> Raw Bytes -> Base64 String
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(fileURL, forKey: .fileURL)
+        try container.encode(text, forKey: .text)
+        
+        // Convert the Float array directly into binary Data
+        let data = embedding.withUnsafeBufferPointer { buffer in
+            Data(buffer: buffer)
+        }
+        
+        // JSONEncoder automatically converts Data into a Base64 string
+        try container.encode(data, forKey: .embedding)
+    }
 }
-
 struct FileIndex: Codable {
     let lastModified: Date
     let chunks: [DocumentChunk]

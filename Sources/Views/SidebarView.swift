@@ -203,20 +203,30 @@ struct SidebarView: View {
                             Spacer()
                             
                             // 👉 Force Rebuild / Cancel Button
+                            // 👉 Smart Resume / Cancel Button
                             Button(action: {
                                 if ragManager.isIndexing {
-                                    // If already running, we can flip the flag to stop the loop
+                                    // Cancel if running
                                     ragManager.isIndexing = false 
                                     ragManager.indexStatus = "Cancelled."
                                 } else if let folder = model.currentFolder {
-                                    Task { await ragManager.indexProject(at: folder, forceReindex: true) }
+                                    // 👉 changed to false so it resumes/updates!
+                                    Task { await ragManager.indexProject(at: folder, forceReindex: false) }
                                 }
                             }) {
                                 Image(systemName: ragManager.isIndexing ? "xmark.circle.fill" : "cpu")
                                     .foregroundColor(ragManager.isIndexing ? .red : themeManager.textColor.opacity(0.6))
                             }
                             .buttonStyle(.plain)
-                            .help(ragManager.isIndexing ? "Cancel Indexing" : "Force Rebuild AI Project Index")
+                            .help(ragManager.isIndexing ? "Cancel Indexing" : "Update AI Index (Resume)")
+                            // 👉 Add a right-click menu for a total wipe
+                            .contextMenu {
+                                Button("Force Rebuild Entire Index") {
+                                    if !ragManager.isIndexing, let folder = model.currentFolder {
+                                        Task { await ragManager.indexProject(at: folder, forceReindex: true) }
+                                    }
+                                }
+                            }
                             
                             Button(action: { model.loadFiles() }) {
                                 Image(systemName: "arrow.clockwise")
