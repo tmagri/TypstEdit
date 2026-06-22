@@ -32,6 +32,11 @@ class FileSystemModel: ObservableObject {
     func loadFiles() {
         guard let folder = currentFolder else { return }
         self.rootNodes = loadDirectory(at: folder)
+        
+        Task(priority: .background) {
+            print("[DEBUG] Triggering RAG Indexer for folder: \(folder.lastPathComponent)")
+            await RAGManager.shared.indexProject(at: folder)
+        }
     }
     
     private func loadDirectory(at url: URL) -> [FileNode] {
