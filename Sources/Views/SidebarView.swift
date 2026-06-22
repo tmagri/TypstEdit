@@ -184,37 +184,76 @@ struct SidebarView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @StateObject private var compiler = TypstCompiler()
     @ObservedObject var editorController: EditorController
-    
+    @ObservedObject private var ragManager = RAGManager.shared
+
     var body: some View {
         VStack(spacing: 0) {
-            // Header
+            // Header & File Tree
             VStack(alignment: .leading, spacing: 0) {
                 if let folderName = model.currentFolder?.lastPathComponent {
-                    HStack {
-                        Text(folderName.uppercased())
-                            .font(.system(size: 11, weight: .bold))
-                            .tracking(1)
-                            .foregroundColor(themeManager.textColor.opacity(0.6))
-                        Spacer()
-                        
-                        Button(action: { model.loadFiles() }) {
-                            Image(systemName: "arrow.clockwise")
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(folderName.uppercased())
+                                .font(.system(size: 11, weight: .bold))
+                                .tracking(1)
                                 .foregroundColor(themeManager.textColor.opacity(0.6))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            
+                            Spacer()
+                            
+                            // 👉 Force Rebuild / Cancel Button
+                            Button(action: {
+                                if ragManager.isIndexing {
+                                    // If already running, we can flip the flag to stop the loop
+                                    ragManager.isIndexing = false 
+                                    ragManager.indexStatus = "Cancelled."
+                                } else if let folder = model.currentFolder {
+                                    Task { await ragManager.indexProject(at: folder, forceReindex: true) }
+                                }
+                            }) {
+                                Image(systemName: ragManager.isIndexing ? "xmark.circle.fill" : "cpu")
+                                    .foregroundColor(ragManager.isIndexing ? .red : themeManager.textColor.opacity(0.6))
+                            }
+                            .buttonStyle(.plain)
+                            .help(ragManager.isIndexing ? "Cancel Indexing" : "Force Rebuild AI Project Index")
+                            
+                            Button(action: { model.loadFiles() }) {
+                                Image(systemName: "arrow.clockwise")
+                                    .foregroundColor(themeManager.textColor.opacity(0.6))
+                            }
+                            .buttonStyle(.plain)
+                            
+                            Button(action: { model.openFolder() }) {
+                                Image(systemName: "folder.badge.plus")
+                                    .foregroundColor(themeManager.textColor.opacity(0.6))
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 16)
+                        .padding(.bottom, ragManager.isIndexing ? 4 : 8)
                         
-                        Button(action: { model.openFolder() }) {
-                            Image(systemName: "folder.badge.plus")
-                                .foregroundColor(themeManager.textColor.opacity(0.6))
+                        if ragManager.isIndexing {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(ragManager.indexStatus)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(themeManager.secondaryTextColor)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                
+                                ProgressView(value: ragManager.indexProgress)
+                                    .progressViewStyle(.linear)
+                                    .controlSize(.mini)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 8)
+                            .transition(.opacity)
                         }
-                        .buttonStyle(.plain)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 16)
-                    .padding(.bottom, 8)
                 }
                 
-                // File Tree
+                // 👉 RESTORED: The actual file list!
                 List(model.rootNodes, children: \.children) { node in
                     SidebarRow(node: node, selectedFile: $selectedFile, editorController: editorController)
                         .environmentObject(model)

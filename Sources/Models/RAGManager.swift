@@ -91,9 +91,12 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
 
 @MainActor
 class RAGManager: ObservableObject {
-    static let shared = RAGManager()
+static let shared = RAGManager()
     
     @Published var isIndexing: Bool = false
+    @Published var indexProgress: Double = 0.0     
+    @Published var indexStatus: String = ""      
+    
     private var projectIndex = ProjectIndex()
     private var currentProjectDir: URL?
     
@@ -173,33 +176,50 @@ class RAGManager: ObservableObject {
         try? FileManager.default.removeItem(at: fileURL)
         print("Project vector cache cleared successfully.")
     }
-        
-
+    
     // MARK: - Indexing
     
     /// Indexes the entire project directory intelligently, including subdirectories
-    func indexProject(at projectDir: URL) async {
+    func indexProject(at projectDir: URL, forceReindex: Bool = false) async {
+        guard !isIndexing else { return } // Prevent duplicate runs
         isIndexing = true
-        defer { isIndexing = false }
+        indexProgress = 0.0
+        indexStatus = "Gathering files..."
+        
+        defer { 
+            isIndexing = false 
+            indexStatus = ""
+            indexProgress = 0.0
+        }
         
         self.currentProjectDir = projectDir
+        
+        // If the user clicked the manual force button, wipe the cache first
+        if forceReindex {
+            clearIndexCache()
+        }
+        
         loadCache() // Reads existing index from project_dir/vectorcaches/
         
         let provider = activeProvider
-        
-        // 1. Gather files synchronously to satisfy Swift Concurrency rules
         let filesToProcess = gatherFiles(in: projectDir)
         var cacheUpdated = false
         
-        // 2. Process them asynchronously
-        for fileURL in filesToProcess {
-            let ext = fileURL.pathExtension.lowercased()
+        let totalFiles = filesToProcess.count
+        guard totalFiles > 0 else { return }
+        
+        for (index, fileURL) in filesToProcess.enumerated() {
+            // 👉 CANCEL CHECK: If the user hit the stop button, break the loop
+            guard isIndexing else { break }
             
-            // Get the file's current modification date
+            // Update UI Progress
+            self.indexProgress = Double(index) / Double(totalFiles)
+            self.indexStatus = "Indexing \(fileURL.lastPathComponent)..."
+            
+            let ext = fileURL.pathExtension.lowercased()
             let attributes = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
             guard let lastModified = attributes?.contentModificationDate else { continue }
             
-            // Use the relative path as the cache key
             let fileKey = fileURL.path.replacingOccurrences(of: projectDir.path + "/", with: "")
             
             // Skip if file hasn't changed since last build
@@ -207,7 +227,6 @@ class RAGManager: ObservableObject {
                 continue
             }
             
-            // --- DATA INGESTION & FLATTENING ---
             var extractedTextChunks: [String] = []
             
             if ext == "typ" || ext == "md" {
@@ -224,31 +243,35 @@ class RAGManager: ObservableObject {
                 }
             }
             
-           // --- EMBEDDING GENERATION ---
             var newChunks: [DocumentChunk] = []
             for textChunk in extractedTextChunks {
                 do {
-                    // Try to get the embedding
                     let vector = try await provider.getEmbedding(for: textChunk)
                     newChunks.append(DocumentChunk(fileURL: fileURL, text: textChunk, embedding: vector))
                 } catch {
-                    // 👉 NEW: Print exactly why Ollama failed
                     print("[RAG Error] Failed to embed chunk in \(fileURL.lastPathComponent): \(error)")
                 }
             }
             
             projectIndex.files[fileKey] = FileIndex(lastModified: lastModified, chunks: newChunks)
             cacheUpdated = true
+            
+            // 👉 INCREMENTAL SAVE: Write to disk immediately after finishing this file!
+            saveCache()
         }
         
-        if cacheUpdated {
-            saveCache() // Writes index and creates directory structure cleanly
-            print("Local project vectorcache updated successfully.")
-        } else {
-            print("Using cached embeddings from local vectorcaches folder.")
+        // Only show completion if it wasn't cancelled
+        if isIndexing {
+            self.indexProgress = 1.0
+            self.indexStatus = "Finishing up..."
+            
+            if cacheUpdated {
+                print("Local project vectorcache updated successfully.")
+            } else {
+                print("Using cached embeddings from local vectorcaches folder.")
+            }
         }
     }
-    
     /// Synchronously crawls the directory to find target files
     private func gatherFiles(in projectDir: URL) -> [URL] {
         let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .isDirectoryKey]
