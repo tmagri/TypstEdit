@@ -40,7 +40,7 @@ struct AIPromptView: View {
                     )
                     .font(.system(.body, design: .monospaced))
                 
-                Toggle("Use Project Context (MCP)", isOn: $controller.useMCPForPrompt)
+                Toggle("Use Semantic Project Search (RAG)", isOn: $controller.useMCPForPrompt)
                     .toggleStyle(.checkbox)
                     .font(.caption)
                     .foregroundColor(.secondary)

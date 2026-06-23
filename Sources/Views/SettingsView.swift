@@ -102,7 +102,7 @@ struct AISettingsView: View {
                 
                 // MARK: - RAG & Embeddings Setup
                 Section(header: Text("Project Context (RAG & Embeddings)")) {
-                    Toggle("Include Project Context (MCP)", isOn: $settings.includeProjectContext)
+                    Toggle("Include Semantic Project Search (RAG)", isOn: $settings.includeProjectContext)
                     
                     if settings.includeProjectContext {
                         Text("Searches your project files to provide highly relevant context.")
