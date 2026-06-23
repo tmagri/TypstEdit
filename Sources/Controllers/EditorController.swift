@@ -2455,17 +2455,24 @@ class EditorController: NSObject, ObservableObject {
                 fileURL: self.currentFileURL,
                 errors: self.errors
             )
-            finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)\n\nOutput only the resulting Typst code."
+            finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)"
         }
         
-        let systemPrompt = "You are an expert Typst and software developer. Generate precise Typst code or content based on the user's request. Output only the content to be inserted, without any conversational filler. STRICTLY USE TYPST SYNTAX. DO NOT USE MARKDOWN (e.g., use '=' for headings, not '#'). If the user asks for a chart or table, provide the full Typst code for it."
+        // NEW: More permissive system prompt tailored for writing and coding
+        let systemPrompt = """
+        You are an expert Typst editor and general writing assistant.
+        Generate the requested content or code based on the user's prompt. 
+        If the user asks for prose, annotations, or text, write the text. If they ask for code, write the code.
+        IMPORTANT: Output ONLY the raw content to be inserted into the document. Do not include conversational filler like "Here is the text:" and do not wrap the response in markdown code blocks unless explicitly requested.
+        """
         
         return try await AICompletionService.shared.fetchCompletion(
             prompt: finalPrompt,
             systemPrompt: systemPrompt,
-            maxTokens: 512
+            maxTokens: 2048 // Increased to allow for longer writing generations
         )
     }
+    
     func requestAIFix(for error: TypstError) {
         // Construct a prompt for the fix
         let range = getRangeForLine(error.line)

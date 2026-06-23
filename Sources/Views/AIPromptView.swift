@@ -4,7 +4,7 @@ struct AIPromptView: View {
     @ObservedObject var controller: EditorController
     @State private var promptText: String = ""
     @State private var generatedResult: String = ""
-    @State private var errorMessage: String? = nil // <-- NEW: Track errors
+    @State private var errorMessage: String? = nil
     @State private var isEditorFocused: Bool = false
     @FocusState private var editorFocus: Bool
     
@@ -75,6 +75,7 @@ struct AIPromptView: View {
                 .transition(.opacity)
             }
             
+
             if let errorMessage = errorMessage {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -89,7 +90,6 @@ struct AIPromptView: View {
                 .cornerRadius(8)
                 .transition(.opacity)
             }
-            // -------------------------
             
             HStack {
                 Button("Cancel") {
@@ -107,9 +107,8 @@ struct AIPromptView: View {
                     Task {
                         await MainActor.run {
                             controller.isAIGenerating = true
-                            errorMessage = nil 
+                            errorMessage = nil // Clear previous errors
                         }
-                        
                         do {
                             let result = try await controller.generateAIContent(from: promptText)
                             await MainActor.run {
@@ -119,7 +118,7 @@ struct AIPromptView: View {
                         } catch {
                             await MainActor.run {
                                 print("AI Error: \(error)")
-                                self.errorMessage = error.localizedDescription
+                                self.errorMessage = error.localizedDescription // Push error to the UI
                                 controller.isAIGenerating = false
                             }
                         }

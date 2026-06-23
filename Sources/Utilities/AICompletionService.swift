@@ -3,14 +3,14 @@ import Foundation
 enum AIError: LocalizedError {
     case invalidURL
     case noData
-    case parsingError
+    case parsingError(String)
     case apiError(String)
     
     var errorDescription: String? {
         switch self {
-        case .invalidURL: return "Invalid URL"
-        case .noData: return "No data received from provider"
-        case .parsingError: return "Failed to parse AI response"
+        case .invalidURL: return "Invalid URL configuration."
+        case .noData: return "No data received from the AI provider."
+        case .parsingError(let details): return "Parsing Error: \(details)"
         case .apiError(let msg): return msg
         }
     }
@@ -107,14 +107,11 @@ class AICompletionService: ObservableObject {
         guard httpResponse.statusCode == 200 else {
             var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
             
-            // Attempt to extract a clean, human-readable error message from the JSON payload
+            // Attempt to extract a clean error message from the standard AI API formats
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                // Standard OpenAI / OpenRouter format
                 if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
                     parsedErrorMsg = msg
-                } 
-                // Gemini format (sometimes wraps errors in an array or different structure)
-                else if let errorArray = json["error"] as? [[String: Any]], let first = errorArray.first, let msg = first["message"] as? String {
+                } else if let errorArray = json["error"] as? [[String: Any]], let first = errorArray.first, let msg = first["message"] as? String {
                     parsedErrorMsg = msg
                 }
             }
@@ -123,10 +120,11 @@ class AICompletionService: ObservableObject {
         }
         
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AIError.parsingError
+            throw AIError.parsingError("Invalid JSON structure returned by provider.")
         }
         
         let rawResult: String
+        
         // Parse Gemini Response
         if isGemini {
             if let candidates = json["candidates"] as? [[String: Any]],
@@ -136,27 +134,45 @@ class AICompletionService: ObservableObject {
                let firstPart = parts.first,
                let text = firstPart["text"] as? String {
                 rawResult = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if let promptFeedback = json["promptFeedback"] as? [String: Any],
+                      let blockReason = promptFeedback["blockReason"] as? String {
+                throw AIError.apiError("Request blocked by safety filters. Reason: \(blockReason)")
             } else {
-                throw AIError.parsingError
+                throw AIError.parsingError("Gemini response missing text. Keys returned: \(json.keys.joined(separator: ", "))")
             }
         } 
-        // Parse OpenAI Response
-        else if let choices = json["choices"] as? [[String: Any]],
-           let firstChoice = choices.first,
-           let message = firstChoice["message"] as? [String: Any],
-           let content = message["content"] as? String {
-            rawResult = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            throw AIError.parsingError
+        // Parse OpenAI / OpenRouter Response
+        else {
+            if let choices = json["choices"] as? [[String: Any]],
+               let firstChoice = choices.first,
+               let message = firstChoice["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                rawResult = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                throw AIError.apiError("API Error: \(msg)")
+            } else {
+                throw AIError.parsingError("OpenAI response missing text. Keys returned: \(json.keys.joined(separator: ", "))")
+            }
         }
         
        var finalResult = rawResult
         if settings.forceCodeOutput {
-            finalResult = extractCode(from: rawResult)
+            let extracted = extractCode(from: rawResult)
+            // Fallback to the raw text if the AI didn't format it as a code block
+            finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? rawResult : extracted
         }
         
-        // Pass the result through our Markdown-to-Typst safety net
-        return sanitizeMarkdownToTypst(finalResult)
+        let sanitizedResult = sanitizeMarkdownToTypst(finalResult)
+        
+        print("RAW AI RESULT: '\(rawResult)'")
+        print("SANITIZED RESULT: '\(sanitizedResult)'")
+
+        // Trap completely empty responses so the UI doesn't silently reset
+        if sanitizedResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw AIError.apiError("The AI processed the request but returned an empty response. Try rephrasing your prompt.")
+        }
+        
+        return sanitizedResult
     }
     
     private func extractCode(from text: String) -> String {
