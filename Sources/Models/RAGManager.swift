@@ -187,6 +187,7 @@ class RAGManager: ObservableObject {
         let initVectorSQL = "SELECT vector_init('chunks', 'embedding', 'type=FLOAT32,dimension=\(provider.dimensions),distance=COSINE');"
         sqlite3_exec(db, initVectorSQL, nil, nil, nil)
         
+        sqlite3_exec(db, "SELECT vector_quantize_preload('chunks', 'embedding');", nil, nil, nil)
         sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nil, nil, nil)
     }
     
@@ -362,6 +363,8 @@ class RAGManager: ObservableObject {
             
             if cacheUpdated {
                 print("Local project vector db updated successfully.")
+                // Build a TurboQuant index to significantly speed up searches
+                sqlite3_exec(db, "SELECT vector_quantize('chunks', 'embedding', 'qtype=TURBO');", nil, nil, nil)
             } else {
                 print("Using cached embeddings from local vectorcaches folder.")
             }
@@ -412,27 +415,38 @@ class RAGManager: ObservableObject {
             let queryVector = try await activeProvider.getEmbedding(for: query)
             let vectorData = queryVector.withUnsafeBufferPointer { Data(buffer: $0) }
             
-            // Note: Since vector_init was called with COSINE distance, we can join with vector_full_scan
-            let searchSQL = """
+             // Use vector_quantize_scan for SIMD-accelerated approximate nearest neighbor search
+            var searchSQL = """
             SELECT c.text, f.path, c.embedding, v.distance 
             FROM chunks AS c 
             JOIN files AS f ON c.file_id = f.id
-            JOIN vector_full_scan('chunks', 'embedding', ?) AS v 
+            JOIN vector_quantize_scan('chunks', 'embedding', ?, ?) AS v 
             ON c.id = v.rowid
-            ORDER BY v.distance ASC
-            LIMIT \(topK);
+            ORDER BY v.distance ASC;
             """
             
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, searchSQL, -1, &stmt, nil) != SQLITE_OK {
-                let err = String(cString: sqlite3_errmsg(db))
-                print("Search query prepare failed: \(err)")
-                return []
+                // Fallback to brute-force full scan if quantization index isn't built yet
+                searchSQL = """
+                SELECT c.text, f.path, c.embedding, v.distance 
+                FROM chunks AS c 
+                JOIN files AS f ON c.file_id = f.id
+                JOIN vector_full_scan('chunks', 'embedding', ?, ?) AS v 
+                ON c.id = v.rowid
+                ORDER BY v.distance ASC;
+                """
+                if sqlite3_prepare_v2(db, searchSQL, -1, &stmt, nil) != SQLITE_OK {
+                    let err = String(cString: sqlite3_errmsg(db))
+                    print("Search query prepare failed: \(err)")
+                    return []
+                }
             }
             
             _ = vectorData.withUnsafeBytes { rawBuffer in
                 sqlite3_bind_blob(stmt, 1, rawBuffer.baseAddress, Int32(rawBuffer.count), nil)
             }
+            sqlite3_bind_int64(stmt, 2, Int64(topK))
             
             var results: [DocumentChunk] = []
             while sqlite3_step(stmt) == SQLITE_ROW {
