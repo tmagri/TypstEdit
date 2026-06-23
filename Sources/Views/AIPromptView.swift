@@ -4,6 +4,7 @@ struct AIPromptView: View {
     @ObservedObject var controller: EditorController
     @State private var promptText: String = ""
     @State private var generatedResult: String = ""
+    @State private var errorMessage: String? = nil // <-- NEW: Track errors
     @State private var isEditorFocused: Bool = false
     @FocusState private var editorFocus: Bool
     
@@ -74,6 +75,22 @@ struct AIPromptView: View {
                 .transition(.opacity)
             }
             
+            if let errorMessage = errorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text(errorMessage)
+                        .font(.caption)
+                        .multilineTextAlignment(.leading)
+                    Spacer()
+                }
+                .foregroundColor(.red)
+                .padding(10)
+                .background(Color.red.opacity(0.1))
+                .cornerRadius(8)
+                .transition(.opacity)
+            }
+            // -------------------------
+            
             HStack {
                 Button("Cancel") {
                     controller.showAIPromptEditor = false
@@ -88,7 +105,11 @@ struct AIPromptView: View {
                 
                 Button(action: {
                     Task {
-                        controller.isAIGenerating = true
+                        await MainActor.run {
+                            controller.isAIGenerating = true
+                            errorMessage = nil 
+                        }
+                        
                         do {
                             let result = try await controller.generateAIContent(from: promptText)
                             await MainActor.run {
@@ -98,6 +119,7 @@ struct AIPromptView: View {
                         } catch {
                             await MainActor.run {
                                 print("AI Error: \(error)")
+                                self.errorMessage = error.localizedDescription
                                 controller.isAIGenerating = false
                             }
                         }
@@ -132,5 +154,3 @@ struct AIPromptView: View {
         }
     }
 }
-
-

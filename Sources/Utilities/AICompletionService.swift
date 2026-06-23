@@ -105,8 +105,21 @@ class AICompletionService: ObservableObject {
         }
         
         guard httpResponse.statusCode == 200 else {
-            let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
-            throw AIError.apiError("Status \(httpResponse.statusCode): \(errorMsg)")
+            var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
+            
+            // Attempt to extract a clean, human-readable error message from the JSON payload
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // Standard OpenAI / OpenRouter format
+                if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                    parsedErrorMsg = msg
+                } 
+                // Gemini format (sometimes wraps errors in an array or different structure)
+                else if let errorArray = json["error"] as? [[String: Any]], let first = errorArray.first, let msg = first["message"] as? String {
+                    parsedErrorMsg = msg
+                }
+            }
+            
+            throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
         }
         
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
