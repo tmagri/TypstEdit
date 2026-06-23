@@ -40,6 +40,7 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiMaxContextWindow") var maxContextWindow: Int = 4096
     @AppStorage("aiIncludeProjectContext") var includeProjectContext: Bool = true
     @AppStorage("aiCacheEmbeddingsToDisk") var cacheEmbeddingsToDisk: Bool = true
+    @AppStorage("aiTimeoutSeconds") var timeoutSeconds: Double = 120.0
     var apiKey: String {
         switch provider {
         case .openAI: return openAIApiKey

@@ -61,7 +61,7 @@ struct AISettingsView: View {
             
             if settings.isEnabled {
                 
-                // MARK: - Chat Provider Setup
+                // Chat Provider Setup
                 Section(header: Text("AI Provider (Chat)")) {
                     VStack(alignment: .leading, spacing: 10) {
                         Picker("Provider", selection: $settings.provider) {
@@ -134,7 +134,22 @@ struct AISettingsView: View {
                         }
                     }
                 }
-                
+                // --- Request Configuration Section ---
+                Section(header: Text("Request Configuration")) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Timeout:")
+                            Slider(value: $settings.timeoutSeconds, in: 5...1200, step: 5)
+                            Text("\(Int(settings.timeoutSeconds))s")
+                                .monospacedDigit()
+                                .frame(width: 35, alignment: .trailing)
+                        }
+                        Text("Maximum time to wait for a response from the AI provider.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 // MARK: - Test Connection
                 Section {
                     Button(action: {

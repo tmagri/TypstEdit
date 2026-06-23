@@ -51,7 +51,7 @@ class AICompletionService: ObservableObject {
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        
+        request.timeoutInterval = settings.timeoutSeconds
         // Gemini API key is in URL query parameter, not header
         if !isGemini {
             request.addValue("Bearer \(settings.apiKey)", forHTTPHeaderField: "Authorization")
