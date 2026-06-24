@@ -243,7 +243,12 @@ struct SidebarView: View {
                         .padding(.horizontal, 16)
                         .padding(.top, 16)
                         .padding(.bottom, ragManager.isIndexing ? 4 : 8)
-                        
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            if let window = NSApp.keyWindow {
+                                window.zoom(nil)
+                            }
+                        }
                         if ragManager.isIndexing {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(ragManager.indexStatus)

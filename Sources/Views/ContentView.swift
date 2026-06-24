@@ -50,11 +50,16 @@ struct ContentView: View {
             
             themeManager.mainBackground.ignoresSafeArea()
             
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    toggleWindowMaximize()
-                }
+            VStack {
+                Color.clear
+                    .frame(height: 60) // Covers the standard macOS toolbar height
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        toggleWindowMaximize()
+                    }
+                Spacer()
+            }
+            .ignoresSafeArea(edges: .top)
             
             mainLayout
             
@@ -186,12 +191,6 @@ struct ContentView: View {
             themeManager.contentOverlay.ignoresSafeArea()
             themeManager.mainBackground.ignoresSafeArea()
             
-             Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    toggleWindowMaximize()
-                }
-            
             let isTypst = editorController.currentFileType == .typst
             
             if isTypst {
@@ -216,6 +215,8 @@ struct ContentView: View {
     private var pdfBox: some View {
         ZStack {
             themeManager.pdfBackground
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { toggleWindowMaximize() }
             PreviewView(
                 url: currentPDFURL,
                 reloadToken: reloadToken,
@@ -237,6 +238,8 @@ struct ContentView: View {
             Text("Select a file").foregroundColor(themeManager.textColor)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { toggleWindowMaximize() }
         .layoutPriority(1)
     }
     
@@ -334,6 +337,8 @@ struct ContentView: View {
                 }
                .padding(.horizontal, 12).padding(.vertical, 4)
                .background(Color(NSColor.controlBackgroundColor))
+               .contentShape(Rectangle()) 
+               .onTapGesture(count: 2) { toggleWindowMaximize() }
                .overlay(Divider(), alignment: .top) 
             }
         }

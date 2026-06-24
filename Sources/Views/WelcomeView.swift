@@ -173,6 +173,12 @@ struct WelcomeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.mainBackground.ignoresSafeArea())
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            if let window = NSApp.keyWindow {
+                window.zoom(nil)
+            }
+        }
         .sheet(isPresented: $showingTemplateSelection) {
             TemplateSelectionView { template in
                 model.createNewProject(template: template)
