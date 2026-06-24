@@ -50,6 +50,12 @@ struct ContentView: View {
             
             themeManager.mainBackground.ignoresSafeArea()
             
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    toggleWindowMaximize()
+                }
+            
             mainLayout
             
             savePopup
@@ -179,6 +185,12 @@ struct ContentView: View {
         ZStack {
             themeManager.contentOverlay.ignoresSafeArea()
             themeManager.mainBackground.ignoresSafeArea()
+            
+             Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    toggleWindowMaximize()
+                }
             
             let isTypst = editorController.currentFileType == .typst
             
@@ -511,6 +523,11 @@ struct ContentView: View {
     }
     
     // MARK: - Helper Methods
+    private func toggleWindowMaximize() {
+        if let window = NSApp.keyWindow {
+            window.zoom(nil)
+        }
+    }
     
     func loadFile(url: URL?) {
         guard let url = url else { return }
