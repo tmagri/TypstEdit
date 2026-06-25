@@ -10,24 +10,35 @@ struct ImageInfo {
 }
 
 struct ImageDetector {
-    /// Finds the range of an #image(...) call surrounding the given index.
+    /// Finds the range of an image call surrounding the given index.
+    /// Supports both Typst `#image(...)` and Markdown `![alt](url)`
     static func findImageRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
-        let pattern = "#image\\s*\\("
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-        
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
-        
-        // Safety check: Clamp index
         let safeIndex = max(0, min(index, nsText.length))
         
-        for match in matches.reversed() {
-            if match.range.location <= safeIndex {
-                // Potential start. Now find the matching closing parenthesis.
-                if let contentRange = findClosingParenthesis(in: text, startingAt: match.range.location + match.range.length) {
-                    let fullRange = NSRange(location: match.range.location, length: contentRange.upperBound - match.range.location)
-                    if NSLocationInRange(safeIndex, fullRange) {
-                        return fullRange
+        // 1. Try Markdown Image `![alt](url)`
+        let mdPattern = #"!\[[^\]]*\]\([^)]+\)"#
+        if let mdRegex = try? NSRegularExpression(pattern: mdPattern, options: []) {
+            let matches = mdRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
+                    return match.range
+                }
+            }
+        }
+        
+        // 2. Try Typst Image `#image(...)`
+        let typstPattern = "#image\\s*\\("
+        if let typstRegex = try? NSRegularExpression(pattern: typstPattern, options: []) {
+            let matches = typstRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches.reversed() {
+                if match.range.location <= safeIndex {
+                    // Potential start. Now find the matching closing parenthesis.
+                    if let contentRange = findClosingParenthesis(in: text, startingAt: match.range.location + match.range.length) {
+                        let fullRange = NSRange(location: match.range.location, length: contentRange.upperBound - match.range.location)
+                        if safeIndex >= fullRange.location && safeIndex <= fullRange.upperBound {
+                            return fullRange
+                        }
                     }
                 }
             }
@@ -40,7 +51,24 @@ struct ImageDetector {
         guard let range = findImageRange(in: text, at: index) else { return nil }
         let fullText = (text as NSString).substring(with: range)
         
-        // Extract content between parentheses
+        // --- Handle Markdown Image ---
+        if fullText.hasPrefix("![") {
+            var path = ""
+            var alt: String? = nil
+            
+            if let bracketStart = fullText.firstIndex(of: "["),
+               let bracketEnd = fullText.firstIndex(of: "]"),
+               let parenStart = fullText.lastIndex(of: "("),
+               let parenEnd = fullText.lastIndex(of: ")") {
+                
+                alt = String(fullText[fullText.index(after: bracketStart)..<bracketEnd])
+                path = String(fullText[fullText.index(after: parenStart)..<parenEnd])
+            }
+            
+            return ImageInfo(range: range, path: path, width: nil, height: nil, alt: alt, fit: nil)
+        }
+        
+        // --- Handle Typst Image ---
         guard let startParen = fullText.firstIndex(of: "("),
               let endParen = fullText.lastIndex(of: ")") else { return nil }
         

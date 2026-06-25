@@ -1,14 +1,18 @@
 import Foundation
 
 struct FormatDetector {
-    /// Finds the range of bold text (*...*) surrounding the index.
+    /// Finds the range of bold text surrounding the index (Typst: *...* | Markdown: **...** or __...__).
     static func findBoldRange(in text: String, at index: Int) -> NSRange? {
+        if let mdRange = findRegexRange(in: text, at: index, pattern: #"(?s)\*\*(.*?)\*\*|__(.*?)__"#) { return mdRange }
         return findSymmetricRange(in: text, at: index, marker: "*")
     }
     
-    /// Finds the range of italic text (_..._) surrounding the index.
+    /// Finds the range of italic text surrounding the index (Typst: _..._ | Markdown: *...*).
     static func findItalicRange(in text: String, at index: Int) -> NSRange? {
-        return findSymmetricRange(in: text, at: index, marker: "_")
+        if let typstRange = findSymmetricRange(in: text, at: index, marker: "_") { return typstRange }
+        // Markdown Italic: matches *text* but strictly ignores **text**
+        if let mdRange = findRegexRange(in: text, at: index, pattern: #"(?s)(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)"#) { return mdRange }
+        return nil
     }
     
     /// Finds the range of underline (#underline[...]) surrounding the index.
@@ -75,19 +79,17 @@ struct FormatDetector {
     /// Detects the heading level (0-6) of the line at the given index.
     static func detectHeadingLevel(in text: String, at index: Int) -> Int {
         let nsText = text as NSString
-        let length = nsText.length
-        let safeIndex = max(0, min(index, length))
+        let safeIndex = max(0, min(index, nsText.length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange)
         
-        // Typst headings start with some number of = followed by whitespace
-        let pattern = #"^(=+)\s"#
+        // Match both Typst (=) and Markdown (#)
+        let pattern = #"^(=+|#+)\s"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return 0 }
         
         if let match = regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.count)) {
-            if let eqRange = Range(match.range(at: 1), in: line) {
-                let eqStr = String(line[eqRange])
-                return min(eqStr.count, 6)
+            if let markerRange = Range(match.range(at: 1), in: line) {
+                return min(String(line[markerRange]).count, 6)
             }
         }
         return 0
@@ -111,11 +113,14 @@ struct FormatDetector {
     /// Detects if the cursor at the given index is on a numerical list line.
     static func isNumberListActive(in text: String, at index: Int) -> Bool {
         let nsText = text as NSString
-        let length = nsText.length
-        let safeIndex = max(0, min(index, length))
+        let safeIndex = max(0, min(index, nsText.length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        return line.hasPrefix("+ ")
+        
+        let mdNumberRegex = try? NSRegularExpression(pattern: #"^\d+\.\s"#)
+        let isMdNumber = mdNumberRegex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
+        
+        return line.hasPrefix("+ ") || isMdNumber
     }
     
     /// Detects if the cursor at the given index is on a description list line.
@@ -128,21 +133,19 @@ struct FormatDetector {
         return line.hasPrefix("/ ")
     }
     
-    /// Finds the range of the heading prefix (e.g., "== ") for the line at the given index.
+    /// Finds the range of the heading prefix (e.g., "== " or "## ") for the line at the given index.
     static func findHeadingRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
-        let length = nsText.length
-        let safeIndex = max(0, min(index, length))
+        let safeIndex = max(0, min(index, nsText.length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange)
         
-        let pattern = #"^(=+)\s"#
+        let pattern = #"^(=+|#+)\s"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
         
         if let match = regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.count)) {
             return NSRange(location: lineRange.location, length: match.range.length)
         }
-        
         return nil
     }
     
@@ -242,21 +245,23 @@ struct FormatDetector {
     }
 
     static func findLinkRange(in text: String, at index: Int) -> NSRange? {
-        let pattern = #"#link\("([^"]+)"\)(?:\[(.*?)\])?"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        let patterns = [
+            #"#link\("([^"]+)"\)(?:\[(.*?)\])?"#, // Typst link
+            #"(?<!!)\[([^\]]+)\]\([^)]+\)"#      // Markdown link (negative lookbehind ensures it's not an image)
+        ]
         
         let nsText = text as NSString
-        let length = nsText.length
-        let safeIndex = max(0, min(index, length))
+        let safeIndex = max(0, min(index, nsText.length))
         
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
-        
-        for match in matches {
-            if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
-                return match.range
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
+                    return match.range
+                }
             }
         }
-        
         return nil
     }
     
@@ -281,7 +286,18 @@ struct FormatDetector {
     }
     
     static func findQuoteRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#quote(?:\s*\([^)]*\))?\s*[\[(]"#)
+        if let typstRange = findBracketedRange(in: text, at: index, prefixPattern: #"#quote(?:\s*\([^)]*\))?\s*[\[(]"#) {
+            return typstRange
+        }
+        
+        // Markdown blockquote
+        let nsText = text as NSString
+        let safeIndex = max(0, min(index, nsText.length))
+        let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
+        if nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces).hasPrefix(">") {
+            return lineRange 
+        }
+        return nil
     }
 
     static func findFootnoteRange(in text: String, at index: Int) -> NSRange? {
@@ -342,11 +358,11 @@ struct FormatDetector {
 
     static func findHorizontalLineRange(in text: String, at index: Int) -> NSRange? {
         let nsText = text as NSString
-        let length = nsText.length
-        let safeIndex = max(0, min(index, length))
+        let safeIndex = max(0, min(index, nsText.length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        if line.contains("#line(length: 100%)") {
+        
+        if line.contains("#line(length: 100%)") || line.hasPrefix("---") || line.hasPrefix("***") || line.hasPrefix("___") {
             return lineRange
         }
         return nil
@@ -696,5 +712,20 @@ struct FormatDetector {
             results.append(current)
         }
         return results
+    }
+
+    private static func findRegexRange(in text: String, at index: Int, pattern: String) -> NSRange? {
+        let nsText = text as NSString
+        let safeIndex = max(0, min(index, nsText.length))
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+        for match in matches {
+            // Check if cursor is inside the matched pattern
+            if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
+                return match.range
+            }
+        }
+        return nil
     }
 }

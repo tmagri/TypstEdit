@@ -331,7 +331,7 @@ struct ContentView: View {
     
     private var toolbarArea: some View {
         Group {
-            if editorController.currentFileType == .typst {
+            if editorController.currentFileType == .typst || editorController.isMarkdownFile{
                 HStack {
                     ToolbarView(controller: editorController).padding(.leading, 44)
                     Spacer()

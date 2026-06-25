@@ -1183,7 +1183,13 @@ class EditorController: NSObject, ObservableObject {
              params.append("fit: \"\(imageFit)\"")
          }
          
-         let snippet = "#image(\(params.joined(separator: ", ")))"
+         let snippet: String
+         if isMarkdownFile {
+             snippet = "![\(imageAlt)](\(finalPath))"
+         } else {
+             let paramsString = params.joined(separator: ", ")
+             snippet = "#image(\(paramsString))"
+         }
         
         if let range = currentImageRange {
              insertText(snippet, replacementRange: range)
@@ -1510,8 +1516,8 @@ class EditorController: NSObject, ObservableObject {
         toggleListPrefix("- ")
     }
     
-    func toggleNumberList() {
-        toggleListPrefix("+ ")
+   func toggleNumberList() {
+        toggleListPrefix(isMarkdownFile ? "1. " : "+ ")
     }
     
     func toggleDescriptionList() {
@@ -1752,7 +1758,6 @@ class EditorController: NSObject, ObservableObject {
     }
     
     // --- Heading Actions ---
-    
     func setHeadingLevel(_ level: Int) {
         let range = selectedRange
         let nsText = sourceCode as NSString
@@ -1762,14 +1767,17 @@ class EditorController: NSObject, ObservableObject {
         let hadTrailingNewline = lineContent.hasSuffix("\n")
         let isSingleLineRepresentation = (lineRange.length > 0)
         
-        // --- Special Case: Single empty line or marker-only line ---
-        let markerOnlyPattern = #"^(=+)\s*$"#
+        let markerChar = isMarkdownFile ? "#" : "="
+        let markerOnlyPattern = isMarkdownFile ? #"^(#+)\s*$"# : #"^(=+)\s*$"#
+        let headingPattern = isMarkdownFile ? #"^(#+)\s"# : #"^(=+)\s"#
+        
         let isMarkerOnly = (lineContent.range(of: markerOnlyPattern, options: .regularExpression) != nil)
         let isEmptyLine = lineContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
         
         if isSingleLineRepresentation && (isEmptyLine || isMarkerOnly) {
             if level > 0 {
-                let prefix = String(repeating: "=", count: level) + " "
+                // ✅ FIXED: Use markerChar instead of "="
+                let prefix = String(repeating: markerChar, count: level) + " "
                 let newText = prefix + (hadTrailingNewline ? "\n" : "")
                 let newCursor = NSRange(location: lineRange.location + prefix.utf16.count, length: 0)
                 insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
@@ -1787,14 +1795,12 @@ class EditorController: NSObject, ObservableObject {
         var lines = lineContent.components(separatedBy: CharacterSet.newlines)
         if hadTrailingNewline { lines.removeLast() }
         
-        let headingPattern = #"^(=+)\s"#
         guard let regex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
         
         var newLines: [String] = []
         
         // Check if we need to remove existing heading markers from ALL lines (if toggle off or changing level)
-        // For simplicity: We strip any leading "= " from all lines, then add new level if > 0
-        
+        // We strip any leading prefix from all lines, then add new level if > 0
         for line in lines {
             // Skip purely blank lines within a selection
             if line.trimmingCharacters(in: CharacterSet.whitespaces).isEmpty {
@@ -1818,7 +1824,7 @@ class EditorController: NSObject, ObservableObject {
             }
             
             if level > 0 {
-                let prefix = String(repeating: "=", count: level) + " "
+                let prefix = String(repeating: markerChar, count: level) + " "
                 newLines.append(prefix + content)
             } else {
                 newLines.append(content)
@@ -2083,13 +2089,20 @@ class EditorController: NSObject, ObservableObject {
         showQuoteEditor = true
     }
     
-    func insertQuote(text: String, attribution: String, isBlock: Bool) {
-        var params: [String] = []
-        if isBlock { params.append("block: true") }
-        if !attribution.isEmpty { params.append("attribution: \"\(attribution)\"") }
+   func insertQuote(text: String, attribution: String, isBlock: Bool) {
+        let snippet: String
         
-        let paramStr = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
-        let snippet = "#quote\(paramStr)[\(text)]"
+        if isMarkdownFile {
+            let quotedText = text.components(separatedBy: .newlines).map { "> \($0)" }.joined(separator: "\n")
+            snippet = attribution.isEmpty ? quotedText : "\(quotedText)\n> — *\(attribution)*"
+        } else {
+            var params: [String] = []
+            if isBlock { params.append("block: true") }
+            if !attribution.isEmpty { params.append("attribution: \"\(attribution)\"") }
+            
+            let paramStr = params.isEmpty ? "" : "(\(params.joined(separator: ", ")))"
+            snippet = "#quote\(paramStr)[\(text)]"
+        }
         
         let rangeToReplace = currentQuoteRange ?? selectedRange
         insertText(snippet, replacementRange: rangeToReplace)
@@ -2137,7 +2150,8 @@ class EditorController: NSObject, ObservableObject {
         if let existingRange = FormatDetector.findHorizontalLineRange(in: sourceCode, at: range.location) {
             insertText("", replacementRange: existingRange)
         } else {
-            insertText("#line(length: 100%)\n", replacementRange: range)
+            let snippet = isMarkdownFile ? "---\n" : "#line(length: 100%)\n"
+            insertText(snippet, replacementRange: range)
         }
         updateFormattingState()
     }
@@ -2460,10 +2474,11 @@ class EditorController: NSObject, ObservableObject {
     
     func insertLink(url: String, text: String) {
         var snippet = ""
-        if text.isEmpty {
-            snippet = "#link(\"\(url)\")"
+        
+        if isMarkdownFile {
+            snippet = text.isEmpty ? "[\(url)](\(url))" : "[\(text)](\(url))"
         } else {
-            snippet = "#link(\"\(url)\")[\(text)]"
+            snippet = text.isEmpty ? "#link(\"\(url)\")" : "#link(\"\(url)\")[\(text)]"
         }
         
         let rangeToReplace = currentLinkRange ?? selectedRange
