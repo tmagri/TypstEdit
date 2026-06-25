@@ -21,6 +21,12 @@ struct FormatDetector {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#highlight(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
     
+    /// Finds the range of a text color block (#text(fill: ...)[...]) surrounding the index.
+    static func findTextColorRange(in text: String, at index: Int) -> NSRange? {
+        // Matches standard colors like "red" or hex colors like "rgb(\"#ff0000\")"
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#text\s*\(\s*fill\s*:\s*(?:[a-zA-Z0-9]+|rgb\([^)]+\))\s*\)\s*[\[(]"#)
+    }
+    
     /// Finds the range of strikethrough (#strike[...]) surrounding the index.
     static func findStrikeRange(in text: String, at index: Int) -> NSRange? {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#strike(?:\s*\([^)]*\))?\s*[\[(]"#)

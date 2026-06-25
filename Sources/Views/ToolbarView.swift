@@ -3,7 +3,9 @@ import SwiftUI
 struct ToolbarView: View {
     @ObservedObject var controller: EditorController
     @State private var availableWidth: CGFloat = 800
-    
+    @State private var showColorPopover = false
+    @State private var customColor: Color = .blue
+
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
@@ -60,19 +62,48 @@ struct ToolbarView: View {
                             ToolbarButton(icon: "pencil.tip", tooltip: "Highlight (Cmd+Shift+H)", isActive: controller.isHighlightActive, action: controller.toggleHighlight)
                             ToolbarButton(icon: "textformat.subscript", tooltip: "Subscript (Cmd+Ctrl+-)", isActive: controller.isSubscriptActive, action: controller.toggleSubscript)
                             ToolbarButton(icon: "textformat.superscript", tooltip: "Superscript (Cmd+Ctrl++)", isActive: controller.isSuperscriptActive, action: controller.toggleSuperscript) 
-                             // Color Picker
-                            Menu {
-                                 Button(action: { controller.applyTextColor("red") }) { Label("Red", systemImage: "circle.fill").foregroundColor(.red) }
-                                 Button(action: { controller.applyTextColor("blue") }) { Label("Blue", systemImage: "circle.fill").foregroundColor(.blue) }
-                                 Button(action: { controller.applyTextColor("green") }) { Label("Green", systemImage: "circle.fill").foregroundColor(.green) }
-                                 Button(action: { controller.applyTextColor("orange") }) { Label("Orange", systemImage: "circle.fill").foregroundColor(.orange) }
-                                 Button(action: { controller.applyTextColor("purple") }) { Label("Purple", systemImage: "circle.fill").foregroundColor(.purple) }
-                                 Button(action: { controller.applyTextColor("black") }) { Label("Black", systemImage: "circle.fill").foregroundColor(.black) }
-                             } label: {
-                                 ToolbarButton(icon: "paintpalette", tooltip: "Text Color", action: {})
-                             }
-                             .menuStyle(.borderlessButton)
-                             .frame(width: 26)
+                            
+                            ToolbarButton(icon: "paintpalette", tooltip: "Text Color", isActive: controller.isTextColorActive) {
+                                showColorPopover.toggle()
+                            }
+                            .popover(isPresented: $showColorPopover) {
+                                VStack(alignment: .leading, spacing: 16) {
+                                    Text("Text Color").font(.headline)
+                                    
+                                    // Quick Presets
+                                    HStack(spacing: 12) {
+                                        ForEach(["red", "yellow", "green", "blue", "orange", "purple", "black"], id: \.self) { colorName in
+                                            Button(action: {
+                                                controller.applyTextColor(colorName)
+                                                showColorPopover = false
+                                            }) {
+                                                Circle()
+                                                    .fill(colorFromName(colorName))
+                                                    .frame(width: 20, height: 20)
+                                                    .overlay(Circle().stroke(Color.primary.opacity(0.2), lineWidth: 1))
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help(colorName.capitalized)
+                                        }
+                                    }
+                                    
+                                    Divider()
+                                    
+                                    // Custom Color Picker
+                                    ColorPicker("Custom Color...", selection: $customColor, supportsOpacity: false)
+                                        .onChange(of: customColor) { newColor in
+                                            if let nsColor = NSColor(newColor).usingColorSpace(.sRGB) {
+                                                let r = Int(round(nsColor.redComponent * 255))
+                                                let g = Int(round(nsColor.greenComponent * 255))
+                                                let b = Int(round(nsColor.blueComponent * 255))
+                                                let hex = String(format: "#%02X%02X%02X", r, g, b)
+                                                controller.applyTextColor("rgb(\"\(hex)\")")
+                                            }
+                                        }
+                                }
+                                .padding()
+                                .frame(width: 240)
+                            }
                         }
                     }
                 }
@@ -140,6 +171,19 @@ struct ToolbarView: View {
             .padding(4)
         }
         .frame(height: 100) // Allow sufficient height for the ribbon
+    }
+
+    private func colorFromName(_ name: String) -> Color {
+        switch name {
+        case "red": return .red
+        case "yellow": return .yellow
+        case "green": return .green
+        case "blue": return .blue
+        case "orange": return .orange
+        case "purple": return .purple
+        case "black": return .black
+        default: return .clear
+        }
     }
 }
 

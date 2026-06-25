@@ -313,6 +313,7 @@ class EditorController: NSObject, ObservableObject {
     @Published var isItalicActive: Bool = false
     @Published var isUnderlineActive: Bool = false
     @Published var isHighlightActive: Bool = false
+    @Published var isTextColorActive: Bool = false
     @Published var isStrikeActive: Bool = false
     @Published var isSubscriptActive: Bool = false
     @Published var isSuperscriptActive: Bool = false
@@ -1647,6 +1648,9 @@ class EditorController: NSObject, ObservableObject {
             self.isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
             self.isHighlightActive = FormatDetector.findHighlightRange(in: text, at: range.location) != nil
             self.isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
+            self.isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
+            self.isTextColorActive = FormatDetector.findTextColorRange(in: text, at: range.location) != nil 
+            self.isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
             self.isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
             self.isLinkActive = FormatDetector.findLinkRange(in: text, at: range.location) != nil
             self.isQuoteActive = FormatDetector.findQuoteRange(in: text, at: range.location) != nil
@@ -2159,8 +2163,28 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func applyTextColor(_ color: String) {
-         // color should be a Typst color string like "red", "blue", "rgb(...)".
-         wrapSelection(prefix: "#text(fill: \(color))[", suffix: "]")
+        let range = selectedRange
+        if let colorRange = FormatDetector.findTextColorRange(in: sourceCode, at: range.location) {
+            // Replace the existing color inside the tag
+            let nsText = sourceCode as NSString
+            let snippet = nsText.substring(with: colorRange)
+            
+            // Regex captures the prefix (group 1) and the suffix (group 2), discarding the old color
+            if let regex = try? NSRegularExpression(pattern: "(#text\\s*\\(\\s*fill\\s*:\\s*)(?:[a-zA-Z0-9]+|rgb\\([^)]+\\))(\\s*\\)\\s*\\[)") {
+                let newSnippet = regex.stringByReplacingMatches(
+                    in: snippet,
+                    range: NSRange(location: 0, length: snippet.utf16.count),
+                    withTemplate: "$1\(color)$2"
+                )
+                insertText(newSnippet, replacementRange: colorRange)
+                showStatus("Changed Text Color")
+            }
+        } else {
+            // Apply new color wrapper
+            wrapSelection(prefix: "#text(fill: \(color))[", suffix: "]")
+            showStatus("Applied Text Color")
+        }
+        updateFormattingState()
     }
     
     // --- Zoom Actions ---
