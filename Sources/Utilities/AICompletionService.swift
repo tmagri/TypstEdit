@@ -222,10 +222,15 @@ class AICompletionService: ObservableObject {
             let img = try NSRegularExpression(pattern: "\\!\\[([^\\]]*)\\]\\(([^\\)]+)\\)")
             processed = img.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#image(\"$2\", alt: \"$1\")")
             
-            // 5. Tables: Markdown -> Typst
+            // 5. Horizontal Rules: ---, ***, or ___ -> #line(length: 100%)
+            // (?m) enables multiline mode, matching exactly 3 or more hyphens/asterisks/underscores on a line
+            let hr = try NSRegularExpression(pattern: "(?m)^[-*_]{3,}\\s*$")
+            processed = hr.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#line(length: 100%)")
+
+            // 6. Tables: Markdown -> Typst
             processed = convertMarkdownTablesToTypst(processed)
 
-            // 6. Equations: Convert LaTeX math to Typst math using our internal Lyx converter
+            // 7. Equations: Convert LaTeX math to Typst math using our internal Lyx converter
             // (?s) allows the dot (.) to match newlines for multiline math blocks
             let mathPatterns = [
                 "(?s)\\$\\$(.+?)\\$\\$",              // $$...$$
