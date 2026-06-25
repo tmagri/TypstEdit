@@ -68,7 +68,20 @@ struct ToolbarView: View {
                             }
                             .popover(isPresented: $showColorPopover) {
                                 VStack(alignment: .leading, spacing: 16) {
-                                    Text("Text Color").font(.headline)
+                                   HStack {
+                                        Text("Text Color").font(.headline)
+                                        Spacer()
+                                        if controller.isTextColorActive {
+                                            Button("Remove") {
+                                                controller.removeTextColor()
+                                                showColorPopover = false
+                                            }
+                                            .font(.caption.weight(.medium))
+                                            .foregroundColor(.red)
+                                            .buttonStyle(.plain)
+                                            .help("Remove custom text color")
+                                        }
+                                    }
                                     
                                     // Quick Presets
                                     HStack(spacing: 12) {

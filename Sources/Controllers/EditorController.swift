@@ -2186,6 +2186,19 @@ class EditorController: NSObject, ObservableObject {
         }
         updateFormattingState()
     }
+
+    func removeTextColor() {
+        let range = selectedRange
+        if let colorRange = FormatDetector.findTextColorRange(in: sourceCode, at: range.location) {
+            // Unwrap the #text(fill: ...)[...] block completely
+            unwrapBracketedFormatting(
+                range: colorRange, 
+                prefixPattern: #"^#text\s*\(\s*fill\s*:\s*(?:[a-zA-Z0-9]+|rgb\([^)]+\))\s*\)\s*[\[(]"#
+            )
+            showStatus("Removed Text Color")
+            updateFormattingState()
+        }
+    }
     
     // --- Zoom Actions ---
     func zoomIn() {
