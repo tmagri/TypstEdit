@@ -197,87 +197,146 @@ class AICompletionService: ObservableObject {
     }
 
     func sanitizeMarkdownToTypst(_ text: String) -> String {
-        var processed = text
+        let processed = NSMutableString(string: text)
         
+        // --- 1. MASK CODE BLOCKS ---
+        // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
+        var codeBlocks: [String] = []
         do {
-            // 1. Headings: "# Heading" -> "= Heading"
-            let h3 = try NSRegularExpression(pattern: "(?m)^###\\s+(.*)$")
-            processed = h3.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "=== $1")
-            
-            let h2 = try NSRegularExpression(pattern: "(?m)^##\\s+(.*)$")
-            processed = h2.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "== $1")
-            
-            let h1 = try NSRegularExpression(pattern: "(?m)^#\\s+(.*)$")
-            processed = h1.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "= $1")
-            
-            // 2. Bold: **text** -> *text*
-            let bold = try NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
-            processed = bold.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "*$1*")
-            
-            // 3. Links: [text](url) -> #link("url")[text]
-            let link = try NSRegularExpression(pattern: "(?<!\\!)\\[([^\\]]+)\\]\\(([^\\)]+)\\)")
-            processed = link.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#link(\"$2\")[$1]")
-            
-            // 4. Images: ![alt](url) -> #image("url", alt: "alt")
-            let img = try NSRegularExpression(pattern: "\\!\\[([^\\]]*)\\]\\(([^\\)]+)\\)")
-            processed = img.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#image(\"$2\", alt: \"$1\")")
-            
-            // 5. Horizontal Rules: ---, ***, or ___ -> #line(length: 100%)
-            // (?m) enables multiline mode, matching exactly 3 or more hyphens/asterisks/underscores on a line
-            let hr = try NSRegularExpression(pattern: "(?m)^[-*_]{3,}\\s*$")
-            processed = hr.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#line(length: 100%)")
-
-            // 6. Tables: Markdown -> Typst
-            processed = convertMarkdownTablesToTypst(processed)
-
-            // 7. Equations: Convert LaTeX math to Typst math using our internal Lyx converter
-            // (?s) allows the dot (.) to match newlines for multiline math blocks
-            let mathPatterns = [
-                "(?s)\\$\\$(.+?)\\$\\$",              // $$...$$
-                "(?<!\\\\)\\$([^\\$]+?)(?<!\\\\)\\$", // $...$
-                "(?s)\\\\\\[(.+?)\\\\\\]",            // \[...\]
-                "(?s)\\\\\\((.+?)\\\\\\)"             // \(...\)
-            ]
-            
-            for pattern in mathPatterns {
-                if let regex = try? NSRegularExpression(pattern: pattern) {
-                    let matches = regex.matches(in: processed, range: NSRange(0..<processed.utf16.count))
-                    
-                    // Iterate in reverse so modifying the string doesn't mess up the ranges of upcoming matches
-                    for match in matches.reversed() {
-                        if let contentRange = Range(match.range(at: 1), in: processed),
-                           let fullRange = Range(match.range, in: processed) {
-                            
-                            let latexMath = String(processed[contentRange])
-                            let typstMath = LyxToTypstConverter.convertLatexMathToTypst(latexMath)
-                            
-                            // Wrap the clean Typst math in the standard Typst $ $ delimiters
-                            processed.replaceSubrange(fullRange, with: "$ \(typstMath) $")
-                        }
-                    }
-                }
+            let codeRegex = try NSRegularExpression(pattern: "(?s)`{3}.*?`{3}|`[^`\\n]*`", options: [])
+            let matches = codeRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
+            for match in matches { codeBlocks.append(processed.substring(with: match.range)) }
+            for (i, match) in matches.enumerated().reversed() {
+                processed.replaceCharacters(in: match.range, with: "@@@CODEBLOCK\(i)@@@")
             }
-            
-        } catch {
-            print("Regex error in sanitization: \(error)")
+        } catch { print("Code block mask regex failed: \(error)") }
+        
+        // --- 2. MASK MATH BLOCKS ---
+        // Protect real equations so we can safely escape currency dollars later
+        var mathBlocks: [String] = []
+        do {
+            // Strict matching: $$...$$ | $...$ (no newlines) | \[...\] | \(...\)
+            let mathPattern = "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)"
+            let mathRegex = try NSRegularExpression(pattern: mathPattern, options: [])
+            let matches = mathRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
+            for match in matches { mathBlocks.append(processed.substring(with: match.range)) }
+            for (i, match) in matches.enumerated().reversed() {
+                processed.replaceCharacters(in: match.range, with: "@@@MATHBLOCK\(i)@@@")
+            }
+        } catch { print("Math block mask regex failed: \(error)") }
+        
+        // Helper to safely apply regex replacements so one failure doesn't crash the pipeline
+        func applyRegex(_ pattern: String, template: String) {
+            do {
+                let regex = try NSRegularExpression(pattern: pattern, options: [])
+                regex.replaceMatches(in: processed, options: [], range: NSRange(location: 0, length: processed.length), withTemplate: template)
+            } catch { print("Regex failed: \(pattern) - \(error)") }
         }
         
-        return processed
+        // 3. Autolinks (Process before HTML tags to prevent crossfire)
+        applyRegex("<(https?://[^>\\s]+)>", template: "#link(\"$1\")")
+        
+        // 4. Escape HTML tags to prevent Typst label parsing crashes
+        applyRegex("(?i)<(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
+        
+        // 5. Escape Markdown footnotes to prevent Typst math errors
+        applyRegex("\\[\\^([^\\]]+)\\]", template: "\\\\[\\\\^$1\\\\]")
+        
+        // 6. Headings (H1 - H6) -> Typst (=)
+        if let headingRegex = try? NSRegularExpression(pattern: "(?m)^(#+)[ \\t]+", options: []) {
+            let headingMatches = headingRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
+            for match in headingMatches.reversed() {
+                let hashCount = match.range(at: 1).length
+                let equals = String(repeating: "=", count: hashCount)
+                processed.replaceCharacters(in: match.range, with: "\(equals) ")
+            }
+        }
+        
+        // 7. Task Lists -> Typst native Checkboxes
+        applyRegex("(?m)^([ \\t]*[-*+])[ \\t]+\\[[xX]\\][ \\t]+", template: "$1 ☑ ")
+        applyRegex("(?m)^([ \\t]*[-*+])[ \\t]+\\[ \\][ \\t]+", template: "$1 ☐ ")
+        
+        // 8. Unordered Lists -> Typst (-)
+        applyRegex("(?m)^([ \\t]*)[*+][ \\t]+", template: "$1- ")
+        
+        // 9. Ordered Lists `1. ` -> Typst auto-numbering (`+ `)
+        applyRegex("(?m)^([ \\t]*)\\d+\\.[ \\t]+", template: "$1+ ")
+        
+        // 10. Strikethrough -> #strike[text]
+        applyRegex("~~(.+?)~~", template: "#strike[$1]")
+        
+        // 11. Bold (Markdown ** or __) -> Typst *
+        applyRegex("\\*\\*(.+?)\\*\\*", template: "*$1*")
+        applyRegex("__(.+?)__", template: "*$1*")
+        
+        // 12. Images (Typst throws a compiler error for web URLs in #image)
+        if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
+            let matches = imgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let altText = processed.substring(with: match.range(at: 1))
+                let urlText = processed.substring(with: match.range(at: 2))
+                
+                let replacement: String
+                if urlText.lowercased().hasPrefix("http") {
+                    // Fallback to a link to prevent Typst from crashing the entire document
+                    let displayAlt = altText.trimmingCharacters(in: .whitespaces).isEmpty ? "Image" : altText
+                    replacement = "#link(\"\(urlText)\")[🖼️ \(displayAlt)]"
+                } else {
+                    replacement = "#image(\"\(urlText)\", alt: \"\(altText)\")"
+                }
+                processed.replaceCharacters(in: match.range, with: replacement)
+            }
+        }
+        
+        // 13. Links (safely ignoring optional hover titles)
+        applyRegex("(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", template: "#link(\"$2\")[$1]")
+        
+        // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
+        applyRegex("(?m)^[-*_]{3,}[ \\t]*$", template: "#line(length: 100%)")
+        
+        // 14. Escape Literal Dollars (Currency)
+        // Since real math equations are safely masked, any remaining `$` is guaranteed to be a literal!
+        applyRegex("(?<!\\\\)\\$", template: "\\\\$")
+        
+        var resultString = processed as String
+        
+        // 15. Tables
+        resultString = convertMarkdownTablesToTypst(resultString)
+        
+        // 16. UNMASK AND CONVERT MATH BLOCKS
+        for (i, block) in mathBlocks.enumerated() {
+            var latexMath = ""
+            if block.hasPrefix("$$") && block.hasSuffix("$$") {
+                latexMath = String(block.dropFirst(2).dropLast(2))
+            } else if block.hasPrefix("$") && block.hasSuffix("$") {
+                latexMath = String(block.dropFirst(1).dropLast(1))
+            } else if block.hasPrefix("\\[") && block.hasSuffix("\\]") {
+                latexMath = String(block.dropFirst(2).dropLast(2))
+            } else if block.hasPrefix("\\(") && block.hasSuffix("\\)") {
+                latexMath = String(block.dropFirst(2).dropLast(2))
+            } else {
+                latexMath = block
+            }
+            let typstMath = LyxToTypstConverter.convertLatexMathToTypst(latexMath)
+            resultString = resultString.replacingOccurrences(of: "@@@MATHBLOCK\(i)@@@", with: "$ \(typstMath) $")
+        }
+        
+        // 17. UNMASK CODE BLOCKS
+        for (i, block) in codeBlocks.enumerated() {
+            resultString = resultString.replacingOccurrences(of: "@@@CODEBLOCK\(i)@@@", with: block)
+        }
+        
+        return resultString
     }
-
-   private func convertMarkdownTablesToTypst(_ text: String) -> String {
-        // Matches a table block: Header row, Separator row, and all lines until a blank line.
-        // This captures the whole block even if inner rows are hard-wrapped without a starting pipe.
-        let pattern = "(?m)^[ \\t]*\\|[^\\n]*\\n[ \\t]*\\|[-:| \\t]*\\|[^\\n]*(?:\\n.*)*?(?=\\n\\s*\\n|\\Z)"
+    
+    private func convertMarkdownTablesToTypst(_ text: String) -> String {
+        // Matches a table block strictly line-by-line starting with pipes to prevent swallowing the rest of the document!
+        let pattern = "(?m)^[ \\t]*\\|[^\\n]*\\n[ \\t]*\\|[-:| \\t]*\\|[^\\n]*(?:\\n[ \\t]*\\|[^\\n]*)*"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
         
         let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
-        
-        // Use NSMutableString to safely replace multiple ranges in large pasted files
-        // (Standard Swift Strings can crash or misalign indices during multiple subrange replacements)
         let processed = NSMutableString(string: text)
         
-        // Process in reverse to avoid invalidating offset ranges
         for match in matches.reversed() {
             let tableText = processed.substring(with: match.range)
             let typstTable = parseSingleMarkdownTable(tableText)
@@ -296,8 +355,6 @@ class AICompletionService: ObservableObject {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             
-            // If the line starts with a pipe, it's a new row.
-            // Otherwise, it's a wrapped continuation of the previous row.
             if trimmed.hasPrefix("|") {
                 lines.append(trimmed)
             } else if !lines.isEmpty {
@@ -344,7 +401,6 @@ class AICompletionService: ObservableObject {
         }
         
         let headerCells = extractCells(from: lines[0])
-        
         let separatorLine = lines[1].replacingOccurrences(of: "-", with: "")
                                     .replacingOccurrences(of: "|", with: "")
                                     .replacingOccurrences(of: ":", with: "")
@@ -367,7 +423,6 @@ class AICompletionService: ObservableObject {
         for i in 2..<lines.count {
             var cells = extractCells(from: lines[i])
             
-            // Pad or trim to strictly match the column count
             while cells.count < columnsCount { cells.append("") }
             cells = Array(cells.prefix(columnsCount))
             

@@ -2285,12 +2285,12 @@ class EditorController: NSObject, ObservableObject {
             }
         }
         
-        // --- 2. Images: ![alt](url) -> #image("url", alt: "alt") ---
-        if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(([^\\)]+)\\)", options: []) {
+        // --- 2. Images: ![alt](url "title") -> #image("url", alt: "alt") ---
+        if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
             if let match = imgRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
                 let nsLine = lineContent as NSString
                 let altText = nsLine.substring(with: match.range(at: 1))
-                let urlText = nsLine.substring(with: match.range(at: 2))
+                let urlText = nsLine.substring(with: match.range(at: 2)) // Group 2 safely ignores the title
                 let replacement = "#image(\"\(urlText)\", alt: \"\(altText)\")"
                 
                 let absoluteRange = NSRange(location: lineRange.location + match.range.location, length: match.range.length)
@@ -2302,12 +2302,12 @@ class EditorController: NSObject, ObservableObject {
             }
         }
         
-        // --- 3. Links: [text](url) -> #link("url")[text] ---
-        if let linkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(([^\\)]+)\\)", options: []) {
+        // --- 3. Links: [text](url "title") -> #link("url")[text] ---
+        if let linkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
             if let match = linkRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
                 let nsLine = lineContent as NSString
                 let linkText = nsLine.substring(with: match.range(at: 1))
-                let urlText = nsLine.substring(with: match.range(at: 2))
+                let urlText = nsLine.substring(with: match.range(at: 2)) // Group 2 safely ignores the title
                 let replacement = "#link(\"\(urlText)\")[\(linkText)]"
                 
                 let absoluteRange = NSRange(location: lineRange.location + match.range.location, length: match.range.length)
