@@ -188,6 +188,7 @@ class EditorController: NSObject, ObservableObject {
     private var scrollMonitor: Any?
     private var findPanelClickMonitor: Any?
     private var findPanelCloseTask: Task<Void, Never>?
+    private var pasteMonitor: Any?
 
     override init() {
         super.init()
@@ -208,6 +209,25 @@ class EditorController: NSObject, ObservableObject {
                 self.adjustZoom(by: delta)
                 
                 return nil // Consume the event so the page doesn't scroll
+            }
+            return event
+        }
+        // Listen for Cmd+V to paste as plain text
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return event }
+            
+            // Check if the keystroke is Cmd+V
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               event.charactersIgnoringModifiers?.lowercased() == "v" {
+                
+                // ONLY intercept if the code editor is actively focused
+                // (We don't want to hijack pastes in the Find panel or Rename alerts)
+                if let textView = self.textViewController?.textView,
+                   NSApp.keyWindow?.firstResponder == textView {
+                    
+                    self.pasteSelection()
+                    return nil // Consume the event so macOS doesn't double-paste
+                }
             }
             return event
         }
@@ -501,6 +521,10 @@ class EditorController: NSObject, ObservableObject {
         currentFileURL?.pathExtension.lowercased() == "typ"
     }
     
+    var isMarkdownFile: Bool {
+        currentFileURL?.pathExtension.lowercased() == "md"
+    }
+    
     func openEquationEditor(at range: NSRange, initialContent: String) {
         currentEquationRange = range
         currentEquationContent = initialContent
@@ -716,7 +740,14 @@ class EditorController: NSObject, ObservableObject {
     func pasteSelection() {
         if let items = NSPasteboard.general.pasteboardItems?.first,
            let text = items.string(forType: .string) {
-            insertText(text)
+            
+            var textToInsert = text
+            
+            if currentFileType == .typst {
+                textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
+            }
+            
+            insertText(textToInsert)
         }
     }
     
@@ -2200,6 +2231,97 @@ class EditorController: NSObject, ObservableObject {
         }
     }
     
+    // MARK: - Live Markdown Auto-Translation
+    
+    /// Detects Markdown syntax on the current line in a `.typ` file and
+    /// auto-replaces it with the equivalent Typst syntax in real-time.
+    /// Detects Markdown syntax on the current line in a `.typ` file and
+    /// auto-replaces it with the equivalent Typst syntax in real-time.
+    func handleMarkdownAutoformat() {
+        // Only auto-translate when editing a Typst file
+        guard currentFileType == .typst else { return }
+        
+        let nsText = sourceCode as NSString
+        let cursorLocation = max(0, min(selectedRange.location, nsText.length))
+        guard cursorLocation <= nsText.length else { return }
+        
+        let lineRange = nsText.lineRange(for: NSRange(location: cursorLocation, length: 0))
+        let lineContent = nsText.substring(with: lineRange)
+        
+        // --- 1. Headings: ^#{1,6}\s -> Typst = equivalents ---
+        // We explicitly capture the space and rewrite it to prevent AppKit from swallowing the keystroke.
+        if let headingRegex = try? NSRegularExpression(pattern: "^(#{1,6})(\\s)", options: []) {
+            let nsLine = lineContent as NSString
+            if let match = headingRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: nsLine.length)) {
+                
+                let hashCount = match.range(at: 1).length
+                let spaceStr = nsLine.substring(with: match.range(at: 2))
+                
+                // Explicitly bundle the space into the replacement
+                let replacementStr = String(repeating: "=", count: hashCount) + spaceStr
+                
+                // Replace the entire sequence (hashes + space)
+                let absoluteRange = NSRange(location: lineRange.location + match.range.location, length: match.range.length)
+                
+                // Snap cursor exactly to the end of the new replacement block
+                let newCursor = NSRange(location: absoluteRange.location + replacementStr.utf16.count, length: 0)
+                
+                insertText(replacementStr, replacementRange: absoluteRange, newCursorRange: newCursor)
+                return
+            }
+        }
+        
+        // --- 2. Images: ![alt](url) -> #image("url", alt: "alt") ---
+        if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(([^\\)]+)\\)", options: []) {
+            if let match = imgRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
+                let nsLine = lineContent as NSString
+                let altText = nsLine.substring(with: match.range(at: 1))
+                let urlText = nsLine.substring(with: match.range(at: 2))
+                let replacement = "#image(\"\(urlText)\", alt: \"\(altText)\")"
+                
+                let absoluteRange = NSRange(location: lineRange.location + match.range.location, length: match.range.length)
+                let lengthDifference = replacement.utf16.count - match.range.length
+                let newCursorLoc = max(absoluteRange.location, cursorLocation + lengthDifference)
+                
+                insertText(replacement, replacementRange: absoluteRange, newCursorRange: NSRange(location: newCursorLoc, length: 0))
+                return
+            }
+        }
+        
+        // --- 3. Links: [text](url) -> #link("url")[text] ---
+        if let linkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(([^\\)]+)\\)", options: []) {
+            if let match = linkRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
+                let nsLine = lineContent as NSString
+                let linkText = nsLine.substring(with: match.range(at: 1))
+                let urlText = nsLine.substring(with: match.range(at: 2))
+                let replacement = "#link(\"\(urlText)\")[\(linkText)]"
+                
+                let absoluteRange = NSRange(location: lineRange.location + match.range.location, length: match.range.length)
+                let lengthDifference = replacement.utf16.count - match.range.length
+                let newCursorLoc = max(absoluteRange.location, cursorLocation + lengthDifference)
+                
+                insertText(replacement, replacementRange: absoluteRange, newCursorRange: NSRange(location: newCursorLoc, length: 0))
+                return
+            }
+        }
+        
+        // --- 4. Bold: **text** -> *text* ---
+        if let boldRegex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*", options: []) {
+            if let match = boldRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
+                let nsLine = lineContent as NSString
+                let innerText = nsLine.substring(with: match.range(at: 1))
+                let replacement = "*\(innerText)*"
+                
+                let absoluteRange = NSRange(location: lineRange.location + match.range.location, length: match.range.length)
+                let lengthDifference = replacement.utf16.count - match.range.length
+                let newCursorLoc = max(absoluteRange.location, cursorLocation + lengthDifference)
+                
+                insertText(replacement, replacementRange: absoluteRange, newCursorRange: NSRange(location: newCursorLoc, length: 0))
+                return
+            }
+        }
+    }
+    
     // --- Zoom Actions ---
     func zoomIn() {
         zoomLevel += 0.1
@@ -2683,6 +2805,9 @@ class SourceEditorBridge: TextViewCoordinator {
             }
             // Aggressively re-apply wrapping settings
             self.controller?.updateTextViewWrapping()
+            
+            // Live Markdown auto-translation (converts MD syntax to Typst in .typ files)
+            self.controller?.handleMarkdownAutoformat()
         }
     }
 

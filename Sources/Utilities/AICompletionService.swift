@@ -196,7 +196,7 @@ class AICompletionService: ObservableObject {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
     }
 
-    private func sanitizeMarkdownToTypst(_ text: String) -> String {
+    func sanitizeMarkdownToTypst(_ text: String) -> String {
         var processed = text
         
         do {
@@ -222,7 +222,10 @@ class AICompletionService: ObservableObject {
             let img = try NSRegularExpression(pattern: "\\!\\[([^\\]]*)\\]\\(([^\\)]+)\\)")
             processed = img.stringByReplacingMatches(in: processed, range: NSRange(0..<processed.utf16.count), withTemplate: "#image(\"$2\", alt: \"$1\")")
             
-            // 5. Equations: Convert LaTeX math to Typst math using our internal Lyx converter
+            // 5. Tables: Markdown -> Typst
+            processed = convertMarkdownTablesToTypst(processed)
+
+            // 6. Equations: Convert LaTeX math to Typst math using our internal Lyx converter
             // (?s) allows the dot (.) to match newlines for multiline math blocks
             let mathPatterns = [
                 "(?s)\\$\\$(.+?)\\$\\$",              // $$...$$
@@ -255,5 +258,120 @@ class AICompletionService: ObservableObject {
         }
         
         return processed
+    }
+
+   private func convertMarkdownTablesToTypst(_ text: String) -> String {
+        // Matches a table block: Header row, Separator row, and all lines until a blank line.
+        // This captures the whole block even if inner rows are hard-wrapped without a starting pipe.
+        let pattern = "(?m)^[ \\t]*\\|[^\\n]*\\n[ \\t]*\\|[-:| \\t]*\\|[^\\n]*(?:\\n.*)*?(?=\\n\\s*\\n|\\Z)"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
+        
+        let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
+        
+        // Use NSMutableString to safely replace multiple ranges in large pasted files
+        // (Standard Swift Strings can crash or misalign indices during multiple subrange replacements)
+        let processed = NSMutableString(string: text)
+        
+        // Process in reverse to avoid invalidating offset ranges
+        for match in matches.reversed() {
+            let tableText = processed.substring(with: match.range)
+            let typstTable = parseSingleMarkdownTable(tableText)
+            processed.replaceCharacters(in: match.range, with: typstTable + "\n")
+        }
+        
+        return processed as String
+    }
+    
+    private func parseSingleMarkdownTable(_ markdown: String) -> String {
+        let rawLines = markdown.components(separatedBy: .newlines)
+        var lines: [String] = []
+        
+        // Safely re-join hard-wrapped lines that belong to the same row
+        for line in rawLines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            
+            // If the line starts with a pipe, it's a new row.
+            // Otherwise, it's a wrapped continuation of the previous row.
+            if trimmed.hasPrefix("|") {
+                lines.append(trimmed)
+            } else if !lines.isEmpty {
+                lines[lines.count - 1] += " " + trimmed
+            } else {
+                lines.append(trimmed)
+            }
+        }
+        
+        guard lines.count >= 2 else { return markdown }
+        
+        func extractCells(from row: String) -> [String] {
+            var rowText = row.trimmingCharacters(in: .whitespaces)
+            if rowText.hasPrefix("|") { rowText.removeFirst() }
+            if rowText.hasSuffix("|") { rowText.removeLast() }
+            
+            var cells: [String] = []
+            var currentCell = ""
+            var isEscaped = false
+            
+            for char in rowText {
+                if isEscaped {
+                    if char == "|" {
+                        currentCell.append(char) // Keep pipe, drop backslash
+                    } else {
+                        currentCell.append("\\")
+                        currentCell.append(char)
+                    }
+                    isEscaped = false
+                } else if char == "\\" {
+                    isEscaped = true
+                } else if char == "|" {
+                    cells.append(currentCell.trimmingCharacters(in: .whitespaces))
+                    currentCell = ""
+                } else {
+                    currentCell.append(char)
+                }
+            }
+            
+            if isEscaped { currentCell.append("\\") }
+            cells.append(currentCell.trimmingCharacters(in: .whitespaces))
+            
+            return cells
+        }
+        
+        let headerCells = extractCells(from: lines[0])
+        
+        let separatorLine = lines[1].replacingOccurrences(of: "-", with: "")
+                                    .replacingOccurrences(of: "|", with: "")
+                                    .replacingOccurrences(of: ":", with: "")
+                                    .replacingOccurrences(of: " ", with: "")
+        
+        guard separatorLine.isEmpty else { return markdown }
+        
+        let columnsCount = headerCells.count
+        var typst = "#table(\n"
+        typst += "  columns: \(columnsCount),\n"
+        
+        // Headers
+        typst += "  table.header(\n"
+        for cell in headerCells {
+            typst += "    [\(cell)],\n"
+        }
+        typst += "  ),\n"
+        
+        // Body rows
+        for i in 2..<lines.count {
+            var cells = extractCells(from: lines[i])
+            
+            // Pad or trim to strictly match the column count
+            while cells.count < columnsCount { cells.append("") }
+            cells = Array(cells.prefix(columnsCount))
+            
+            for cell in cells {
+                typst += "  [\(cell)],\n"
+            }
+        }
+        
+        typst += ")"
+        return typst
     }
 }

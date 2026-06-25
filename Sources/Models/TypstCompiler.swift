@@ -93,8 +93,14 @@ class TypstCompiler: ObservableObject {
         // Write content to shadow file
         do {
             var finalSource = source
+            
+            // If the file is a Markdown (.md) file, convert to Typst before compilation
+            if fileURL.pathExtension.lowercased() == "md" {
+                finalSource = AICompletionService.shared.sanitizeMarkdownToTypst(finalSource)
+            }
+            
             if isDarkMode {
-                finalSource = darkModePreamble + source
+                finalSource = darkModePreamble + finalSource
             }
             try finalSource.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
             

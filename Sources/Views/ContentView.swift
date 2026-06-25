@@ -192,8 +192,9 @@ struct ContentView: View {
             themeManager.mainBackground.ignoresSafeArea()
             
             let isTypst = editorController.currentFileType == .typst
+            let isCompilable = isTypst || editorController.isMarkdownFile
             
-            if isTypst {
+            if isCompilable {
                 if editorController.viewMode == .editorOnly {
                     editorBox.padding(.horizontal, 12)
                 } else if editorController.viewMode == .previewOnly {
@@ -736,7 +737,8 @@ struct ContentView: View {
     
     func scheduleCompilation(with content: String? = nil) {
         let isUnsaved = fileSystem.isNewUnsavedFile && selectedFile == nil
-        guard (selectedFile != nil || isUnsaved), editorController.isTypstFile else {
+        let isCompilable = editorController.isTypstFile || editorController.isMarkdownFile
+        guard (selectedFile != nil || isUnsaved), isCompilable else {
             compiler.cleanUp(); currentPDFURL = nil; return
         }
         
