@@ -201,8 +201,6 @@ class AICompletionService: ObservableObject {
         
         // --- 1. MASK CODE BLOCKS ---
         // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
-        // --- 1. MASK CODE BLOCKS ---
-        // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
         var codeBlocks: [String] = []
         do {
             // Matches any number of opening backticks, lazy content, and the exact same number of closing backticks.
@@ -210,7 +208,8 @@ class AICompletionService: ObservableObject {
             let matches = codeRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
             for match in matches { codeBlocks.append(processed.substring(with: match.range)) }
             for (i, match) in matches.enumerated().reversed() {
-                processed.replaceCharacters(in: match.range, with: "@@@CODEBLOCK\(i)@@@")
+                // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
+                processed.replaceCharacters(in: match.range, with: "MASKEDCODEBLOCK\(i)ENDMASK")
             }
         } catch { print("Code block mask regex failed: \(error)") }
         
@@ -224,7 +223,8 @@ class AICompletionService: ObservableObject {
             let matches = mathRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
             for match in matches { mathBlocks.append(processed.substring(with: match.range)) }
             for (i, match) in matches.enumerated().reversed() {
-                processed.replaceCharacters(in: match.range, with: "@@@MATHBLOCK\(i)@@@")
+                // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
+                processed.replaceCharacters(in: match.range, with: "MASKEDMATHBLOCK\(i)ENDMASK")
             }
         } catch { print("Math block mask regex failed: \(error)") }
         
@@ -290,7 +290,6 @@ class AICompletionService: ObservableObject {
         }
         
         // 6.5 Translate literal documentation space characters (⋅ or ·) to actual spaces
-        // Many Markdown cheatsheets use these to visually represent spaces, which breaks lists
         if let dotRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+", options: []) {
             while let match = dotRegex.firstMatch(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length)) {
                 let matchedString = processed.substring(with: match.range)
@@ -309,7 +308,7 @@ class AICompletionService: ObservableObject {
         // 9. Ordered Lists `1. ` -> Typst auto-numbering (`+ `)
         applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)\\d+\\.[ \\t]+", template: "$1+ ")
 
-        // 9.5 Tables (Process before inline formatting so hard-wrapped rows are re-joined correctly)
+        // 9.5 Tables
         processed.setString(convertMarkdownTablesToTypst(processed as String))
 
         // 10. Strikethrough -> #strike[text]
@@ -319,13 +318,11 @@ class AICompletionService: ObservableObject {
         applyRegex("\\*\\*\\*(.+?)\\*\\*\\*", template: "_*$1*_")
         applyRegex("___(.+?)___", template: "_*$1*_")
         
-        // 10.5 Fix asymmetrical bold markers (e.g. ***text**) often found in README typos
-        // Exclude newlines to prevent matching across horizontal rules and paragraphs
+        // 10.5 Fix asymmetrical bold markers
         applyRegex("(?<!\\*)\\*\\*\\*([^*\\n]+)\\*\\*(?!\\*)", template: "**$1**")
         applyRegex("(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)", template: "**$1**")
         
-        // 10.6 Escape underscores in technical terms/filenames (e.g. NES_OC_*.rbf)
-        // Matches underscores flanked by alphanumerics or followed by a single asterisk (ignoring bold markers)
+        // 10.6 Escape underscores in technical terms/filenames
         applyRegex("(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])", template: "\\\\_")
         applyRegex("_(?=\\\\?\\*(?!\\*))", template: "\\\\_")
         
@@ -341,7 +338,7 @@ class AICompletionService: ObservableObject {
                 let id = processed.substring(with: match.range(at: 1)).lowercased()
                 let url = processed.substring(with: match.range(at: 2))
                 referenceLinks[id] = url
-                processed.replaceCharacters(in: match.range, with: "") // Remove definition from output
+                processed.replaceCharacters(in: match.range, with: "")
             }
         }
         
@@ -351,7 +348,7 @@ class AICompletionService: ObservableObject {
             for match in matches.reversed() {
                 let alt = processed.substring(with: match.range(at: 1))
                 var id = processed.substring(with: match.range(at: 2)).lowercased()
-                if id.isEmpty { id = alt.lowercased() } // Handle empty id e.g. ![alt][]
+                if id.isEmpty { id = alt.lowercased() }
                 
                 if let url = referenceLinks[id] {
                     let replacement = "#image(\"\(url)\", alt: \"\(alt)\")"
@@ -366,7 +363,7 @@ class AICompletionService: ObservableObject {
             for match in matches.reversed() {
                 let text = processed.substring(with: match.range(at: 1))
                 var id = processed.substring(with: match.range(at: 2)).lowercased()
-                if id.isEmpty { id = text.lowercased() } // Handle empty id e.g. [text][]
+                if id.isEmpty { id = text.lowercased() }
                 
                 if let url = referenceLinks[id] {
                     processed.replaceCharacters(in: match.range, with: "#link(\"\(url)\")[\(text)]")
@@ -374,7 +371,7 @@ class AICompletionService: ObservableObject {
             }
         }
 
-        // 13. Inline Images (Typst throws a compiler error for web URLs in #image)
+        // 13. Inline Images
         if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
             let matches = imgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
             for match in matches.reversed() {
@@ -386,37 +383,41 @@ class AICompletionService: ObservableObject {
             }
         }
         
-        // 13.1 Inline Links (safely ignoring optional hover titles)
+        // 13.1 Inline Links
         applyRegex("(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", template: "#link(\"$2\")[$1]")
         
-        // 13.5 Escape Markdown abbreviation definitions to prevent unclosed bold delimiters
+        // 13.5 Escape Markdown abbreviation definitions
         applyRegex("(?m)^\\*\\[([^\\]]+)\\]:", template: "\\\\*[$1]:")
         
         // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
         applyRegex("(?m)^[-*_]{3,}[ \\t]*$", template: "#line(length: 100%)")
         
-       // 14. Escape Literal Dollars (Currency)
-        // Since real math equations are safely masked, any remaining `$` is guaranteed to be a literal!
+        // 14. Escape Literal Dollars (Currency)
         applyRegex("(?<!\\\\)\\$", template: "\\\\$")
         
         // 14b. Common HTML Entities
         applyRegex("(?i)&rarr;", template: "->")
         applyRegex("(?i)&larr;", template: "<-")
                 
-      // 14c. Escape Literal Hash (prevent accidental Typst code evaluation, e.g. in tables)
+        // 14c. Escape Literal Hash
         applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\()", template: "\\\\#")
         
-        // 14e. Escape Stray Backticks (prevent unclosed raw text errors in Typst)
+        // 14e. Escape Stray Backticks
         applyRegex("(?<!\\\\)`", template: "\\\\`")
         
-        // 14f. Un-escape underscores in Typst string parameters (like URLs in #link and #image)
-        if let stringParamRegex = try? NSRegularExpression(pattern: "(#(?:link|image)\\s*\\(\\s*\")([^\"]+)(\")", options: []) {
-            let matches = stringParamRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        // 14g. Escape Literal At-Signs (@)
+        applyRegex("(?<!\\\\)@", template: "\\\\@")
+
+        // 14f. Un-escape characters inside Typst string parameters
+        if let stringRegex = try? NSRegularExpression(pattern: "\"[^\"]*\"", options: []) {
+            let matches = stringRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
             for match in matches.reversed() {
-                let prefix = processed.substring(with: match.range(at: 1))
-                let url = processed.substring(with: match.range(at: 2)).replacingOccurrences(of: "\\\\_", with: "_")
-                let suffix = processed.substring(with: match.range(at: 3))
-                processed.replaceCharacters(in: match.range, with: prefix + url + suffix)
+                let matchedString = processed.substring(with: match.range)
+                let unescaped = matchedString.replacingOccurrences(of: "\\_", with: "_")
+                                             .replacingOccurrences(of: "\\*", with: "*")
+                                             .replacingOccurrences(of: "\\#", with: "#")
+                                             .replacingOccurrences(of: "\\`", with: "`")
+                processed.replaceCharacters(in: match.range, with: unescaped)
             }
         }
         
@@ -437,17 +438,16 @@ class AICompletionService: ObservableObject {
                 latexMath = block
             }
             let typstMath = LyxToTypstConverter.convertLatexMathToTypst(latexMath)
-            resultString = resultString.replacingOccurrences(of: "@@@MATHBLOCK\(i)@@@", with: "$ \(typstMath) $")
+            resultString = resultString.replacingOccurrences(of: "MASKEDMATHBLOCK\(i)ENDMASK", with: "$ \(typstMath) $")
         }
         
         // 17. UNMASK CODE BLOCKS
         for (i, block) in codeBlocks.enumerated() {
-            resultString = resultString.replacingOccurrences(of: "@@@CODEBLOCK\(i)@@@", with: block)
+            resultString = resultString.replacingOccurrences(of: "MASKEDCODEBLOCK\(i)ENDMASK", with: block)
         }
         
         return resultString
     }
-    
     private func convertMarkdownTablesToTypst(_ text: String) -> String {
         // Matches a table block including potential hard-wrapped lines (matches until a blank line)
         let pattern = "(?m)^[ \\t]*\\|[^\\n]*\\n[ \\t]*\\|[-:| \\t]*\\|[^\\n]*(?:\\n(?![ \\t]*$)[^\\n]*)*"
