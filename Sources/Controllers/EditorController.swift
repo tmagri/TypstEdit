@@ -6,6 +6,7 @@ extension Notification.Name {
     static let refreshProjectSidebar = Notification.Name("refreshProjectSidebar")
     static let openProjectAndFile = Notification.Name("openProjectAndFile")
     static let openStandaloneFile = Notification.Name("openStandaloneFile")
+    static let openProjectFolder = Notification.Name("openProjectFolder")
 }
 
 import CodeEditSourceEditor

@@ -394,9 +394,8 @@ class TypstCompiler: ObservableObject {
                 let safeName = ".web_img_\(abs(url.hashValue)).\(ext)"
                 let localURL = root.appendingPathComponent(safeName)
                 
-                if !FileManager.default.fileExists(atPath: localURL.path) {
-                    try? data.write(to: localURL)
-                }
+                // Always write to overwrite any previously corrupted/HTML downloads
+                try? data.write(to: localURL, options: .atomic)
                 
                 processed = processed.replacingOccurrences(of: "\"\(url)\"", with: "\"\(safeName)\"")
             }
@@ -423,7 +422,17 @@ actor WebImageCache {
         let task = Task { () -> (Data, String)? in
             guard let url = URL(string: urlString) else { return nil }
             do {
-                let (data, response) = try await URLSession.shared.data(from: url)
+                var request = URLRequest(url: url)
+                // Masquerade as a standard browser to prevent strict servers (like Wikimedia) from rejecting the request
+                request.addValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", forHTTPHeaderField: "User-Agent")
+                
+                let (data, response) = try await URLSession.shared.data(for: request)
+                
+                // Prevent saving HTML error pages (like 403 Forbidden) as images
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                    print("[ImageCache] HTTP Error \(httpResponse.statusCode) downloading \(urlString)")
+                    return nil
+                }
                 
                 var ext = url.pathExtension.lowercased()
                 if ext.isEmpty { ext = "png" }

@@ -125,6 +125,26 @@ struct ContentView: View {
                 fileSystem.loadFiles()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .openProjectFolder)) { notification in
+            if let url = notification.object as? URL {
+                fileSystem.currentFolder = url
+                fileSystem.isNewUnsavedFile = false
+                fileSystem.loadFiles()
+                editorController.isSidebarVisible = true
+                
+                // Try to open main.typ if it exists, otherwise clear selection
+                let mainFile = url.appendingPathComponent("main.typ")
+                if FileManager.default.fileExists(atPath: mainFile.path) {
+                    self.selectedFile = mainFile
+                    self.loadFile(url: mainFile)
+                } else {
+                    self.selectedFile = nil
+                    self.editorController.currentFileURL = nil
+                    self.editorController.sourceCode = ""
+                    self.currentPDFURL = nil
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
             if let url = notification.object as? URL {
                 self.selectedFile = url

@@ -201,9 +201,12 @@ class AICompletionService: ObservableObject {
         
         // --- 1. MASK CODE BLOCKS ---
         // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
+        // --- 1. MASK CODE BLOCKS ---
+        // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
         var codeBlocks: [String] = []
         do {
-            let codeRegex = try NSRegularExpression(pattern: "(?s)`{3}.*?`{3}|`[^`\\n]*`", options: [])
+            // Matches any number of opening backticks, lazy content, and the exact same number of closing backticks.
+            let codeRegex = try NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)", options: [])
             let matches = codeRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
             for match in matches { codeBlocks.append(processed.substring(with: match.range)) }
             for (i, match) in matches.enumerated().reversed() {
@@ -236,7 +239,39 @@ class AICompletionService: ObservableObject {
         // 3. Autolinks (Process before HTML tags to prevent crossfire)
         applyRegex("<(https?://[^>\\s]+)>", template: "#link(\"$1\")")
         
-        // 4. Escape HTML tags to prevent Typst label parsing crashes
+        // 3.5 Common HTML tags to Typst
+        applyRegex("(?is)\\s*<dt>(.*?)</dt>\\s*", template: "\n/ $1: ")
+        applyRegex("(?is)\\s*<dd>(.*?)</dd>\\s*", template: " $1\n")
+        applyRegex("(?i)\\s*</?dl>\\s*", template: "\n")
+        applyRegex("(?is)<(strong|b)>(.*?)</\\1>", template: "*$2*")
+        applyRegex("(?is)<(em|i)>(.*?)</\\1>", template: "_$2_")
+        applyRegex("(?is)<del>(.*?)</del>", template: "#strike[$1]")
+        applyRegex("(?i)<br\\s*/?>", template: "\\\\")
+        
+        // 3.6 HTML Links and Images
+        applyRegex("(?is)<a\\s+(?:[^>]*?\\s+)?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", template: "#link(\"$1\")[$2]")
+        if let htmlImgRegex = try? NSRegularExpression(pattern: "(?i)<img\\s+([^>]+)>", options: []) {
+            let matches = htmlImgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let attributes = processed.substring(with: match.range(at: 1))
+                var src = ""
+                var alt = ""
+                
+                if let srcMatch = try? NSRegularExpression(pattern: "(?i)src=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
+                    src = (attributes as NSString).substring(with: srcMatch.range(at: 1))
+                }
+                if let altMatch = try? NSRegularExpression(pattern: "(?i)alt=[\"']([^\"']*)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
+                    alt = (attributes as NSString).substring(with: altMatch.range(at: 1))
+                }
+                
+                if !src.isEmpty {
+                    let replacement = alt.isEmpty ? "#image(\"\(src)\")" : "#image(\"\(src)\", alt: \"\(alt)\")"
+                    processed.replaceCharacters(in: match.range, with: replacement)
+                }
+            }
+        }
+
+        // 4. Escape remaining HTML tags to prevent Typst label parsing crashes
         // Swallow optional preceding backslash to prevent double-escaping into an unclosed label
         applyRegex("(?i)\\\\?<(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
         
@@ -251,6 +286,16 @@ class AICompletionService: ObservableObject {
                 let hashCount = match.range(at: 2).length
                 let equals = String(repeating: "=", count: hashCount)
                 processed.replaceCharacters(in: match.range, with: "\(prefix)\(equals) ")
+            }
+        }
+        
+        // 6.5 Translate literal documentation space characters (⋅ or ·) to actual spaces
+        // Many Markdown cheatsheets use these to visually represent spaces, which breaks lists
+        if let dotRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+", options: []) {
+            while let match = dotRegex.firstMatch(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length)) {
+                let matchedString = processed.substring(with: match.range)
+                let replaced = matchedString.replacingOccurrences(of: "⋅", with: " ").replacingOccurrences(of: "·", with: " ")
+                processed.replaceCharacters(in: match.range, with: replaced)
             }
         }
         
@@ -280,9 +325,9 @@ class AICompletionService: ObservableObject {
         applyRegex("(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)", template: "**$1**")
         
         // 10.6 Escape underscores in technical terms/filenames (e.g. NES_OC_*.rbf)
-        // Matches underscores flanked by alphanumerics or followed by an asterisk
+        // Matches underscores flanked by alphanumerics or followed by a single asterisk (ignoring bold markers)
         applyRegex("(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])", template: "\\\\_")
-        applyRegex("_(?=\\\\?\\*)", template: "\\\\_")
+        applyRegex("_(?=\\\\?\\*(?!\\*))", template: "\\\\_")
         
         // 11. Bold (Markdown ** or __) -> Typst *
         applyRegex("\\*\\*(.+?)\\*\\*", template: "*$1*")
@@ -358,8 +403,22 @@ class AICompletionService: ObservableObject {
         applyRegex("(?i)&rarr;", template: "->")
         applyRegex("(?i)&larr;", template: "<-")
                 
-       // 14c. Escape Literal Hash (prevent accidental Typst code evaluation, e.g. in tables)
+      // 14c. Escape Literal Hash (prevent accidental Typst code evaluation, e.g. in tables)
         applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\()", template: "\\\\#")
+        
+        // 14e. Escape Stray Backticks (prevent unclosed raw text errors in Typst)
+        applyRegex("(?<!\\\\)`", template: "\\\\`")
+        
+        // 14f. Un-escape underscores in Typst string parameters (like URLs in #link and #image)
+        if let stringParamRegex = try? NSRegularExpression(pattern: "(#(?:link|image)\\s*\\(\\s*\")([^\"]+)(\")", options: []) {
+            let matches = stringParamRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let prefix = processed.substring(with: match.range(at: 1))
+                let url = processed.substring(with: match.range(at: 2)).replacingOccurrences(of: "\\\\_", with: "_")
+                let suffix = processed.substring(with: match.range(at: 3))
+                processed.replaceCharacters(in: match.range, with: prefix + url + suffix)
+            }
+        }
         
         var resultString = processed as String
         

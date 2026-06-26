@@ -35,7 +35,7 @@ class FileSystemModel: ObservableObject {
         panel.allowsMultipleSelection = false
         
         if panel.runModal() == .OK, let url = panel.url {
-            NotificationCenter.default.post(name: .openStandaloneFile, object: url)
+            NotificationCenter.default.post(name: .openProjectFolder, object: url)
         }
     }
     

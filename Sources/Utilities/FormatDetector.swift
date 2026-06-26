@@ -227,9 +227,8 @@ struct FormatDetector {
         let length = nsText.length
         let safeIndex = max(0, min(index, length))
         
-        // Pattern for triple backticks (multiline) and single backticks (inline)
-        // Order matters: match triple first
-        let patterns = [#"```[\s\S]*?```"#, #"`[^`\n]*?`"#]
+        // Matches any identical sequence of backticks (handles `...`, ``...``, ```...```)
+        let patterns = [#"(?s)(`+).*?(?<!`)\1(?!`)"#]
         
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
