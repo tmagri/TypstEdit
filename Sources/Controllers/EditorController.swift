@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 extension Notification.Name {
     static let refreshProjectSidebar = Notification.Name("refreshProjectSidebar")
     static let openProjectAndFile = Notification.Name("openProjectAndFile")
+    static let openStandaloneFile = Notification.Name("openStandaloneFile")
 }
 
 import CodeEditSourceEditor
@@ -16,13 +17,14 @@ class EditorController: NSObject, ObservableObject {
     enum SupportedFileType {
         case typst
         case text
+        case markdown
         case image
         case pdf
         case other
         
         var isTextual: Bool {
             switch self {
-            case .typst, .text: return true
+            case .typst, .text, .markdown: return true
             default: return false
             }
         }
@@ -445,14 +447,15 @@ class EditorController: NSObject, ObservableObject {
             return EditorTheme.Attribute(color: safeColor(color), bold: bold, italic: italic)
         }
         
-       let bg = isDark ? NSColor(red: 40/255, green: 44/255, blue: 52/255, alpha: 1.0) : NSColor.white
-       let fg = isDark ? NSColor(red: 171/255, green: 178/255, blue: 191/255, alpha: 1.0) : NSColor.black
+        let bg = isDark ? NSColor(red: 40/255, green: 44/255, blue: 52/255, alpha: 1.0) : NSColor.white
+        let fg = isDark ? NSColor(red: 171/255, green: 178/255, blue: 191/255, alpha: 1.0) : NSColor.black
 
         let green = isDark ? NSColor(red: 152/255, green: 195/255, blue: 121/255, alpha: 1.0) : NSColor(red: 24/255, green: 112/255, blue: 51/255, alpha: 1.0)
         let yellow = isDark ? NSColor(red: 229/255, green: 192/255, blue: 123/255, alpha: 1.0) : NSColor(red: 136/255, green: 90/255, blue: 10/255, alpha: 1.0)
         let blue = isDark ? NSColor(red: 97/255, green: 175/255, blue: 239/255, alpha: 1.0) : NSColor(red: 9/255, green: 80/255, blue: 208/255, alpha: 1.0)
         let purple = isDark ? NSColor(red: 198/255, green: 120/255, blue: 221/255, alpha: 1.0) : NSColor(red: 130/255, green: 40/255, blue: 180/255, alpha: 1.0)
         let teal = isDark ? NSColor(red: 86/255, green: 182/255, blue: 194/255, alpha: 1.0) : NSColor(red: 20/255, green: 120/255, blue: 130/255, alpha: 1.0)
+        let orange = isDark ? NSColor(red: 209/255, green: 154/255, blue: 102/255, alpha: 1.0) : NSColor(red: 180/255, green: 90/255, blue: 30/255, alpha: 1.0)
         let gray = isDark ? NSColor(red: 92/255, green: 99/255, blue: 112/255, alpha: 1.0) : NSColor(red: 120/255, green: 120/255, blue: 130/255, alpha: 1.0)
         
         let insertionPoint: NSColor
@@ -462,6 +465,8 @@ class EditorController: NSObject, ObservableObject {
             insertionPoint = fg
         }
         
+        let isMarkdown = isMarkdownFile
+        
         let theme = EditorTheme(
             text: attr(fg),
             insertionPoint: insertionPoint,
@@ -469,21 +474,29 @@ class EditorController: NSObject, ObservableObject {
             background: safeColor(bg),
             lineHighlight: safeColor(isDark ? NSColor.white.withAlphaComponent(0.05) : NSColor.black.withAlphaComponent(0.05)),
             selection: safeColor(NSColor.selectedTextBackgroundColor).withAlphaComponent(0.4),
-            keywords: attr(purple, bold: true),
-            commands: attr(purple),
-            types: attr(blue, bold: true),
-            attributes: attr(purple, italic: true),
-            variables: attr(purple),
+            keywords: attr(isMarkdown ? blue : purple, bold: true),
+            commands: attr(isMarkdown ? teal : purple),
+            types: attr(isMarkdown ? orange : blue, bold: true),
+            attributes: attr(isMarkdown ? green : purple, italic: true),
+            variables: attr(isMarkdown ? yellow : purple),
             values: attr(teal),
             numbers: attr(yellow),
             strings: attr(green),
             characters: attr(green),
-            comments: attr(gray, italic: true)
+            comments: attr(gray, italic: true),
+            markupHeading: attr(blue, bold: true),
+            markupBold: attr(fg, bold: true),
+            markupItalic: attr(fg, italic: true),
+            markupStrikethrough: attr(gray),
+            markupList: attr(orange),
+            markupQuote: attr(green, italic: true),
+            markupLink: attr(teal)
         )
         _customTheme = theme
         _customThemeIsDark = isDark
         return theme
     }
+
     func applyTheme() {
         // Clear the cache to force a recalculation
         _customTheme = nil 
@@ -496,9 +509,10 @@ class EditorController: NSObject, ObservableObject {
     
     @Published var currentFileType: SupportedFileType = .typst
     
-    private func updateFileType() {
+   private func updateFileType() {
         guard let url = currentFileURL else {
             currentFileType = .typst // Default for new unsaved files
+            applyTheme()
             return
         }
         
@@ -506,8 +520,10 @@ class EditorController: NSObject, ObservableObject {
         switch ext {
         case "typ":
             currentFileType = .typst
-        case "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg":
+        case "txt", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg":
             currentFileType = .text
+        case "md":
+            currentFileType = .markdown
         case "png", "jpg", "jpeg", "gif", "tiff", "bmp", "heic", "webp":
             currentFileType = .image
         case "pdf":
@@ -515,14 +531,15 @@ class EditorController: NSObject, ObservableObject {
         default:
             currentFileType = .other
         }
+        applyTheme() // Auto-update the theme if the file type switches natively
     }
-    
+
     var isTypstFile: Bool {
         currentFileURL?.pathExtension.lowercased() == "typ"
     }
     
     var isMarkdownFile: Bool {
-        currentFileURL?.pathExtension.lowercased() == "md"
+        currentFileType == .markdown
     }
     
     func openEquationEditor(at range: NSRange, initialContent: String) {
@@ -1647,12 +1664,6 @@ class EditorController: NSObject, ObservableObject {
         return mirror.children.first!.value
     }
     
-    // --- Commandes d'édition de texte ---
-    
-    // Insère du texte à la position du curseur
-    // Legacy insertText removed (redundant)
-    
-    // Entoure la sélection actuelle avec un préfixe et un suffixe
     func wrapSelection(prefix: String, suffix: String) {
         let range = selectedRange
         print("[EditorController] wrapSelection prefix='\(prefix)' suffix='\(suffix)' at \(range)")
@@ -1881,13 +1892,21 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Formatting Actions ---
     
+   // --- Formatting Actions ---
+    
     func toggleBold() {
         let range = selectedRange
-        if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location) {
-            unwrapFormatting(range: boldRange, prefixLen: 1, suffixLen: 1)
+        if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location),
+           let r = Range(boldRange, in: sourceCode) {
+            let snippet = sourceCode[r]
+            // If it's Markdown (** or __), unwrap 2 characters; otherwise 1 for Typst (*)
+            let prefixLen = (snippet.hasPrefix("**") || snippet.hasPrefix("__")) ? 2 : 1
+            
+            unwrapFormatting(range: boldRange, prefixLen: prefixLen, suffixLen: prefixLen)
             showStatus("Removed Bold")
         } else {
-            wrapSelection(prefix: "*", suffix: "*")
+            let marker = isMarkdownFile ? "**" : "*"
+            wrapSelection(prefix: marker, suffix: marker)
             showStatus("Applied Bold")
         }
         updateFormattingState()
@@ -1895,11 +1914,16 @@ class EditorController: NSObject, ObservableObject {
     
     func toggleItalic() {
         let range = selectedRange
-        if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location) {
-            unwrapFormatting(range: italicRange, prefixLen: 1, suffixLen: 1)
+        if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location),
+           let r = Range(italicRange, in: sourceCode) {
+            let snippet = sourceCode[r]
+            let prefixLen = 1 // Both Markdown (*) and Typst (_) use 1 character
+            
+            unwrapFormatting(range: italicRange, prefixLen: prefixLen, suffixLen: prefixLen)
             showStatus("Removed Italic")
         } else {
-            wrapSelection(prefix: "_", suffix: "_")
+            let marker = isMarkdownFile ? "*" : "_"
+            wrapSelection(prefix: marker, suffix: marker)
             showStatus("Applied Italic")
         }
         updateFormattingState()
@@ -1927,10 +1951,32 @@ class EditorController: NSObject, ObservableObject {
     
     func toggleStrike() {
         let range = selectedRange
+        
+        // 1. Check for Markdown Strike (~~)
+        if isMarkdownFile {
+            let nsText = sourceCode as NSString
+            let safeIndex = max(0, min(range.location, nsText.length))
+            if let regex = try? NSRegularExpression(pattern: #"(?s)~~(.*?)~~"#, options: []),
+               let match = regex.matches(in: sourceCode, options: [], range: NSRange(location: 0, length: nsText.length)).first(where: { safeIndex >= $0.range.location && safeIndex <= $0.range.upperBound }) {
+                
+                unwrapFormatting(range: match.range, prefixLen: 2, suffixLen: 2)
+                showStatus("Removed Strikethrough")
+                updateFormattingState()
+                return
+            }
+        }
+        
+        // 2. Check for Typst Strike (#strike[...])
         if let strikeRange = FormatDetector.findStrikeRange(in: sourceCode, at: range.location) {
             unwrapBracketedFormatting(range: strikeRange, prefixPattern: #"^#strike\s*[\[\(]"#)
+            showStatus("Removed Strikethrough")
         } else {
-            wrapSelection(prefix: "#strike[", suffix: "]")
+            if isMarkdownFile {
+                wrapSelection(prefix: "~~", suffix: "~~")
+            } else {
+                wrapSelection(prefix: "#strike[", suffix: "]")
+            }
+            showStatus("Applied Strikethrough")
         }
         updateFormattingState()
     }
@@ -2247,8 +2293,6 @@ class EditorController: NSObject, ObservableObject {
     
     // MARK: - Live Markdown Auto-Translation
     
-    /// Detects Markdown syntax on the current line in a `.typ` file and
-    /// auto-replaces it with the equivalent Typst syntax in real-time.
     /// Detects Markdown syntax on the current line in a `.typ` file and
     /// auto-replaces it with the equivalent Typst syntax in real-time.
     func handleMarkdownAutoformat() {

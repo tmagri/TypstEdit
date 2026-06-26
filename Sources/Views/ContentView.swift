@@ -77,6 +77,43 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
             if let command = notification.object as? String { handleMenuCommand(command) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .openStandaloneFile)) { notification in
+            if let url = notification.object as? URL {
+                self.selectedFile = url
+                self.loadFile(url: url)
+                fileSystem.currentFolder = nil // Ensures it stays in standalone mode
+                fileSystem.rootNodes = []
+                editorController.isSidebarVisible = false
+            }
+        }
+        .onOpenURL { url in
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                if isDirectory.boolValue {
+                    // 1. If it's a folder, open as a project
+                    fileSystem.currentFolder = url
+                    fileSystem.isNewUnsavedFile = false
+                    fileSystem.loadFiles()
+                    editorController.isSidebarVisible = true
+                    
+                } else if url.pathExtension.lowercased() == "typ" {
+                    // 2. If it's a Typst file, open its parent folder as a project AND open the file
+                    let folder = url.deletingLastPathComponent()
+                    fileSystem.currentFolder = folder
+                    fileSystem.isNewUnsavedFile = false
+                    fileSystem.loadFiles()
+                    
+                    self.selectedFile = url
+                    self.loadFile(url: url)
+                    
+                    editorController.isSidebarVisible = true
+                    
+                } else {
+                    // 3. If it's a Markdown file (or anything else), force standalone mode
+                    NotificationCenter.default.post(name: .openStandaloneFile, object: url)
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
             if let url = notification.object as? URL {
                 self.selectedFile = url
@@ -144,7 +181,7 @@ struct ContentView: View {
     
     private var mainLayout: some View {
         Group {
-            if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile {
+           if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile && selectedFile == nil {
                 WelcomeView(model: fileSystem, onOpen: { url in
                     self.selectedFile = url
                     self.loadFile(url: url) // Load immediately
@@ -326,9 +363,7 @@ struct ContentView: View {
         }
     }
     
-    // Custom search bar removed in favor of native panel
-
-    
+    // Custom search bar removed in favor of native panel    
     private var toolbarArea: some View {
         Group {
             if editorController.currentFileType == .typst || editorController.isMarkdownFile{
@@ -344,13 +379,14 @@ struct ContentView: View {
             }
         }
     }
-    
+
     private var editorContent: some View {
         Group {
-            if editorController.currentFileType == .typst || editorController.currentFileType == .text {
+            if editorController.currentFileType.isTextual {
                 SourceEditor(
                     $editorController.sourceCode,
-                    language: .typst,
+                    // Revert this back to .typst so we bypass the broken Markdown AST
+                    language: .typst, 
                     configuration: editorController.editorConfiguration,
                     state: $editorController.editorState,
                     coordinators: [editorController.sourceEditorBridge],
@@ -365,7 +401,6 @@ struct ContentView: View {
             }
         }
     }
-
     private var editorBox: some View {
         ZStack {
             themeManager.editorBackground
@@ -776,7 +811,8 @@ struct ContentView: View {
     func handleMenuCommand(_ command: String) {
         switch command {
         case "newFile": fileSystem.createNewFile()
-        case "uploadFile": fileSystem.importFile()
+        case "openFile": fileSystem.openFile()
+        case "openFolder": fileSystem.openFolder()
         case "importLyx": editorController.importLyx()
         case "renameFile": if let url = selectedFile { self.renameTargetURL = url; self.newFileName = url.lastPathComponent; self.showRenameAlert = true }
         case "quickExportPDF": if let url = selectedFile { exportPDF(from: url) }

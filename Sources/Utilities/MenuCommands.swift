@@ -13,10 +13,15 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
             
-            Button("Upload File...") {
-                NotificationCenter.default.post(name: .menuCommand, object: "uploadFile")
+            Button("Open File...") {
+                NotificationCenter.default.post(name: .menuCommand, object: "openFile")
             }
             .keyboardShortcut("o", modifiers: .command)
+            
+            Button("Open Folder...") {
+                NotificationCenter.default.post(name: .menuCommand, object: "openFolder")
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
             
             Button("Import LyX File...") {
                 NotificationCenter.default.post(name: .menuCommand, object: "importLyx")

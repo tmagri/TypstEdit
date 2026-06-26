@@ -16,16 +16,26 @@ class FileSystemModel: ObservableObject {
     @Published var expandedFolders: Set<URL> = []
     @Published var isNewUnsavedFile: Bool = false
     
+    // ADD THIS METHOD:
+    func openFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            NotificationCenter.default.post(name: .openStandaloneFile, object: url)
+        }
+    }
+    
     func openFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         
-        if panel.runModal() == .OK {
-            self.currentFolder = panel.url
-            self.isNewUnsavedFile = false
-            loadFiles()
+        if panel.runModal() == .OK, let url = panel.url {
+            NotificationCenter.default.post(name: .openStandaloneFile, object: url)
         }
     }
     

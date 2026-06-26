@@ -57,66 +57,90 @@ struct WelcomeView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
                 
-                HStack(spacing: 20) {
-                    Button(action: { model.createNewFile() }) {
-                        VStack {
-                            Image(systemName: "doc.badge.plus")
-                                .font(.system(size: 24))
-                                .padding(.bottom, 5)
-                                .foregroundColor(.blue)
-                            Text("New File")
-                                .font(.headline)
-                                .foregroundColor(themeManager.textColor)
+                VStack(spacing: 20) {
+                    HStack(spacing: 20) {
+                        Button(action: { model.createNewFile() }) {
+                            VStack {
+                                Image(systemName: "doc.badge.plus")
+                                    .font(.system(size: 24))
+                                    .padding(.bottom, 5)
+                                    .foregroundColor(.blue)
+                                Text("New File")
+                                    .font(.headline)
+                                    .foregroundColor(themeManager.textColor)
+                            }
+                            .frame(width: 140, height: 100)
+                            .background(Color.primary.opacity(0.1))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                            )
                         }
-                        .frame(width: 140, height: 100)
-                        .background(Color.primary.opacity(0.1))
-                        .cornerRadius(12)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.primary.opacity(0.2), lineWidth: 1)
-                        )
+                        .buttonStyle(.plain)
+                        
+                        Button(action: { showingTemplateSelection = true }) {
+                            VStack {
+                                Image(systemName: "plus.square.fill")
+                                    .font(.system(size: 24))
+                                    .padding(.bottom, 5)
+                                    .foregroundColor(.blue)
+                                Text("New Project")
+                                    .font(.headline)
+                                    .foregroundColor(themeManager.textColor)
+                            }
+                            .frame(width: 140, height: 100)
+                            .background(Color.primary.opacity(0.1))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                     
-                    Button(action: { showingTemplateSelection = true }) {
-                        VStack {
-                            Image(systemName: "plus.square.fill")
-                                .font(.system(size: 24))
-                                .padding(.bottom, 5)
-                                .foregroundColor(.blue)
-                            Text("New Project")
-                                .font(.headline)
-                                .foregroundColor(themeManager.textColor)
+                    HStack(spacing: 20) {
+                        Button(action: { model.openFile() }) {
+                            VStack {
+                                Image(systemName: "doc")
+                                    .font(.system(size: 24))
+                                    .padding(.bottom, 5)
+                                    .foregroundColor(.blue)
+                                Text("Open File")
+                                    .font(.headline)
+                                    .foregroundColor(themeManager.textColor)
+                            }
+                            .frame(width: 140, height: 100)
+                            .background(Color.primary.opacity(0.1))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                            )
                         }
-                        .frame(width: 140, height: 100)
-                        .background(Color.primary.opacity(0.1))
-                        .cornerRadius(12)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.primary.opacity(0.2), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: { model.openFolder() }) {
-                        VStack {
-                            Image(systemName: "folder.fill")
-                                .font(.system(size: 24))
-                                .padding(.bottom, 5)
-                                .foregroundColor(.blue)
-                            Text("Open Project")
-                                .font(.headline)
-                                .foregroundColor(themeManager.textColor)
+                        .buttonStyle(.plain)
+                        
+                        Button(action: { model.openFolder() }) {
+                            VStack {
+                                Image(systemName: "folder.fill")
+                                    .font(.system(size: 24))
+                                    .padding(.bottom, 5)
+                                    .foregroundColor(.blue)
+                                Text("Open Project")
+                                    .font(.headline)
+                                    .foregroundColor(themeManager.textColor)
+                            }
+                            .frame(width: 140, height: 100)
+                            .background(Color.primary.opacity(0.1))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                            )
                         }
-                        .frame(width: 140, height: 100)
-                        .background(Color.primary.opacity(0.1))
-                        .cornerRadius(12)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.primary.opacity(0.2), lineWidth: 1)
-                        )
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
                 .padding(.top, 20)
                 

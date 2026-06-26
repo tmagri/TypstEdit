@@ -41,6 +41,13 @@ public struct EditorTheme: Equatable {
     public var strings: Attribute
     public var characters: Attribute
     public var comments: Attribute
+    public var markupHeading: Attribute
+    public var markupBold: Attribute
+    public var markupItalic: Attribute
+    public var markupStrikethrough: Attribute
+    public var markupList: Attribute
+    public var markupQuote: Attribute
+    public var markupLink: Attribute
 
     public init(
         text: Attribute,
@@ -58,7 +65,14 @@ public struct EditorTheme: Equatable {
         numbers: Attribute,
         strings: Attribute,
         characters: Attribute,
-        comments: Attribute
+        comments: Attribute,
+        markupHeading: Attribute = .init(color: .textColor, bold: true),
+        markupBold: Attribute = .init(color: .textColor, bold: true),
+        markupItalic: Attribute = .init(color: .textColor, italic: true),
+        markupStrikethrough: Attribute = .init(color: .textColor),
+        markupList: Attribute = .init(color: .textColor),
+        markupQuote: Attribute = .init(color: .textColor, italic: true),
+        markupLink: Attribute = .init(color: .linkColor)
     ) {
         self.text = text
         self.insertionPoint = insertionPoint
@@ -76,6 +90,13 @@ public struct EditorTheme: Equatable {
         self.strings = strings
         self.characters = characters
         self.comments = comments
+        self.markupHeading = markupHeading
+        self.markupBold = markupBold
+        self.markupItalic = markupItalic
+        self.markupStrikethrough = markupStrikethrough
+        self.markupList = markupList
+        self.markupQuote = markupQuote
+        self.markupLink = markupLink
     }
 
     /// Maps a capture type to the attributes for that capture determined by the theme.
