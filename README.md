@@ -31,6 +31,7 @@
 * **📝 Rich Text Formatting:** Support for bold, italic, underline, strikethrough, highlight, subscript, and superscript.
 * **📋 List Support:** Bullet lists, numbered lists, and **description lists** with one-click insertion.
 * **💬 Code Blocks & Quotes:** Inline code, code blocks, and block quotes with syntax support.
+* **🔄 Markdown Auto-Conversion:** Paste Markdown directly into your `.typ` files and it will automatically convert to native Typst syntax! *(Note: Highly complex Markdown syntax may occasionally fail to convert perfectly, so please review and correct the output after pasting).*
 
 ### Visual Editors
 * **🧮 Visual Equation Editor:** Interactive equation editor with live LaTeX preview for mathematical expressions.
