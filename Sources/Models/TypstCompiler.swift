@@ -102,6 +102,10 @@ class TypstCompiler: ObservableObject {
             if isDarkMode {
                 finalSource = darkModePreamble + finalSource
             }
+            
+            // Download web images and inject local paths before saving
+            finalSource = await resolveWebImages(in: finalSource, projectRoot: projectRoot)
+            
             try finalSource.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
             
             // Clear errors on new content update
@@ -311,8 +315,11 @@ class TypstCompiler: ObservableObject {
         let sourceURL = tempDir.appendingPathComponent("\(tempID).typ")
         let pdfURL = tempDir.appendingPathComponent("\(tempID).pdf")
         
+        var finalContent = content
+        finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
+        
         do {
-            try content.write(to: sourceURL, atomically: true, encoding: .utf8)
+            try finalContent.write(to: sourceURL, atomically: true, encoding: .utf8)
         } catch {
             return (false, nil, "Failed to write temp source: \(error.localizedDescription)")
         }
@@ -350,11 +357,112 @@ class TypstCompiler: ObservableObject {
             return (false, nil, error.localizedDescription)
         }
     }
+
+    // MARK: - Web Image Resolver
+    
+    private func resolveWebImages(in text: String, projectRoot: URL?) async -> String {
+        let pattern = #"#image\(\s*"([^"]*)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
+        
+        let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
+        var urlsToFetch: Set<String> = []
+        
+        let nsText = text as NSString
+        for match in matches {
+            let url = nsText.substring(with: match.range(at: 1))
+            if url.lowercased().hasPrefix("http") {
+                urlsToFetch.insert(url)
+            }
+        }
+        
+        guard !urlsToFetch.isEmpty, let root = projectRoot else { return text }
+        
+        // Fetch missing images concurrently
+        await withTaskGroup(of: Void.self) { group in
+            for url in urlsToFetch {
+                group.addTask {
+                    _ = await WebImageCache.shared.download(urlString: url)
+                }
+            }
+        }
+        
+        // Replace web URLs with our cached local temp paths
+        var processed = text
+        for url in urlsToFetch {
+            if let (data, ext) = await WebImageCache.shared.download(urlString: url) {
+                // Keep the file hidden from the Finder/Sidebar but accessible to Typst
+                let safeName = ".web_img_\(abs(url.hashValue)).\(ext)"
+                let localURL = root.appendingPathComponent(safeName)
+                
+                if !FileManager.default.fileExists(atPath: localURL.path) {
+                    try? data.write(to: localURL)
+                }
+                
+                processed = processed.replacingOccurrences(of: "\"\(url)\"", with: "\"\(safeName)\"")
+            }
+        }
+        
+        return processed
+    }
+} // End of TypstCompiler class
+
+// MARK: - Web Image Caching Actor
+actor WebImageCache {
+    static let shared = WebImageCache()
+    private var cache: [String: (Data, String)] = [:]
+    private var activeDownloads: [String: Task<(Data, String)?, Never>] = [:]
+
+    func download(urlString: String) async -> (Data, String)? {
+        if let cached = cache[urlString] { return cached }
+        
+        // If we are already downloading this image, wait for it
+        if let active = activeDownloads[urlString] {
+            return await active.value
+        }
+
+        let task = Task { () -> (Data, String)? in
+            guard let url = URL(string: urlString) else { return nil }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                
+                var ext = url.pathExtension.lowercased()
+                if ext.isEmpty { ext = "png" }
+                
+                if let mimeType = response.mimeType {
+                    if mimeType == "image/png" { ext = "png" }
+                    else if mimeType == "image/jpeg" { ext = "jpg" }
+                    else if mimeType == "image/gif" { ext = "gif" }
+                    else if mimeType == "image/svg+xml" { ext = "svg" }
+                }
+                
+                // Magic bytes fallback (supercedes MIME type if it's wrong, like the GitHub issue)
+                if data.count > 4 {
+                    let bytes = [UInt8](data.prefix(4))
+                    if bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {
+                        ext = "png"
+                    } else if bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+                        ext = "jpg"
+                    } else if bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 {
+                        ext = "gif"
+                    }
+                }
+                
+                return (data, ext)
+            } catch {
+                print("[ImageCache] Failed to download \(urlString): \(error)")
+                return nil
+            }
+        }
+
+        activeDownloads[urlString] = task
+        let result = await task.value
+        if let res = result { cache[urlString] = res }
+        activeDownloads[urlString] = nil
+        return result
+    }
 }
 
 extension Notification.Name {
     static let pdfDidUpdate = Notification.Name("pdfDidUpdate")
     static let typstErrorsUpdated = Notification.Name("typstErrorsUpdated")
 }
-
-

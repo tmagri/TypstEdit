@@ -237,7 +237,8 @@ class AICompletionService: ObservableObject {
         applyRegex("<(https?://[^>\\s]+)>", template: "#link(\"$1\")")
         
         // 4. Escape HTML tags to prevent Typst label parsing crashes
-        applyRegex("(?i)<(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
+        // Swallow optional preceding backslash to prevent double-escaping into an unclosed label
+        applyRegex("(?i)\\\\?<(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
         
         // 5. Escape Markdown footnotes to prevent Typst math errors
         applyRegex("\\[\\^([^\\]]+)\\]", template: "\\\\[\\\\^$1\\\\]")
@@ -274,8 +275,9 @@ class AICompletionService: ObservableObject {
         applyRegex("___(.+?)___", template: "_*$1*_")
         
         // 10.5 Fix asymmetrical bold markers (e.g. ***text**) often found in README typos
-        applyRegex("(?<!\\*)\\*\\*\\*([^*]+)\\*\\*(?!\\*)", template: "**$1**")
-        applyRegex("(?<!\\*)\\*\\*([^*]+)\\*\\*\\*(?!\\*)", template: "**$1**")
+        // Exclude newlines to prevent matching across horizontal rules and paragraphs
+        applyRegex("(?<!\\*)\\*\\*\\*([^*\\n]+)\\*\\*(?!\\*)", template: "**$1**")
+        applyRegex("(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)", template: "**$1**")
         
         // 10.6 Escape underscores in technical terms/filenames (e.g. NES_OC_*.rbf)
         // Matches underscores flanked by alphanumerics or followed by an asterisk
@@ -286,27 +288,64 @@ class AICompletionService: ObservableObject {
         applyRegex("\\*\\*(.+?)\\*\\*", template: "*$1*")
         applyRegex("__(.+?)__", template: "*$1*")
         
-        // 12. Images (Typst throws a compiler error for web URLs in #image)
+        // 12. Reference-Style Links & Images (Pass 1: Extract Definitions)
+        var referenceLinks: [String: String] = [:]
+        if let refDefRegex = try? NSRegularExpression(pattern: "(?m)^[ \\t]*\\[([^\\]]+)\\]:[ \\t]+([^ \\t\\n]+)(?:[ \\t]+[\"'(].*?[\"')])?[ \\t]*$", options: []) {
+            let matches = refDefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let id = processed.substring(with: match.range(at: 1)).lowercased()
+                let url = processed.substring(with: match.range(at: 2))
+                referenceLinks[id] = url
+                processed.replaceCharacters(in: match.range, with: "") // Remove definition from output
+            }
+        }
+        
+        // 12.5 Reference-Style Images (Pass 2)
+        if let refImgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\[([^\\]]*)\\]", options: []) {
+            let matches = refImgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let alt = processed.substring(with: match.range(at: 1))
+                var id = processed.substring(with: match.range(at: 2)).lowercased()
+                if id.isEmpty { id = alt.lowercased() } // Handle empty id e.g. ![alt][]
+                
+                if let url = referenceLinks[id] {
+                    let replacement = "#image(\"\(url)\", alt: \"\(alt)\")"
+                    processed.replaceCharacters(in: match.range, with: replacement)
+                }
+            }
+        }
+        
+        // 12.6 Reference-Style Links (Pass 2)
+        if let refLinkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\[([^\\]]*)\\]", options: []) {
+            let matches = refLinkRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let text = processed.substring(with: match.range(at: 1))
+                var id = processed.substring(with: match.range(at: 2)).lowercased()
+                if id.isEmpty { id = text.lowercased() } // Handle empty id e.g. [text][]
+                
+                if let url = referenceLinks[id] {
+                    processed.replaceCharacters(in: match.range, with: "#link(\"\(url)\")[\(text)]")
+                }
+            }
+        }
+
+        // 13. Inline Images (Typst throws a compiler error for web URLs in #image)
         if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
             let matches = imgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
             for match in matches.reversed() {
                 let altText = processed.substring(with: match.range(at: 1))
                 let urlText = processed.substring(with: match.range(at: 2))
                 
-                let replacement: String
-                if urlText.lowercased().hasPrefix("http") {
-                    // Fallback to a link to prevent Typst from crashing the entire document
-                    let displayAlt = altText.trimmingCharacters(in: .whitespaces).isEmpty ? "Image" : altText
-                    replacement = "#link(\"\(urlText)\")[🖼️ \(displayAlt)]"
-                } else {
-                    replacement = "#image(\"\(urlText)\", alt: \"\(altText)\")"
-                }
+                let replacement = "#image(\"\(urlText)\", alt: \"\(altText)\")"
                 processed.replaceCharacters(in: match.range, with: replacement)
             }
         }
         
-        // 13. Links (safely ignoring optional hover titles)
+        // 13.1 Inline Links (safely ignoring optional hover titles)
         applyRegex("(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", template: "#link(\"$2\")[$1]")
+        
+        // 13.5 Escape Markdown abbreviation definitions to prevent unclosed bold delimiters
+        applyRegex("(?m)^\\*\\[([^\\]]+)\\]:", template: "\\\\*[$1]:")
         
         // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
         applyRegex("(?m)^[-*_]{3,}[ \\t]*$", template: "#line(length: 100%)")
