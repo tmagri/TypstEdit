@@ -197,7 +197,7 @@ class AICompletionService: ObservableObject {
     }
 
     func sanitizeMarkdownToTypst(_ text: String) -> String {
-        let processed = NSMutableString(string: text)
+        let processed = NSMutableString(string: text.replacingOccurrences(of: "\r\n", with: "\n"))
         
         // --- 1. MASK CODE BLOCKS ---
         // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
@@ -243,27 +243,44 @@ class AICompletionService: ObservableObject {
         applyRegex("\\[\\^([^\\]]+)\\]", template: "\\\\[\\\\^$1\\\\]")
         
         // 6. Headings (H1 - H6) -> Typst (=)
-        if let headingRegex = try? NSRegularExpression(pattern: "(?m)^(#+)[ \\t]+", options: []) {
+        if let headingRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)(#+)[ \\t]+", options: []) {
             let headingMatches = headingRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
             for match in headingMatches.reversed() {
-                let hashCount = match.range(at: 1).length
+                let prefix = processed.substring(with: match.range(at: 1))
+                let hashCount = match.range(at: 2).length
                 let equals = String(repeating: "=", count: hashCount)
-                processed.replaceCharacters(in: match.range, with: "\(equals) ")
+                processed.replaceCharacters(in: match.range, with: "\(prefix)\(equals) ")
             }
         }
         
         // 7. Task Lists -> Typst native Checkboxes
-        applyRegex("(?m)^([ \\t]*[-*+])[ \\t]+\\[[xX]\\][ \\t]+", template: "$1 ☑ ")
-        applyRegex("(?m)^([ \\t]*[-*+])[ \\t]+\\[ \\][ \\t]+", template: "$1 ☐ ")
+        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[[xX]\\][ \\t]+", template: "$1- ☑ ")
+        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[ \\][ \\t]+", template: "$1- ☐ ")
         
         // 8. Unordered Lists -> Typst (-)
-        applyRegex("(?m)^([ \\t]*)[*+][ \\t]+", template: "$1- ")
+        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[*+][ \\t]+", template: "$1- ")
         
         // 9. Ordered Lists `1. ` -> Typst auto-numbering (`+ `)
-        applyRegex("(?m)^([ \\t]*)\\d+\\.[ \\t]+", template: "$1+ ")
-        
+        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)\\d+\\.[ \\t]+", template: "$1+ ")
+
+        // 9.5 Tables (Process before inline formatting so hard-wrapped rows are re-joined correctly)
+        processed.setString(convertMarkdownTablesToTypst(processed as String))
+
         // 10. Strikethrough -> #strike[text]
         applyRegex("~~(.+?)~~", template: "#strike[$1]")
+        
+        // 10.4 Bold-Italic (Markdown *** or ___) -> Typst _*
+        applyRegex("\\*\\*\\*(.+?)\\*\\*\\*", template: "_*$1*_")
+        applyRegex("___(.+?)___", template: "_*$1*_")
+        
+        // 10.5 Fix asymmetrical bold markers (e.g. ***text**) often found in README typos
+        applyRegex("(?<!\\*)\\*\\*\\*([^*]+)\\*\\*(?!\\*)", template: "**$1**")
+        applyRegex("(?<!\\*)\\*\\*([^*]+)\\*\\*\\*(?!\\*)", template: "**$1**")
+        
+        // 10.6 Escape underscores in technical terms/filenames (e.g. NES_OC_*.rbf)
+        // Matches underscores flanked by alphanumerics or followed by an asterisk
+        applyRegex("(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])", template: "\\\\_")
+        applyRegex("_(?=\\\\?\\*)", template: "\\\\_")
         
         // 11. Bold (Markdown ** or __) -> Typst *
         applyRegex("\\*\\*(.+?)\\*\\*", template: "*$1*")
@@ -294,14 +311,18 @@ class AICompletionService: ObservableObject {
         // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
         applyRegex("(?m)^[-*_]{3,}[ \\t]*$", template: "#line(length: 100%)")
         
-        // 14. Escape Literal Dollars (Currency)
+       // 14. Escape Literal Dollars (Currency)
         // Since real math equations are safely masked, any remaining `$` is guaranteed to be a literal!
         applyRegex("(?<!\\\\)\\$", template: "\\\\$")
         
-        var resultString = processed as String
+        // 14b. Common HTML Entities
+        applyRegex("(?i)&rarr;", template: "->")
+        applyRegex("(?i)&larr;", template: "<-")
+                
+       // 14c. Escape Literal Hash (prevent accidental Typst code evaluation, e.g. in tables)
+        applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\()", template: "\\\\#")
         
-        // 15. Tables
-        resultString = convertMarkdownTablesToTypst(resultString)
+        var resultString = processed as String
         
         // 16. UNMASK AND CONVERT MATH BLOCKS
         for (i, block) in mathBlocks.enumerated() {
@@ -330,8 +351,8 @@ class AICompletionService: ObservableObject {
     }
     
     private func convertMarkdownTablesToTypst(_ text: String) -> String {
-        // Matches a table block strictly line-by-line starting with pipes to prevent swallowing the rest of the document!
-        let pattern = "(?m)^[ \\t]*\\|[^\\n]*\\n[ \\t]*\\|[-:| \\t]*\\|[^\\n]*(?:\\n[ \\t]*\\|[^\\n]*)*"
+        // Matches a table block including potential hard-wrapped lines (matches until a blank line)
+        let pattern = "(?m)^[ \\t]*\\|[^\\n]*\\n[ \\t]*\\|[-:| \\t]*\\|[^\\n]*(?:\\n(?![ \\t]*$)[^\\n]*)*"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
         
         let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
@@ -404,7 +425,7 @@ class AICompletionService: ObservableObject {
         let separatorLine = lines[1].replacingOccurrences(of: "-", with: "")
                                     .replacingOccurrences(of: "|", with: "")
                                     .replacingOccurrences(of: ":", with: "")
-                                    .replacingOccurrences(of: " ", with: "")
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
         
         guard separatorLine.isEmpty else { return markdown }
         
