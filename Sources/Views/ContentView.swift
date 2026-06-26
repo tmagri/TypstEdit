@@ -83,7 +83,9 @@ struct ContentView: View {
                 self.loadFile(url: url)
                 fileSystem.currentFolder = nil // Ensures it stays in standalone mode
                 fileSystem.rootNodes = []
+                editorController.projectRootURL = nil
                 editorController.isSidebarVisible = false
+                RAGManager.shared.disableForStandaloneMode()
             }
         }
         .onOpenURL { url in

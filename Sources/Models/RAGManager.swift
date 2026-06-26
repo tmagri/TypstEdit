@@ -131,7 +131,12 @@ class RAGManager: ObservableObject {
     // MARK: - Database Management
     
     private func setupDatabase() {
-       if let folderURL = cacheFolderURL, AISettingsManager.shared.cacheEmbeddingsToDisk {
+         guard currentProjectDir != nil else {
+            print("Standalone mode active: Aborting vector database setup.")
+            return
+        }
+        
+        if let folderURL = cacheFolderURL, AISettingsManager.shared.cacheEmbeddingsToDisk {
             if !FileManager.default.fileExists(atPath: folderURL.path) {
                 try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true, attributes: nil)
             }
@@ -142,7 +147,7 @@ class RAGManager: ObservableObject {
             db = nil
         }
         
-        // Use :memory: if dbFileURL is nil
+        // Use :memory: if dbFileURL is nil (though our guard above makes this safer)
         let dbPath = dbFileURL?.path ?? ":memory:"
         
         if sqlite3_open(dbPath, &db) != SQLITE_OK {
@@ -190,6 +195,24 @@ class RAGManager: ObservableObject {
         sqlite3_exec(db, "SELECT vector_quantize_preload('chunks', 'embedding');", nil, nil, nil)
         sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nil, nil, nil)
     }
+    // MARK: - Standalone Mode Management
+    
+    /// Completely disables the RAG Manager and closes any active DB connections for standalone editing.
+    public func disableForStandaloneMode() {
+        self.currentProjectDir = nil
+        
+        if db != nil {
+            sqlite3_close(db)
+            db = nil
+        }
+        
+        // Reset any indexing state just in case it was interrupted
+        isIndexing = false
+        indexProgress = 0.0
+        indexStatus = ""
+        
+        print("RAGManager: Vector DB locked out and closed for standalone mode.")
+    }
     
     public func clearIndexCache() {
         if db != nil {
@@ -208,6 +231,12 @@ class RAGManager: ObservableObject {
     // MARK: - Indexing
     
     func indexProject(at projectDir: URL, forceReindex: Bool = false) async {
+        let isDirectory = (try? projectDir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+        guard isDirectory else {
+            print("RAGManager: Aborting index. Provided URL is a standalone file, not a directory.")
+            return
+        }
+
         guard !isIndexing else { return }
         isIndexing = true
         indexProgress = 0.0
