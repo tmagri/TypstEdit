@@ -275,7 +275,8 @@ class AICompletionService: ObservableObject {
                 }
                 
                 if !src.isEmpty {
-                    var params: [String] = ["\"\(src)\""]
+                    let formattedSrc = src.lowercased().hasPrefix("http") || src.hasPrefix("/") || src.hasPrefix("data:") ? src : "/\(src)"
+                    var params: [String] = ["\"\(formattedSrc)\""]
                     if !alt.isEmpty { params.append("alt: \"\(alt)\"") }
                     
                     // HTML width and height are typically in pixels. In Typst, we can append 'pt' if they are pure numbers.
@@ -391,7 +392,8 @@ class AICompletionService: ObservableObject {
                 if id.isEmpty { id = alt.lowercased() }
                 
                 if let url = referenceLinks[id] {
-                    let replacement = "#image(\"\(url)\", alt: \"\(alt)\")"
+                    let formattedUrl = url.lowercased().hasPrefix("http") || url.hasPrefix("/") || url.hasPrefix("data:") ? url : "/\(url)"
+                    let replacement = "#image(\"\(formattedUrl)\", alt: \"\(alt)\")"
                     processed.replaceCharacters(in: match.range, with: replacement)
                 }
             }
@@ -418,7 +420,8 @@ class AICompletionService: ObservableObject {
                 let altText = processed.substring(with: match.range(at: 1))
                 let urlText = processed.substring(with: match.range(at: 2))
                 
-                let replacement = "#image(\"\(urlText)\", alt: \"\(altText)\")"
+                let formattedUrl = urlText.lowercased().hasPrefix("http") || urlText.hasPrefix("/") || urlText.hasPrefix("data:") ? urlText : "/\(urlText)"
+                let replacement = "#image(\"\(formattedUrl)\", alt: \"\(altText)\")"
                 processed.replaceCharacters(in: match.range, with: replacement)
             }
         }

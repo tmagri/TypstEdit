@@ -839,9 +839,6 @@ struct ContentView: View {
     func handleMenuCommand(_ command: String) {
         switch command {
         case "newFile": fileSystem.createNewFile()
-        case "openFile": fileSystem.openFile()
-        case "openFolder": fileSystem.openFolder()
-        case "importLyx": editorController.importLyx()
         case "renameFile": if let url = selectedFile { self.renameTargetURL = url; self.newFileName = url.lastPathComponent; self.showRenameAlert = true }
         case "quickExportPDF": if let url = selectedFile { exportPDF(from: url) }
         case "exportPDF": handleExport(format: "pdf")

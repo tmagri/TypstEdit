@@ -1,30 +1,75 @@
 import SwiftUI
+import AppKit
 
 struct AppMenuCommands: Commands {
     @ObservedObject var themeManager: ThemeManager
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
     
+    @Environment(\.openWindow) private var openWindow
+    
+    private func ensureWindowAndPost(name: Notification.Name, object: Any? = nil) {
+        let hasWindow = !NSApp.windows.filter({ $0.isVisible && $0.className != "NSStatusBarWindow" && $0.className != "NSMenu" }).isEmpty
+        
+        if !hasWindow {
+            openWindow(id: "main")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: name, object: object)
+            }
+        } else {
+            NotificationCenter.default.post(name: name, object: object)
+        }
+    }
+    
+    private func ensureWindowAndExecute(action: @escaping () -> Void) {
+        let hasWindow = !NSApp.windows.filter({ $0.isVisible && $0.className != "NSStatusBarWindow" && $0.className != "NSMenu" }).isEmpty
+        
+        if !hasWindow {
+            openWindow(id: "main")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                action()
+            }
+        } else {
+            action()
+        }
+    }
+    
     var body: some Commands {
         // MARK: - File Menu
         CommandGroup(replacing: .newItem) {
             Button("New File") {
-                NotificationCenter.default.post(name: .menuCommand, object: "newFile")
+                ensureWindowAndPost(name: .menuCommand, object: "newFile")
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
             
             Button("Open File...") {
-                NotificationCenter.default.post(name: .menuCommand, object: "openFile")
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = true
+                panel.canChooseDirectories = false
+                panel.allowsMultipleSelection = false
+                
+                if panel.runModal() == .OK, let url = panel.url {
+                    ensureWindowAndPost(name: .openStandaloneFile, object: url)
+                }
             }
             .keyboardShortcut("o", modifiers: .command)
             
             Button("Open Folder...") {
-                NotificationCenter.default.post(name: .menuCommand, object: "openFolder")
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = false
+                panel.canChooseDirectories = true
+                panel.allowsMultipleSelection = false
+                
+                if panel.runModal() == .OK, let url = panel.url {
+                    ensureWindowAndPost(name: .openProjectFolder, object: url)
+                }
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
             
             Button("Import LyX File...") {
-                NotificationCenter.default.post(name: .menuCommand, object: "importLyx")
+                ensureWindowAndExecute {
+                    editorController.importLyx()
+                }
             }
             .keyboardShortcut("i", modifiers: [.command, .shift])
             

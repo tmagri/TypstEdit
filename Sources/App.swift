@@ -150,7 +150,7 @@ struct TypstEditApp: App {
     @State private var selectedFile: URL?
     
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "main") {
             ContentView(selectedFile: $selectedFile, editorController: editorController)
                 .environmentObject(themeManager)
                 .background(VisualEffectView().ignoresSafeArea())

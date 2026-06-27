@@ -2336,7 +2336,9 @@ class EditorController: NSObject, ObservableObject {
                 let nsLine = lineContent as NSString
                 let altText = nsLine.substring(with: match.range(at: 1))
                 let urlText = nsLine.substring(with: match.range(at: 2)) // Group 2 safely ignores the title
-                let replacement = "#image(\"\(urlText)\", alt: \"\(altText)\")"
+                
+                let formattedUrl = urlText.lowercased().hasPrefix("http") || urlText.hasPrefix("/") || urlText.hasPrefix("data:") ? urlText : "/\(urlText)"
+                let replacement = "#image(\"\(formattedUrl)\", alt: \"\(altText)\")"
                 
                 let absoluteRange = NSRange(location: lineRange.location + match.range.location, length: match.range.length)
                 let lengthDifference = replacement.utf16.count - match.range.length

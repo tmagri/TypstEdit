@@ -407,15 +407,6 @@ class TypstCompiler: ObservableObject {
         
         guard !urlsToFetch.isEmpty, let root = projectRoot else { return text }
         
-        // Fetch missing images concurrently
-        await withTaskGroup(of: Void.self) { group in
-            for url in urlsToFetch {
-                group.addTask {
-                    _ = await WebImageCache.shared.download(urlString: url)
-                }
-            }
-        }
-        
         // Replace web URLs with cached local copies inside the project's temp/ folder
         var processed = text
         let tempDir: URL
@@ -433,9 +424,9 @@ class TypstCompiler: ObservableObject {
                 // Always overwrite to clear out any corrupted HTML 403 pages from previous runs
                 try? data.write(to: localURL, options: .atomic)
                 
-                // The shadow source lives inside temp/, so Typst resolves paths relative
-                // to that directory — use just the filename with no path prefix.
-                processed = processed.replacingOccurrences(of: "\"\(url)\"", with: "\"\(safeName)\"")
+                // FIX: Use an absolute path from the Typst root to ensure it resolves 
+                // correctly regardless of where the shadow file is located.
+                processed = processed.replacingOccurrences(of: "\"\(url)\"", with: "\"/temp/\(safeName)\"")
             }
         }
         

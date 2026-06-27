@@ -16,3 +16,4 @@ repomix-output.xml
 **/temp/*.preview.typ
 **/temp/*.preview.pdf
 **/temp/web_img_*
+vectorcaches/project_index.sqlite
