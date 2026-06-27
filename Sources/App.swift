@@ -104,13 +104,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     // NSApplicationDelegate
     nonisolated func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // We need to bridge from nonisolated back to MainActor for runModal
-        // Since runModal is synchronous, we can't easily wait for a Task.
-        // However, in macOS apps, these delegate methods are called on the main thread.
-        // We can use MainActor.assumeIsolated if we are sure, or just mark the delegate as @MainActor.
-        
         return MainActor.assumeIsolated {
             if showSaveWarningIfNeeded() {
+                // Clean up temp files for the current project before quitting
+                if let projectRoot = editorController?.projectRootURL {
+                    TypstCompiler.cleanUpTempDirectory(in: projectRoot)
+                } else if let fileURL = editorController?.currentFileURL {
+                    // Standalone file: clean temp/ next to the file
+                    TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
+                }
                 return .terminateNow
             } else {
                 return .terminateCancel
@@ -122,7 +124,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
         print("[DEBUG] AppDelegate: windowShouldClose triggered")
         return MainActor.assumeIsolated {
-            return showSaveWarningIfNeeded()
+            if showSaveWarningIfNeeded() {
+                // Clean up temp files when the window (project) closes
+                if let projectRoot = editorController?.projectRootURL {
+                    TypstCompiler.cleanUpTempDirectory(in: projectRoot)
+                } else if let fileURL = editorController?.currentFileURL {
+                    TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
+                }
+                return true
+            }
+            return false
         }
     }
 }

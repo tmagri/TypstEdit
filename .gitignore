@@ -11,3 +11,8 @@ TypstEdit.app
 temp.dmg
 dmg_contents/Applications
 repomix-output.xml
+
+# TypstEdit preview temp directories created in user project folders
+**/temp/*.preview.typ
+**/temp/*.preview.pdf
+**/temp/web_img_*

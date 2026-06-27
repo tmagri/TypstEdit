@@ -72,21 +72,51 @@ class TypstCompiler: ObservableObject {
             process.terminate()
         }
         currentProcess = nil
-        // Optional: Clean up shadow files
+        processOutputPipe?.fileHandleForReading.readabilityHandler = nil
+        processOutputPipe = nil
+        currentShadowSourceURL = nil
+    }
+
+    /// Call this when the project or app is about to close to remove the temp/ directory.
+    func cleanUpProjectTemp(projectRoot: URL) {
+        TypstCompiler.cleanUpTempDirectory(in: projectRoot)
+    }
+
+    /// Removes the `temp/` directory inside the given project root, silently.
+    static func cleanUpTempDirectory(in projectRoot: URL) {
+        let tempDir = projectRoot.appendingPathComponent("temp")
+        cleanUpTempDirectory(tempDir)
+    }
+
+    private static func cleanUpTempDirectory(_ tempDir: URL) {
+        guard FileManager.default.fileExists(atPath: tempDir.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: tempDir)
+            print("[TypstCompiler] Cleaned up temp directory: \(tempDir.path)")
+        } catch {
+            print("[TypstCompiler] Failed to remove temp directory \(tempDir.path): \(error)")
+        }
+    }
+
+    /// Creates the temp directory inside the project folder if it doesn't exist, and returns its URL.
+    private func ensureTempDirectory(in projectRoot: URL) -> URL {
+        let tempDir = projectRoot.appendingPathComponent("temp")
+        if !FileManager.default.fileExists(atPath: tempDir.path) {
+            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        }
+        return tempDir
     }
     
     // Writes content to the shadow file. If watch is not running, starts it.
     func updateContent(source: String, fileURL: URL) async {
-        let tempDir = FileManager.default.temporaryDirectory
         let workingDirectory = fileURL.deletingLastPathComponent()
         let filename = fileURL.lastPathComponent
         
-        // Store hidden shadow source in project folder to satisfy Typst root restrictions
-        let shadowSourceURL = workingDirectory.appendingPathComponent(".\(filename).preview.typ")
-        
-        // Keep shadow PDF in temp directory to keep project folder clean
-        let fileHash = abs(fileURL.path.hashValue)
-        let shadowPDFURL = tempDir.appendingPathComponent("typst-edit-\(fileHash).preview.pdf")
+        // Use a 'temp/' subdirectory inside the project folder so Typst root restrictions are satisfied
+        // and the files are clearly visible (not hidden dot-files).
+        let projectTempDir = ensureTempDirectory(in: workingDirectory)
+        let shadowSourceURL = projectTempDir.appendingPathComponent("\(filename).preview.typ")
+        let shadowPDFURL = projectTempDir.appendingPathComponent("\(filename).preview.pdf")
         
         let projectRoot = workingDirectory
         
@@ -386,17 +416,25 @@ class TypstCompiler: ObservableObject {
             }
         }
         
-        // Replace web URLs with our cached local temp paths
+        // Replace web URLs with cached local copies inside the project's temp/ folder
         var processed = text
+        let tempDir: URL
+        let tempDirPath = root.appendingPathComponent("temp")
+        if !FileManager.default.fileExists(atPath: tempDirPath.path) {
+            try? FileManager.default.createDirectory(at: tempDirPath, withIntermediateDirectories: true)
+        }
+        tempDir = tempDirPath
+
         for url in urlsToFetch {
             if let (data, ext) = await WebImageCache.shared.download(urlString: url) {
-                // Keep the file hidden from the Finder/Sidebar but accessible to Typst
-                let safeName = ".web_img_\(abs(url.hashValue)).\(ext)"
-                let localURL = root.appendingPathComponent(safeName)
+                let safeName = "web_img_\(abs(url.hashValue)).\(ext)"
+                let localURL = tempDir.appendingPathComponent(safeName)
                 
                 // Always overwrite to clear out any corrupted HTML 403 pages from previous runs
                 try? data.write(to: localURL, options: .atomic)
                 
+                // The shadow source lives inside temp/, so Typst resolves paths relative
+                // to that directory — use just the filename with no path prefix.
                 processed = processed.replacingOccurrences(of: "\"\(url)\"", with: "\"\(safeName)\"")
             }
         }

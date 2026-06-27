@@ -4,9 +4,13 @@ struct WelcomeView: View {
     @ObservedObject var model: FileSystemModel
     @EnvironmentObject var themeManager: ThemeManager
     @ObservedObject var recents = RecentFilesManager.shared
-    var onOpen: (URL) -> Void
+    /// Called when the user taps a recent file. Receives the full RecentFile so the
+    /// caller can decide whether to open in project or standalone mode.
+    var onOpen: (RecentFilesManager.RecentFile) -> Void
     
     @State private var showingTemplateSelection = false
+    @State private var showClearConfirmation = false
+    @State private var openingFileId: UUID? = nil
     
     private var appIconImage: Image {
         // Try simple name first (standard Asset Catalog)
@@ -158,41 +162,94 @@ struct WelcomeView: View {
             
             // Right Panel: Recent Files
             VStack(alignment: .leading, spacing: 0) {
-                Text("Recent Files")
-                    .font(.headline)
-                    .foregroundColor(themeManager.textColor)
-                    .padding()
-                    .padding(.top, 20)
-                
-                List {
-                    ForEach(recents.recentFiles) { file in
-                        HStack {
-                            Image(systemName: "doc.text")
+                HStack {
+                    Text("Recent Files")
+                        .font(.headline)
+                        .foregroundColor(themeManager.textColor)
+                    Spacer()
+                    if !recents.recentFiles.isEmpty {
+                        Button(action: { showClearConfirmation = true }) {
+                            Text("Clear")
+                                .font(.caption)
                                 .foregroundColor(.secondary)
-                            VStack(alignment: .leading) {
-                                Text(file.name)
-                                    .foregroundColor(themeManager.textColor)
-                                .truncationMode(.middle)
-                                Text(file.path)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                        }
+                        .buttonStyle(.plain)
+                        .confirmationDialog("Clear Recent Files", isPresented: $showClearConfirmation, titleVisibility: .visible) {
+                            Button("Clear All", role: .destructive) {
+                                recents.clearAll()
                             }
-                            Spacer()
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("This will remove all entries from the recent files list.")
                         }
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            onOpen(file.url)
-                        }
-                        .listRowBackground(Color.clear)
                     }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                .padding()
+                .padding(.top, 20)
+                
+                if recents.recentFiles.isEmpty {
+                    Spacer()
+                    Text("No recent files")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    Spacer()
+                } else {
+                    List {
+                        ForEach(recents.recentFiles) { file in
+                            Button(action: {
+                                openingFileId = file.id
+                                // Use Task to yield to main runloop so the spinner appears before the blocking read
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                                    onOpen(file)
+                                    openingFileId = nil
+                                }
+                            }) {
+                                HStack {
+                                    if openingFileId == file.id {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .frame(width: 16, height: 16)
+                                    } else {
+                                        Image(systemName: file.isProject ? "folder" : "doc.text")
+                                            .foregroundColor(file.isProject ? .blue : .secondary)
+                                    }
+                                    VStack(alignment: .leading) {
+                                        Text(file.name)
+                                            .foregroundColor(themeManager.textColor)
+                                            .truncationMode(.middle)
+                                        HStack(spacing: 4) {
+                                            Text(file.isProject ? "Project" : "File")
+                                                .font(.caption2)
+                                                .foregroundColor(file.isProject ? .blue.opacity(0.8) : .secondary)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 3)
+                                                        .fill(file.isProject ? Color.blue.opacity(0.1) : Color.secondary.opacity(0.1))
+                                                )
+                                            Text(file.path)
+                                                .font(.caption)
+                                                .foregroundColor(.secondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.vertical, 4)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .listRowBackground(Color.clear)
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                }
             }
-            .frame(width: 250)
+            .frame(width: 270)
             .background(Color.primary.opacity(0.1))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

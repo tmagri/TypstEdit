@@ -2677,19 +2677,30 @@ class EditorController: NSObject, ObservableObject {
             finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)"
         }
         
-        // NEW: More permissive system prompt tailored for writing and coding
-        let systemPrompt = """
+        let isMd = self.isMarkdownFile
+        
+        let systemPrompt = isMd ? """
+        You are an expert Markdown editor and general writing assistant.
+        Generate the requested content or code based on the user's prompt. 
+        If the user asks for prose, annotations, or text, write the text. If they ask for code, write the code.
+        IMPORTANT: Output ONLY the raw Markdown content to be inserted into the document. Do not include conversational filler like "Here is the text:" and do not wrap the response in markdown code blocks unless explicitly requested.
+        """ : """
         You are an expert Typst editor and general writing assistant.
         Generate the requested content or code based on the user's prompt. 
         If the user asks for prose, annotations, or text, write the text. If they ask for code, write the code.
         IMPORTANT: Output ONLY the raw content to be inserted into the document. Do not include conversational filler like "Here is the text:" and do not wrap the response in markdown code blocks unless explicitly requested.
         """
         
-        return try await AICompletionService.shared.fetchCompletion(
+        let result = try await AICompletionService.shared.fetchCompletion(
             prompt: finalPrompt,
             systemPrompt: systemPrompt,
             maxTokens: 2048 // Increased to allow for longer writing generations
         )
+        
+        if !isMd {
+            return AICompletionService.shared.sanitizeMarkdownToTypst(result)
+        }
+        return result
     }
     
     func requestAIFix(for error: TypstError) {

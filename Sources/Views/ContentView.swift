@@ -204,13 +204,20 @@ struct ContentView: View {
     private var mainLayout: some View {
         Group {
            if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile && selectedFile == nil {
-                WelcomeView(model: fileSystem, onOpen: { url in
-                    self.selectedFile = url
-                    self.loadFile(url: url) // Load immediately
-                    let folder = url.deletingLastPathComponent()
-                    fileSystem.currentFolder = folder
-                    fileSystem.loadFiles()
-                    fileSystem.isNewUnsavedFile = false
+                WelcomeView(model: fileSystem, onOpen: { file in
+                    if file.isProject {
+                        // Re-open in project mode: show sidebar with parent folder
+                        self.selectedFile = file.url
+                        self.loadFile(url: file.url)
+                        let folder = file.url.deletingLastPathComponent()
+                        fileSystem.currentFolder = folder
+                        fileSystem.loadFiles()
+                        fileSystem.isNewUnsavedFile = false
+                        editorController.isSidebarVisible = true
+                    } else {
+                        // Re-open as standalone single file (no sidebar)
+                        NotificationCenter.default.post(name: .openStandaloneFile, object: file.url)
+                    }
                 })
                 .background(themeManager.mainBackground)
             } else {
@@ -234,7 +241,6 @@ struct ContentView: View {
                         scheduleCompilation()
                     }
                     .toolbar { appToolbar }
-                    .toolbarBackground(.hidden, for: .windowToolbar)
                     .onChange(of: compiler.errors) { newErrors in
                         editorController.errors = newErrors
                         editorController.needsRedraw()
@@ -407,8 +413,8 @@ struct ContentView: View {
             if editorController.currentFileType.isTextual {
                 SourceEditor(
                     $editorController.sourceCode,
-                    // Revert this back to .typst so we bypass the broken Markdown AST
-                    language: .typst, 
+                    // Use the correct language for markdown files to avoid syntax highlighting conflicts
+                    language: editorController.currentFileType == .markdown ? .markdown : .typst, 
                     configuration: editorController.editorConfiguration,
                     state: $editorController.editorState,
                     coordinators: [editorController.sourceEditorBridge],
@@ -629,7 +635,7 @@ struct ContentView: View {
                     self.currentPDFURL = nil
                     self.reloadToken = UUID()
                     self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-                    RecentFilesManager.shared.add(url: url)
+                    RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
                     
                     self.editorController.syncSavedContent(content)
                     print("[DEBUG] loadFile: Updating sourceCode")
@@ -714,7 +720,7 @@ struct ContentView: View {
     private func performSave(to url: URL) {
         do {
             try editorController.sourceCode.write(to: url, atomically: true, encoding: .utf8)
-            RecentFilesManager.shared.add(url: url)
+            RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
             DispatchQueue.main.async {
                 if url == self.selectedFile || fileSystem.isNewUnsavedFile {
                     self.editorController.syncSavedContent(self.editorController.sourceCode)
