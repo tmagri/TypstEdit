@@ -240,6 +240,8 @@ class AICompletionService: ObservableObject {
         applyRegex("<(https?://[^>\\s]+)>", template: "#link(\"$1\")")
         
         // 3.5 Common HTML tags to Typst
+        applyRegex("(?is)\\s*<p\\s+align=[\"']([^\"']+)[\"']>\\s*(.*?)\\s*</p>\\s*", template: "\n#align($1)[\n$2\n]\n")
+        applyRegex("(?is)\\s*<p>\\s*(.*?)\\s*</p>\\s*", template: "\n$1\n")
         applyRegex("(?is)\\s*<dt>(.*?)</dt>\\s*", template: "\n/ $1: ")
         applyRegex("(?is)\\s*<dd>(.*?)</dd>\\s*", template: " $1\n")
         applyRegex("(?i)\\s*</?dl>\\s*", template: "\n")
@@ -256,6 +258,8 @@ class AICompletionService: ObservableObject {
                 let attributes = processed.substring(with: match.range(at: 1))
                 var src = ""
                 var alt = ""
+                var width = ""
+                var height = ""
                 
                 if let srcMatch = try? NSRegularExpression(pattern: "(?i)src=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
                     src = (attributes as NSString).substring(with: srcMatch.range(at: 1))
@@ -263,9 +267,45 @@ class AICompletionService: ObservableObject {
                 if let altMatch = try? NSRegularExpression(pattern: "(?i)alt=[\"']([^\"']*)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
                     alt = (attributes as NSString).substring(with: altMatch.range(at: 1))
                 }
+                if let widthMatch = try? NSRegularExpression(pattern: "(?i)width=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
+                    width = (attributes as NSString).substring(with: widthMatch.range(at: 1))
+                }
+                if let heightMatch = try? NSRegularExpression(pattern: "(?i)height=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
+                    height = (attributes as NSString).substring(with: heightMatch.range(at: 1))
+                }
                 
                 if !src.isEmpty {
-                    let replacement = alt.isEmpty ? "#image(\"\(src)\")" : "#image(\"\(src)\", alt: \"\(alt)\")"
+                    var params: [String] = ["\"\(src)\""]
+                    if !alt.isEmpty { params.append("alt: \"\(alt)\"") }
+                    
+                    // HTML width and height are typically in pixels. In Typst, we can append 'pt' if they are pure numbers.
+                    if !width.isEmpty {
+                        if width.allSatisfy({ $0.isNumber }) {
+                            params.append("width: \(width)pt")
+                        } else {
+                            params.append("width: \(width)")
+                        }
+                    }
+                    if !height.isEmpty {
+                        if height.allSatisfy({ $0.isNumber }) {
+                            params.append("height: \(height)pt")
+                        } else {
+                            params.append("height: \(height)")
+                        }
+                    }
+                    
+                    let ext = (src as NSString).pathExtension.lowercased()
+                    let isWeb = src.lowercased().hasPrefix("http")
+                    let supportedExts = ["png", "jpg", "jpeg", "gif", "svg"]
+                    
+                    let replacement: String
+                    if !isWeb && !ext.isEmpty && !supportedExts.contains(ext) {
+                        // Fallback to a link if format is entirely unsupported by Typst (like .icns)
+                        let displayAlt = alt.trimmingCharacters(in: .whitespaces).isEmpty ? "Image" : alt
+                        replacement = "#link(\"\(src)\")[🖼️ \(displayAlt)]"
+                    } else {
+                        replacement = "#image(\(params.joined(separator: ", ")))"
+                    }
                     processed.replaceCharacters(in: match.range, with: replacement)
                 }
             }
@@ -400,7 +440,7 @@ class AICompletionService: ObservableObject {
         applyRegex("(?i)&larr;", template: "<-")
                 
         // 14c. Escape Literal Hash
-        applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\()", template: "\\\\#")
+        applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[)", template: "\\\\#")
         
         // 14e. Escape Stray Backticks
         applyRegex("(?<!\\\\)`", template: "\\\\`")
