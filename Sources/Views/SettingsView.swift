@@ -148,6 +148,20 @@ struct AISettingsView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                    
+                    Divider()
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Max Tokens:")
+                            TextField("2048", value: $settings.maxTokens, formatter: NumberFormatter())
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 80)
+                        }
+                        Text("The maximum number of tokens to generate in the response.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 // MARK: - Test Connection

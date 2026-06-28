@@ -39,6 +39,7 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiForceCodeOutput") var forceCodeOutput: Bool = false
     @AppStorage("aiMaxContextWindow") var maxContextWindow: Int = 4096
     @AppStorage("aiIncludeProjectContext") var includeProjectContext: Bool = true
+    @AppStorage("aiMaxTokens") var maxTokens: Int = 2048
     @AppStorage("aiCacheEmbeddingsToDisk") var cacheEmbeddingsToDisk: Bool = true
     @AppStorage("aiTimeoutSeconds") var timeoutSeconds: Double = 120.0
     var apiKey: String {

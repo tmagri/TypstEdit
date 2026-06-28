@@ -2799,7 +2799,7 @@ class EditorController: NSObject, ObservableObject {
         let result = try await AICompletionService.shared.fetchCompletion(
             prompt: finalPrompt,
             systemPrompt: systemPrompt,
-            maxTokens: 2048 // Increased to allow for longer writing generations
+            maxTokens: AISettingsManager.shared.maxTokens
         )
         
         if !isMd {
