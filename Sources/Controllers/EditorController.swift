@@ -917,8 +917,59 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func insertTable(rows: Int, cols: Int, columnsString: String, inset: String, align: String, useHeader: Bool, headerCells: [String]) {
+        if isMarkdownFile {
+            var mdSnippet = ""
+            var headerRow = "|"
+            var separatorRow = "|"
+            
+            for c in 0..<cols {
+                let cell = useHeader && c < headerCells.count ? headerCells[c] : " Header \(c+1) "
+                headerRow += " \(cell) |"
+                separatorRow += "---|"
+            }
+            mdSnippet += headerRow + "\n"
+            mdSnippet += separatorRow + "\n"
+            
+            let totalCellsNeeded = rows * cols
+            var cellsToInsert: [String] = []
+            
+            for i in 0..<totalCellsNeeded {
+                let r = i / cols
+                let c = i % cols
+                if let oldCols = tableEditInitialCols != 0 ? tableEditInitialCols : nil {
+                    let oldIndex = r * oldCols + c
+                    if r < tableEditInitialRows && c < oldCols && oldIndex < currentTableCells.count {
+                        let content = currentTableCells[oldIndex].replacingOccurrences(of: "\\[|\\]", with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                        cellsToInsert.append(content.isEmpty ? " " : content)
+                    } else {
+                        cellsToInsert.append(" ")
+                    }
+                } else {
+                    cellsToInsert.append(" ")
+                }
+            }
+            
+            for r in 0..<rows {
+                var rowText = "|"
+                for c in 0..<cols {
+                    let index = r * cols + c
+                    rowText += " \(cellsToInsert[index]) |"
+                }
+                mdSnippet += rowText + "\n"
+            }
+            
+            let rangeToReplace = currentTableRange ?? selectedRange
+            if rangeToReplace.location != NSNotFound {
+                insertText(mdSnippet, replacementRange: rangeToReplace)
+            } else {
+                insertText(mdSnippet)
+            }
+            
+            showTableEditor = false
+            updateFormattingState()
+            return
+        }
 
-        
         var snippet = "#table(\n"
         
         // Columns
@@ -1353,6 +1404,29 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func insertFigure(content: String, caption: String, label: String, kind: String?, supplement: String?) {
+        if isMarkdownFile {
+            let trimmedContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            var url = trimmedContent
+            
+            // Try to extract URL from image("...")
+            if trimmedContent.hasPrefix("image(") {
+                if let startQuote = trimmedContent.firstIndex(of: "\""), let endQuote = trimmedContent.lastIndex(of: "\""), startQuote < endQuote {
+                    url = String(trimmedContent[trimmedContent.index(after: startQuote)..<endQuote])
+                }
+            }
+            
+            let mdSnippet = "![\(caption)](\(url))"
+            let rangeToReplace = currentFigureRange ?? selectedRange
+            if rangeToReplace.location != NSNotFound {
+                insertText(mdSnippet, replacementRange: rangeToReplace)
+            } else {
+                insertText(mdSnippet)
+            }
+            showFigureEditor = false
+            updateFormattingState()
+            return
+        }
+        
         var params: [String] = []
         
         // Content: If it starts with a function call like image( or table(, don't wrap in []
@@ -1933,9 +2007,18 @@ class EditorController: NSObject, ObservableObject {
     func toggleUnderline() {
         let range = selectedRange
         if let underlineRange = FormatDetector.findUnderlineRange(in: sourceCode, at: range.location) {
-            unwrapBracketedFormatting(range: underlineRange, prefixPattern: #"^#underline\s*[\[\(]"#)
+            let snippet = (sourceCode as NSString).substring(with: underlineRange)
+            if snippet.hasPrefix("<u>") {
+                unwrapFormatting(range: underlineRange, prefixLen: 3, suffixLen: 4)
+            } else {
+                unwrapBracketedFormatting(range: underlineRange, prefixPattern: #"^#underline\s*[\[\(]"#)
+            }
         } else {
-            wrapSelection(prefix: "#underline[", suffix: "]")
+            if isMarkdownFile {
+                wrapSelection(prefix: "<u>", suffix: "</u>")
+            } else {
+                wrapSelection(prefix: "#underline[", suffix: "]")
+            }
         }
         updateFormattingState()
     }
@@ -1943,9 +2026,20 @@ class EditorController: NSObject, ObservableObject {
     func toggleHighlight() {
         let range = selectedRange
         if let highlightRange = FormatDetector.findHighlightRange(in: sourceCode, at: range.location) {
-            unwrapBracketedFormatting(range: highlightRange, prefixPattern: #"^#highlight\s*[\[\(]"#)
+            let snippet = (sourceCode as NSString).substring(with: highlightRange)
+            if snippet.hasPrefix("<mark>") {
+                unwrapFormatting(range: highlightRange, prefixLen: 6, suffixLen: 7)
+            } else if snippet.hasPrefix("==") {
+                unwrapFormatting(range: highlightRange, prefixLen: 2, suffixLen: 2)
+            } else {
+                unwrapBracketedFormatting(range: highlightRange, prefixPattern: #"^#highlight\s*[\[\(]"#)
+            }
         } else {
-            wrapSelection(prefix: "#highlight[", suffix: "]")
+            if isMarkdownFile {
+                wrapSelection(prefix: "==", suffix: "==")
+            } else {
+                wrapSelection(prefix: "#highlight[", suffix: "]")
+            }
         }
         updateFormattingState()
     }
@@ -1953,23 +2047,13 @@ class EditorController: NSObject, ObservableObject {
     func toggleStrike() {
         let range = selectedRange
         
-        // 1. Check for Markdown Strike (~~)
-        if isMarkdownFile {
-            let nsText = sourceCode as NSString
-            let safeIndex = max(0, min(range.location, nsText.length))
-            if let regex = try? NSRegularExpression(pattern: #"(?s)~~(.*?)~~"#, options: []),
-               let match = regex.matches(in: sourceCode, options: [], range: NSRange(location: 0, length: nsText.length)).first(where: { safeIndex >= $0.range.location && safeIndex <= $0.range.upperBound }) {
-                
-                unwrapFormatting(range: match.range, prefixLen: 2, suffixLen: 2)
-                showStatus("Removed Strikethrough")
-                updateFormattingState()
-                return
-            }
-        }
-        
-        // 2. Check for Typst Strike (#strike[...])
         if let strikeRange = FormatDetector.findStrikeRange(in: sourceCode, at: range.location) {
-            unwrapBracketedFormatting(range: strikeRange, prefixPattern: #"^#strike\s*[\[\(]"#)
+            let snippet = (sourceCode as NSString).substring(with: strikeRange)
+            if snippet.hasPrefix("~~") {
+                unwrapFormatting(range: strikeRange, prefixLen: 2, suffixLen: 2)
+            } else {
+                unwrapBracketedFormatting(range: strikeRange, prefixPattern: #"^#strike\s*[\[\(]"#)
+            }
             showStatus("Removed Strikethrough")
         } else {
             if isMarkdownFile {
@@ -1985,9 +2069,18 @@ class EditorController: NSObject, ObservableObject {
     func toggleSubscript() {
         let range = selectedRange
         if let subRange = FormatDetector.findSubscriptRange(in: sourceCode, at: range.location) {
-            unwrapBracketedFormatting(range: subRange, prefixPattern: #"^#sub\s*[\[\(]"#)
+            let snippet = (sourceCode as NSString).substring(with: subRange)
+            if snippet.hasPrefix("<sub>") {
+                unwrapFormatting(range: subRange, prefixLen: 5, suffixLen: 6)
+            } else {
+                unwrapBracketedFormatting(range: subRange, prefixPattern: #"^#sub\s*[\[\(]"#)
+            }
         } else {
-            wrapSelection(prefix: "#sub[", suffix: "]")
+            if isMarkdownFile {
+                wrapSelection(prefix: "<sub>", suffix: "</sub>")
+            } else {
+                wrapSelection(prefix: "#sub[", suffix: "]")
+            }
         }
         updateFormattingState()
     }
@@ -1995,9 +2088,18 @@ class EditorController: NSObject, ObservableObject {
     func toggleSuperscript() {
         let range = selectedRange
         if let supRange = FormatDetector.findSuperscriptRange(in: sourceCode, at: range.location) {
-            unwrapBracketedFormatting(range: supRange, prefixPattern: #"^#super\s*[\[\(]"#)
+            let snippet = (sourceCode as NSString).substring(with: supRange)
+            if snippet.hasPrefix("<sup>") {
+                unwrapFormatting(range: supRange, prefixLen: 5, suffixLen: 6)
+            } else {
+                unwrapBracketedFormatting(range: supRange, prefixPattern: #"^#super\s*[\[\(]"#)
+            }
         } else {
-            wrapSelection(prefix: "#super[", suffix: "]")
+            if isMarkdownFile {
+                wrapSelection(prefix: "<sup>", suffix: "</sup>")
+            } else {
+                wrapSelection(prefix: "#super[", suffix: "]")
+            }
         }
         updateFormattingState()
     }
@@ -2187,7 +2289,8 @@ class EditorController: NSObject, ObservableObject {
         if let existingRange = FormatDetector.findPageBreakRange(in: sourceCode, at: range.location) {
             insertText("", replacementRange: existingRange)
         } else {
-            insertText("#pagebreak()\n", replacementRange: range)
+            let snippet = isMarkdownFile ? "<div style=\"page-break-after: always;\"></div>\n" : "#pagebreak()\n"
+            insertText(snippet, replacementRange: range)
         }
         updateFormattingState()
     }

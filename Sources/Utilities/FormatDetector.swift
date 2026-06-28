@@ -15,14 +15,17 @@ struct FormatDetector {
         return nil
     }
     
-    /// Finds the range of underline (#underline[...]) surrounding the index.
+    /// Finds the range of underline (#underline[...] or <u>...</u>) surrounding the index.
     static func findUnderlineRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#underline(?:\s*\([^)]*\))?\s*[\[(]"#)
+        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#underline(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        return findHTMLTagRange(in: text, at: index, tag: "u")
     }
     
-    /// Finds the range of highlight (#highlight[...]) surrounding the index.
+    /// Finds the range of highlight (#highlight[...] or <mark>...</mark> or ==...==) surrounding the index.
     static func findHighlightRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#highlight(?:\s*\([^)]*\))?\s*[\[(]"#)
+        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#highlight(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        if let mark = findHTMLTagRange(in: text, at: index, tag: "mark") { return mark }
+        return findRegexRange(in: text, at: index, pattern: #"(?s)==(.*?)=="#)
     }
     
     /// Finds the range of a text color block (#text(fill: ...)[...]) surrounding the index.
@@ -31,19 +34,22 @@ struct FormatDetector {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#text\s*\(\s*fill\s*:\s*(?:[a-zA-Z0-9]+|rgb\([^)]+\))\s*\)\s*[\[(]"#)
     }
     
-    /// Finds the range of strikethrough (#strike[...]) surrounding the index.
+    /// Finds the range of strikethrough (#strike[...] or ~~...~~) surrounding the index.
     static func findStrikeRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#strike(?:\s*\([^)]*\))?\s*[\[(]"#)
+        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#strike(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        return findRegexRange(in: text, at: index, pattern: #"(?s)~~(.*?)~~"#)
     }
 
-    /// Finds the range of subscript (#sub[...]) surrounding the index.
+    /// Finds the range of subscript (#sub[...] or <sub>...</sub>) surrounding the index.
     static func findSubscriptRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#sub(?:\s*\([^)]*\))?\s*[\[(]"#)
+        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#sub(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        return findHTMLTagRange(in: text, at: index, tag: "sub")
     }
 
-    /// Finds the range of superscript (#sup[...]) surrounding the index.
+    /// Finds the range of superscript (#sup[...] or <sup>...</sup>) surrounding the index.
     static func findSuperscriptRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#super(?:\s*\([^)]*\))?\s*[\[(]"#)
+        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#super(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        return findHTMLTagRange(in: text, at: index, tag: "sup")
     }
 
     /// Finds the range of title (#title[...]) surrounding the index.
@@ -737,5 +743,10 @@ struct FormatDetector {
             }
         }
         return nil
+    }
+    
+    static func findHTMLTagRange(in text: String, at index: Int, tag: String) -> NSRange? {
+        let pattern = "(?s)<\(tag)>.*?</\(tag)>"
+        return findRegexRange(in: text, at: index, pattern: pattern)
     }
 }

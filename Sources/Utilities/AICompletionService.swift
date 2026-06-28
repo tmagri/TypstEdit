@@ -248,6 +248,10 @@ class AICompletionService: ObservableObject {
         applyRegex("(?is)<(strong|b)>(.*?)</\\1>", template: "*$2*")
         applyRegex("(?is)<(em|i)>(.*?)</\\1>", template: "_$2_")
         applyRegex("(?is)<del>(.*?)</del>", template: "#strike[$1]")
+        applyRegex("(?is)<sup>(.*?)</sup>", template: "#super[$1]")
+        applyRegex("(?is)<sub>(.*?)</sub>", template: "#sub[$1]")
+        applyRegex("(?is)<u>(.*?)</u>", template: "#underline[$1]")
+        applyRegex("(?is)<mark>(.*?)</mark>", template: "#highlight[$1]")
         applyRegex("(?i)<br\\s*/?>", template: "\\\\")
         
         // 3.6 HTML Links and Images
@@ -353,8 +357,8 @@ class AICompletionService: ObservableObject {
         processed.setString(convertMarkdownTablesToTypst(processed as String))
 
         // 10. Strikethrough -> #strike[text]
-        applyRegex("~~(.+?)~~", template: "#strike[$1]")
-        
+        applyRegex("(?s)~~(.+?)~~", template: "#strike[$1]")
+
         // 10.4 Bold-Italic (Markdown *** or ___) -> Typst _*
         applyRegex("\\*\\*\\*(.+?)\\*\\*\\*", template: "_*$1*_")
         applyRegex("___(.+?)___", template: "_*$1*_")
@@ -443,8 +447,7 @@ class AICompletionService: ObservableObject {
         applyRegex("(?i)&larr;", template: "<-")
                 
         // 14c. Escape Literal Hash
-        applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[)", template: "\\\\#")
-        
+        applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[)", template: "\\\\#")
         // 14e. Escape Stray Backticks
         applyRegex("(?<!\\\\)`", template: "\\\\`")
         
