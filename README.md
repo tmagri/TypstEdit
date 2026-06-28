@@ -1,7 +1,7 @@
 # TypstEdit
 
 <p align="center">
-  <img src="TypstEdit/AppIcon.icns" alt="TypstEdit Icon" width="128" />
+  <img src="/AppIcon.icns" alt="TypstEdit Icon" width="128" />
 </p>
 
 <p align="center">
