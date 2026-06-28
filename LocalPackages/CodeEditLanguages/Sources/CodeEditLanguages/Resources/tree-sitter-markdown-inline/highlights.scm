@@ -6,8 +6,11 @@
 
 [
   (emphasis_delimiter)
+] @text.emphasis
+
+[
   (code_span_delimiter)
-] @punctuation.delimiter
+] @text.literal
 
 (emphasis) @text.emphasis
 

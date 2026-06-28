@@ -33,6 +33,17 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
     case variableBuiltin
     case keywordReturn
     case keywordFunction
+    case textTitle
+    case textLiteral
+    case textEmphasis
+    case textStrong
+    case textUri
+    case textReference
+    case textQuote
+    case textList
+    case textStrike
+    case punctuationSpecial
+    case punctuationDelimiter
 
     var alternate: CaptureName {
         switch self {
@@ -92,6 +103,28 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
             return .keywordReturn
         case "keyword.function":
             return .keywordFunction
+        case "text.title":
+            return .textTitle
+        case "text.literal":
+            return .textLiteral
+        case "text.emphasis":
+            return .textEmphasis
+        case "text.strong":
+            return .textStrong
+        case "text.uri":
+            return .textUri
+        case "text.reference":
+            return .textReference
+        case "text.quote":
+            return .textQuote
+        case "text.list":
+            return .textList
+        case "text.strike":
+            return .textStrike
+        case "punctuation.special":
+            return .punctuationSpecial
+        case "punctuation.delimiter":
+            return .punctuationDelimiter
         default:
             return nil
         }
@@ -142,6 +175,28 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
             return "keywordReturn"
         case .keywordFunction:
             return "keywordFunction"
+        case .textTitle:
+            return "textTitle"
+        case .textLiteral:
+            return "textLiteral"
+        case .textEmphasis:
+            return "textEmphasis"
+        case .textStrong:
+            return "textStrong"
+        case .textUri:
+            return "textUri"
+        case .textReference:
+            return "textReference"
+        case .textQuote:
+            return "textQuote"
+        case .textList:
+            return "textList"
+        case .textStrike:
+            return "textStrike"
+        case .punctuationSpecial:
+            return "punctuationSpecial"
+        case .punctuationDelimiter:
+            return "punctuationDelimiter"
         }
     }
 }

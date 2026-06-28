@@ -11,7 +11,7 @@
   (atx_h6_marker)
   (setext_h1_underline)
   (setext_h2_underline)
-] @punctuation.special
+] @text.title
 
 [
   (link_title)
@@ -39,13 +39,14 @@
   (list_marker_star)
   (list_marker_dot)
   (list_marker_parenthesis)
-  (thematic_break)
-] @punctuation.special
+] @text.list
+
+(thematic_break) @text.strike
 
 [
   (block_continuation)
   (block_quote_marker)
-] @punctuation.special
+] @text.quote
 
 [
   (backslash_escape)

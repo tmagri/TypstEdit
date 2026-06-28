@@ -51,13 +51,20 @@ struct FormatDetector {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#title(?:\s*\([^)]*\))?\s*[\[(]"#)
     }
     
+    private static func getSearchRange(around index: Int, in length: Int, windowSize: Int = 5000) -> NSRange {
+        let start = max(0, index - windowSize)
+        let end = min(length, index + windowSize)
+        return NSRange(location: start, length: end - start)
+    }
+
     private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
         let nsText = text as NSString
         let length = nsText.length
         let safeIndex = max(0, min(index, length))
         guard let regex = try? NSRegularExpression(pattern: prefixPattern, options: []) else { return nil }
         
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
+        let searchRange = getSearchRange(around: safeIndex, in: length, windowSize: 5000)
+        let matches = regex.matches(in: text, options: [], range: searchRange)
         
         for match in matches.reversed() {
             if match.range.location <= safeIndex {
@@ -228,11 +235,12 @@ struct FormatDetector {
         let safeIndex = max(0, min(index, length))
         
         // Matches any identical sequence of backticks (handles `...`, ``...``, ```...```)
+        let searchRange = getSearchRange(around: safeIndex, in: length, windowSize: 5000)
         let patterns = [#"(?s)(`+).*?(?<!`)\1(?!`)"#]
         
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
-            let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
+            let matches = regex.matches(in: text, options: [], range: searchRange)
             
             for match in matches {
                 if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
@@ -251,10 +259,11 @@ struct FormatDetector {
         
         let nsText = text as NSString
         let safeIndex = max(0, min(index, nsText.length))
+        let searchRange = getSearchRange(around: safeIndex, in: nsText.length, windowSize: 2000)
         
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
-            let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            let matches = regex.matches(in: text, options: [], range: searchRange)
             for match in matches {
                 if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
                     return match.range
@@ -274,7 +283,8 @@ struct FormatDetector {
         let length = nsText.length
         let safeIndex = max(0, min(index, length))
         
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
+        let searchRange = getSearchRange(around: safeIndex, in: length, windowSize: 10000)
+        let matches = regex.matches(in: text, options: [], range: searchRange)
         
         for match in matches {
             if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
@@ -613,7 +623,7 @@ struct FormatDetector {
         }
         
         // Extract params from () using proper nesting check
-        if let parenStart = snippet.firstIndex(of: "(") {
+        if snippet.contains("(") {
             let nsSnippet = snippet as NSString
             let startIdx = nsSnippet.range(of: "(").location + 1
             if let paramsRange = findClosingMarker(in: snippet, startingAt: startIdx, opener: "(", closer: ")") {
@@ -653,7 +663,7 @@ struct FormatDetector {
         var gutter: String?
         var cells: [String] = []
         
-        if let parenStart = snippet.firstIndex(of: "(") {
+        if snippet.contains("(") {
             let nsSnippet = snippet as NSString
             let startIdx = nsSnippet.range(of: "(").location + 1
             if let paramsRange = findClosingMarker(in: snippet, startingAt: startIdx, opener: "(", closer: ")") {
@@ -713,12 +723,13 @@ struct FormatDetector {
         return results
     }
 
-    private static func findRegexRange(in text: String, at index: Int, pattern: String) -> NSRange? {
+    private static func findRegexRange(in text: String, at index: Int, pattern: String, windowSize: Int = 2000) -> NSRange? {
         let nsText = text as NSString
         let safeIndex = max(0, min(index, nsText.length))
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
         
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+        let searchRange = getSearchRange(around: safeIndex, in: nsText.length, windowSize: windowSize)
+        let matches = regex.matches(in: text, options: [], range: searchRange)
         for match in matches {
             // Check if cursor is inside the matched pattern
             if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {

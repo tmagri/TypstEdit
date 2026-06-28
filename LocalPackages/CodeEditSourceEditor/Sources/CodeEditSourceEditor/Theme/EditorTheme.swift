@@ -115,6 +115,15 @@ public struct EditorTheme: Equatable {
         case .type: return types
         case .parameter: return variables
         case .typeAlternate: return attributes
+        case .textTitle: return markupHeading
+        case .textEmphasis: return markupItalic
+        case .textStrong: return markupBold
+        case .textUri, .textReference: return markupLink
+        case .textLiteral: return text
+        case .textQuote: return markupQuote
+        case .textList: return markupList
+        case .textStrike: return markupStrikethrough
+        case .punctuationSpecial, .punctuationDelimiter: return text
         default: return text
         }
     }
