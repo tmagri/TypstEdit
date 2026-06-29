@@ -131,6 +131,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 } else if let fileURL = editorController?.currentFileURL {
                     TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
                 }
+                // Reset the app state so the Welcome Screen appears on next launch
+                NotificationCenter.default.post(name: .resetToWelcome, object: nil)
+                
                 return true
             }
             return false
@@ -140,6 +143,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 extension Notification.Name {
     static let requestSave = Notification.Name("requestSave")
+    static let resetToWelcome = Notification.Name("resetToWelcome") 
 }
 
 @main

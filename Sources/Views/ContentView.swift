@@ -88,33 +88,8 @@ struct ContentView: View {
                 RAGManager.shared.disableForStandaloneMode()
             }
         }
-        .onOpenURL { url in
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-                if isDirectory.boolValue {
-                    // 1. If it's a folder, open as a project
-                    fileSystem.currentFolder = url
-                    fileSystem.isNewUnsavedFile = false
-                    fileSystem.loadFiles()
-                    editorController.isSidebarVisible = true
-                    
-                } else if url.pathExtension.lowercased() == "typ" {
-                    // 2. If it's a Typst file, open its parent folder as a project AND open the file
-                    let folder = url.deletingLastPathComponent()
-                    fileSystem.currentFolder = folder
-                    fileSystem.isNewUnsavedFile = false
-                    fileSystem.loadFiles()
-                    
-                    self.selectedFile = url
-                    self.loadFile(url: url)
-                    
-                    editorController.isSidebarVisible = true
-                    
-                } else {
-                    // 3. If it's a Markdown file (or anything else), force standalone mode
-                    NotificationCenter.default.post(name: .openStandaloneFile, object: url)
-                }
-            }
+        .onOpenURL { url in 
+            handleOpenURL(url) 
         }
         .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
             if let url = notification.object as? URL {
@@ -196,6 +171,18 @@ struct ContentView: View {
             editorController.setupDefaultConfiguration()
             editorController.applyTheme() 
             syncPreviewTheme()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .resetToWelcome)) { _ in
+            // Clear all active file/project state to trigger the WelcomeView
+            self.selectedFile = nil
+            self.fileSystem.currentFolder = nil
+            self.fileSystem.isNewUnsavedFile = false
+            self.editorController.currentFileURL = nil
+            self.editorController.projectRootURL = nil
+            self.editorController.sourceCode = ""
+            self.editorController.syncSavedContent("")
+            self.currentPDFURL = nil
+            self.editorController.isSidebarVisible = false
         }
     } // End of ZStack
     
@@ -557,7 +544,37 @@ struct ContentView: View {
     }
     
     // MARK: - Handlers
+    // MARK: - Handlers
     
+    private func handleOpenURL(_ url: URL) {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+            if isDirectory.boolValue {
+                // 1. If it's a folder, open as a project
+                fileSystem.currentFolder = url
+                fileSystem.isNewUnsavedFile = false
+                fileSystem.loadFiles()
+                editorController.isSidebarVisible = true
+                
+            } else if url.pathExtension.lowercased() == "typ" {
+                // 2. If it's a Typst file, open its parent folder as a project AND open the file
+                let folder = url.deletingLastPathComponent()
+                fileSystem.currentFolder = folder
+                fileSystem.isNewUnsavedFile = false
+                fileSystem.loadFiles()
+                
+                self.selectedFile = url
+                self.loadFile(url: url)
+                
+                editorController.isSidebarVisible = true
+                
+            } else {
+                // 3. If it's a Markdown file (or anything else), force standalone mode
+                NotificationCenter.default.post(name: .openStandaloneFile, object: url)
+            }
+        }
+    }
+
     private func handleFileSelectionChange(newValue: URL?) {
         if self.isInternalSelectionChange { self.isInternalSelectionChange = false; return }
         
