@@ -13,13 +13,13 @@ public enum TreeSitterLanguage: String {
     case bash
     case c
     case cpp
-    case cSharp
+    case cSharp = "c_sharp"
     case css
     case dart
     case dockerfile
     case elixir
     case go
-    case goMod
+    case goMod = "go_mod"
     case haskell
     case html
     case java
@@ -31,10 +31,10 @@ public enum TreeSitterLanguage: String {
     case kotlin
     case lua
     case markdown
-    case markdownInline
+    case markdownInline = "markdown_inline"
     case objc
     case ocaml
-    case ocamlInterface
+    case ocamlInterface = "ocaml_interface"
     case perl
     case php
     case python
@@ -51,5 +51,5 @@ public enum TreeSitterLanguage: String {
     case yaml
     case zig
     case typst
-    case plainText
+    case plainText = "plain_text"
 }

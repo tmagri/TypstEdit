@@ -35,3 +35,9 @@
 
 ; COMMENTS
 (comment) @comment
+
+; CODE BLOCKS
+[
+  (raw_blck)
+  (raw_span)
+] @text.literal

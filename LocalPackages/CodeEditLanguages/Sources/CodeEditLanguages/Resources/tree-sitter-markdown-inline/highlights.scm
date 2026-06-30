@@ -4,13 +4,7 @@
   (link_title)
 ] @text.literal
 
-[
-  (emphasis_delimiter)
-] @text.emphasis
 
-[
-  (code_span_delimiter)
-] @text.literal
 
 (emphasis) @text.emphasis
 

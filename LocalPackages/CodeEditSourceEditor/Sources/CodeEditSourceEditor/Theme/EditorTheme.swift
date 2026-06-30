@@ -119,7 +119,7 @@ public struct EditorTheme: Equatable {
         case .textEmphasis: return markupItalic
         case .textStrong: return markupBold
         case .textUri, .textReference: return markupLink
-        case .textLiteral: return text
+        case .textLiteral: return strings
         case .textQuote: return markupQuote
         case .textList: return markupList
         case .textStrike: return markupStrikethrough
