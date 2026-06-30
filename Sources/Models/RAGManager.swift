@@ -1,6 +1,7 @@
 import Foundation
 import NaturalLanguage
 import Accelerate
+import CryptoKit
 import CSQLite
 import vector
 
@@ -172,7 +173,9 @@ class RAGManager: ObservableObject {
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT UNIQUE,
-            last_modified REAL
+            last_modified REAL,
+            file_size INTEGER DEFAULT 0,
+            content_hash TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +185,10 @@ class RAGManager: ObservableObject {
             FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
         );
         """
+        
+        // Migrate existing databases that don't have the new columns yet.
+        sqlite3_exec(db, "ALTER TABLE files ADD COLUMN file_size INTEGER DEFAULT 0;", nil, nil, nil)
+        sqlite3_exec(db, "ALTER TABLE files ADD COLUMN content_hash TEXT DEFAULT '';", nil, nil, nil)
         
         if sqlite3_exec(db, createSQL, nil, nil, &errMsg) != SQLITE_OK {
             print("Failed to create tables: \(String(cString: errMsg!))")
@@ -297,23 +304,30 @@ class RAGManager: ObservableObject {
             self.indexStatus = "Indexing \(fileURL.lastPathComponent)..."
             
             let ext = fileURL.pathExtension.lowercased()
-            let attributes = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey])
-            guard let lastModifiedDate = attributes?.contentModificationDate else { continue }
+            let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            guard let lastModifiedDate = resourceValues?.contentModificationDate else { continue }
             let lastModified = lastModifiedDate.timeIntervalSince1970
+            let currentFileSize = Int64(resourceValues?.fileSize ?? 0)
             
             let fileKey = fileURL.path.replacingOccurrences(of: projectDir.path + "/", with: "")
             
             var needsIndexing = true
             var fileId: Int64 = -1
             
-            let checkSQL = "SELECT id, last_modified FROM files WHERE path = ?;"
+            // Step 1: Fast metadata check (size + mtime) — free, no I/O
+            let checkSQL = "SELECT id, last_modified, file_size, content_hash FROM files WHERE path = ?;"
             var checkStmt: OpaquePointer?
+            var storedHash = ""
             if sqlite3_prepare_v2(db, checkSQL, -1, &checkStmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(checkStmt, 1, (fileKey as NSString).utf8String, -1, nil)
                 if sqlite3_step(checkStmt) == SQLITE_ROW {
                     fileId = sqlite3_column_int64(checkStmt, 0)
                     let storedModified = sqlite3_column_double(checkStmt, 1)
-                    if storedModified >= lastModified {
+                    let storedSize = sqlite3_column_int64(checkStmt, 2)
+                    storedHash = sqlite3_column_text(checkStmt, 3).map { String(cString: $0) } ?? ""
+                    
+                    if storedSize == currentFileSize && storedModified >= lastModified {
+                        // Metadata matches exactly — skip without reading the file
                         needsIndexing = false
                     }
                 }
@@ -321,6 +335,29 @@ class RAGManager: ObservableObject {
             sqlite3_finalize(checkStmt)
             
             if !needsIndexing { continue }
+            
+            // Step 2: Metadata differed — compute SHA-256 hash to confirm real content change
+            guard let fileData = try? Data(contentsOf: fileURL) else { continue }
+            let newHash = SHA256.hash(data: fileData)
+                .compactMap { String(format: "%02x", $0) }.joined()
+            
+            if !storedHash.isEmpty && storedHash == newHash {
+                // Content is identical despite metadata change (e.g. git checkout, copy).
+                // Just update the metadata columns to avoid hashing again next sync.
+                let updateMetaSQL = "UPDATE files SET last_modified = ?, file_size = ? WHERE id = ?;"
+                var updateMetaStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, updateMetaSQL, -1, &updateMetaStmt, nil) == SQLITE_OK {
+                    sqlite3_bind_double(updateMetaStmt, 1, lastModified)
+                    sqlite3_bind_int64(updateMetaStmt, 2, currentFileSize)
+                    sqlite3_bind_int64(updateMetaStmt, 3, fileId)
+                    sqlite3_step(updateMetaStmt)
+                }
+                sqlite3_finalize(updateMetaStmt)
+                print("[RAG] \(fileURL.lastPathComponent): metadata changed but content unchanged — skipping re-embed.")
+                continue
+            }
+            
+            // Content actually changed (or new file) — fall through to re-index.
             
             var extractedTextChunks: [String] = []
             
@@ -348,11 +385,13 @@ class RAGManager: ObservableObject {
                 sqlite3_exec(db, delSQL, nil, nil, nil)
             }
             
-            let insertFileSQL = "INSERT INTO files (path, last_modified) VALUES (?, ?);"
+            let insertFileSQL = "INSERT INTO files (path, last_modified, file_size, content_hash) VALUES (?, ?, ?, ?);"
             var insertFileStmt: OpaquePointer?
             if sqlite3_prepare_v2(db, insertFileSQL, -1, &insertFileStmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(insertFileStmt, 1, (fileKey as NSString).utf8String, -1, nil)
                 sqlite3_bind_double(insertFileStmt, 2, lastModified)
+                sqlite3_bind_int64(insertFileStmt, 3, currentFileSize)
+                sqlite3_bind_text(insertFileStmt, 4, (newHash as NSString).utf8String, -1, nil)
                 if sqlite3_step(insertFileStmt) == SQLITE_DONE {
                     fileId = sqlite3_last_insert_rowid(db)
                 }
