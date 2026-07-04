@@ -109,7 +109,10 @@ struct AppMenuCommands: Commands {
         }
         
         // MARK: - Edit Menu
-        CommandGroup(replacing: .textEditing) {
+        // Replace each system group individually to avoid duplicate items.
+        
+        // Replaces the system Undo / Redo pair
+        CommandGroup(replacing: .undoRedo) {
             Button("Undo") {
                 NotificationCenter.default.post(name: .menuCommand, object: "undo")
             }
@@ -119,9 +122,10 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "redo")
             }
             .keyboardShortcut("z", modifiers: [.command, .shift])
-            
-            Divider()
-            
+        }
+        
+        // Replaces the system Cut / Copy / Paste trio
+        CommandGroup(replacing: .pasteboard) {
             Button("Cut") {
                 NotificationCenter.default.post(name: .menuCommand, object: "cut")
             }
@@ -137,13 +141,19 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("v", modifiers: .command)
             
+            Button("Paste as Plain Text") {
+                NotificationCenter.default.post(name: .menuCommand, object: "pasteAsPlainText")
+            }
+            .keyboardShortcut("v", modifiers: [.command, .shift])
+            
             Button("Delete") {
                 NotificationCenter.default.post(name: .menuCommand, object: "delete")
             }
             .keyboardShortcut(.delete, modifiers: [])
-            
-            Divider()
-            
+        }
+        
+        // Replaces the system Select All / text-editing group; also carries formatting shortcuts
+        CommandGroup(replacing: .textEditing) {
             Button("Search and Replace") {
                 editorController.showFindPanel()
             }
@@ -152,7 +162,7 @@ struct AppMenuCommands: Commands {
             Button("Go to Line") {
                 NotificationCenter.default.post(name: .menuCommand, object: "goToLine")
             }
-            .keyboardShortcut("l", modifiers: .command) // Changed G to L which is more common and was G in original but typically L
+            .keyboardShortcut("l", modifiers: .command)
             
             Divider()
             
@@ -243,8 +253,9 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleQuote")
             }
             .keyboardShortcut(".", modifiers: [.command, .shift])
-            
         }
+
+
 
         
         // MARK: - Insert Menu

@@ -1,6 +1,9 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import Vision
+import ImageIO
+
 
 extension Notification.Name {
     static let refreshProjectSidebar = Notification.Name("refreshProjectSidebar")
@@ -766,6 +769,78 @@ class EditorController: NSObject, ObservableObject {
             }
             
             insertText(textToInsert)
+        }
+    }
+    
+    /// Paste the clipboard contents as literal plain text, bypassing any
+    /// Markdown-to-Typst conversion that `pasteSelection()` would apply.
+    /// If the clipboard holds an image instead of text, Vision OCR is used
+    /// to extract text from it and insert the result at the cursor.
+    func pasteAsPlainText() {
+        let pasteboard = NSPasteboard.general
+        
+        // 1. Prefer raw string data (no conversion).
+        if let text = pasteboard.string(forType: .string) {
+            insertText(text)
+            return
+        }
+        
+        // 2. Fall back to OCR when the clipboard contains image data.
+        //    Critically: read the raw bytes eagerly here on the MAIN thread using
+        //    data(forType:) — NOT NSImage(pasteboard:), which uses a lazy data
+        //    provider that can IPC back to the source app and trigger a
+        //    dispatch_sync-on-main-queue deadlock (→ EXC_BREAKPOINT / libdispatch crash).
+        let imageTypes: [NSPasteboard.PasteboardType] = [
+            .tiff,
+            NSPasteboard.PasteboardType("public.png"),
+            NSPasteboard.PasteboardType("public.jpeg"),
+            NSPasteboard.PasteboardType("com.apple.pict")
+        ]
+        
+        var rawData: Data?
+        for type in imageTypes {
+            if let d = pasteboard.data(forType: type) {
+                rawData = d
+                break
+            }
+        }
+        
+        guard let data = rawData else {
+            showStatus("Nothing to paste")
+            return
+        }
+        
+        showStatus("Running OCR on clipboard image…")
+        
+        // All heavy work (image decode + Vision) runs off the main thread.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                DispatchQueue.main.async { self.showStatus("Could not decode clipboard image") }
+                return
+            }
+            
+            let request = VNRecognizeTextRequest { req, _ in
+                let lines = (req.results as? [VNRecognizedTextObservation] ?? [])
+                    .compactMap { $0.topCandidates(1).first?.string }
+                let recognized = lines.joined(separator: "\n")
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if recognized.isEmpty {
+                        self.showStatus("OCR found no text in the image")
+                    } else {
+                        self.insertText(recognized)
+                        self.showStatus("Pasted \(lines.count) line(s) via OCR")
+                    }
+                }
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try? handler.perform([request])
         }
     }
     
@@ -2868,10 +2943,33 @@ class EditorController: NSObject, ObservableObject {
         
         guard let index = controller.textView.layoutManager.textOffsetAtPoint(point) else { return nil }
         
+        // Build the base edit actions menu that always appears
+        let baseMenu = NSMenu()
+        
+        let cutItem = NSMenuItem(title: "Cut", action: #selector(contextMenuCut(_:)), keyEquivalent: "")
+        cutItem.target = self
+        cutItem.isEnabled = selectedRange.length > 0
+        baseMenu.addItem(cutItem)
+        
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(contextMenuCopy(_:)), keyEquivalent: "")
+        copyItem.target = self
+        copyItem.isEnabled = selectedRange.length > 0
+        baseMenu.addItem(copyItem)
+        
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(contextMenuPaste(_:)), keyEquivalent: "")
+        pasteItem.target = self
+        pasteItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
+        baseMenu.addItem(pasteItem)
+        
+        let pastePlainItem = NSMenuItem(title: "Paste as Plain Text", action: #selector(contextMenuPasteAsPlainText(_:)), keyEquivalent: "")
+        pastePlainItem.target = self
+        pastePlainItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
+        baseMenu.addItem(pastePlainItem)
+        
         for error in self.errors {
             // Check if click is on the error line
             if let range = getRangeForLine(error.line), NSLocationInRange(index, range) {
-                let menu = NSMenu()
+                baseMenu.addItem(NSMenuItem.separator())
                 
                 // Static Fixes
                 // Get line content
@@ -2892,7 +2990,7 @@ class EditorController: NSObject, ObservableObject {
                 if !lineCode.isEmpty { // Only offer fixes if we have line content
                     let headerItem = NSMenuItem(title: "Quick Fixes", action: nil, keyEquivalent: "")
                     headerItem.isEnabled = false
-                    menu.addItem(headerItem)
+                    baseMenu.addItem(headerItem)
                     
                     // Let's handle newline logic here to be safe and robust.
                     var cleanLine = lineCode
@@ -2913,21 +3011,37 @@ class EditorController: NSObject, ObservableObject {
                          let item = NSMenuItem(title: cleanFix.title, action: #selector(applyStaticFix(_:)), keyEquivalent: "")
                          item.target = self
                          item.representedObject = rangeFix
-                         menu.addItem(item)
+                         baseMenu.addItem(item)
                     }
-                    menu.addItem(NSMenuItem.separator())
+                    baseMenu.addItem(NSMenuItem.separator())
                 }
                 
                 // AI Fix
                 let item = NSMenuItem(title: "✨ Fix with AI", action: #selector(fixErrorWithAI(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = error
-                menu.addItem(item)
+                baseMenu.addItem(item)
                 
-                return menu
+                return baseMenu
             }
         }
-        return nil
+        return baseMenu
+    }
+    
+    @objc func contextMenuCut(_ sender: NSMenuItem) {
+        cutSelection()
+    }
+    
+    @objc func contextMenuCopy(_ sender: NSMenuItem) {
+        copySelection()
+    }
+    
+    @objc func contextMenuPaste(_ sender: NSMenuItem) {
+        pasteSelection()
+    }
+    
+    @objc func contextMenuPasteAsPlainText(_ sender: NSMenuItem) {
+        pasteAsPlainText()
     }
     
     @objc func applyStaticFix(_ sender: NSMenuItem) {
