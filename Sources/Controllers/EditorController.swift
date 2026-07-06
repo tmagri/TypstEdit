@@ -2479,6 +2479,10 @@ class EditorController: NSObject, ObservableObject {
         // Only auto-translate when editing a Typst file
         guard currentFileType == .typst else { return }
         
+        // Disable entirely for .note files — they support hybrid Typst/Markdown natively
+        // and auto-conversion would be disruptive and unexpected
+        if currentFileURL?.pathExtension.lowercased() == "note" { return }
+        
         let nsText = sourceCode as NSString
         let cursorLocation = max(0, min(selectedRange.location, nsText.length))
         guard cursorLocation <= nsText.length else { return }
@@ -2486,9 +2490,11 @@ class EditorController: NSObject, ObservableObject {
         let lineRange = nsText.lineRange(for: NSRange(location: cursorLocation, length: 0))
         let lineContent = nsText.substring(with: lineRange)
         
-        // --- 1. Headings: ^#{1,6}\s -> Typst = equivalents ---
-        // We explicitly capture the space and rewrite it to prevent AppKit from swallowing the keystroke.
-        if let headingRegex = try? NSRegularExpression(pattern: "^(#{1,6})(\\s)", options: []) {
+        // --- 1. Headings: ^#{1,6} (\s) -> Typst = equivalents ---
+        // Only fires when the ENTIRE line content before the space is solely # characters
+        // (i.e. "# Title" → "= Title"), but NOT for "#functionCall" or "#import" etc.
+        // The space must immediately follow the hashes with nothing else on the line before it.
+        if let headingRegex = try? NSRegularExpression(pattern: "^(#{1,6})( )", options: []) {
             let nsLine = lineContent as NSString
             if let match = headingRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: nsLine.length)) {
                 

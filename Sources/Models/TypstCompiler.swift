@@ -124,8 +124,11 @@ class TypstCompiler: ObservableObject {
         do {
             var finalSource = source
             
-            // If the file is a Markdown (.md) file, convert to Typst before compilation
-            if fileURL.pathExtension.lowercased() == "md" {
+            // If the file is a Markdown (.md) or hybrid Note (.note) file,
+            // convert Markdown syntax to Typst before compilation.
+            // Native Typst syntax (= headings, #functions, etc.) passes through unchanged.
+            let ext = fileURL.pathExtension.lowercased()
+            if ext == "md" || ext == "note" {
                 finalSource = AICompletionService.shared.sanitizeMarkdownToTypst(finalSource)
             }
             
