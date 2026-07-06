@@ -66,6 +66,11 @@ class TypstCompiler: ObservableObject {
     
     // We keep track of the current shadow file being watched
     private var currentShadowSourceURL: URL?
+
+    // Lenient-mode fallback tracking (used for .note / .md files)
+    private var currentFileExtension: String = ""
+    private var fallbackAttempted: Set<Int> = []    // raw shadow-file line numbers already escaped
+    private var lastRawErrorLines: [Int] = []        // raw shadow-file line numbers from last error
     
     func cleanUp() {
         if let process = currentProcess {
@@ -75,6 +80,8 @@ class TypstCompiler: ObservableObject {
         processOutputPipe?.fileHandleForReading.readabilityHandler = nil
         processOutputPipe = nil
         currentShadowSourceURL = nil
+        // We do not clear fallback tracking here because updateContent() sets them
+        // up just before cleanUp() is called to switch processes.
     }
 
     /// Call this when the project or app is about to close to remove the temp/ directory.
@@ -128,6 +135,13 @@ class TypstCompiler: ObservableObject {
             // convert Markdown syntax to Typst before compilation.
             // Native Typst syntax (= headings, #functions, etc.) passes through unchanged.
             let ext = fileURL.pathExtension.lowercased()
+
+            // Track the file type for lenient-mode fallback, and reset escape history
+            // because the user typed new content — start fresh.
+            currentFileExtension = ext
+            fallbackAttempted = []
+            lastRawErrorLines = []
+
             if ext == "md" || ext == "note" {
                 finalSource = AICompletionService.shared.sanitizeMarkdownToTypst(finalSource, isHybrid: ext == "note")
             }
@@ -233,6 +247,15 @@ class TypstCompiler: ObservableObject {
                         print("[TYPST] Detected error message")
                         self.compilationStatus = "Compilation Error"
                         self.parseErrors(from: output)
+
+                        // Lenient mode: for .note and .md files, escape the exact lines that
+                        // Typst rejected so the document always compiles and text is preserved.
+                        if self.currentFileExtension == "note" || self.currentFileExtension == "md" {
+                            let rawLines = self.lastRawErrorLines
+                            if !rawLines.isEmpty {
+                                self.attemptFallbackFix(rawErrorLines: rawLines)
+                            }
+                        }
                     }
                 }
             }
@@ -255,6 +278,8 @@ class TypstCompiler: ObservableObject {
         
         var currentErrorMsg: String? = nil
         
+        var newRawErrorLines: [Int] = []
+
         for line in lines {
             if line.starts(with: "error: ") {
                 // If we had a previous error pending without a location, maybe add it? 
@@ -266,6 +291,11 @@ class TypstCompiler: ObservableObject {
                 let match = String(line[range]) // ":10:5"
                 let parts = match.split(separator: ":")
                 if parts.count >= 1, let lineNum = Int(parts[0]) {
+                    // Keep the raw shadow-file line for fallback fix purposes
+                    if !newRawErrorLines.contains(lineNum) {
+                        newRawErrorLines.append(lineNum)
+                    }
+
                     let adjustedLine = isDarkMode ? max(1, lineNum - preambleLineCount) : lineNum
                     
                     // Avoid duplicate errors for the same line if possible, or just allow them
@@ -278,6 +308,11 @@ class TypstCompiler: ObservableObject {
                 currentErrorMsg = nil // Consumed
             }
         }
+
+        // Store raw error lines so the fallback fixer can locate them in the shadow file
+        if !newRawErrorLines.isEmpty {
+            lastRawErrorLines = newRawErrorLines
+        }
         
         // Update errors if changed.
         if self.errors != newErrors {
@@ -285,7 +320,83 @@ class TypstCompiler: ObservableObject {
             NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
         }
     }
-    
+
+    // MARK: - Lenient Fallback Fixer (.note / .md)
+
+    /// For non-strict file types, when Typst reports an error on specific lines of the shadow
+    /// file, this method escapes all Typst special characters on those lines and rewrites the
+    /// shadow file. `typst watch` detects the change and recompiles, almost always successfully.
+    /// The content is preserved verbatim in the output instead of being silently dropped.
+    ///
+    /// A `fallbackAttempted` set prevents us from retrying the same line infinitely.
+    private func attemptFallbackFix(rawErrorLines: [Int]) {
+        guard let shadowURL = currentShadowSourceURL else { return }
+        guard FileManager.default.fileExists(atPath: shadowURL.path) else { return }
+
+        // Only process lines we haven't already tried to fix
+        let newLines = rawErrorLines.filter { !fallbackAttempted.contains($0) }
+        guard !newLines.isEmpty else {
+            print("[FallbackFix] All error lines already attempted — skipping.")
+            return
+        }
+
+        do {
+            let content = try String(contentsOf: shadowURL, encoding: .utf8)
+            var fileLines = content.components(separatedBy: "\n")
+            var modified = false
+
+            for rawLine in newLines {
+                let idx = rawLine - 1  // convert 1-based to 0-based
+                guard idx >= 0 && idx < fileLines.count else { continue }
+
+                let original = fileLines[idx]
+                let trimmed = original.trimmingCharacters(in: .whitespaces)
+
+                // Skip blank lines and lines that are already pure Typst function calls
+                // (they were generated by sanitizeMarkdownToTypst and should be valid)
+                if trimmed.isEmpty { continue }
+                if trimmed.hasPrefix("#raw(") { continue }  // already escaped
+
+                let escaped = escapeTypstLine(original)
+                fileLines[idx] = escaped
+                fallbackAttempted.insert(rawLine)
+                modified = true
+                print("[FallbackFix] Escaped line \(rawLine): \(original.prefix(60))")
+            }
+
+            if modified {
+                let newContent = fileLines.joined(separator: "\n")
+                try newContent.write(to: shadowURL, atomically: true, encoding: .utf8)
+                print("[FallbackFix] Shadow file updated — typst watch will recompile.")
+            }
+        } catch {
+            print("[FallbackFix] Failed to apply fallback escaping: \(error)")
+        }
+    }
+
+    /// Escapes all Typst special characters in a line so it compiles as literal plain text.
+    /// Safely handles strings that might already be partially escaped by removing existing
+    /// escapes first, preventing double-escaping (e.g., \$ turning into \\\$).
+    private func escapeTypstLine(_ line: String) -> String {
+        var result = line
+        
+        // 1. Remove existing standard Typst escapes to prevent double-escaping
+        result = result.replacingOccurrences(of: "\\#", with: "#")
+        result = result.replacingOccurrences(of: "\\$", with: "$")
+        result = result.replacingOccurrences(of: "\\@", with: "@")
+        result = result.replacingOccurrences(of: "\\<", with: "<")
+        result = result.replacingOccurrences(of: "\\`", with: "`")
+        
+        // 2. Escape all special characters
+        result = result.replacingOccurrences(of: "#",  with: "\\#")
+        result = result.replacingOccurrences(of: "$",  with: "\\$")
+        result = result.replacingOccurrences(of: "@",  with: "\\@")
+        result = result.replacingOccurrences(of: "<",  with: "\\<")
+        result = result.replacingOccurrences(of: "`",  with: "\\`")
+        
+        return result
+    }
+
     // --- Export Functions ---
     
     func export(sourceURL: URL, outputURL: URL, format: String, projectRoot: URL? = nil) async -> (success: Bool, error: String?) {
