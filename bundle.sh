@@ -101,7 +101,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>
-    <string>com.example.$APP_NAME</string>
+    <string>com.tmagri.$APP_NAME</string>
     <key>CFBundleName</key>
     <string>$APP_NAME</string>
     <key>CFBundleIconFile</key>
@@ -116,6 +116,12 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>TypstEdit needs access to your Desktop to open and save documents stored there.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>TypstEdit needs access to your Documents folder to open and save documents stored there.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>TypstEdit needs access to your Downloads folder to open documents stored there.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
