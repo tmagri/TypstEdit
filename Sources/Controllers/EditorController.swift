@@ -522,7 +522,7 @@ class EditorController: NSObject, ObservableObject {
         
         let ext = url.pathExtension.lowercased()
         switch ext {
-        case "typ":
+        case "typ", "note":
             currentFileType = .typst
         case "txt", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg":
             currentFileType = .text
@@ -539,7 +539,8 @@ class EditorController: NSObject, ObservableObject {
     }
 
     var isTypstFile: Bool {
-        currentFileURL?.pathExtension.lowercased() == "typ"
+        let ext = currentFileURL?.pathExtension.lowercased()
+        return ext == "typ" || ext == "note"
     }
     
     var isMarkdownFile: Bool {
@@ -732,11 +733,11 @@ class EditorController: NSObject, ObservableObject {
     // --- Undo/Redo Functions ---
     
     func undo() {
-        // textView?.undoManager?.undo()
+        textViewController?.textView.undoManager?.undo()
     }
     
     func redo() {
-        // textView?.undoManager?.redo()
+        textViewController?.textView.undoManager?.redo()
     }
     
     func cutSelection() {

@@ -100,6 +100,16 @@ struct ContentView: View {
                 fileSystem.loadFiles()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("openNotebooks"))) { _ in
+            fileSystem.currentFolder = NotebookManager.shared.rootDirectory
+            fileSystem.isNewUnsavedFile = false
+            fileSystem.rootNodes = [] // Just keep empty to not load file system for it
+            editorController.isSidebarVisible = true
+            self.selectedFile = nil
+            self.editorController.currentFileURL = nil
+            self.editorController.sourceCode = ""
+            self.currentPDFURL = nil
+        }
         .onReceive(NotificationCenter.default.publisher(for: .openProjectFolder)) { notification in
             if let url = notification.object as? URL {
                 fileSystem.currentFolder = url
@@ -151,7 +161,10 @@ struct ContentView: View {
                 self.reloadToken = UUID()
             }
         }
-        .onChange(of: editorController.sourceCode) { newValue in editorController.checkUnsavedChanges(currentContent: newValue) }
+        .onChange(of: editorController.sourceCode) { newValue in 
+            editorController.checkUnsavedChanges(currentContent: newValue)
+            scheduleCompilation(with: newValue)
+        }
 
         .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in saveFile(to: notification.object as? URL) }
         .preferredColorScheme(themeManager.appTheme.colorScheme)
@@ -626,7 +639,7 @@ struct ContentView: View {
         // 2. Pre-check file type for non-textual files to avoid delay
         // Check extension manually since editorController.currentFileURL isn't updated yet
         let ext = url.pathExtension.lowercased()
-        let isTextual = ["typ", "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg", "lyx"].contains(ext)
+        let isTextual = ["typ", "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg", "lyx", "note"].contains(ext)
 
         if !isTextual && ext != "pdf" && ext != "png" && ext != "jpg" { // Basic check
              // For non-text, update immediately as there is no content to read
@@ -831,11 +844,24 @@ struct ContentView: View {
             Task {
                 compiler.isDarkMode = isDark
 
+                // Auto-save .note files to prevent data loss
+                if url.pathExtension.lowercased() == "note" {
+                    do {
+                        try currentSource.write(to: url, atomically: true, encoding: .utf8)
+                        DispatchQueue.main.async {
+                            self.editorController.syncSavedContent(currentSource)
+                            AutoRecoveryManager.shared.clearRecovery(for: url)
+                        }
+                    } catch {
+                        print("[ERROR] Failed to auto-save note: \(error)")
+                    }
+                }
+
                 await compiler.updateContent(source: currentSource, fileURL: url)
             }
         }
         workItem = newWorkItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: newWorkItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: newWorkItem)
     }
     
     @MainActor

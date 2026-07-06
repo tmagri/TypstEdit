@@ -196,11 +196,27 @@ struct SidebarView: View {
     @ObservedObject var editorController: EditorController
     @ObservedObject private var ragManager = RAGManager.shared
 
+    @State private var sidebarMode: Int = 0 // 0: Projects, 1: Notebooks
+
+
     var body: some View {
         VStack(spacing: 0) {
-            // Header & File Tree
-            VStack(alignment: .leading, spacing: 0) {
-                if let folderName = model.currentFolder?.lastPathComponent {
+            
+            // Mode Selector
+            Picker("", selection: $sidebarMode) {
+                Label("Projects", systemImage: "folder").tag(0)
+                Label("Notebooks", systemImage: "book.closed").tag(1)
+            }
+            .pickerStyle(SegmentedPickerStyle())
+            .labelsHidden()
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 5)
+            
+            if sidebarMode == 0 {
+                // Header & File Tree
+                VStack(alignment: .leading, spacing: 0) {
+                    if let folderName = model.currentFolder?.lastPathComponent {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(folderName.uppercased())
@@ -290,6 +306,10 @@ struct SidebarView: View {
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
+            } // Close VStack
+            } else {
+                NotebookSidebarView(selectedFile: $selectedFile)
+                    .environmentObject(themeManager)
             }
             
             Divider()
@@ -308,6 +328,18 @@ struct SidebarView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .refreshProjectSidebar)) { _ in
             model.loadFiles()
+        }
+        .onChange(of: model.currentFolder) { newValue in
+            if newValue == NotebookManager.shared.rootDirectory {
+                sidebarMode = 1
+            } else {
+                sidebarMode = 0
+            }
+        }
+        .onAppear {
+            if model.currentFolder == NotebookManager.shared.rootDirectory {
+                sidebarMode = 1
+            }
         }
     }
 }

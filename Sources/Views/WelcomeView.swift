@@ -145,6 +145,27 @@ struct WelcomeView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    HStack(spacing: 20) {
+                        Button(action: { NotificationCenter.default.post(name: Notification.Name("openNotebooks"), object: nil) }) {
+                            VStack {
+                                Image(systemName: "book.closed")
+                                    .font(.system(size: 24))
+                                    .padding(.bottom, 5)
+                                    .foregroundColor(.indigo)
+                                Text("Notebooks")
+                                    .font(.headline)
+                                    .foregroundColor(themeManager.textColor)
+                            }
+                            .frame(width: 140, height: 100)
+                            .background(Color.primary.opacity(0.1))
+                            .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.primary.opacity(0.2), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .padding(.top, 20)
                 
