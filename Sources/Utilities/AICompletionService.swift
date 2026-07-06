@@ -196,7 +196,7 @@ class AICompletionService: ObservableObject {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
     }
 
-    func sanitizeMarkdownToTypst(_ text: String) -> String {
+    func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
         let processed = NSMutableString(string: text.replacingOccurrences(of: "\r\n", with: "\n"))
         
         // --- 1. MASK CODE BLOCKS ---
@@ -320,8 +320,37 @@ class AICompletionService: ObservableObject {
         // Swallow optional preceding backslash to prevent double-escaping into an unclosed label
         applyRegex("(?i)\\\\?<(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
         
-        // 5. Escape Markdown footnotes to prevent Typst math errors
-        applyRegex("\\[\\^([^\\]]+)\\]", template: "\\\\[\\\\^$1\\\\]")
+        // 5. Markdown Footnotes -> Typst #footnote[]
+        var footnotes: [String: String] = [:]
+        // Extract reference footnote definitions: [^id]: text
+        // This regex matches `[^id]:` at the start of a line, then lazily captures text until it sees 
+        // either the next `\n[^something]:` or the end of the string.
+        if let fnDefRegex = try? NSRegularExpression(pattern: "(?m)^\\[\\^([^\\]]+)\\]:[ \\t]*(.*?)(?=\\n\\[\\^|\n\\z|\\z)", options: [.dotMatchesLineSeparators]) {
+            let matches = fnDefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let id = processed.substring(with: match.range(at: 1))
+                let text = processed.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                footnotes[id] = text
+                processed.replaceCharacters(in: match.range, with: "")
+            }
+        }
+        
+        // Replace footnote references: [^id]
+        if let fnRefRegex = try? NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]", options: []) {
+            let matches = fnRefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let id = processed.substring(with: match.range(at: 1))
+                if let text = footnotes[id] {
+                    processed.replaceCharacters(in: match.range, with: "#footnote[\(text)]")
+                } else {
+                    // Escape it if no definition found so it doesn't break Typst math
+                    processed.replaceCharacters(in: match.range, with: "\\\\[\\\\^\(id)\\\\]")
+                }
+            }
+        }
+        
+        // Inline footnotes: ^[text]
+        applyRegex("(?<!!)\\^\\[([^\\]]+)\\]", template: "#footnote[$1]")
         
         // 6. Headings (H1 - H6) -> Typst (=)
         if let headingRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)(#+)[ \\t]+", options: []) {
@@ -368,8 +397,12 @@ class AICompletionService: ObservableObject {
         applyRegex("(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)", template: "**$1**")
         
         // 10.6 Escape underscores in technical terms/filenames
-        applyRegex("(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])", template: "\\\\_")
-        applyRegex("_(?=\\\\?\\*(?!\\*))", template: "\\\\_")
+        // In Hybrid mode (.note), Typst handles my_variable perfectly natively, and `_underscores_` is native italic.
+        // If we escape underscores, we break valid Typst syntax.
+        if !isHybrid {
+            applyRegex("(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])", template: "\\\\_")
+            applyRegex("_(?=\\\\?\\*(?!\\*))", template: "\\\\_")
+        }
         
         // 11. Bold (Markdown ** or __) -> Typst *
         applyRegex("\\*\\*(.+?)\\*\\*", template: "*$1*")
@@ -439,20 +472,38 @@ class AICompletionService: ObservableObject {
         // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
         applyRegex("(?m)^[-*_]{3,}[ \\t]*$", template: "#line(length: 100%)")
         
-        // 14. Escape Literal Dollars (Currency)
-        applyRegex("(?<!\\\\)\\$", template: "\\\\$")
-        
         // 14b. Common HTML Entities
         applyRegex("(?i)&rarr;", template: "->")
         applyRegex("(?i)&larr;", template: "<-")
-                
-        // 14c. Escape Literal Hash
-        applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[)", template: "\\\\#")
-        // 14e. Escape Stray Backticks
+        
+        // 14e. Escape Stray Backticks (Always)
+        // A stray backtick ALWAYS crashes Typst as an unclosed raw block.
+        // Valid code blocks are already masked, so any remaining backticks are stray.
         applyRegex("(?<!\\\\)`", template: "\\\\`")
         
-        // 14g. Escape Literal At-Signs (@)
-        applyRegex("(?<!\\\\)@", template: "\\\\@")
+        // In pure Markdown mode (e.g. AI completions or .md files), we escape Typst's special characters
+        // so they render as literal text. In hybrid mode (.note), we apply smart escaping to prevent
+        // common Markdown patterns (like $1600 or user@email.com) from crashing the compiler, while
+        // leaving native Typst functions (e.g. #title, $math$, @ref) alone.
+        if !isHybrid {
+            // 14. Escape Literal Dollars (Currency)
+            applyRegex("(?<!\\\\)\\$", template: "\\\\$")
+            
+            // 14c. Escape Literal Hash
+            applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[)", template: "\\\\#")
+            
+            // 14g. Escape Literal At-Signs (@)
+            applyRegex("(?<!\\\\)@", template: "\\\\@")
+        } else {
+            // HYBRID MODE SMART ESCAPING
+            // Escape dollars if followed by a digit (e.g. $1600) to prevent unclosed math block errors,
+            // but leave other dollars alone so Typst math ($E=mc^2$) still works.
+            applyRegex("(?<!\\\\)\\$(?=\\d)", template: "\\\\$")
+            
+            // Escape @ if it's preceded by a letter/number (e.g. email addresses like user@email.com)
+            // or followed by a space. Typst references (like @fig1) usually have a space before them and letters after.
+            applyRegex("(?<=[a-zA-Z0-9])@|@(?=\\s)", template: "\\\\@")
+        }
 
         // 14f. Un-escape characters inside Typst string parameters
         if let stringRegex = try? NSRegularExpression(pattern: "\"[^\"]*\"", options: []) {
@@ -495,8 +546,9 @@ class AICompletionService: ObservableObject {
         return resultString
     }
     private func convertMarkdownTablesToTypst(_ text: String) -> String {
-        // Matches a table block including potential hard-wrapped lines (matches until a blank line)
-        let pattern = "(?m)^[ \\t]*\\|[^\\n]*\\n[ \\t]*\\|[-:| \\t]*\\|[^\\n]*(?:\\n(?![ \\t]*$)[^\\n]*)*"
+        // Matches a table block including potential hard-wrapped lines (matches until a blank line).
+        // Supports tables both with and without outer pipes.
+        let pattern = "(?m)^[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(?:\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*\\n(?:[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n?)*"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
         
         let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
@@ -554,6 +606,10 @@ class AICompletionService: ObservableObject {
                 } else if char == "|" {
                     cells.append(currentCell.trimmingCharacters(in: .whitespaces))
                     currentCell = ""
+                } else if char == "`" {
+                    // Escape stray backticks (since valid code blocks are already masked)
+                    currentCell.append("\\")
+                    currentCell.append(char)
                 } else {
                     currentCell.append(char)
                 }

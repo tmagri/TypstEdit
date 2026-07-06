@@ -129,7 +129,7 @@ class TypstCompiler: ObservableObject {
             // Native Typst syntax (= headings, #functions, etc.) passes through unchanged.
             let ext = fileURL.pathExtension.lowercased()
             if ext == "md" || ext == "note" {
-                finalSource = AICompletionService.shared.sanitizeMarkdownToTypst(finalSource)
+                finalSource = AICompletionService.shared.sanitizeMarkdownToTypst(finalSource, isHybrid: ext == "note")
             }
             
             if isDarkMode {
