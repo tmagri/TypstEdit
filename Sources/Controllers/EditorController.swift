@@ -2692,8 +2692,6 @@ class EditorController: NSObject, ObservableObject {
         // Ensure UI update
         DispatchQueue.main.async {
              self.textViewController?.setCursorPositions([.init(range: fullRange)], scrollToVisible: false)
-             // Also set selection directly on the textView for reliable visual sync
-             self.textViewController?.textView.setSelectedRange(fullRange)
         }
     }
     
