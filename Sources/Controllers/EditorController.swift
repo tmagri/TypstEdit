@@ -1680,77 +1680,123 @@ class EditorController: NSObject, ObservableObject {
     
     // --- List Functions ---
     
+    enum ListType {
+        case bullet, number, description
+        
+        var targetPattern: String {
+            switch self {
+            case .bullet: return #"^([-*])\s+"#
+            case .number: return #"^(?:\+|\d+\.)\s+"#
+            case .description: return #"^/\s+"#
+            }
+        }
+        
+        func defaultPrefix(isMarkdown: Bool) -> String {
+            switch self {
+            case .bullet: return "- "
+            case .number: return isMarkdown ? "1. " : "+ "
+            case .description: return "/ "
+            }
+        }
+    }
+
     func toggleBulletList() {
-        toggleListPrefix("- ")
+        toggleListMode(.bullet)
     }
     
-   func toggleNumberList() {
-        toggleListPrefix(isMarkdownFile ? "1. " : "+ ")
+    func toggleNumberList() {
+        toggleListMode(.number)
     }
     
     func toggleDescriptionList() {
-        toggleListPrefix("/ ")
+        toggleListMode(.description)
     }
     
-    private func toggleListPrefix(_ prefix: String) {
+    private func toggleListMode(_ type: ListType) {
         let range = selectedRange
         guard Range(range, in: sourceCode) != nil else { return }
+        
+        let targetPrefix = type.defaultPrefix(isMarkdown: isMarkdownFile)
+        let targetRegex = try! NSRegularExpression(pattern: type.targetPattern, options: [])
+        let allListRegex = try! NSRegularExpression(pattern: #"^([-*]|\+|\d+\.|/)\s+"#, options: [])
         
         let nsText = sourceCode as NSString
         let lineRange = nsText.lineRange(for: range)
         let lineContent = nsText.substring(with: lineRange)
         
-        // --- Case 1: Single line and empty ---
         let hadTrailingNewline = lineContent.hasSuffix("\n")
         let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
-        
         let trimmed = lineContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isSingleLineRepresentation && (trimmed.isEmpty || trimmed == prefix.trimmingCharacters(in: .whitespaces)) {
-            if trimmed == prefix.trimmingCharacters(in: .whitespaces) {
-                // Remove prefix
-                let newText = hadTrailingNewline ? "\n" : ""
-                let newCursor = NSRange(location: lineRange.location, length: 0)
+        
+        if isSingleLineRepresentation {
+            let nsContent = lineContent as NSString
+            if let match = allListRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: nsContent.length)) {
+                let existingPrefix = nsContent.substring(with: match.range)
+                let textAfter = nsContent.substring(from: match.range.length).trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                if textAfter.isEmpty {
+                    if targetRegex.firstMatch(in: existingPrefix, options: [], range: NSRange(location: 0, length: existingPrefix.utf16.count)) != nil {
+                        let newText = hadTrailingNewline ? "\n" : ""
+                        let newCursor = NSRange(location: lineRange.location, length: 0)
+                        insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+                    } else {
+                        let newText = targetPrefix + (hadTrailingNewline ? "\n" : "")
+                        let newCursor = NSRange(location: lineRange.location + targetPrefix.utf16.count, length: 0)
+                        insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+                    }
+                    return
+                }
+            } else if trimmed.isEmpty {
+                let newText = targetPrefix + (hadTrailingNewline ? "\n" : "")
+                let newCursor = NSRange(location: lineRange.location + targetPrefix.utf16.count, length: 0)
                 insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
-            } else {
-                // Add prefix
-                let newText = prefix + (hadTrailingNewline ? "\n" : "")
-                let newCursor = NSRange(location: lineRange.location + prefix.utf16.count, length: 0)
-                insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+                return
             }
-            return
         }
         
-        // --- Case 2: Multiline selection or non-empty line ---
+        // --- Multiline selection or non-empty line ---
         var lineStrings = lineContent.components(separatedBy: .newlines)
         if hadTrailingNewline { lineStrings.removeLast() }
         
-        let otherPrefixes = ["- ", "+ ", "/ "].filter { $0 != prefix }
-        let headingPattern = #"^(=+)\s"#
+        let headingPattern = #"^(=+|#+)\s"#
         guard let headingRegex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
         
         struct LineInfo {
             let headingPrefix: String
-            let contentAfterHeading: String
-            let hasTargetPrefix: Bool
+            let existingListPrefix: String?
+            let contentAfterListPrefix: String
+            let isTargetPrefix: Bool
             let isBlank: Bool
         }
         
         var infos: [LineInfo] = []
         for line in lineStrings {
-            let nsLine = line as NSString
             var headingPrefix = ""
             var remaining = line
             
-            if let match = headingRegex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: nsLine.length)) {
-                headingPrefix = nsLine.substring(with: match.range)
-                remaining = nsLine.substring(from: match.range.length)
+            if let match = headingRegex.firstMatch(in: remaining, options: [], range: NSRange(location: 0, length: remaining.utf16.count)) {
+                headingPrefix = (remaining as NSString).substring(with: match.range)
+                remaining = (remaining as NSString).substring(from: match.range.length)
+            }
+            
+            var existingPrefix: String? = nil
+            var isTarget = false
+            let nsRemaining = remaining as NSString
+            if let match = allListRegex.firstMatch(in: remaining, options: [], range: NSRange(location: 0, length: nsRemaining.length)) {
+                existingPrefix = nsRemaining.substring(with: match.range)
+                remaining = nsRemaining.substring(from: match.range.length)
+                
+                if targetRegex.firstMatch(in: existingPrefix!, options: [], range: NSRange(location: 0, length: existingPrefix!.utf16.count)) != nil {
+                    isTarget = true
+                }
             }
             
             let isBlank = remaining.trimmingCharacters(in: .whitespaces).isEmpty
             infos.append(LineInfo(
                 headingPrefix: headingPrefix,
-                contentAfterHeading: remaining,
-                hasTargetPrefix: remaining.hasPrefix(prefix),
+                existingListPrefix: existingPrefix,
+                contentAfterListPrefix: remaining,
+                isTargetPrefix: isTarget,
                 isBlank: isBlank
             ))
         }
@@ -1758,32 +1804,22 @@ class EditorController: NSObject, ObservableObject {
         let nonBlankInfos = infos.filter { !$0.isBlank }
         if nonBlankInfos.isEmpty { return }
         
-        let allHaveTarget = nonBlankInfos.allSatisfy { $0.hasTargetPrefix }
+        let allHaveTarget = nonBlankInfos.allSatisfy { $0.isTargetPrefix }
         
         var newLines: [String] = []
         for info in infos {
             if info.isBlank {
-                newLines.append(info.headingPrefix + info.contentAfterHeading)
+                newLines.append(info.headingPrefix + (info.existingListPrefix ?? "") + info.contentAfterListPrefix)
                 continue
             }
             
-            var newContent = info.contentAfterHeading
+            var newLine = info.headingPrefix
             if allHaveTarget {
-                newContent = String(newContent.dropFirst(prefix.count))
+                newLine += info.contentAfterListPrefix
             } else {
-                var replaced = false
-                for op in otherPrefixes {
-                    if newContent.hasPrefix(op) {
-                        newContent = prefix + String(newContent.dropFirst(op.count))
-                        replaced = true
-                        break
-                    }
-                }
-                if !replaced && !info.hasTargetPrefix {
-                    newContent = prefix + newContent
-                }
+                newLine += targetPrefix + info.contentAfterListPrefix
             }
-            newLines.append(info.headingPrefix + newContent)
+            newLines.append(newLine)
         }
         
         var replacement = newLines.joined(separator: "\n")
@@ -1842,8 +1878,8 @@ class EditorController: NSObject, ObservableObject {
             // Debug Log
             print("[EditorController] updateFormattingState at \(range), textLen: \(text.count)")
             
-            self.isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location) != nil
-            self.isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location) != nil
+            self.isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location, isMarkdown: self.isMarkdownFile) != nil
+            self.isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location, isMarkdown: self.isMarkdownFile) != nil
             self.isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
             self.isHighlightActive = FormatDetector.findHighlightRange(in: text, at: range.location) != nil
             self.isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
@@ -1930,8 +1966,8 @@ class EditorController: NSObject, ObservableObject {
         let isSingleLineRepresentation = (lineRange.length > 0)
         
         let markerChar = isMarkdownFile ? "#" : "="
-        let markerOnlyPattern = isMarkdownFile ? #"^(#+)\s*$"# : #"^(=+)\s*$"#
-        let headingPattern = isMarkdownFile ? #"^(#+)\s"# : #"^(=+)\s"#
+        let markerOnlyPattern = #"^(=+|#+)\s*$"#
+        let headingPattern = #"^(=+|#+)\s"#
         
         let isMarkerOnly = (lineContent.range(of: markerOnlyPattern, options: .regularExpression) != nil)
         let isEmptyLine = lineContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
@@ -2030,7 +2066,7 @@ class EditorController: NSObject, ObservableObject {
         }
         
         // If it's a heading, strip the marker
-        let headingPattern = #"^(=+)\s"#
+        let headingPattern = #"^(=+|#+)\s"#
         if let regex = try? NSRegularExpression(pattern: headingPattern, options: []),
            let match = regex.firstMatch(in: content, options: [], range: NSRange(location: 0, length: content.utf16.count)) {
             content = String(content.dropFirst(match.range.length))
@@ -2042,12 +2078,10 @@ class EditorController: NSObject, ObservableObject {
     }
     
     // --- Formatting Actions ---
-    
-   // --- Formatting Actions ---
-    
+     
     func toggleBold() {
         let range = selectedRange
-        if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location),
+        if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location, isMarkdown: isMarkdownFile),
            let r = Range(boldRange, in: sourceCode) {
             let snippet = sourceCode[r]
             // If it's Markdown (** or __), unwrap 2 characters; otherwise 1 for Typst (*)
@@ -2065,7 +2099,7 @@ class EditorController: NSObject, ObservableObject {
     
     func toggleItalic() {
         let range = selectedRange
-        if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location),
+        if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location, isMarkdown: isMarkdownFile),
            let r = Range(italicRange, in: sourceCode) {
             let snippet = sourceCode[r]
             let prefixLen = 1 // Both Markdown (*) and Typst (_) use 1 character
@@ -2804,7 +2838,8 @@ class EditorController: NSObject, ObservableObject {
     func generateCleanPDF(compiler: TypstCompiler, fileURL: URL?) async -> URL? {
         showStatus("Preparing clean PDF...")
         let preferredDir = fileURL?.deletingLastPathComponent()
-        let result = await compiler.compileClean(content: sourceCode, preferredDirectory: preferredDir, projectRoot: projectRootURL)
+        let ext = fileURL?.pathExtension.lowercased()
+        let result = await compiler.compileClean(content: sourceCode, fileExtension: ext, preferredDirectory: preferredDir, projectRoot: projectRootURL)
         
         if result.success, let url = result.pdfURL {
             self.cleanPDFURL = url

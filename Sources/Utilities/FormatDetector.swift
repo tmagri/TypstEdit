@@ -1,17 +1,36 @@
 import Foundation
 
 struct FormatDetector {
-    /// Finds the range of bold text surrounding the index (Typst: *...* | Markdown: **...** or __...__).
-    static func findBoldRange(in text: String, at index: Int) -> NSRange? {
-        if let mdRange = findRegexRange(in: text, at: index, pattern: #"(?s)\*\*(.*?)\*\*|__(.*?)__"#) { return mdRange }
-        return findSymmetricRange(in: text, at: index, marker: "*")
+   /// Finds the range of bold text surrounding the index.
+    static func findBoldRange(in text: String, at index: Int, isMarkdown: Bool) -> NSRange? {
+        if isMarkdown {
+            if let mdRange = findRegexRange(in: text, at: index, pattern: #"(?s)\*\*(.*?)\*\*|__(.*?)__"#) { return mdRange }
+        } else {
+            // Typst Bold: *text*
+            let typstPattern = #"(?s)(?<!\*)\*(?!\s|\*)(.*?)(?<!\s|\*)\*(?!\*)"#
+            if let typstRange = findRegexRange(in: text, at: index, pattern: typstPattern) { return typstRange }
+            return findSymmetricRange(in: text, at: index, marker: "*")
+        }
+        return nil
     }
     
-    /// Finds the range of italic text surrounding the index (Typst: _..._ | Markdown: *...*).
-    static func findItalicRange(in text: String, at index: Int) -> NSRange? {
-        if let typstRange = findSymmetricRange(in: text, at: index, marker: "_") { return typstRange }
-        // Markdown Italic: matches *text* but strictly ignores **text**
-        if let mdRange = findRegexRange(in: text, at: index, pattern: #"(?s)(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)"#) { return mdRange }
+    /// Finds the range of italic text surrounding the index.
+    static func findItalicRange(in text: String, at index: Int, isMarkdown: Bool) -> NSRange? {
+        // Typst & Markdown Shared Italic: _text_
+        // - (?<![a-zA-Z0-9_]) and (?![a-zA-Z0-9_]) ignore snake_case_variables and double underscores.
+        let typstPattern = #"(?s)(?<![a-zA-Z0-9_])_(?!\s|_)(.*?)(?<!\s|_)_(?![a-zA-Z0-9_])"#
+        if let typstRange = findRegexRange(in: text, at: index, pattern: typstPattern) {
+            return typstRange
+        }
+        
+        // Markdown Exclusive Italic: *text* // (Only activated if the document is strictly a Markdown file)
+        if isMarkdown {
+            let mdPattern = #"(?s)(?<!\*)\*(?!\s|\*)(.*?)(?<!\s|\*)\*(?!\*)"#
+            if let mdRange = findRegexRange(in: text, at: index, pattern: mdPattern) {
+                return mdRange
+            }
+        }
+        
         return nil
     }
     
@@ -120,7 +139,8 @@ struct FormatDetector {
         let safeIndex = max(0, min(index, length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        return line.hasPrefix("- ")
+        let regex = try? NSRegularExpression(pattern: #"^[-*]\s+"#)
+        return regex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
     }
 
     /// Detects if the cursor at the given index is on a numerical list line.
@@ -129,11 +149,8 @@ struct FormatDetector {
         let safeIndex = max(0, min(index, nsText.length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        
-        let mdNumberRegex = try? NSRegularExpression(pattern: #"^\d+\.\s"#)
-        let isMdNumber = mdNumberRegex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
-        
-        return line.hasPrefix("+ ") || isMdNumber
+        let regex = try? NSRegularExpression(pattern: #"^(?:\+|\d+\.)\s+"#)
+        return regex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
     }
     
     /// Detects if the cursor at the given index is on a description list line.
@@ -143,7 +160,8 @@ struct FormatDetector {
         let safeIndex = max(0, min(index, length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        return line.hasPrefix("/ ")
+        let regex = try? NSRegularExpression(pattern: #"^/\s+"#)
+        return regex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
     }
     
     /// Finds the range of the heading prefix (e.g., "== " or "## ") for the line at the given index.

@@ -794,7 +794,9 @@ struct ContentView: View {
         let pdfDestination = sourceURL.deletingPathExtension().appendingPathExtension("pdf")
         
         Task {
-            let result = await compiler.compileClean(content: editorController.sourceCode, 
+            let ext = sourceURL.pathExtension.lowercased()
+            let result = await compiler.compileClean(content: editorController.sourceCode,
+                                                     fileExtension: ext,
                                                      preferredDirectory: nil, // Use temp for export
                                                      projectRoot: editorController.projectRootURL)
             

@@ -15,8 +15,16 @@ class TypstCompiler: ObservableObject {
     
     var isDarkMode: Bool = false
     private var preambleLineCount: Int {
-        darkModePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        var count = 0
+        if isDarkMode {
+            count += darkModePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        }
+        if currentFileExtension == "note" {
+            count += notePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        }
+        return count
     }
+    
     private let darkModePreamble = 
 """
 #set page(fill: rgb("#1a1a1a"))
@@ -26,6 +34,11 @@ class TypstCompiler: ObservableObject {
 #set circle(stroke: rgb("#d1d1d1"))
 #set table(stroke: rgb("#d1d1d1"))
 #show raw: set text(fill: rgb("#d1d1d1"))
+""" + "\n"
+    
+    private let notePreamble =
+"""
+#let title(body) = align(center)[#text(size: 24pt, weight: "bold")[#body]]
 """ + "\n"
     
     // Check if typst makes sense or we need full path
@@ -146,9 +159,14 @@ class TypstCompiler: ObservableObject {
                 finalSource = AICompletionService.shared.sanitizeMarkdownToTypst(finalSource, isHybrid: ext == "note")
             }
             
-            if isDarkMode {
-                finalSource = darkModePreamble + finalSource
+            var injectedPreamble = ""
+            if ext == "note" {
+                injectedPreamble += notePreamble
             }
+            if isDarkMode {
+                injectedPreamble += darkModePreamble
+            }
+            finalSource = injectedPreamble + finalSource
             
             // Download web images and inject local paths before saving
             finalSource = await resolveWebImages(in: finalSource, projectRoot: projectRoot)
@@ -296,7 +314,7 @@ class TypstCompiler: ObservableObject {
                         newRawErrorLines.append(lineNum)
                     }
 
-                    let adjustedLine = isDarkMode ? max(1, lineNum - preambleLineCount) : lineNum
+                    let adjustedLine = max(1, lineNum - preambleLineCount)
                     
                     // Avoid duplicate errors for the same line if possible, or just allow them
                     // Check if we already have this error
@@ -448,7 +466,7 @@ class TypstCompiler: ObservableObject {
         }
     }
 
-    func compileClean(content: String, preferredDirectory: URL? = nil, projectRoot: URL?) async -> (success: Bool, pdfURL: URL?, error: String?) {
+    func compileClean(content: String, fileExtension: String? = nil, preferredDirectory: URL? = nil, projectRoot: URL?) async -> (success: Bool, pdfURL: URL?, error: String?) {
         guard let typstPath = resolveTypstPath() else {
             return (false, nil, "Error: 'typst' executable not found.")
         }
@@ -460,6 +478,15 @@ class TypstCompiler: ObservableObject {
         let pdfURL = tempDir.appendingPathComponent("\(tempID).pdf")
         
         var finalContent = content
+        
+        let ext = fileExtension ?? currentFileExtension
+        if ext == "md" || ext == "note" {
+            finalContent = AICompletionService.shared.sanitizeMarkdownToTypst(finalContent, isHybrid: ext == "note")
+        }
+        if ext == "note" {
+            finalContent = notePreamble + finalContent
+        }
+        
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
         
         do {
