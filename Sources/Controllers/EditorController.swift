@@ -172,6 +172,10 @@ class EditorController: NSObject, ObservableObject {
              print("[EditorController] Syncing with TextViewController: \(ObjectIdentifier(tvc))")
              // Use surgical update to avoid resetting the entire highlighter (fixes "going white")
              tvc.textView.replaceCharacters(in: range, with: text)
+             
+             // Force layout update and redraw to ensure changes are visible immediately
+             tvc.textView.layoutManager.setNeedsLayout()
+             tvc.textView.needsDisplay = true
         } else {
              print("[EditorController] WARNING: No TextViewController available for sync")
         }

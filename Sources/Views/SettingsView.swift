@@ -35,17 +35,19 @@ struct AppearanceSettingsView: View {
     @EnvironmentObject var themeManager: ThemeManager
     
     var body: some View {
-        Form {
-            Section(header: Text("Theme")) {
-                Picker("Appearance", selection: $themeManager.appTheme) {
-                    ForEach(AppTheme.allCases) { theme in
-                        Text(theme.rawValue).tag(theme)
+        ScrollView {
+            Form {
+                Section(header: Text("Theme")) {
+                    Picker("Appearance", selection: $themeManager.appTheme) {
+                        ForEach(AppTheme.allCases) { theme in
+                            Text(theme.rawValue).tag(theme)
+                        }
                     }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
             }
+            .padding()
         }
-        .padding()
     }
 }
 
@@ -53,8 +55,9 @@ struct AISettingsView: View {
     @StateObject private var settings = AISettingsManager.shared
     
     var body: some View {
-        Form {
-            Section {
+        ScrollView {
+            Form {
+                Section {
                 Toggle("Enable Manual Intellisense", isOn: $settings.intellisenseEnabled)
                 Toggle("Enable AI Completion", isOn: $settings.isEnabled)
             }
@@ -187,6 +190,7 @@ struct AISettingsView: View {
             }
         }
         .padding()
+        }
     }
     
     @State private var isTesting = false
@@ -221,8 +225,9 @@ struct TypstSettingsView: View {
     @State private var checkingDependencies: Bool = false
     
     var body: some View {
-        Form {
-            Section(header: Text("Configuration")) {
+        ScrollView {
+            Form {
+                Section(header: Text("Configuration")) {
                 Toggle("Use Custom Typst (compiled or downloaded)", isOn: $settings.useCustomTypst)
                 
                 Picker("Update Mode", selection: $settings.updateMode) {
@@ -337,6 +342,7 @@ struct TypstSettingsView: View {
             }
         }
         .padding()
+        }
         .onAppear {
             checkDependencies()
         }
