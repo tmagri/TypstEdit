@@ -809,12 +809,12 @@ class EditorController: NSObject, ObservableObject {
             return
         }
         
-        // Determine save directory: project root > current file's directory > fallback to Desktop
+        // Determine save directory: current file's directory > project root
         let saveDir: URL
-        if let root = projectRootURL {
-            saveDir = root
-        } else if let fileDir = currentFileURL?.deletingLastPathComponent() {
+        if let fileDir = currentFileURL?.deletingLastPathComponent() {
             saveDir = fileDir
+        } else if let root = projectRootURL {
+            saveDir = root
         } else {
             showStatus("No project or file open — cannot save pasted image")
             return
@@ -833,11 +833,12 @@ class EditorController: NSObject, ObservableObject {
         
         // Compute the path to use in the #image() reference
         let imagePath: String
-        if projectRootURL != nil {
-            // Relative to project root — just the filename since we saved in root
-            imagePath = fileName
+        if let root = projectRootURL {
+            let rel = relativePath(from: root, to: fileURL) ?? fileName
+            imagePath = rel.hasPrefix("/") ? rel : "/\(rel)"
         } else if let currentFile = currentFileURL {
-            imagePath = relativePath(from: currentFile.deletingLastPathComponent(), to: fileURL) ?? fileName
+            let rel = relativePath(from: currentFile.deletingLastPathComponent(), to: fileURL) ?? fileName
+            imagePath = rel
         } else {
             imagePath = fileName
         }
