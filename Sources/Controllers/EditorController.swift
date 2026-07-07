@@ -760,7 +760,10 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func pasteSelection() {
-        if let items = NSPasteboard.general.pasteboardItems?.first,
+        let pasteboard = NSPasteboard.general
+        
+        // 1. Prefer text data (with optional Markdown→Typst conversion).
+        if let items = pasteboard.pasteboardItems?.first,
            let text = items.string(forType: .string) {
             
             var textToInsert = text
@@ -770,7 +773,78 @@ class EditorController: NSObject, ObservableObject {
             }
             
             insertText(textToInsert)
+            return
         }
+        
+        // 2. Fall back to pasting image data as a saved file with an #image() reference.
+        //    Read raw bytes eagerly on the main thread via data(forType:) to avoid
+        //    the lazy-data IPC deadlock described in pasteAsPlainText().
+        let imageTypes: [NSPasteboard.PasteboardType] = [
+            .tiff,
+            NSPasteboard.PasteboardType("public.png"),
+            NSPasteboard.PasteboardType("public.jpeg"),
+            NSPasteboard.PasteboardType("com.apple.pict")
+        ]
+        
+        var rawData: Data?
+        for type in imageTypes {
+            if let d = pasteboard.data(forType: type) {
+                rawData = d
+                break
+            }
+        }
+        
+        guard let data = rawData else { return }
+        
+        // Convert to PNG regardless of source format
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            showStatus("Could not decode clipboard image")
+            return
+        }
+        
+        let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
+        guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
+            showStatus("Could not encode image as PNG")
+            return
+        }
+        
+        // Determine save directory: project root > current file's directory > fallback to Desktop
+        let saveDir: URL
+        if let root = projectRootURL {
+            saveDir = root
+        } else if let fileDir = currentFileURL?.deletingLastPathComponent() {
+            saveDir = fileDir
+        } else {
+            showStatus("No project or file open — cannot save pasted image")
+            return
+        }
+        
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let fileName = "pasted_image_\(timestamp).png"
+        let fileURL = saveDir.appendingPathComponent(fileName)
+        
+        do {
+            try pngData.write(to: fileURL)
+        } catch {
+            showStatus("Failed to save pasted image: \(error.localizedDescription)")
+            return
+        }
+        
+        // Compute the path to use in the #image() reference
+        let imagePath: String
+        if projectRootURL != nil {
+            // Relative to project root — just the filename since we saved in root
+            imagePath = fileName
+        } else if let currentFile = currentFileURL {
+            imagePath = relativePath(from: currentFile.deletingLastPathComponent(), to: fileURL) ?? fileName
+        } else {
+            imagePath = fileName
+        }
+        
+        insertText("#image(\"\(imagePath)\")")
+        showStatus("Pasted image saved as \(fileName)")
+        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
     }
     
     /// Paste the clipboard contents as literal plain text, bypassing any
@@ -2612,12 +2686,14 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func selectAll() {
-        // Select entire text
-        let fullRange = NSRange(location: 0, length: sourceCode.count)
+        // Select entire text — NSRange uses UTF-16 code units, so use NSString.length
+        let fullRange = NSRange(location: 0, length: (sourceCode as NSString).length)
         editorState.cursorPositions = [.init(range: fullRange)]
         // Ensure UI update
         DispatchQueue.main.async {
              self.textViewController?.setCursorPositions([.init(range: fullRange)], scrollToVisible: false)
+             // Also set selection directly on the textView for reliable visual sync
+             self.textViewController?.textView.setSelectedRange(fullRange)
         }
     }
     

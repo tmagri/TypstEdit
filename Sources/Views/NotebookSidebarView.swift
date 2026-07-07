@@ -189,6 +189,8 @@ struct NotebookRow: View {
     var onAddNote: () -> Void
     @EnvironmentObject var themeManager: ThemeManager
     @State private var showDeleteAlert = false
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
     
     var body: some View {
         HStack {
@@ -208,6 +210,11 @@ struct NotebookRow: View {
         }
         .contentShape(Rectangle())
         .contextMenu {
+            Button("Rename Notebook") {
+                renameText = notebook.name
+                showRenameAlert = true
+            }
+            
             Button("Open as Project") {
                 NotificationCenter.default.post(name: .openProjectFolder, object: notebook.url)
             }
@@ -229,6 +236,17 @@ struct NotebookRow: View {
                 showDeleteAlert = true
             }
         }
+        .alert("Rename Notebook", isPresented: $showRenameAlert) {
+            TextField("New Name", text: $renameText)
+            Button("Cancel", role: .cancel) { renameText = "" }
+            Button("Rename") {
+                let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && trimmed != notebook.name {
+                    _ = manager.renameNotebook(url: notebook.url, newName: trimmed)
+                }
+                renameText = ""
+            }
+        }
         .alert("Delete Notebook '\(notebook.name)'?", isPresented: $showDeleteAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
@@ -245,6 +263,8 @@ struct NotebookPageRow: View {
     @Binding var selectedFile: URL?
     @EnvironmentObject var themeManager: ThemeManager
     @State private var showDeleteAlert = false
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
     
     var isSelected: Bool {
         selectedFile == page.url
@@ -268,8 +288,29 @@ struct NotebookPageRow: View {
             selectedFile = page.url
         }
         .contextMenu {
+            Button("Rename Page") {
+                renameText = page.name
+                showRenameAlert = true
+            }
+            Divider()
             Button("Delete Page", role: .destructive) {
                 showDeleteAlert = true
+            }
+        }
+        .alert("Rename Page", isPresented: $showRenameAlert) {
+            TextField("New Name", text: $renameText)
+            Button("Cancel", role: .cancel) { renameText = "" }
+            Button("Rename") {
+                let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && trimmed != page.name {
+                    if let newURL = NotebookManager.shared.renamePage(url: page.url, newName: trimmed) {
+                        // Update selectedFile if the renamed page was currently open
+                        if selectedFile == page.url {
+                            selectedFile = newURL
+                        }
+                    }
+                }
+                renameText = ""
             }
         }
         .alert("Delete Page '\(page.name)'?", isPresented: $showDeleteAlert) {

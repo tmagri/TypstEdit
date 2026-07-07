@@ -361,7 +361,7 @@ class RAGManager: ObservableObject {
             
             var extractedTextChunks: [String] = []
             
-            let plaintextExtensions = ["typ", "md", "bib", "txt", "csv", "yaml", "yml"]
+            let plaintextExtensions = ["typ", "md", "bib", "txt", "csv", "yaml", "yml", "note"]
             if plaintextExtensions.contains(ext) {
                 if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
                     extractedTextChunks = content.components(separatedBy: "\n\n")
@@ -460,12 +460,12 @@ class RAGManager: ObservableObject {
             
             if isDirectory { continue }
             
-            if let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, fileSize > 2 * 1024 * 1024 {
+            if let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, fileSize > 50 * 1024 * 1024 {
                 continue
             }
             
             let ext = fileURL.pathExtension.lowercased()
-            let allowedExtensions = ["typ", "md", "json", "bib", "txt", "csv", "yaml", "yml"]
+            let allowedExtensions = ["typ", "md", "json", "bib", "txt", "csv", "yaml", "yml", "note"]
             if allowedExtensions.contains(ext) {
                 validFiles.append(fileURL)
             }

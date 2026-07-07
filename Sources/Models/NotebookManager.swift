@@ -98,6 +98,38 @@ class NotebookManager: ObservableObject {
         }
     }
     
+    func renameNotebook(url: URL, newName: String) -> URL? {
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
+        guard !FileManager.default.fileExists(atPath: newURL.path) else {
+            print("Error renaming notebook: A notebook with that name already exists.")
+            return nil
+        }
+        do {
+            try FileManager.default.moveItem(at: url, to: newURL)
+            loadNotebooks()
+            return newURL
+        } catch {
+            print("Error renaming notebook: \(error)")
+            return nil
+        }
+    }
+    
+    func renamePage(url: URL, newName: String) -> URL? {
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName).appendingPathExtension("note")
+        guard !FileManager.default.fileExists(atPath: newURL.path) else {
+            print("Error renaming page: A page with that name already exists.")
+            return nil
+        }
+        do {
+            try FileManager.default.moveItem(at: url, to: newURL)
+            loadNotebooks()
+            return newURL
+        } catch {
+            print("Error renaming page: \(error)")
+            return nil
+        }
+    }
+    
     func exportNotebook(_ notebook: Notebook, to destination: URL) async -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
