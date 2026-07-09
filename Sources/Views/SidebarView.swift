@@ -115,6 +115,30 @@ class FileSystemModel: ObservableObject {
         NotificationCenter.default.post(name: .fileDidCreate, object: nil)
     }
     
+    func createProjectFile(extension fileExtension: String) -> URL? {
+        guard let folder = currentFolder else { return nil }
+        
+        let baseName = "Untitled"
+        var targetURL = folder.appendingPathComponent("\(baseName).\(fileExtension)")
+        var counter = 1
+        
+        // Find a unique filename
+        while FileManager.default.fileExists(atPath: targetURL.path) {
+            targetURL = folder.appendingPathComponent("\(baseName) \(counter).\(fileExtension)")
+            counter += 1
+        }
+        
+        do {
+            // Create an empty file
+            try "".write(to: targetURL, atomically: true, encoding: .utf8)
+            loadFiles()
+            return targetURL
+        } catch {
+            print("Error creating file: \(error)")
+            return nil
+        }
+    }
+
     func importFile() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -260,6 +284,30 @@ struct SidebarView: View {
                             }
                             .buttonStyle(.plain)
                             
+                            Menu {
+                                Button(action: {
+                                    if let newFile = model.createProjectFile(extension: "typ") {
+                                        selectedFile = newFile // Opens the file immediately
+                                    }
+                                }) {
+                                    Label("New Typst File", systemImage: "doc.text")
+                                }
+                                
+                                Button(action: {
+                                    if let newFile = model.createProjectFile(extension: "md") {
+                                        selectedFile = newFile // Opens the file immediately
+                                    }
+                                }) {
+                                    Label("New Markdown File", systemImage: "doc.text.fill") 
+                                }
+                            } label: {
+                                Image(systemName: "plus")
+                                    .foregroundColor(themeManager.textColor.opacity(0.6))
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize() // Prevents the menu button from stretching awkwardly
+                            .help("New File")
+
                             Button(action: { model.openFolder() }) {
                                 Image(systemName: "folder.badge.plus")
                                     .foregroundColor(themeManager.textColor.opacity(0.6))
