@@ -43,7 +43,11 @@ extension TextView {
     func createReadCallback() -> SwiftTreeSitter.Predicate.TextProvider {
         return { [weak self] range, _ in
             let workItem: () -> String? = {
-                self?.textStorage.substring(from: range)
+                guard let self = self else { return nil }
+                guard range.location >= 0 && range.location + range.length <= self.documentRange.length else {
+                    return nil
+                }
+                return self.textStorage.substring(from: range)
             }
             return DispatchQueue.waitMainIfNot(workItem)
         }

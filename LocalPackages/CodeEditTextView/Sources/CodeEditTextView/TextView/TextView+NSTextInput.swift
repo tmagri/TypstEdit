@@ -96,23 +96,25 @@ extension TextView: NSTextInputClient {
         let shouldInsert = layoutManager.markedTextManager.markedRanges.isEmpty
 
         // Copy the text selections *before* we modify them.
-        let selectionCopies = selectionManager.textSelections.map(\.range)
+        let selectionCopies = replacementRange.location == NSNotFound 
+            ? selectionManager.textSelections.map(\.range)
+            : [replacementRange]
 
         if shouldInsert {
             _insertText(insertString: insertString, replacementRange: replacementRange)
         } else {
             replaceCharacters(in: layoutManager.markedTextManager.markedRanges, with: insertString)
         }
+
         layoutManager.markedTextManager.updateMarkedRanges(
             insertLength: (insertString as NSString).length,
             textSelections: selectionCopies
         )
 
         // Reset the selected ranges to reflect the replaced text.
-        selectionManager.setSelectedRanges(layoutManager.markedTextManager.markedRanges.map({
-            NSRange(location: $0.max, length: 0)
+        selectionManager.setSelectedRanges(layoutManager.markedTextManager.markedRanges.map({ 
+            NSRange(location: $0.location + selectedRange.location, length: selectedRange.length) 
         }))
-
         _undoManager?.enable()
     }
 
