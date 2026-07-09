@@ -72,7 +72,7 @@ class PackageManager: ObservableObject {
             // Extract using native tar
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            process.arguments = ["-xzf", tempURL.path, "-C", destDir.path, "--strip-components=1"]
+            process.arguments = ["-xzf", tempURL.path, "-C", destDir.path]
             
             try await runProcess(process)
             statusMessage = "Successfully installed \(package.name)!"
