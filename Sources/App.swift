@@ -139,6 +139,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return false
         }
     }
+
+    func windowDidChangeScreen(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let screen = window.screen else { return }
+        
+        // If width > height, it's a landscape monitor (side-by-side panels)
+        // If height > width, it's a portrait monitor (top-and-bottom panels)
+        let isLandscape = screen.frame.width > screen.frame.height
+        
+        // Only update if it actually needs changing
+        if editorController?.isVerticalSplit != isLandscape {
+            editorController?.isVerticalSplit = isLandscape
+        }
+    }
 }
 
 extension Notification.Name {
@@ -162,6 +176,11 @@ struct TypstEditApp: App {
                     if window.delegate !== appDelegate {
                         print("[DEBUG] App: Assigning window delegate to appDelegate")
                         window.delegate = appDelegate
+                        // Set the initial split based on the screen it opened on
+                        if let screen = window.screen {
+                            let isLandscape = screen.frame.width > screen.frame.height
+                            editorController.isVerticalSplit = isLandscape
+                        }
                     }
                 })
                 .onAppear {
