@@ -10,11 +10,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             print("[DEBUG] AppDelegate: editorController assigned (nil? \(editorController == nil))")
         }
     }
-    
+
+    private var titleBarDoubleClickMonitor: Any?
+
     override init() {
         super.init()
         AppDelegate.shared = self
         print("[DEBUG] AppDelegate: init")
+    }
+
+    func setupTitleBarDoubleClick(for window: NSWindow) {
+        guard titleBarDoubleClickMonitor == nil else { return }
+
+        titleBarDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak window] event in
+            guard let window = window, event.window === window, event.clickCount >= 2 else { return event }
+
+            let mouseLocation = NSEvent.mouseLocation
+            let titleBarHeight: CGFloat = 60
+
+            if mouseLocation.y > window.frame.maxY - titleBarHeight &&
+               mouseLocation.x >= window.frame.minX && mouseLocation.x <= window.frame.maxX {
+                DispatchQueue.main.async { window.zoom(nil) }
+            }
+
+            return event
+        }
     }
     
     // Shared logic for save warning (Async)
@@ -182,6 +202,7 @@ struct TypstEditApp: App {
                             editorController.isVerticalSplit = isLandscape
                         }
                     }
+                    appDelegate.setupTitleBarDoubleClick(for: window)
                 })
                 .onAppear {
                     print("[DEBUG] TypstEditApp onAppear: assigning editorController to appDelegate")

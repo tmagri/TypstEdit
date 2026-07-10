@@ -27,6 +27,9 @@ struct ContentView: View {
     @State private var reloadToken: UUID = UUID()
     @State private var lastSaved: Date?
     @State private var showSavePopup: Bool = false
+
+    /// PDF preview zoom. Persisted across launches. `0` means "auto / fit".
+    @AppStorage("pdfZoomFactor") private var pdfZoomFactor: Double = 0
     @State private var showRenameAlert: Bool = false
     @State private var renameTargetURL: URL?
     @State private var newFileName: String = ""
@@ -49,17 +52,6 @@ struct ContentView: View {
                 .ignoresSafeArea()
             
             themeManager.mainBackground.ignoresSafeArea()
-            
-            VStack {
-                Color.clear
-                    .frame(height: 60) // Covers the standard macOS toolbar height
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) {
-                        toggleWindowMaximize()
-                    }
-                Spacer()
-            }
-            .ignoresSafeArea(edges: .top)
             
             mainLayout
             
@@ -288,14 +280,80 @@ struct ContentView: View {
                 reloadToken: reloadToken,
                 colorBlindnessMode: editorController.colorBlindnessMode,
                 isPreviewDarkMode: editorController.isPreviewDarkMode,
+                zoomScale: CGFloat(pdfZoomFactor),
+                onZoomScaleChange: { newZoom in
+                    DispatchQueue.main.async {
+                        pdfZoomFactor = Double(newZoom)
+                    }
+                },
                 onWordCountChange: { count in DispatchQueue.main.async { editorController.wordCount = count } }
             )
             .padding(20)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if currentPDFURL != nil {
+                pdfZoomControls
+                    .padding(14)
+            }
         }
         .cornerRadius(12)
         .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
         .padding(.vertical, 12)
         .padding(.trailing, 12)
+    }
+
+    private var pdfZoomControls: some View {
+        HStack(spacing: 2) {
+            zoomButton(icon: "minus") { adjustZoom(by: 1.0 / 1.2) }
+                .keyboardShortcut("-", modifiers: .command)
+
+            Text(zoomLabel)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .frame(width: 46)
+                .foregroundColor(themeManager.textColor)
+                .help("Current zoom")
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { resetZoom() }
+
+            zoomButton(icon: "plus") { adjustZoom(by: 1.2) }
+                .keyboardShortcut("+", modifiers: .command)
+
+            Divider()
+                .frame(height: 14)
+                .padding(.horizontal, 2)
+
+            zoomButton(icon: "arrow.up.left.and.arrow.down.right") { resetZoom() }
+                .keyboardShortcut("0", modifiers: .command)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+    }
+
+    private var zoomLabel: String {
+        pdfZoomFactor > 0 ? "\(Int(pdfZoomFactor * 100))%" : "Fit"
+    }
+
+    private func zoomButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .foregroundColor(themeManager.textColor)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(icon == "minus" ? "Zoom Out (Cmd−)" : icon == "plus" ? "Zoom In (Cmd+)" : "Fit to Window (Cmd+0)")
+    }
+
+    private func adjustZoom(by factor: Double) {
+        let current = pdfZoomFactor > 0 ? pdfZoomFactor : 1.0
+        pdfZoomFactor = max(0.1, min(5.0, current * factor))
+    }
+
+    private func resetZoom() {
+        pdfZoomFactor = 0
     }
     
     private var emptyStateView: some View {
