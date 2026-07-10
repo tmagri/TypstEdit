@@ -204,5 +204,14 @@ EOF
 
 echo "Done! App is located at $APP_BUNDLE"
 
+# Code-sign the fully assembled bundle so macOS TCC binds the Info.plist
+# (incl. folder usage descriptions) to a stable identity and seals resources.
+# See bundle_universal.sh for the full rationale. Sign inside-out (NOT --deep):
+# vector.framework in MacOS/ makes --deep fail to bind Info.plist.
+echo "Code-signing app bundle (ad-hoc, inside-out)..."
+codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/vector.framework" || true
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst" || true
+codesign --force --sign - "$APP_BUNDLE"
+
 echo "Refreshing macOS Launch Services cache..."
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE"

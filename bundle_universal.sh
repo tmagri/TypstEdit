@@ -72,7 +72,8 @@ if [ -f "AppIcon.icns" ]; then
     cp "AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 fi
 
-# Create Info.plist
+# Create Info.plist — kept in sync with bundle.sh (folder usage descriptions are
+# REQUIRED for macOS TCC to grant folder-level access instead of per-file prompts).
 cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -81,7 +82,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>
-    <string>com.example.$APP_NAME</string>
+    <string>com.tmagri.$APP_NAME</string>
     <key>CFBundleName</key>
     <string>$APP_NAME</string>
     <key>CFBundleIconFile</key>
@@ -96,8 +97,109 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>TypstEdit needs access to your Desktop to open and save documents stored there.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>TypstEdit needs access to your Documents folder to open and save documents stored there.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>TypstEdit needs access to your Downloads folder to open documents stored there.</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Typst Source</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>typ</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.typst.typst-source</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Markdown Document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>net.daringfireball.markdown</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>md</string>
+                <string>markdown</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTImportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.typst.typst-source</string>
+            <key>UTTypeDescription</key>
+            <string>Typst Source</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.source-code</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>typ</string>
+                </array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>net.daringfireball.markdown</string>
+            <key>UTTypeDescription</key>
+            <string>Markdown Document</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.plain-text</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>md</string>
+                    <string>markdown</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>
 EOF
+
+# Code-sign the fully assembled bundle so macOS TCC binds the Info.plist
+# (incl. folder usage descriptions) to a stable identity and seals resources.
+# Without this, the linker-only signature leaves Info.plist unbound and TCC
+# falls back to per-file prompts for every file the app — or its `typst`
+# subprocess — touches.
+#
+# Sign inside-out (NOT --deep): vector.framework lives in MacOS/ which makes
+# --deep emit "bundle format is ambiguous" and fail to bind Info.plist.
+# Signing nested components first, then the outer bundle, binds the Info.plist
+# and seals resources correctly. The nested typst binary shares the app's
+# identity so its file reads are attributed to TypstEdit instead of re-prompting.
+echo "Code-signing app bundle (ad-hoc, inside-out)..."
+codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/vector.framework" || true
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst" || true
+codesign --force --sign - "$APP_BUNDLE"
+
+echo "Refreshing macOS Launch Services cache..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE"
 
 echo "Done! Universal binary app is located at $APP_BUNDLE"
