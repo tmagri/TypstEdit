@@ -144,6 +144,13 @@ public struct SourceEditor: NSViewControllerRepresentable {
             context.coordinator.isUpdatingFromRepresentable = false
         }
 
+        // Reconcile the text view's displayed text with the binding.
+        // The plain String binding is one-way upward (text view -> binding) via the coordinator;
+        // downward (binding -> text view) only happens at init. Programmatic changes to the binding
+        // (paste, formatting actions, restoreContent) therefore need to be pushed back down here,
+        // otherwise the editor can display stale/blank text while the model is correct.
+        syncTextIfNeeded(controller: controller)
+
         // Do manual diffing to reduce the amount of reloads.
         // This helps a lot in view performance, as it otherwise gets triggered on each environment change.
         guard !paramsAreEqual(controller: controller, coordinator: context.coordinator) else {
@@ -158,6 +165,40 @@ public struct SourceEditor: NSViewControllerRepresentable {
 
         controller.reloadUI()
         return
+    }
+
+    /// Reconciles the text view's displayed string with the SwiftUI `String` binding.
+    /// Only acts when the two have diverged (e.g. a programmatic edit to the binding that did not
+    /// route through the text view). This is the downward (binding -> text view) sync that the
+    /// `String`-binding initializer otherwise lacks, and prevents the editor from going blank while
+    /// the model is up to date.
+    private func syncTextIfNeeded(controller: TextViewController) {
+        guard case .binding(let binding) = text else { return }
+        let bindingText = binding.wrappedValue
+        guard let textView = controller.textView else { return }
+        let current = textView.string
+        guard current != bindingText else { return }
+
+        // Preserve cursor as best we can across the resync.
+        let storageLength = (current as NSString).length
+        let previousRange: NSRange = textView.selectionManager.textSelections.first?.range
+            ?? NSRange(location: storageLength, length: 0)
+        let clampedLocation = max(0, min(previousRange.location, (bindingText as NSString).length))
+
+        if storageLength == 0 {
+            textView.setText(bindingText)
+        } else {
+            textView.replaceCharacters(
+                in: NSRange(location: 0, length: storageLength),
+                with: bindingText,
+                skipUpdateSelection: true
+            )
+        }
+
+        // Restore a sane caret position after the full replace.
+        textView.selectionManager.setSelectedRange(NSRange(location: clampedLocation, length: 0))
+        textView.layoutManager.setNeedsLayout()
+        textView.needsDisplay = true
     }
 
     private func updateControllerWithState(_ state: SourceEditorState, controller: TextViewController) {

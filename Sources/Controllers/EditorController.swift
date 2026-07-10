@@ -145,9 +145,17 @@ class EditorController: NSObject, ObservableObject {
     var selectedRange: NSRange {
         get {
             if let pos = editorState.cursorPositions?.first {
-                return pos.range
+                // Clamp to the current string length. NSRange uses UTF-16 code units, so measure
+                // with NSString.length. This prevents out-of-range ranges (and the resulting
+                // "index out of range" / display desync) after inserts/deletes.
+                let len = (sourceCode as NSString).length
+                let loc = max(0, min(pos.range.location, len))
+                let maxLen = max(0, len - loc)
+                let length = max(0, min(pos.range.length, maxLen))
+                return NSRange(location: loc, length: length)
             }
-            return NSRange(location: sourceCode.count, length: 0)
+            // Fallback: end of document (UTF-16 units, not grapheme `count`).
+            return NSRange(location: (sourceCode as NSString).length, length: 0)
         }
         set {
             editorState.cursorPositions = [.init(range: newValue)]
@@ -168,14 +176,26 @@ class EditorController: NSObject, ObservableObject {
         
         // --- Sync with actual editor if available ---
         // This is necessary because SourceEditor's binding is one-way (upwards) in some versions
+        isApplyingProgrammaticChange = true
+        defer { isApplyingProgrammaticChange = false }
         if let tvc = textViewController {
              print("[EditorController] Syncing with TextViewController: \(ObjectIdentifier(tvc))")
              // Use surgical update to avoid resetting the entire highlighter (fixes "going white")
-             tvc.textView.replaceCharacters(in: range, with: text)
+             // Clamp the range to the text view's actual length to avoid invalid-range failures
+             // (and the resulting display desync) when sourceCode and the view have diverged.
+             let tvLen = (tvc.textView.string as NSString).length
+             let safeLocation = max(0, min(range.location, tvLen))
+             let safeLength = max(0, min(range.length, tvLen - safeLocation))
+             let safeRange = NSRange(location: safeLocation, length: safeLength)
+             tvc.textView.replaceCharacters(in: safeRange, with: text)
              
              // Force layout update and redraw to ensure changes are visible immediately
              tvc.textView.layoutManager.setNeedsLayout()
              tvc.textView.needsDisplay = true
+             
+             // Safety net: make sure the view's text now matches the model. If the surgical
+             // update above didn't land cleanly (e.g. range mismatch), reconcile fully.
+             reconcileTextViewIfNeeded()
         } else {
              print("[EditorController] WARNING: No TextViewController available for sync")
         }
@@ -192,6 +212,37 @@ class EditorController: NSObject, ObservableObject {
                  textViewController?.setCursorPositions([.init(range: newRange)], scrollToVisible: true)
             }
         }
+    }
+
+    /// Safety net: if the underlying text view's displayed string has diverged from `sourceCode`
+    /// (the model the preview/saving rely on), force the view back in sync. This is what makes the
+    /// "editor goes blank / loses text while the PDF preview shows the change" class of bugs
+    /// impossible — any operation that fails to update the view cleanly is recovered here.
+    func reconcileTextViewIfNeeded() {
+        guard let tvc = textViewController, let textView = tvc.textView else { return }
+        let current = textView.string
+        guard current != sourceCode else { return }
+
+        print("[EditorController] reconcileTextViewIfNeeded: view (len \(current.count)) != sourceCode (len \(sourceCode.count)); forcing full resync")
+
+        let storageLength = (current as NSString).length
+        let previousRange = textView.selectionManager.textSelections.first?.range
+            ?? NSRange(location: storageLength, length: 0)
+        let clamped = max(0, min(previousRange.location, (sourceCode as NSString).length))
+
+        if storageLength == 0 {
+            textView.setText(sourceCode)
+        } else {
+            textView.replaceCharacters(
+                in: NSRange(location: 0, length: storageLength),
+                with: sourceCode,
+                skipUpdateSelection: true
+            )
+        }
+
+        textView.selectionManager.setSelectedRange(NSRange(location: clamped, length: 0))
+        textView.layoutManager.setNeedsLayout()
+        textView.needsDisplay = true
     }
 
 
@@ -430,6 +481,12 @@ class EditorController: NSObject, ObservableObject {
     // Bridge to the actual editor for programmatic updates
     var sourceEditorBridge: SourceEditorBridge!
     weak var textViewController: TextViewController?
+    
+    /// True while the controller is driving the underlying text view programmatically
+    /// (insertText / restoreContent / reconcileTextView). Used to suppress the bridge's
+    /// text-change side effects (markdown autoformat, wrap re-application) that would
+    /// otherwise re-enter `insertText` recursively and desync `sourceCode` from the view.
+    fileprivate var isApplyingProgrammaticChange: Bool = false
     
     // Stable configuration to prevent "going white" due to frequent resets
     @Published var editorConfiguration: SourceEditorConfiguration!
@@ -716,6 +773,8 @@ class EditorController: NSObject, ObservableObject {
         self.sourceCode = content
         
         // Force update the underlying text view if available
+        isApplyingProgrammaticChange = true
+        defer { isApplyingProgrammaticChange = false }
         if let tvc = textViewController {
             // Replace entire content
              let fullRange = NSRange(location: 0, length: tvc.textView.string.utf16.count)
@@ -724,6 +783,8 @@ class EditorController: NSObject, ObservableObject {
              } else {
                  tvc.textView.string = content
              }
+             // Ensure the view is in sync (recovery path for any partial failure above)
+             reconcileTextViewIfNeeded()
         }
         
         // Reset cursor to start
@@ -1935,8 +1996,10 @@ class EditorController: NSObject, ObservableObject {
         print("[EditorController] wrapSelection prefix='\(prefix)' suffix='\(suffix)' at \(range)")
         
         if range.length == 0 {
-            // Insert markers and place cursor in between
-            let newCursor = NSRange(location: range.location + prefix.count, length: 0)
+            // Insert markers and place cursor in between. Use UTF-16 offset for the cursor
+            // (NSRange uses UTF-16), clamped to document length to stay valid.
+            let cursorLoc = max(0, min(range.location + (prefix as NSString).length, (sourceCode as NSString).length))
+            let newCursor = NSRange(location: cursorLoc, length: 0)
             insertText(prefix + suffix, replacementRange: range, newCursorRange: newCursor)
         } else {
             // Surround selection
@@ -2311,10 +2374,24 @@ class EditorController: NSObject, ObservableObject {
     
     private func unwrapFormatting(range: NSRange, prefixLen: Int, suffixLen: Int) {
         let nsText = sourceCode as NSString
+        // Guard the range against the current string length (can shrink between detection and edit).
+        guard range.location != NSNotFound,
+              range.location + range.length <= nsText.length else {
+            print("[EditorController] unwrapFormatting skipped: invalid range \(range) for len \(nsText.length)")
+            return
+        }
         let fullSnippet = nsText.substring(with: range)
-        
+
+        // Validate offsets BEFORE String.index(offsetBy:), which otherwise traps with
+        // "index out of range" (the crash behind the "random text loses display" bug).
+        let snippetLen = fullSnippet.count
+        guard prefixLen >= 0, suffixLen >= 0, prefixLen + suffixLen <= snippetLen else {
+            print("[EditorController] unwrapFormatting skipped: prefixLen=\(prefixLen) suffixLen=\(suffixLen) snippetLen=\(snippetLen)")
+            return
+        }
         let contentStart = fullSnippet.index(fullSnippet.startIndex, offsetBy: prefixLen)
         let contentEnd = fullSnippet.index(fullSnippet.endIndex, offsetBy: -suffixLen)
+        guard contentStart <= contentEnd else { return }
         let innerContent = String(fullSnippet[contentStart..<contentEnd])
         
         insertText(innerContent, replacementRange: range)
@@ -2691,12 +2768,24 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func selectAll() {
-        // Select entire text — NSRange uses UTF-16 code units, so use NSString.length
-        let fullRange = NSRange(location: 0, length: (sourceCode as NSString).length)
+        // Derive the full range from the TEXT VIEW's actual storage length first, falling back to
+        // sourceCode. TextSelectionManager.setSelectedRanges silently drops any range whose max
+        // exceeds textStorage.length, so a mismatch between sourceCode and the view (the root cause
+        // of these editor bugs) would otherwise make Cmd+A select nothing.
+        var length = (textViewController?.textView.string as NSString?)?.length ?? 0
+        if length == 0 {
+            length = (sourceCode as NSString).length
+        }
+        let fullRange = NSRange(location: 0, length: length)
+
+        // Set state (drives the SwiftUI binding + updateFormattingState).
         editorState.cursorPositions = [.init(range: fullRange)]
-        // Ensure UI update
-        DispatchQueue.main.async {
-             self.textViewController?.setCursorPositions([.init(range: fullRange)], scrollToVisible: false)
+
+        // And apply the selection directly on the text view for reliable visual feedback
+        // (setCursorPositions alone can be dropped under divergence).
+        if let tvc = textViewController {
+            tvc.setCursorPositions([.init(range: fullRange)], scrollToVisible: false)
+            tvc.textView.selectionManager.setSelectedRange(fullRange)
         }
     }
     
@@ -3211,23 +3300,32 @@ class SourceEditorBridge: TextViewCoordinator {
         // Sync back to EditorController if needed (usually handled by binding, but as a backup)
         // Guard against infinite loops if we are already in an update
         MainActor.assumeIsolated {
-            if self.controller?.sourceCode != controller.text {
-                 self.controller?.sourceCode = controller.text
+            guard let ctrl = self.controller else { return }
+            if ctrl.sourceCode != controller.text {
+                 ctrl.sourceCode = controller.text
             }
+            // Skip side effects while we are the ones driving the text view. These would otherwise
+            // re-enter `insertText` (markdown autoformat) and thrash layout (wrap re-apply) mid-edit,
+            // which desyncs `sourceCode` from the displayed text.
+            guard !ctrl.isApplyingProgrammaticChange else { return }
             // Aggressively re-apply wrapping settings
-            self.controller?.updateTextViewWrapping()
+            ctrl.updateTextViewWrapping()
             
             // Live Markdown auto-translation (converts MD syntax to Typst in .typ files)
-            self.controller?.handleMarkdownAutoformat()
+            ctrl.handleMarkdownAutoformat()
         }
     }
 
     nonisolated func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
         MainActor.assumeIsolated {
-            // Aggressively re-apply wrapping settings
-            self.controller?.updateTextViewWrapping()
+            guard let ctrl = self.controller else { return }
+            // Don't fight the layout while applying a programmatic change.
+            if !ctrl.isApplyingProgrammaticChange {
+                // Aggressively re-apply wrapping settings
+                ctrl.updateTextViewWrapping()
+            }
             // Update formatting state (bold/italic detection)
-            self.controller?.updateFormattingState()
+            ctrl.updateFormattingState()
         }
     }
     
