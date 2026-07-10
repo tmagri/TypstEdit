@@ -453,7 +453,8 @@ class RAGManager: ObservableObject {
             let filename = fileURL.lastPathComponent
             let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             
-            if isDirectory && filename == "vectorcaches" {
+            // Exclude both the vector cache and the temp build directories
+            if isDirectory && (filename == "vectorcaches" || filename == "temp") {
                 enumerator.skipDescendants()
                 continue
             }
