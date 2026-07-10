@@ -475,22 +475,34 @@ class RAGManager: ObservableObject {
     }
     
     // MARK: - Searching
+    // MARK: - Searching
     
-    func search(query: String, topK: Int = 3) async -> [DocumentChunk] {
+    func search(query: String, topK: Int = 3, excluding excludeURL: URL? = nil) async -> [DocumentChunk] {
         guard let db = db, let currentProjectDir = currentProjectDir else { return [] }
+        
+        // The DB stores paths relative to the project root. Convert the URL to match.
+        let excludedPath = excludeURL?.path.replacingOccurrences(of: currentProjectDir.path + "/", with: "")
+        
+        // If excluding a file, ask the vector scan for a few extra chunks so we aren't 
+        // short-changed after the WHERE clause filters out the current file.
+        let fetchLimit = excludedPath != nil ? topK + 5 : topK
         
         do {
             let queryVector = try await activeProvider.getEmbedding(for: query)
             let vectorData = queryVector.withUnsafeBufferPointer { Data(buffer: $0) }
             
-             // Use vector_quantize_scan for SIMD-accelerated approximate nearest neighbor search
+            let whereClause = excludedPath != nil ? "WHERE f.path != ?" : ""
+            
+            // Use vector_quantize_scan for SIMD-accelerated approximate nearest neighbor search
             var searchSQL = """
             SELECT c.text, f.path, c.embedding, v.distance 
             FROM chunks AS c 
             JOIN files AS f ON c.file_id = f.id
             JOIN vector_quantize_scan('chunks', 'embedding', ?, ?) AS v 
             ON c.id = v.rowid
-            ORDER BY v.distance ASC;
+            \(whereClause)
+            ORDER BY v.distance ASC
+            LIMIT \(topK);
             """
             
             var stmt: OpaquePointer?
@@ -502,7 +514,9 @@ class RAGManager: ObservableObject {
                 JOIN files AS f ON c.file_id = f.id
                 JOIN vector_full_scan('chunks', 'embedding', ?, ?) AS v 
                 ON c.id = v.rowid
-                ORDER BY v.distance ASC;
+                \(whereClause)
+                ORDER BY v.distance ASC
+                LIMIT \(topK);
                 """
                 if sqlite3_prepare_v2(db, searchSQL, -1, &stmt, nil) != SQLITE_OK {
                     let err = String(cString: sqlite3_errmsg(db))
@@ -514,7 +528,12 @@ class RAGManager: ObservableObject {
             _ = vectorData.withUnsafeBytes { rawBuffer in
                 sqlite3_bind_blob(stmt, 1, rawBuffer.baseAddress, Int32(rawBuffer.count), nil)
             }
-            sqlite3_bind_int64(stmt, 2, Int64(topK))
+            sqlite3_bind_int64(stmt, 2, Int64(fetchLimit))
+            
+            // Bind the excluded path to the WHERE clause if we have one
+            if let excludedPath = excludedPath {
+                sqlite3_bind_text(stmt, 3, (excludedPath as NSString).utf8String, -1, nil)
+            }
             
             var results: [DocumentChunk] = []
             while sqlite3_step(stmt) == SQLITE_ROW {

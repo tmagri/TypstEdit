@@ -31,9 +31,9 @@ class AIContextManager {
         \(prefix)<CURSOR>\(suffix)
         """
         
-        // NEW RAG LOGIC
         if settings.includeProjectContext {
-            let relevantChunks = await RAGManager.shared.search(query: userPrompt, topK: 3)
+            // Pass the current fileURL to be excluded from the semantic search
+            let relevantChunks = await RAGManager.shared.search(query: userPrompt, topK: 3, excluding: fileURL)
             
             if !relevantChunks.isEmpty {
                 context += "\n\nRELEVANT PROJECT CONTEXT (from semantic search):\n"
@@ -43,7 +43,6 @@ class AIContextManager {
                 }
             }
         }
-        
         return context
     }
     
