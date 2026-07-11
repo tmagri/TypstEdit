@@ -179,16 +179,29 @@ class EditorController: NSObject, ObservableObject {
         // This is necessary because SourceEditor's binding is one-way (upwards) in some versions
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
-        if let tvc = textViewController {
+         if let tvc = textViewController {
              print("[EditorController] Syncing with TextViewController: \(ObjectIdentifier(tvc))")
-             // Use surgical update to avoid resetting the entire highlighter (fixes "going white")
-             // Clamp the range to the text view's actual length to avoid invalid-range failures
-             // (and the resulting display desync) when sourceCode and the view have diverged.
              let tvLen = (tvc.textView.string as NSString).length
-             let safeLocation = max(0, min(range.location, tvLen))
-             let safeLength = max(0, min(range.length, tvLen - safeLocation))
-             let safeRange = NSRange(location: safeLocation, length: safeLength)
-             tvc.textView.replaceCharacters(in: safeRange, with: text)
+             let insertLength = (text as NSString).length
+
+             // When the editor was empty, the tree-sitter Highlighter was initialized with
+             // documentLength == 0. A subsequent bulk insert (e.g. pasting a whole document
+             // into a fresh tab) can leave the highlighter's StyledRangeContainer / parse tree
+             // out of sync with the new text, so the new ranges never get re-queried and the
+             // editor renders as plain / white-on-white text with no bold or syntax colours
+             // (the "pasting on an empty page goes all white" bug). Rebuilding the highlighter
+             // via the view controller's setText guarantees every range is re-queried.
+             if tvLen == 0 && insertLength > 0 {
+                 tvc.setText(sourceCode)
+             } else {
+                 // Surgical update to avoid resetting the entire highlighter (fixes "going white")
+                 // Clamp the range to the text view's actual length to avoid invalid-range failures
+                 // (and the resulting display desync) when sourceCode and the view have diverged.
+                 let safeLocation = max(0, min(range.location, tvLen))
+                 let safeLength = max(0, min(range.length, tvLen - safeLocation))
+                 let safeRange = NSRange(location: safeLocation, length: safeLength)
+                 tvc.textView.replaceCharacters(in: safeRange, with: text)
+             }
              
              // Force layout update and redraw to ensure changes are visible immediately
              tvc.textView.layoutManager.setNeedsLayout()
@@ -197,7 +210,7 @@ class EditorController: NSObject, ObservableObject {
              // Safety net: make sure the view's text now matches the model. If the surgical
              // update above didn't land cleanly (e.g. range mismatch), reconcile fully.
              reconcileTextViewIfNeeded()
-        } else {
+         } else {
              print("[EditorController] WARNING: No TextViewController available for sync")
         }
         
@@ -232,7 +245,10 @@ class EditorController: NSObject, ObservableObject {
         let clamped = max(0, min(previousRange.location, (sourceCode as NSString).length))
 
         if storageLength == 0 {
-            textView.setText(sourceCode)
+            // Use the view controller's setText so the highlighter is rebuilt against the
+            // new text storage. Calling the text view's setText directly leaves the old
+            // (empty-document) highlighter in place and the resynced text unstyled.
+            tvc.setText(sourceCode)
         } else {
             textView.replaceCharacters(
                 in: NSRange(location: 0, length: storageLength),
@@ -788,17 +804,15 @@ class EditorController: NSObject, ObservableObject {
         // Force update the underlying text view if available
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
-        if let tvc = textViewController {
-            // Replace entire content
-             let fullRange = NSRange(location: 0, length: tvc.textView.string.utf16.count)
-             if fullRange.length > 0 {
-                 tvc.textView.replaceCharacters(in: fullRange, with: content)
-             } else {
-                 tvc.textView.string = content
-             }
+         if let tvc = textViewController {
+             // restoreContent replaces the entire document. Use the view controller's setText
+             // so the tree-sitter highlighter is torn down and rebuilt against the new text
+             // storage — otherwise pasting/loading into a fresh editor leaves syntax colours
+             // and bold styling in a stale (often all-white) state.
+             tvc.setText(content)
              // Ensure the view is in sync (recovery path for any partial failure above)
              reconcileTextViewIfNeeded()
-        }
+         }
         
         // Reset cursor to start
         self.editorState = .init()

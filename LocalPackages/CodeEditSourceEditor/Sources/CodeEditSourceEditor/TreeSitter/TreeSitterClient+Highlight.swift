@@ -16,7 +16,19 @@ extension TreeSitterClient {
         var highlights: [HighlightRange] = []
         var injectedSet = IndexSet(integersIn: range)
 
-        for layer in state.layers where layer.id != state.primaryLayer.id {
+        // Injected layers must be queried in a deterministic priority order.
+        // When two layers produce captures for the same range, the first-queried
+        // layer's capture wins (StyledRangeContainer.applyHighlightResult skips
+        // later overlapping captures). The layer order in `state.layers` is
+        // otherwise non-deterministic — it depends on Swift's per-process
+        // Dictionary hash seed — which is why in .note files Typst *bold*
+        // sometimes rendered as bold (Typst wins) and sometimes as italic
+        // (markdown_inline wins) across app launches.
+        let injectedLayers = state.layers
+            .filter { $0.id != state.primaryLayer.id }
+            .sorted { Self.injectionLayerPriority($0.id) < Self.injectionLayerPriority($1.id) }
+
+        for layer in injectedLayers {
             // Query injected only if a layer's ranges intersects with `range`
             for layerRange in layer.ranges {
                 if let rangeIntersection = range.intersection(layerRange) {
@@ -41,6 +53,19 @@ extension TreeSitterClient {
         }
 
         return highlights
+    }
+
+    /// Sort priority for injected language layers. Lower values are queried first
+    /// and therefore win for overlapping ranges. In `.note` files the Typst overlay
+    /// must take precedence over the Markdown inline parser so that Typst markup
+    /// (`*bold*`, `_italic_`, `#func()`, `$math$`) is highlighted correctly instead
+    /// of being overridden by Markdown's interpretation of the same delimiters.
+    private static func injectionLayerPriority(_ id: TreeSitterLanguage) -> Int {
+        switch id {
+        case .typst: return 0
+        case .markdownInline: return 1
+        default: return 2
+        }
     }
 
     /// Queries the given language layer for any highlights.
