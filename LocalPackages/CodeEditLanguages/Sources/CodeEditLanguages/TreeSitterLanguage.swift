@@ -51,5 +51,6 @@ public enum TreeSitterLanguage: String {
     case yaml
     case zig
     case typst
+    case note
     case plainText = "plain_text"
 }

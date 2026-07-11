@@ -471,8 +471,11 @@ struct ContentView: View {
             if editorController.currentFileType.isTextual {
                 SourceEditor(
                     $editorController.sourceCode,
-                    // Use the correct language for markdown files to avoid syntax highlighting conflicts
-                    language: editorController.currentFileType == .markdown ? .markdown : .typst, 
+                    // Pick the highlighting language based on file extension.
+                    //  - .md   -> Markdown
+                    //  - .note -> Markdown grammar with a Typst overlay (Typst wins on overlap)
+                    //  - else  -> Typst
+                    language: editorController.highlightLanguage,
                     configuration: editorController.editorConfiguration,
                     state: $editorController.editorState,
                     coordinators: [editorController.sourceEditorBridge],

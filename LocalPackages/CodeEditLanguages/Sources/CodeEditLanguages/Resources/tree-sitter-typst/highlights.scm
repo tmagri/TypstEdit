@@ -6,7 +6,7 @@
 "$" @number
 
 ; MARKUP (Purple + Bold/Italic)
-(strong) @keyword
+(strong) @text.strong
 (emph) @type_alternate
 
 ; HASHTAG COMMANDS (Purple)

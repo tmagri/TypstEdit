@@ -236,8 +236,24 @@ class AICompletionService: ObservableObject {
             } catch { print("Regex failed: \(pattern) - \(error)") }
         }
         
-        // 3. Autolinks (Process before HTML tags to prevent crossfire)
-        applyRegex("<(https?://[^>\\s]+)>", template: "#link(\"$1\")")
+        // 3. Autolinks (Process before HTML tags to prevent crossfire).
+        // Angle-bracket autolinks to known video hosts become clickable thumbnail embeds.
+        if let autoRegex = try? NSRegularExpression(pattern: "<(https?://[^>\\s]+)>", options: []) {
+            let matches = autoRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let url = processed.substring(with: match.range(at: 1))
+                let host = url.lowercased()
+                let replacement: String
+                if host.contains("youtube.com") || host.contains("youtu.be") {
+                    replacement = Self.videoEmbed(for: url, alt: "YouTube video")
+                } else if host.contains("vimeo.com") {
+                    replacement = Self.videoEmbed(for: url, alt: "Vimeo video")
+                } else {
+                    replacement = "#link(\"\(url)\")"
+                }
+                processed.replaceCharacters(in: match.range, with: replacement)
+            }
+        }
         
         // 3.5 Common HTML tags to Typst
         applyRegex("(?is)\\s*<p\\s+align=[\"']([^\"']+)[\"']>\\s*(.*?)\\s*</p>\\s*", template: "\n#align($1)[\n$2\n]\n")
@@ -382,8 +398,10 @@ class AICompletionService: ObservableObject {
         // 9. Ordered Lists `1. ` -> Typst auto-numbering (`+ `)
         applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)\\d+\\.[ \\t]+", template: "$1+ ")
 
-        // 9.5 Tables
-        processed.setString(convertMarkdownTablesToTypst(processed as String))
+        // (Tables are converted AFTER inline formatting — see step 13.3 below — so that
+        // links, bold, etc. inside cells are converted to Typst before the cell delimiters
+        // are wrapped around them. Otherwise the link regex mistakes the cell `[...]` for
+        // Markdown link syntax.)
 
         // 10. Strikethrough -> #strike[text]
         applyRegex("(?s)~~(.+?)~~", template: "#strike[$1]")
@@ -463,8 +481,54 @@ class AICompletionService: ObservableObject {
             }
         }
         
-        // 13.1 Inline Links
-        applyRegex("(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", template: "#link(\"$2\")[$1]")
+        // 13.1 Inline Links (with special handling for video URLs)
+        // For links pointing to known video hosts (YouTube, Vimeo, etc.), auto-embed the
+        // thumbnail image as a clickable link to the video, so a single Markdown link like
+        // `[Title](https://youtube.com/watch?v=...)` produces a full embed preview.
+        if let linkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
+            let matches = linkRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let linkText = processed.substring(with: match.range(at: 1))
+                let rawUrl  = processed.substring(with: match.range(at: 2))
+
+                let replacement: String
+                if let ytID = Self.extractYouTubeID(from: rawUrl) {
+                    // If the link body is already an image (e.g. `[![alt](thumb)](url)` was
+                    // converted in step 13), keep that image as the clickable thumbnail and
+                    // don't try to inject a second one.
+                    if linkText.contains("#image(") {
+                        replacement = "#link(\"\(rawUrl)\")[\(linkText)]"
+                    } else {
+                        let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
+                        let alt = Self.escapeTypstString(linkText)
+                        replacement = "#link(\"\(rawUrl)\")[#image(\"\(thumb)\", alt: \"\(alt)\")]"
+                    }
+                } else {
+                    replacement = "#link(\"\(rawUrl)\")[\(linkText)]"
+                }
+                processed.replaceCharacters(in: match.range, with: replacement)
+            }
+        }
+
+        // 13.2 Bare video URLs on their own line become clickable thumbnail embeds too,
+        // so pasting a YouTube/Vimeo URL in body text is enough to render a preview.
+        // (Angle-bracket autolinks are already handled in step 3 above.)
+        if let bareRegex = try? NSRegularExpression(
+            pattern: #"(?m)^[ \t]*(https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch|embed|v|shorts|live)|youtu\.be/|vimeo\.com/)[^\s]+)[ \t]*$"#,
+            options: [.caseInsensitive]
+        ) {
+            let matches = bareRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let url = processed.substring(with: match.range(at: 1))
+                let alt = url.lowercased().contains("vimeo") ? "Vimeo video" : "YouTube video"
+                processed.replaceCharacters(in: match.range, with: Self.videoEmbed(for: url, alt: alt))
+            }
+        }
+
+        // 13.3 Tables — converted AFTER inline formatting so cells already contain Typst
+        // syntax (`#link(...)`, `*bold*`, etc.) by the time they're wrapped in `[...]`.
+        // This prevents the inline regexes from matching the cell delimiters themselves.
+        processed.setString(convertMarkdownTablesToTypst(processed as String))
         
         // 13.5 Escape Markdown abbreviation definitions
         applyRegex("(?m)^\\*\\[([^\\]]+)\\]:", template: "\\\\*[$1]:")
@@ -503,6 +567,15 @@ class AICompletionService: ObservableObject {
             // Escape @ if it's preceded by a letter/number (e.g. email addresses like user@email.com)
             // or followed by a space. Typst references (like @fig1) usually have a space before them and letters after.
             applyRegex("(?<=[a-zA-Z0-9])@|@(?=\\s)", template: "\\\\@")
+
+            // Smart `#` escaping: in `.note` files we leave most `#`-prefixed Typst alone
+            // (so `#let`, `#score(...)`, `#emph[...]` all work). But pasted Markdown often
+            // contains `#word` followed by sentence punctuation — e.g. "#refs," in
+            // "@mentions, #refs, [links]()". That's not a Typst call (no `(` / `[` / `.`),
+            // so escape the `#` to render it as literal text instead of erroring on an
+            // unknown variable. Real Typst continuations (`#word(`, `#word[`, `#word.`)
+            // are explicitly preserved by the negative lookahead.
+            applyRegex("(?<!\\\\)#(?!import\\b|include\\b|let\\b|set\\b|show\\b|return\\b|if\\b|else\\b|for\\b|while\\b|context\\b)([A-Za-z][A-Za-z0-9_]*)(?=[,!?;:]|\\.\\s|\\.$)", template: "\\\\#$1")
         }
 
         // 14f. Un-escape characters inside Typst string parameters
@@ -567,12 +640,16 @@ class AICompletionService: ObservableObject {
         let rawLines = markdown.components(separatedBy: .newlines)
         var lines: [String] = []
         
-        // Safely re-join hard-wrapped lines that belong to the same row
+        // Safely re-join hard-wrapped lines that belong to the same row.
+        // A line is treated as the START of a new row when it contains a `|` (the universal
+        // Markdown table delimiter). Lines without a pipe are continuations of the previous
+        // row — this lets tables work whether or not they use outer pipes (`| … |`) and
+        // also gracefully joins soft-wrapped rows.
         for line in rawLines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
             
-            if trimmed.hasPrefix("|") {
+            if trimmed.contains("|") {
                 lines.append(trimmed)
             } else if !lines.isEmpty {
                 lines[lines.count - 1] += " " + trimmed
@@ -620,23 +697,52 @@ class AICompletionService: ObservableObject {
             
             return cells
         }
-        
+
+        /// Parse a column-alignment marker (`:---`, `---:`, `:---:`, `---`) and return
+        /// one of "left", "center", "right", or nil for default alignment.
+        func alignment(for cell: String) -> String? {
+            let trimmed = cell.trimmingCharacters(in: .whitespaces)
+            guard trimmed.contains("-") else { return nil }
+            let leadingColon = trimmed.hasPrefix(":")
+            let trailingColon = trimmed.hasSuffix(":")
+            if leadingColon && trailingColon { return "center" }
+            if leadingColon { return "left" }
+            if trailingColon { return "right" }
+            return nil  // plain `---` — leave default
+        }
+
         let headerCells = extractCells(from: lines[0])
-        let separatorLine = lines[1].replacingOccurrences(of: "-", with: "")
-                                    .replacingOccurrences(of: "|", with: "")
-                                    .replacingOccurrences(of: ":", with: "")
-                                    .trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        guard separatorLine.isEmpty else { return markdown }
+        let separatorCells = extractCells(from: lines[1])
+
+        // Validate the separator: every cell must be a dash-alignment marker (or empty).
+        let separatorIsValid = separatorCells.allSatisfy { cell in
+            let stripped = cell.replacingOccurrences(of: "-", with: "")
+                               .replacingOccurrences(of: ":", with: "")
+                               .trimmingCharacters(in: .whitespaces)
+            return stripped.isEmpty && cell.contains("-")
+        }
+        guard separatorIsValid else { return markdown }
         
         let columnsCount = headerCells.count
+
+        // Compute per-column alignments, if any non-default markers were specified.
+        let columnAlignments: [String?] = (0..<columnsCount).map { idx in
+            idx < separatorCells.count ? alignment(for: separatorCells[idx]) : nil
+        }
+        let hasAnyAlignment = columnAlignments.contains { $0 != nil }
+
         var typst = "#table(\n"
         typst += "  columns: \(columnsCount),\n"
-        
+        if hasAnyAlignment {
+            // `align: (x, y, z, ...)` accepts `left`, `center`, `right`, or `auto` per column.
+            let aligns = columnAlignments.map { $0 ?? "auto" }.joined(separator: ", ")
+            typst += "  align: (\(aligns)),\n"
+        }
+
         // Headers
         typst += "  table.header(\n"
         for cell in headerCells {
-            typst += "    [\(cell)],\n"
+            typst += "    [\(escapeTableCell(cell))],\n"
         }
         typst += "  ),\n"
         
@@ -648,11 +754,74 @@ class AICompletionService: ObservableObject {
             cells = Array(cells.prefix(columnsCount))
             
             for cell in cells {
-                typst += "  [\(cell)],\n"
+                typst += "  [\(escapeTableCell(cell))],\n"
             }
         }
         
         typst += ")"
         return typst
+    }
+
+    /// Lightly escapes characters in a table cell that would otherwise confuse Typst.
+    ///
+    /// Note: Typst tracks `[...]` depth, so nested literal brackets (`[link]`) inside a
+    /// content-block cell render correctly without escaping — we therefore leave them
+    /// alone so legitimate inline Typst syntax (`#link(...)[$1]`, `*bold*`) keeps working.
+    /// We only neutralise dangling backslashes at the very end of a cell, since those
+    /// would otherwise escape the closing `]` and break the cell.
+    private func escapeTableCell(_ cell: String) -> String {
+        var result = cell
+        // A trailing backslash would escape the cell's closing `]`; double it so it
+        // becomes a literal backslash followed by the closing bracket.
+        while result.hasSuffix("\\") && !result.hasSuffix("\\\\") {
+            result += "\\"
+        }
+        return result
+    }
+
+    // MARK: - Video Link Helpers
+
+    /// Extracts the 11-character video ID from any common YouTube URL shape:
+    /// `youtube.com/watch?v=ID`, `youtu.be/ID`, `youtube.com/embed/ID`,
+    /// `youtube.com/shorts/ID`, `m.youtube.com/...`, etc.
+    /// Returns nil if `url` doesn't look like a YouTube link.
+    static func extractYouTubeID(from url: String) -> String? {
+        // Normalise HTML entities so `&amp;v=` works the same as `&v=`.
+        let cleaned = url.replacingOccurrences(of: "&amp;", with: "&")
+        let pattern = #"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let nsText = cleaned as NSString
+        guard let match = regex.firstMatch(in: cleaned, options: [], range: NSRange(0..<nsText.length)) else { return nil }
+        return nsText.substring(with: match.range(at: 1))
+    }
+
+    /// Extracts the numeric video ID from a Vimeo URL (`vimeo.com/123456`,
+    /// `player.vimeo.com/video/123456`). Returns nil otherwise.
+    static func extractVimeoID(from url: String) -> String? {
+        let pattern = #"(?:player\.)?vimeo\.com/(?:video/)?(\d{6,})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let nsText = url as NSString
+        guard let match = regex.firstMatch(in: url, options: [], range: NSRange(0..<nsText.length)) else { return nil }
+        return nsText.substring(with: match.range(at: 1))
+    }
+
+    /// Escapes a string for safe inclusion inside a Typst string literal `"..."`.
+    static func escapeTypstString(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    /// Wraps a video URL in a Typst clickable thumbnail embed.
+    /// For YouTube we can derive a free thumbnail from `img.youtube.com`; for other hosts
+    /// we just produce a styled text link with a play marker so the link is still obvious.
+    static func videoEmbed(for url: String, alt: String) -> String {
+        let escapedAlt = escapeTypstString(alt)
+        if let ytID = extractYouTubeID(from: url) {
+            let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
+            return "#link(\"\(url)\")[#image(\"\(thumb)\", alt: \"\(escapedAlt)\")]"
+        }
+        // Vimeo doesn't expose a free public thumbnail URL, so render a clearly-clickable
+        // text link instead. The user can swap in their own image if desired.
+        return "#link(\"\(url)\")[▶ \(alt)]"
     }
 }

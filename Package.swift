@@ -14,6 +14,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "LocalPackages/CodeEditSourceEditor"),
+        .package(path: "LocalPackages/CodeEditLanguages"),
         .package(path: "LocalPackages/CSQLite"),
         .package(url: "https://github.com/sqliteai/sqlite-vector", from: "1.0.0")
     ],
@@ -22,6 +23,7 @@ let package = Package(
             name: "TypstEdit",
             dependencies: [
                 "CodeEditSourceEditor",
+                .product(name: "CodeEditLanguages", package: "CodeEditLanguages"),
                 .product(name: "CSQLite", package: "CSQLite"),
                 .product(name: "vector", package: "sqlite-vector")
             ],

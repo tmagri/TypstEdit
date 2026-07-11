@@ -104,6 +104,8 @@ public class TreeSitterModel {
             return zigQuery
         case .typst:
             return typstQuery
+        case .note:
+            return noteQuery
         case .plainText:
             return nil
         }
@@ -327,6 +329,11 @@ public class TreeSitterModel {
     /// Query for `Typst` files.
     public private(set) lazy var typstQuery: Query? = {
         return queryFor(.typst)
+    }()
+
+    /// Query for `Note` files (Markdown grammar + Typst overlay).
+    public private(set) lazy var noteQuery: Query? = {
+        return queryFor(.note)
     }()
 
     private init() {}

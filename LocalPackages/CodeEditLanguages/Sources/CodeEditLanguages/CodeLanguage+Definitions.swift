@@ -54,8 +54,25 @@ public extension CodeLanguage {
         .verilog,
         .yaml,
         .zig,
-        .typst
+        .typst,
+        .note
     ]
+
+    /// A language structure for `Note` files (`.note`).
+    ///
+    /// Note files are a hybrid format: predominantly Markdown, but they may also contain
+    /// Typst syntax (`#functions`, `$math$`, `=headings`, `*bold*`, `_italic_`, comments, raw blocks).
+    /// The primary grammar is Markdown; the `note` injections layer additionally overlays Typst
+    /// across the whole document so that Typst constructs are highlighted and take precedence
+    /// wherever they overlap with Markdown.
+    static let note: CodeLanguage = .init(
+        id: .note,
+        tsName: "note",
+        extensions: ["note"],
+        lineCommentString: "[comment]: #",
+        rangeCommentStrings: ("", ""),
+        highlights: ["injections"]
+    )
 
     /// A language structure for `Typst`
     static let typst: CodeLanguage = .init(

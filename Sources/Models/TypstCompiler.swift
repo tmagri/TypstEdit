@@ -81,8 +81,12 @@ class TypstCompiler: ObservableObject {
     private var currentShadowSourceURL: URL?
 
     // Lenient-mode fallback tracking (used for .note / .md files)
+    // `fallbackAttempts[line] = n` records how many escalating fixes we've applied
+    // to that raw shadow-file line. Each escalation is more aggressive so that,
+    // eventually, *something* always renders.
+    //   0 → (untouched)   1 → escape special chars   2 → wrap whole line in #raw()
     private var currentFileExtension: String = ""
-    private var fallbackAttempted: Set<Int> = []    // raw shadow-file line numbers already escaped
+    private var fallbackAttempts: [Int: Int] = [:]
     private var lastRawErrorLines: [Int] = []        // raw shadow-file line numbers from last error
     
     func cleanUp() {
@@ -152,7 +156,7 @@ class TypstCompiler: ObservableObject {
             // Track the file type for lenient-mode fallback, and reset escape history
             // because the user typed new content — start fresh.
             currentFileExtension = ext
-            fallbackAttempted = []
+            fallbackAttempts = [:]
             lastRawErrorLines = []
 
             if ext == "md" || ext == "note" {
@@ -342,19 +346,45 @@ class TypstCompiler: ObservableObject {
     // MARK: - Lenient Fallback Fixer (.note / .md)
 
     /// For non-strict file types, when Typst reports an error on specific lines of the shadow
-    /// file, this method escapes all Typst special characters on those lines and rewrites the
-    /// shadow file. `typst watch` detects the change and recompiles, almost always successfully.
-    /// The content is preserved verbatim in the output instead of being silently dropped.
+    /// file, this method rewrites those lines so the document always compiles and text is
+    /// preserved. The content is rendered verbatim in the output instead of being silently
+    /// dropped.
     ///
-    /// A `fallbackAttempted` set prevents us from retrying the same line infinitely.
+    /// Two escalating strategies are applied, per line, tracked via `fallbackAttempts`:
+    ///
+    ///   **Strategy 1 – Escape:** escape every Typst-special character on the line so it
+    ///   becomes literal plain text. Cheapest fix, looks the nicest, but doesn't help for
+    ///   multi-line constructs (e.g. an unbalanced `]` inside a generated `#table()` cell).
+    ///
+    ///   **Strategy 2 – Wrap in `#raw()`:** replace the entire line with
+    ///   `#raw("escaped content", block: true)`. Raw blocks are *never* parsed by Typst,
+    ///   so this is guaranteed to compile, no matter what the original line contained.
+    ///
+    /// `typst watch` detects the file change after each rewrite and recompiles, so a single
+    /// problematic section may be fixed across two watch cycles (escape first, raw-wrap if
+    /// that wasn't enough).
+    ///
+    /// **Exclusions:** Lines that start with native Typst top-level directives
+    /// (`#import`, `#include`, `#let`, `#set`, `#show`, `#return`) are deliberately left
+    /// untouched. These are intentional Typst code the user wrote — for example a package
+    /// `#import` may briefly fail while the package downloads, and silently escaping it
+    /// would break the rest of the document. The original error is surfaced to the user
+    /// instead of being swallowed by the fallback.
     private func attemptFallbackFix(rawErrorLines: [Int]) {
         guard let shadowURL = currentShadowSourceURL else { return }
         guard FileManager.default.fileExists(atPath: shadowURL.path) else { return }
 
-        // Only process lines we haven't already tried to fix
-        let newLines = rawErrorLines.filter { !fallbackAttempted.contains($0) }
-        guard !newLines.isEmpty else {
-            print("[FallbackFix] All error lines already attempted — skipping.")
+        // Group the offending lines by which strategy we should try next.
+        // Lines we've already maxed out (attempt >= 2) are skipped.
+        var escapeTargets: [Int] = []
+        var rawWrapTargets: [Int] = []
+        for line in rawErrorLines {
+            let attempt = fallbackAttempts[line, default: 0]
+            if attempt == 0 { escapeTargets.append(line) }
+            else if attempt == 1 { rawWrapTargets.append(line) }
+        }
+        guard !(escapeTargets.isEmpty && rawWrapTargets.isEmpty) else {
+            print("[FallbackFix] All error lines already maxed out — skipping.")
             return
         }
 
@@ -363,23 +393,51 @@ class TypstCompiler: ObservableObject {
             var fileLines = content.components(separatedBy: "\n")
             var modified = false
 
-            for rawLine in newLines {
-                let idx = rawLine - 1  // convert 1-based to 0-based
+            // --- Strategy 1: escape special characters ---
+            for rawLine in escapeTargets {
+                let idx = rawLine - 1  // 1-based → 0-based
                 guard idx >= 0 && idx < fileLines.count else { continue }
 
                 let original = fileLines[idx]
                 let trimmed = original.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty { continue }                          // nothing to escape
+                if trimmed.hasPrefix("#raw(\"") { continue }             // already a raw block
+                if isProtectedTypstDirective(trimmed, isHybrid: currentFileExtension == "note") {
+                    // Don't mangle intentional Typst — surface the error instead.
+                    fallbackAttempts[rawLine] = 2  // mark as maxed so we don't keep retrying
+                    print("[FallbackFix][skip] line \(rawLine): protected directive — \(trimmed.prefix(40))")
+                    continue
+                }
 
-                // Skip blank lines and lines that are already pure Typst function calls
-                // (they were generated by sanitizeMarkdownToTypst and should be valid)
-                if trimmed.isEmpty { continue }
-                if trimmed.hasPrefix("#raw(") { continue }  // already escaped
-
-                let escaped = escapeTypstLine(original)
-                fileLines[idx] = escaped
-                fallbackAttempted.insert(rawLine)
+                fileLines[idx] = escapeTypstLine(original)
+                fallbackAttempts[rawLine] = 1
                 modified = true
-                print("[FallbackFix] Escaped line \(rawLine): \(original.prefix(60))")
+                print("[FallbackFix][escape] line \(rawLine): \(original.prefix(60))")
+            }
+
+            // --- Strategy 2: wrap the whole line in #raw("...", block: true) ---
+            for rawLine in rawWrapTargets {
+                let idx = rawLine - 1
+                guard idx >= 0 && idx < fileLines.count else { continue }
+
+                let original = fileLines[idx]
+                let trimmed = original.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty { continue }
+                if trimmed.hasPrefix("#raw(\"") { continue }             // idempotent
+                if isProtectedTypstDirective(trimmed, isHybrid: currentFileExtension == "note") {
+                    fallbackAttempts[rawLine] = 2
+                    print("[FallbackFix][skip] line \(rawLine): protected directive — \(trimmed.prefix(40))")
+                    continue
+                }
+
+                // Escape backslashes and double-quotes so the line is a valid Typst string.
+                let escaped = original
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"")
+                fileLines[idx] = "#raw(\"\(escaped)\", block: true)"
+                fallbackAttempts[rawLine] = 2
+                modified = true
+                print("[FallbackFix][raw-wrap] line \(rawLine): \(original.prefix(60))")
             }
 
             if modified {
@@ -388,8 +446,49 @@ class TypstCompiler: ObservableObject {
                 print("[FallbackFix] Shadow file updated — typst watch will recompile.")
             }
         } catch {
-            print("[FallbackFix] Failed to apply fallback escaping: \(error)")
+            print("[FallbackFix] Failed to apply fallback fix: \(error)")
         }
+    }
+
+    /// Returns true if `line` is intentional Typst code that should never be touched by
+    /// the lenient fallback fixer.
+    ///
+    /// Top-level directives (`#import`, `#include`, `#let`, `#set`, `#show`, `#return`)
+    /// are always protected in every file type — for example, a `#import` that briefly
+    /// fails while a package is downloading should never be escaped, otherwise the rest
+    /// of the document (which depends on that import) breaks too.
+    ///
+    /// In hybrid `.note` files we additionally protect any `#word(…)` / `#word[…]` call.
+    /// `.note` files mix Markdown and intentional Typst, so a line like
+    /// `#score(generated-abc, width: 100%)` is user-written Typst, not generated
+    /// Markdown output. We still allow the fallback to act on Markdown-converted
+    /// constructs (`#link`, `#image`, `#table`, `#strike`, `#figure`, `#align`,
+    /// `#line`, `#footnote`, `#super`, `#sub`, `#underline`, `#highlight`, `#raw`)
+    /// which are the functions `sanitizeMarkdownToTypst` is known to emit.
+    private func isProtectedTypstDirective(_ line: String, isHybrid: Bool) -> Bool {
+        // Always-protected top-level keywords.
+        let topLevel = ["#import", "#include", "#let", "#set", "#show", "#return"]
+        if topLevel.contains(where: { line.hasPrefix($0) }) { return true }
+
+        // Only apply the user-Typst heuristic in hybrid `.note` files. Pure `.md` files
+        // don't contain user Typst, so a stray `#word(…)` there is more likely a typo.
+        guard isHybrid else { return false }
+
+        // Match `#identifier` followed by `(`, `[`, or a space-and-keyword (e.g. `#let x`).
+        // The negative lookahead filters out the Markdown converter's known outputs so
+        // the fallback can still repair broken converter-generated tables/links/images.
+        let markdownConverterFuncs = [
+            "link", "image", "table", "strike", "figure", "align", "line",
+            "footnote", "super", "sub", "underline", "highlight", "raw",
+        ]
+        let pattern = #"^#([A-Za-z][A-Za-z0-9_]*)[\[(]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return false }
+        let nsLine = line as NSString
+        guard let match = regex.firstMatch(in: line, options: [], range: NSRange(0..<nsLine.length)) else {
+            return false
+        }
+        let name = nsLine.substring(with: match.range(at: 1))
+        return !markdownConverterFuncs.contains(name)
     }
 
     /// Escapes all Typst special characters in a line so it compiles as literal plain text.

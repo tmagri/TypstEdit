@@ -1,4 +1,8 @@
-;From nvim-treesitter/nvim-treesitter
+; Note (.note) block-level highlighting.
+; Mirrors tree-sitter-markdown/highlights.scm — the primary grammar for note
+; files is Markdown. Typst constructs are overlaid separately via the note
+; injections layer (see injections.scm), and take precedence wherever they apply.
+
 ;; Headings
 (atx_heading (inline) @text.title)
 (setext_heading (paragraph) @text.title)

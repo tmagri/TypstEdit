@@ -172,6 +172,8 @@ public struct CodeLanguage {
             return tree_sitter_zig()
         case .typst:
             return tree_sitter_typst()
+        case .note:
+            return tree_sitter_markdown()
         case .plainText:
             return nil
         }

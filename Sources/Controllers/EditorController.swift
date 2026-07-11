@@ -13,6 +13,7 @@ extension Notification.Name {
 }
 
 import CodeEditSourceEditor
+import CodeEditLanguages
 import CodeEditTextView
 import Combine
 
@@ -606,6 +607,18 @@ class EditorController: NSObject, ObservableObject {
     
     var isMarkdownFile: Bool {
         currentFileType == .markdown
+    }
+
+    /// The `CodeLanguage` used by the source editor for syntax highlighting.
+    /// `.note` files use a Markdown grammar with a Typst overlay: Typst constructs are
+    /// highlighted as Typst and win on overlap, while Markdown fills in everything else.
+    var highlightLanguage: CodeLanguage {
+        let ext = currentFileURL?.pathExtension.lowercased()
+        switch ext {
+        case "md": return .markdown
+        case "note": return .note
+        default: return .typst
+        }
     }
     
     func openEquationEditor(at range: NSRange, initialContent: String) {
