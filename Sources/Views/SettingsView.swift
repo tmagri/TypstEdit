@@ -5,9 +5,9 @@ struct SettingsView: View {
     
     var body: some View {
         TabView {
-            AppearanceSettingsView()
+            GeneralSettingsView()
                 .tabItem {
-                    Label("Appearance", systemImage: "paintpalette")
+                    Label("General", systemImage: "gear")
                 }
             
             AISettingsView()
@@ -31,8 +31,9 @@ struct SettingsView: View {
 }
 
 // Add this structural View right below SettingsView
-struct AppearanceSettingsView: View {
+struct GeneralSettingsView: View {
     @EnvironmentObject var themeManager: ThemeManager
+    @StateObject private var notebookManager = NotebookManager.shared
     
     var body: some View {
         ScrollView {
@@ -45,8 +46,52 @@ struct AppearanceSettingsView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+                
+                Section(header: Text("Default Folder")) {
+                    HStack {
+                        Text("Notebook Location:")
+                            .fontWeight(.semibold)
+                        Spacer()
+                        Text(notebookManager.rootDirectory.path)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(notebookManager.rootDirectory.path)
+                    }
+                    
+                    HStack {
+                        Button("Choose...") {
+                            chooseFolder()
+                        }
+                        
+                        if notebookManager.isUsingCustomRoot {
+                            Button("Reset to Default") {
+                                notebookManager.resetRootDirectory()
+                            }
+                        }
+                    }
+                    
+                    Text("Change where notebooks are stored. Useful for syncing via iCloud Drive, Dropbox, or other cloud services.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
             .padding()
+        }
+    }
+    
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.title = "Choose Default Notebook Folder"
+        panel.prompt = "Choose"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            notebookManager.setRootDirectory(url)
         }
     }
 }
@@ -59,7 +104,9 @@ struct AISettingsView: View {
             Form {
                 Section {
                 Toggle("Enable Manual Intellisense", isOn: $settings.intellisenseEnabled)
+                    .font(.body.weight(.semibold))
                 Toggle("Enable AI Completion", isOn: $settings.isEnabled)
+                    .font(.body.weight(.semibold))
             }
             
             if settings.isEnabled {
@@ -97,6 +144,7 @@ struct AISettingsView: View {
                     }
                     
                     Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
+                        .font(.body.weight(.semibold))
                         .padding(.top, 5)
                     Text("Extracts content from markdown code blocks in the AI response.")
                         .font(.caption)
@@ -106,6 +154,7 @@ struct AISettingsView: View {
                 // MARK: - RAG & Embeddings Setup
                 Section(header: Text("Project Context (RAG & Embeddings)")) {
                     Toggle("Include Semantic Project Search (RAG)", isOn: $settings.includeProjectContext)
+                        .font(.body.weight(.semibold))
                     
                     if settings.includeProjectContext {
                         Text("Searches your project files to provide highly relevant context.")
@@ -113,6 +162,7 @@ struct AISettingsView: View {
                             .foregroundColor(.secondary)
                             
                         Toggle("Cache Embeddings to Disk", isOn: $settings.cacheEmbeddingsToDisk)
+                            .font(.body.weight(.semibold))
                         Text("If disabled, saves disk space but increases API costs and indexing time by regenerating embeddings on every launch.")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -142,6 +192,7 @@ struct AISettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Timeout:")
+                                .fontWeight(.semibold)
                             Slider(value: $settings.timeoutSeconds, in: 5...1200, step: 5)
                             Text("\(Int(settings.timeoutSeconds))s")
                                 .monospacedDigit()
@@ -157,6 +208,7 @@ struct AISettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Max Tokens:")
+                                .fontWeight(.semibold)
                             TextField("2048", value: $settings.maxTokens, formatter: NumberFormatter())
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 80)
@@ -229,6 +281,7 @@ struct TypstSettingsView: View {
             Form {
                 Section(header: Text("Configuration")) {
                 Toggle("Use Custom Typst (compiled or downloaded)", isOn: $settings.useCustomTypst)
+                    .font(.body.weight(.semibold))
                 
                 Picker("Update Mode", selection: $settings.updateMode) {
                     ForEach(TypstUpdateMode.allCases) { mode in
@@ -240,7 +293,7 @@ struct TypstSettingsView: View {
                 if !settings.customTypstPath.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Current Path:")
-                            .font(.caption)
+                            .font(.caption.weight(.semibold))
                             .foregroundColor(.secondary)
                         Text(settings.customTypstPath)
                             .font(.system(.caption, design: .monospaced))

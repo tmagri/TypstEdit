@@ -19,10 +19,15 @@ class NotebookManager: ObservableObject {
     static let shared = NotebookManager()
     
     @Published var notebooks: [Notebook] = []
+    @Published var customRootPath: String = ""
+    
+    static var defaultRootDirectory: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        return docs.appendingPathComponent("TypstEdit Notes")
+    }
     
     var rootDirectory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let url = docs.appendingPathComponent("TypstEdit Notes")
+        let url = customRootPath.isEmpty ? Self.defaultRootDirectory : URL(fileURLWithPath: (customRootPath as NSString).expandingTildeInPath)
         
         if !FileManager.default.fileExists(atPath: url.path) {
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -30,7 +35,24 @@ class NotebookManager: ObservableObject {
         return url
     }
     
+    var isUsingCustomRoot: Bool {
+        !customRootPath.isEmpty
+    }
+    
     init() {
+        customRootPath = UserDefaults.standard.string(forKey: "notebookRootPath") ?? ""
+        loadNotebooks()
+    }
+    
+    func setRootDirectory(_ url: URL) {
+        customRootPath = url.path
+        UserDefaults.standard.set(url.path, forKey: "notebookRootPath")
+        loadNotebooks()
+    }
+    
+    func resetRootDirectory() {
+        customRootPath = ""
+        UserDefaults.standard.removeObject(forKey: "notebookRootPath")
         loadNotebooks()
     }
     
