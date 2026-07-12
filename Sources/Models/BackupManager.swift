@@ -71,6 +71,13 @@ final class BackupManager {
     func backupExistingFile(at originalURL: URL, projectRoot: URL?) {
         let maxBackups = self.maxBackups
         guard maxBackups > 0 else { return }
+        // If the file is located in a protected special directory (backups, temp,
+        // vectorcaches) we must not create backups for it. Abort early to ensure
+        // nothing is written or routed to external backup locations.
+        if SafeDirectoryManager.containsSpecialDirectory(originalURL) != nil {
+            return
+        }
+
         guard FileManager.default.fileExists(atPath: originalURL.path) else { return }
 
         guard let existingContent = try? String(contentsOf: originalURL, encoding: .utf8) else {

@@ -91,6 +91,14 @@ class RAGManager: ObservableObject {
     
     private init() {}
     
+    static func shouldUseRAG(for projectDir: URL) -> Bool {
+        guard let specialDir = SafeDirectoryManager.containsSpecialDirectory(projectDir) else {
+            return true
+        }
+
+        return specialDir != "backups" && specialDir != "temp" && specialDir != "vectorcaches"
+    }
+    
     // MARK: - Path Configuration
     
     private var cacheFolderURL: URL? {
@@ -133,8 +141,13 @@ class RAGManager: ObservableObject {
     // MARK: - Database Management
     
     private func setupDatabase() {
-         guard currentProjectDir != nil else {
+         guard let projectDir = currentProjectDir else {
             print("Standalone mode active: Aborting vector database setup.")
+            return
+        }
+
+        guard Self.shouldUseRAG(for: projectDir) else {
+            print("RAGManager: Skipping vector DB setup for protected directory \(projectDir.path)")
             return
         }
         
@@ -256,6 +269,19 @@ class RAGManager: ObservableObject {
             indexProgress = 0.0
         }
         
+        guard Self.shouldUseRAG(for: projectDir) else {
+            if db != nil {
+                sqlite3_close(db)
+                db = nil
+            }
+            self.currentProjectDir = nil
+            isIndexing = false
+            indexProgress = 0.0
+            indexStatus = "RAG disabled for protected directory"
+            print("RAGManager: Skipping indexing for protected directory \(projectDir.path)")
+            return
+        }
+
         self.currentProjectDir = projectDir
         
         if forceReindex {

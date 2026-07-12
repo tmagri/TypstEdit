@@ -656,9 +656,9 @@ class TypstCompiler: ObservableObject {
         // Replace web URLs with cached local copies inside the project's temp/ folder
         var processed = text
         let tempDir: URL
-        let tempDirPath = root.appendingPathComponent("temp")
+        let tempDirPath = SafeDirectoryManager.safeTempDirectory(in: root)
         if !FileManager.default.fileExists(atPath: tempDirPath.path) {
-            try? FileManager.default.createDirectory(at: tempDirPath, withIntermediateDirectories: true)
+            try? SafeDirectoryManager.createDirectorySafely(at: tempDirPath, withIntermediateDirectories: true)
         }
         tempDir = tempDirPath
 

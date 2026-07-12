@@ -27,13 +27,30 @@ enum SafeDirectoryManager {
     ///   - projectRoot: Optional project root URL
     /// - Returns: Safe backup directory URL
     static func safeBackupDirectory(for fileURL: URL, projectRoot: URL?) -> URL {
-        if let specialDir = containsSpecialDirectory(fileURL), specialDir == "backups" {
-            // File is already in a backups directory, return it as-is
+        if let specialDir = containsSpecialDirectory(fileURL) {
+            if specialDir == "backups" {
+                // File is already in a backups directory, return it as-is
+                return fileURL.deletingLastPathComponent()
+            }
+            // File is inside a protected directory (temp or vectorcaches).
+            // Per new policy we must NOT create backups for files located in
+            // protected directories and must not route them to external backups.
+            // Return the file's parent (no "backups" subfolder) so callers can
+            // decide to skip creating backups entirely.
             return fileURL.deletingLastPathComponent()
         }
+
         // Normal case: create backups directory in parent
         return fileURL.deletingLastPathComponent()
             .appendingPathComponent("backups", isDirectory: true)
+    }
+
+    /// Returns an external backup directory inside Application Support used when the
+    /// original file is located in a protected directory (temp/vectorcaches).
+    static func safeExternalBackupDirectory(for fileURL: URL) -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let base = appSupport.appendingPathComponent("TypstEdit/ExternalBackups", isDirectory: true)
+        return base
     }
     
     /// Safely resolves a temp directory, preventing nested temp directories.
