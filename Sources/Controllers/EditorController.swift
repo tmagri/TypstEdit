@@ -825,11 +825,17 @@ class EditorController: NSObject, ObservableObject {
     // --- Undo/Redo Functions ---
     
     func undo() {
+        isApplyingProgrammaticChange = true
+        defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.undo()
+        reconcileTextViewIfNeeded()
     }
-    
+
     func redo() {
+        isApplyingProgrammaticChange = true
+        defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.redo()
+        reconcileTextViewIfNeeded()
     }
     
     func cutSelection() {
