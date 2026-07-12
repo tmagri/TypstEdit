@@ -23,8 +23,7 @@ let package = Package(
         // SwiftLint
         .package(path: "../SwiftLintPlugin"),
         // Rules for indentation, pair completion, whitespace
-        .package(path: "../TextFormation"),
-        .package(path: "../swift-custom-dump")
+        .package(path: "../TextFormation")
     ],
     targets: [
         // A source editor with useful features for code editing.
@@ -47,7 +46,6 @@ let package = Package(
             dependencies: [
                 "CodeEditSourceEditor",
                 "CodeEditLanguages",
-                .product(name: "CustomDump", package: "swift-custom-dump")
             ],
             plugins: [
                 .plugin(name: "SwiftLint", package: "SwiftLintPlugin")

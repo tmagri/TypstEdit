@@ -44,9 +44,21 @@
             "problemMatcher": []
         },
         {
-            "label": "publish: create installer",
+            "label": "publish: installer (arm64)",
+            "detail": "Default — arm64-only release DMG",
             "type": "shell",
-            "command": "./create_dmg.sh",
+            "command": "./create_dmg.sh arm64",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": "$swiftc"
+        },
+        {
+            "label": "publish: installer (universal)",
+            "detail": "Universal (arm64 + x86_64) release DMG",
+            "type": "shell",
+            "command": "./create_dmg.sh universal",
             "presentation": {
                 "reveal": "always",
                 "panel": "shared"

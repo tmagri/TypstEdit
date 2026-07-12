@@ -20,17 +20,20 @@
 ] @punctuation.special
 
 ;; Code blocks
+;; Note: capture code_fence_content directly rather than relying on the parent
+;; fenced_code_block node. The parent's range overlaps with the opening
+;; fenced_code_block_delimiter (same lowerBound), and the shorter delimiter
+;; capture is sorted first in applyHighlightResult, causing the longer parent
+;; capture to be skipped as "overlapping" — leaving the content unhighlighted.
 [
   (indented_code_block)
-  (fenced_code_block)
+  (code_fence_content)
   (link_title)
 ] @text.literal
 
 (fenced_code_block_delimiter) @punctuation.delimiter
 
 (info_string (language) @keyword)
-
-(code_fence_content) @none
 
 ;; Links & reference definitions
 (link_destination) @text.uri

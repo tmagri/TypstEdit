@@ -13,9 +13,7 @@ let package = Package(
             name: "CodeEditSymbols",
             targets: ["CodeEditSymbols"]),
     ],
-    dependencies: [
-        .package(path: "../swift-snapshot-testing")
-    ],
+    dependencies: [],
     targets: [
         .target(
             name: "CodeEditSymbols",
@@ -26,7 +24,6 @@ let package = Package(
             name: "CodeEditSymbolsTests",
             dependencies: [
                 "CodeEditSymbols",
-                .product(name: "SnapshotTesting", package: "swift-snapshot-testing")
             ]
         ),
     ]

@@ -3,7 +3,8 @@ set -e
 
 APP_NAME="TypstEdit"
 
-CONFIG=${1:-debug}
+CONFIG=${1:-release}
+ARCH="arm64"
 
 if [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
@@ -11,14 +12,16 @@ else
     VERSION="1.0.0"
 fi
 
-echo "Building version $VERSION with configuration: $CONFIG..."
-swift build -c "$CONFIG"
+echo "Building version $VERSION ($ARCH-only) with configuration: $CONFIG..."
+swift build -c "$CONFIG" --arch "$ARCH"
 
-# Find the executable specifically in the requested configuration folder
-EXECUTABLE=$(find .build -type f -path "*/$CONFIG/$APP_NAME" | grep -v "dSYM" | head -n 1)
+# Find the executable specifically in the requested configuration folder.
+# Pin to the target arch directory to avoid picking up stale artifacts from
+# other arches (e.g. leftovers from bundle_universal.sh).
+EXECUTABLE=".build/$ARCH-apple-macosx/$CONFIG/$APP_NAME"
 
-if [ -z "$EXECUTABLE" ]; then
-    echo "Error: Executable $APP_NAME not found in .build for configuration $CONFIG"
+if [ ! -f "$EXECUTABLE" ]; then
+    echo "Error: Executable $APP_NAME not found at $EXECUTABLE for configuration $CONFIG"
     exit 1
 fi
 
@@ -32,9 +35,12 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
+# Strip debug symbols from the binary to reduce size
+strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
 # Copy all SPM resource bundles — use maxdepth 1 to avoid duplicates from nested build dirs
 echo "Copying resources bundle..."
-find ".build/arm64-apple-macosx/$CONFIG" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
+find ".build/$ARCH-apple-macosx/$CONFIG" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
     echo "  Copying: $(basename "$bundle")"
     cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
 done

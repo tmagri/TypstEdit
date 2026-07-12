@@ -16,17 +16,16 @@
 ] @punctuation.special
 
 ;; Code blocks
+;; Capture code_fence_content directly — see note in tree-sitter-note/highlights.scm.
 [
   (indented_code_block)
-  (fenced_code_block)
+  (code_fence_content)
   (link_title)
 ] @text.literal
 
 (fenced_code_block_delimiter) @punctuation.delimiter
 
 (info_string (language) @keyword)
-
-(code_fence_content) @none
 
 ;; Links & reference definitions
 (link_destination) @text.uri
