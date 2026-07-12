@@ -33,7 +33,8 @@ struct SettingsView: View {
 // Add this structural View right below SettingsView
 struct GeneralSettingsView: View {
     @EnvironmentObject var themeManager: ThemeManager
-    @StateObject private var notebookManager = NotebookManager.shared
+    @ObservedObject private var notebookManager = NotebookManager.shared
+    @AppStorage("maxBackups") private var maxBackups: Int = 3
     
     var body: some View {
         ScrollView {
@@ -76,6 +77,13 @@ struct GeneralSettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+                
+                Section(header: Text("Backups")) {
+                    Stepper("Max Backups Per File", value: $maxBackups, in: 0...20)
+                    Text("Keeps the last \(maxBackups) saved versions per file. A rotating backup is captured each time you press Save. Set to 0 to disable. Stored in a local backups/ folder; excluded from RAG indexing.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
             .padding()
         }
@@ -95,7 +103,6 @@ struct GeneralSettingsView: View {
         }
     }
 }
-
 struct AISettingsView: View {
     @StateObject private var settings = AISettingsManager.shared
     

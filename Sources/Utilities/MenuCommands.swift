@@ -106,6 +106,10 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .backupProject, object: nil)
             }
             .keyboardShortcut("b", modifiers: [.command, .shift])
+            
+            Button("Restore Backup...") {
+                NotificationCenter.default.post(name: .menuCommand, object: "restoreBackup")
+            }
         }
         
         // MARK: - Edit Menu

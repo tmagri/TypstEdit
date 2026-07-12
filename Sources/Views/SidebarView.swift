@@ -50,6 +50,8 @@ class FileSystemModel: ObservableObject {
     }
     
     private func loadDirectory(at url: URL) -> [FileNode] {
+        // Auto-generated directories that shouldn't clutter the project sidebar.
+        let hiddenFolders: Set<String> = ["backups", "temp", "vectorcaches"]
         var nodes: [FileNode] = []
         do {
             let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
@@ -66,6 +68,7 @@ class FileSystemModel: ObservableObject {
             
             for file in sortedContents {
                 let isDir = (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                if isDir && hiddenFolders.contains(file.lastPathComponent) { continue }
                 var children: [FileNode]? = nil
                 
                 if isDir {

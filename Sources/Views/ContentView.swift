@@ -809,6 +809,11 @@ struct ContentView: View {
     }
     
     private func performSave(to url: URL) {
+        // Capture a rotating backup of the CURRENT on-disk content before overwriting.
+        // Only fires on explicit Save (not on .note auto-save), guarding against the
+        // insert-clears-text class of bugs where a save would otherwise destroy good work.
+        BackupManager.shared.backupExistingFile(at: url, projectRoot: editorController.projectRootURL)
+
         do {
             try editorController.sourceCode.write(to: url, atomically: true, encoding: .utf8)
             RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
@@ -1007,8 +1012,63 @@ struct ContentView: View {
         case "openFoundationEditor": editorController.openFoundationEditor()
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()
+        case "restoreBackup": showRestoreBackupSheet()
         default: break
         }
+    }
+
+    /// Presents a chooser for the current file's rotating backups and loads the selected
+    /// snapshot into the editor (without saving), so the user can review/undo before saving.
+    @MainActor
+    func showRestoreBackupSheet() {
+        guard let url = selectedFile ?? editorController.currentFileURL else {
+            editorController.showStatus("Open a file before restoring a backup")
+            return
+        }
+        let backups = BackupManager.shared.listBackups(for: url, projectRoot: editorController.projectRootURL)
+        guard !backups.isEmpty else {
+            editorController.showStatus("No backups available for this file yet")
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Restore Backup for \(url.lastPathComponent)"
+        alert.informativeText = "Choose a backup to load into the editor. The file on disk won't change until you Save."
+        alert.addButton(withTitle: "Restore")
+        alert.addButton(withTitle: "Cancel")
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26), pullsDown: false)
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        for (i, entry) in backups.enumerated() {
+            let label = "#\(i + 1) — \(formatter.string(from: entry.modified))  (\(entry.url.lastPathComponent))"
+            popup.addItem(withTitle: label)
+        }
+        popup.selectItem(at: 0)
+        alert.accessoryView = popup
+
+        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.isKeyWindow }) ?? NSApp.mainWindow else {
+            if alert.runModal() == .alertFirstButtonReturn {
+                restoreSelectedBackup(at: popup.indexOfSelectedItem, from: backups)
+            }
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            self.restoreSelectedBackup(at: popup.indexOfSelectedItem, from: backups)
+        }
+    }
+
+    @MainActor
+    private func restoreSelectedBackup(at index: Int, from backups: [(url: URL, modified: Date)]) {
+        guard backups.indices.contains(index) else { return }
+        guard let content = BackupManager.shared.restoreContent(from: backups[index].url) else {
+            editorController.showStatus("Could not read backup file")
+            return
+        }
+        editorController.restoreContent(content)
+        editorController.showStatus("Restored backup into editor — review and Save to keep")
     }
 
     private func applyAppKitAppearance(_ theme: AppTheme) {
