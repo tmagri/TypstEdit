@@ -172,9 +172,21 @@ class EditorController: NSObject, ObservableObject {
              showStatus("Insert failed: invalid range")
              return 
         }
-        
+
+        // Capture whether the live text view matches the model BEFORE editing the model.
+        // `range` was derived from `sourceCode` (via `selectedRange`), so it is only a valid
+        // location in the text view's NSTextStorage when the two are in sync. If they have
+        // diverged (e.g. a completion was applied directly to the text view, or a prior
+        // surgical update landed at a stale offset), a surgical `replaceCharacters` would
+        // write at the wrong offset and corrupt the tree-sitter Highlighter's parse tree /
+        // StyledRangeContainer for that region — leaving the section unstyled/blank with no
+        // completion until the document is reopened (the "paste loses completion / goes blank"
+        // bug). When diverged we must use a full `setText` rebuild so `setUpHighlighter()`
+        // re-queries every range from scratch.
+        let viewInSync = textViewController?.textView.string == sourceCode
+
         sourceCode.replaceSubrange(stringRange, with: text)
-        
+
         // --- Sync with actual editor if available ---
         // This is necessary because SourceEditor's binding is one-way (upwards) in some versions
         isApplyingProgrammaticChange = true
@@ -184,35 +196,30 @@ class EditorController: NSObject, ObservableObject {
              let tvLen = (tvc.textView.string as NSString).length
              let insertLength = (text as NSString).length
 
-             // When the editor was empty, the tree-sitter Highlighter was initialized with
-             // documentLength == 0. A subsequent bulk insert (e.g. pasting a whole document
-             // into a fresh tab) can leave the highlighter's StyledRangeContainer / parse tree
-             // out of sync with the new text, so the new ranges never get re-queried and the
-             // editor renders as plain / white-on-white text with no bold or syntax colours
-             // (the "pasting on an empty page goes all white" bug). Rebuilding the highlighter
-             // via the view controller's setText guarantees every range is re-queried.
-             if tvLen == 0 && insertLength > 0 {
+             // Use a full setText rebuild when the view was empty OR had diverged from the
+             // model before this edit. setText calls setUpHighlighter(), guaranteeing the
+             // tree-sitter parse tree and StyledRangeContainer are rebuilt against the new
+             // text storage.
+             if (tvLen == 0 && insertLength > 0) || !viewInSync {
                  tvc.setText(sourceCode)
              } else {
-                 // Surgical update to avoid resetting the entire highlighter (fixes "going white")
-                 // Clamp the range to the text view's actual length to avoid invalid-range failures
-                 // (and the resulting display desync) when sourceCode and the view have diverged.
-                 let safeLocation = max(0, min(range.location, tvLen))
-                 let safeLength = max(0, min(range.length, tvLen - safeLocation))
-                 let safeRange = NSRange(location: safeLocation, length: safeLength)
-                 tvc.textView.replaceCharacters(in: safeRange, with: text)
+                 // Surgical update to avoid resetting the entire highlighter (fixes "going white").
+                 // Safe because we verified the view matches the model pre-edit, so `range`
+                 // is a valid location in the text view's coordinate space — no clamping needed.
+                 tvc.textView.replaceCharacters(in: range, with: text)
              }
-             
+
              // Force layout update and redraw to ensure changes are visible immediately
              tvc.textView.layoutManager.setNeedsLayout()
              tvc.textView.needsDisplay = true
-             
-             // Safety net: make sure the view's text now matches the model. If the surgical
-             // update above didn't land cleanly (e.g. range mismatch), reconcile fully.
+
+             // Safety net: make sure the view's text now matches the model. With the
+             // viewInSync check above this should be a no-op in practice, but keeps any
+             // unforeseen edge case from leaving the view stale.
              reconcileTextViewIfNeeded()
          } else {
              print("[EditorController] WARNING: No TextViewController available for sync")
-        }
+         }
         
         if let explicitCursor = newCursorRange {
             editorState.cursorPositions = [.init(range: explicitCursor)]
@@ -239,23 +246,17 @@ class EditorController: NSObject, ObservableObject {
 
         print("[EditorController] reconcileTextViewIfNeeded: view (len \(current.count)) != sourceCode (len \(sourceCode.count)); forcing full resync")
 
-        let storageLength = (current as NSString).length
         let previousRange = textView.selectionManager.textSelections.first?.range
-            ?? NSRange(location: storageLength, length: 0)
+            ?? NSRange(location: (sourceCode as NSString).length, length: 0)
         let clamped = max(0, min(previousRange.location, (sourceCode as NSString).length))
 
-        if storageLength == 0 {
-            // Use the view controller's setText so the highlighter is rebuilt against the
-            // new text storage. Calling the text view's setText directly leaves the old
-            // (empty-document) highlighter in place and the resynced text unstyled.
-            tvc.setText(sourceCode)
-        } else {
-            textView.replaceCharacters(
-                in: NSRange(location: 0, length: storageLength),
-                with: sourceCode,
-                skipUpdateSelection: true
-            )
-        }
+        // Always use the view controller's setText so the highlighter is torn down and
+        // rebuilt against the new text storage. The previous replaceCharacters(0..<len)
+        // approach left the tree-sitter parse tree / StyledRangeContainer in a stale state
+        // for non-empty documents — the root cause of sections going blank / losing
+        // completion after paste. setText calls setUpHighlighter(), guaranteeing every
+        // range is re-queried.
+        tvc.setText(sourceCode)
 
         textView.selectionManager.setSelectedRange(NSRange(location: clamped, length: 0))
         textView.layoutManager.setNeedsLayout()

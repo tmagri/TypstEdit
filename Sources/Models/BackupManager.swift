@@ -7,8 +7,8 @@ import Foundation
 /// "insert at cursor" bug wipes the document: even if the user hits Save on the now-empty
 /// buffer, the good on-disk content is first preserved as a backup.
 ///
-/// - Project files: backups live in `<projectRoot>/backups/` (ignored by RAG / sidebar).
-/// - Standalone files: backups live in `~/Library/Application Support/TypstEdit/Backups/`.
+/// Backups always live in `<file's-parent>/backups/` — co-located with the source file
+/// (inside the notebook for `.note` files), never in a parent/base directory or App Support.
 ///
 /// Up to `maxBackups` (UserDefaults key "maxBackups", default 3, bound via
 /// `@AppStorage` in GeneralSettingsView) copies are kept per file, named
@@ -33,13 +33,11 @@ final class BackupManager {
     // MARK: - Path Resolution
 
     /// Directory holding all backups for the given source file.
+    /// Always co-located with the source: `<parent>/backups/`. This keeps backups inside
+    /// each notebook (for `.note` files) instead of pooling in the base notebooks directory.
     private func backupDirectory(for originalURL: URL, projectRoot: URL?) -> URL {
-        if let root = projectRoot, originalURL.path.hasPrefix(root.path + "/") || originalURL.path == root.path {
-            return root.appendingPathComponent("backups", isDirectory: true)
-        }
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("TypstEdit", isDirectory: true)
-            .appendingPathComponent("Backups", isDirectory: true)
+        originalURL.deletingLastPathComponent()
+            .appendingPathComponent("backups", isDirectory: true)
     }
 
     /// Stable, cross-launch hash of a file path (djb2). Swift's `String.hash` is not
