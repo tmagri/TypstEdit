@@ -35,9 +35,9 @@ final class BackupManager {
     /// Directory holding all backups for the given source file.
     /// Always co-located with the source: `<parent>/backups/`. This keeps backups inside
     /// each notebook (for `.note` files) instead of pooling in the base notebooks directory.
+    /// Prevents nested backup directories if the file is already in a backups folder.
     private func backupDirectory(for originalURL: URL, projectRoot: URL?) -> URL {
-        originalURL.deletingLastPathComponent()
-            .appendingPathComponent("backups", isDirectory: true)
+        SafeDirectoryManager.safeBackupDirectory(for: originalURL, projectRoot: projectRoot)
     }
 
     /// Stable, cross-launch hash of a file path (djb2). Swift's `String.hash` is not
@@ -84,7 +84,7 @@ final class BackupManager {
 
         let dir = backupDirectory(for: originalURL, projectRoot: projectRoot)
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try SafeDirectoryManager.createDirectorySafely(at: dir, withIntermediateDirectories: true)
         } catch {
             print("[Backup] Could not create backup directory: \(error)")
             return

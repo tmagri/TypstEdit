@@ -113,6 +113,11 @@ class TypstCompiler: ObservableObject {
     }
 
     private static func cleanUpTempDirectory(_ tempDir: URL) {
+        // Skip cleanup if project is already in a temp directory (to avoid deleting the entire project)
+        if SafeDirectoryManager.containsSpecialDirectory(tempDir) == "temp" {
+            print("[TypstCompiler] Skipping cleanup of temp directory (project is in temp): \(tempDir.path)")
+            return
+        }
         guard FileManager.default.fileExists(atPath: tempDir.path) else { return }
         do {
             try FileManager.default.removeItem(at: tempDir)
@@ -123,10 +128,11 @@ class TypstCompiler: ObservableObject {
     }
 
     /// Creates the temp directory inside the project folder if it doesn't exist, and returns its URL.
+    /// Prevents nested temp directories if the project is already in a temp folder.
     private func ensureTempDirectory(in projectRoot: URL) -> URL {
-        let tempDir = projectRoot.appendingPathComponent("temp")
+        let tempDir = SafeDirectoryManager.safeTempDirectory(in: projectRoot)
         if !FileManager.default.fileExists(atPath: tempDir.path) {
-            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            try? SafeDirectoryManager.createDirectorySafely(at: tempDir, withIntermediateDirectories: true)
         }
         return tempDir
     }

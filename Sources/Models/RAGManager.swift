@@ -94,7 +94,8 @@ class RAGManager: ObservableObject {
     // MARK: - Path Configuration
     
     private var cacheFolderURL: URL? {
-        currentProjectDir?.appendingPathComponent("vectorcaches", isDirectory: true)
+        guard let projectDir = currentProjectDir else { return nil }
+        return SafeDirectoryManager.safeVectorcachesDirectory(in: projectDir)
     }
     
     private var dbFileURL: URL? {
@@ -139,7 +140,7 @@ class RAGManager: ObservableObject {
         
         if let folderURL = cacheFolderURL, AISettingsManager.shared.cacheEmbeddingsToDisk {
             if !FileManager.default.fileExists(atPath: folderURL.path) {
-                try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true, attributes: nil)
+                try? SafeDirectoryManager.createDirectorySafely(at: folderURL, withIntermediateDirectories: true)
             }
         }
         
