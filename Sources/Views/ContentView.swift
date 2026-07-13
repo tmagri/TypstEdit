@@ -520,6 +520,7 @@ struct ContentView: View {
                 }
                 .sheet(isPresented: $editorController.showSymbolPicker) { SymbolPickerView(controller: editorController) }
                 .sheet(isPresented: $editorController.showAIPromptEditor) { AIPromptView(controller: editorController).environmentObject(themeManager) }
+                .sheet(isPresented: $editorController.showAIRefinePreview) { AIRefinePreviewView(controller: editorController).environmentObject(themeManager) }
                 .sheet(isPresented: $editorController.showQuoteEditor) {
                     QuoteEditorView(controller: editorController, onInsert: { t, a, b in editorController.insertQuote(text: t, attribution: a, isBlock: b) }, onCancel: { editorController.showQuoteEditor = false })
                 }

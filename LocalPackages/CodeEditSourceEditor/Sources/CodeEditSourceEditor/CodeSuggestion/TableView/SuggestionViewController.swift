@@ -122,27 +122,25 @@ class SuggestionViewController: NSViewController {
     }
 
     private func checkKeyDownEvents(_ event: NSEvent) -> NSEvent? {
-        print("[SuggestionViewController] KeyDown: \(event.keyCode)")
+        let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         switch event.keyCode {
-        case 53: // Escape
-            print("[SuggestionViewController] Escape - Closing")
+        case 48: // Tab — Apply (plain Tab only, Shift+Tab falls through)
+            if !modifierFlags.contains(.shift) {
+                self.applySelectedItem()
+                return nil
+            }
+            windowController?.close()
+            return event
+
+        case 53: // Escape — Close
             windowController?.close()
             return nil
 
-        case 126: // Up Arrow
-            moveSelectionUp()
-            return nil
-
-        case 125: // Down Arrow
-            moveSelectionDown()
-            return nil
-
-        case 36, 48:  // Return/Tab
-            print("[SuggestionViewController] Return/Tab - Applying")
-            self.applySelectedItem()
-            return nil
-
         default:
+            // Any other key (arrows, return, letters, etc.):
+            // dismiss the suggestion window and pass the event through to the
+            // editor so the user can continue typing/editing without interruption.
+            windowController?.close()
             return event
         }
     }

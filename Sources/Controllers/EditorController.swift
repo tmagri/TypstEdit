@@ -133,6 +133,14 @@ class EditorController: NSObject, ObservableObject {
     @Published var isAIGenerating: Bool = false
     @Published var useMCPForPrompt: Bool = true
     
+    // --- AI Refine / Grammar State ---
+    @Published var showAIRefinePreview: Bool = false
+    @Published var isAIRefining: Bool = false
+    @Published var aiRefineOriginalText: String = ""
+    @Published var aiRefineResultText: String = ""
+    @Published var aiRefineError: String? = nil
+    var aiRefineRange: NSRange? = nil
+    
     // MARK: - New Features (Symbol Picker & Word Count)
     @Published var showSymbolPicker: Bool = false
     @Published var wordCount: Int = 0
@@ -3182,6 +3190,119 @@ class EditorController: NSObject, ObservableObject {
         showStatus("AI Fix Applied")
     }
     
+    // MARK: - AI Refine / Grammar
+    
+    enum AIRefineAction {
+        case refine
+        case grammar
+    }
+    
+    /// Starts an AI refinement of the currently selected text.
+    /// The selected text is sent to the AI with an appropriate prompt, and the
+    /// result is shown in a preview sheet where the user can accept or reject it.
+    func refineSelection(_ action: AIRefineAction) {
+        let settings = AISettingsManager.shared
+        if settings.provider != .custom && settings.apiKey.isEmpty {
+            showStatus("Configure AI in Settings to use this feature")
+            return
+        }
+        
+        let range = selectedRange
+        guard range.length > 0, let r = Range(range, in: sourceCode) else {
+            showStatus("Select some text first")
+            return
+        }
+        
+        let selectedText = String(sourceCode[r])
+        aiRefineOriginalText = selectedText
+        aiRefineRange = range
+        aiRefineResultText = ""
+        aiRefineError = nil
+        isAIRefining = true
+        showAIRefinePreview = true
+        
+        let isMd = isMarkdownFile
+        
+        let systemPrompt: String
+        let userPrompt: String
+        
+        switch action {
+        case .refine:
+            systemPrompt = isMd ? """
+            You are an expert writing editor. Refine the following Markdown text for clarity, flow, and style.
+            Preserve all Markdown markup (like **bold**, *italic*, [links](url), `code`, # headings, lists).
+            Preserve the original meaning and tone. Output ONLY the refined text, no explanations or code fences.
+            """ : """
+            You are an expert writing editor working with Typst markup. Refine the following text for clarity, flow, and style.
+            Preserve all Typst markup (like *bold*, _italic_, #functions[], $math$, = headings, - lists, @references).
+            Preserve the original meaning and tone. Output ONLY the refined text, no explanations or code fences.
+            """
+            userPrompt = "Refine this text:\n\n\(selectedText)"
+        case .grammar:
+            systemPrompt = isMd ? """
+            You are an expert grammar editor. Fix any grammar, spelling, or punctuation errors in the following Markdown text.
+            Preserve all Markdown markup (like **bold**, *italic*, [links](url), `code`, # headings, lists).
+            Preserve the original meaning and tone. Output ONLY the corrected text, no explanations or code fences.
+            """ : """
+            You are an expert grammar editor working with Typst markup. Fix any grammar, spelling, or punctuation errors in the following text.
+            Preserve all Typst markup (like *bold*, _italic_, #functions[], $math$, = headings, - lists, @references).
+            Preserve the original meaning and tone. Output ONLY the corrected text, no explanations or code fences.
+            """
+            userPrompt = "Fix the grammar of this text:\n\n\(selectedText)"
+        }
+        
+        // Estimate tokens: ~4 chars per token, with a 1.5x buffer for expansion.
+        let estimatedTokens = max(256, Int(Double(selectedText.count) / 4.0 * 1.5))
+        let maxTokens = max(AISettingsManager.shared.maxTokens, min(estimatedTokens, 4096))
+        
+        Task {
+            do {
+                let result = try await AICompletionService.shared.fetchCompletion(
+                    prompt: userPrompt,
+                    systemPrompt: systemPrompt,
+                    maxTokens: maxTokens
+                )
+                await MainActor.run {
+                    self.aiRefineResultText = result
+                    self.isAIRefining = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.aiRefineError = error.localizedDescription
+                    self.isAIRefining = false
+                }
+            }
+        }
+    }
+    
+    /// Replaces the original selection with the AI-refined text.
+    func acceptAIRefine(with text: String) {
+        guard let range = aiRefineRange,
+              range.location + range.length <= (sourceCode as NSString).length else {
+            showStatus("Original text range is no longer valid")
+            showAIRefinePreview = false
+            aiRefineRange = nil
+            return
+        }
+        insertText(text, replacementRange: range)
+        showAIRefinePreview = false
+        aiRefineRange = nil
+        aiRefineResultText = ""
+        aiRefineOriginalText = ""
+        aiRefineError = nil
+        showStatus("AI Refinement Applied")
+    }
+    
+    /// Discards the AI-refined text and closes the preview.
+    func rejectAIRefine() {
+        showAIRefinePreview = false
+        aiRefineRange = nil
+        aiRefineResultText = ""
+        aiRefineOriginalText = ""
+        aiRefineError = nil
+        isAIRefining = false
+    }
+    
     func buildContextMenu(for event: NSEvent, in controller: TextViewController) -> NSMenu? {
         let point = controller.textView.convert(event.locationInWindow, from: nil)
         
@@ -3209,6 +3330,19 @@ class EditorController: NSObject, ObservableObject {
         pastePlainItem.target = self
         pastePlainItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
         baseMenu.addItem(pastePlainItem)
+        
+        // AI Refine / Grammar — only when the user has selected text.
+        if selectedRange.length > 0 {
+            baseMenu.addItem(NSMenuItem.separator())
+            
+            let refineItem = NSMenuItem(title: "✨ Refine Writing", action: #selector(contextMenuRefineWriting(_:)), keyEquivalent: "")
+            refineItem.target = self
+            baseMenu.addItem(refineItem)
+            
+            let grammarItem = NSMenuItem(title: "✓ Fix Grammar", action: #selector(contextMenuFixGrammar(_:)), keyEquivalent: "")
+            grammarItem.target = self
+            baseMenu.addItem(grammarItem)
+        }
         
         for error in self.errors {
             // Check if click is on the error line
@@ -3298,6 +3432,14 @@ class EditorController: NSObject, ObservableObject {
     @objc func fixErrorWithAI(_ sender: NSMenuItem) {
         guard let error = sender.representedObject as? TypstError else { return }
         self.requestAIFix(for: error)
+    }
+    
+    @objc func contextMenuRefineWriting(_ sender: NSMenuItem) {
+        self.refineSelection(.refine)
+    }
+    
+    @objc func contextMenuFixGrammar(_ sender: NSMenuItem) {
+        self.refineSelection(.grammar)
     }
 }
 

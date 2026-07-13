@@ -208,22 +208,30 @@ extension TextViewController {
         let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         switch event.type {
         case .keyDown:
-            // Intercept Arrow Keys and Return/Tab if suggestions are visible
+            // Non-intrusive suggestions: only plain Tab accepts the completion.
+            // Any other key (arrows, return, escape, letters, Shift+Tab, etc.)
+            // dismisses the suggestion window and falls through to normal text
+            // editing so the user never feels "trapped" in the completion list.
             if SuggestionController.shared.isVisible {
-                if event.keyCode == 126 { // Up
-                    SuggestionController.shared.moveSelectionUp()
-                    return nil
-                } else if event.keyCode == 125 { // Down
-                    SuggestionController.shared.moveSelectionDown()
-                    return nil
-                } else if event.keyCode == 36 || event.keyCode == 48 { // Return or Tab
+                let isPlainTab = event.keyCode == 48 && !modifierFlags.contains(.shift)
+                if isPlainTab {
                     // Apply selected item
-                    if let controller = (SuggestionController.shared.popover?.contentViewController as? SuggestionViewController) ?? 
+                    if let controller = (SuggestionController.shared.popover?.contentViewController as? SuggestionViewController) ??
                                          (SuggestionController.shared.contentViewController as? SuggestionViewController) {
                         controller.applySelectedItem()
                     }
                     return nil
                 }
+
+                // Dismiss the suggestion window and let the key reach the editor.
+                SuggestionController.shared.close()
+
+                // Escape would re-trigger "show completions" in handleCommand, so
+                // consume it here to make Escape simply dismiss the window.
+                if event.keyCode == 53 { // Escape
+                    return nil
+                }
+                // All other keys fall through to normal handling below.
             }
 
             let tabKey: UInt16 = 0x30
