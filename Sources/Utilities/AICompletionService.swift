@@ -32,7 +32,24 @@ class AICompletionService: ObservableObject {
     
     private init() {}
     
-    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output only the code to insert at the cursor.", maxTokens: Int = 128, purpose: AIRequestPurpose = .chat) async throws -> String {
+    private func stripThinkingTags(from text: String) -> String {
+        var cleanText = text
+        let patterns = [
+            "<think>[\\s\\S]*?<\\/think>",
+            "<thought>[\\s\\S]*?<\\/thought>"
+        ]
+        
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let range = NSRange(cleanText.startIndex..<cleanText.endIndex, in: cleanText)
+                cleanText = regex.stringByReplacingMatches(in: cleanText, options: [], range: range, withTemplate: "")
+            }
+        }
+        
+        return cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int = 128, purpose: AIRequestPurpose = .chat) async throws -> String {
         isFetching = true
         defer { isFetching = false }
         
@@ -173,11 +190,15 @@ class AICompletionService: ObservableObject {
             }
         }
         
-       var finalResult = rawResult
+        var finalResult = rawResult
+        
+        // Strip out any <think> tags that models might output
+        finalResult = stripThinkingTags(from: finalResult)
+        
         if settings.forceCodeOutput {
-            let extracted = extractCode(from: rawResult)
+            let extracted = extractCode(from: finalResult)
             // Fallback to the raw text if the AI didn't format it as a code block
-            finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? rawResult : extracted
+            finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalResult : extracted
         }
         
         let sanitizedResult = sanitizeMarkdownToTypst(finalResult)

@@ -69,16 +69,55 @@ class AICompletionProvider: CodeSuggestionDelegate {
             let url = controller?.currentFileURL
             let errors = controller?.errors ?? []
             
-            debounceTask = Task {
+            if !allItems.isEmpty {
+                // We already have local Intellisense results.
+                // Return them immediately so the UI is snappy, and fetch AI in the background.
+                debounceTask = Task {
+                    do {
+                        try await Task.sleep(nanoseconds: 700 * 1_000_000)
+                        if Task.isCancelled { return }
+                        let context = await AIContextManager.shared.generateContext(
+                            userPrompt: String(prefix.suffix(100)),
+                            text: text,
+                            cursorIndex: index,
+                            fileURL: url,
+                            errors: errors
+                        )
+                        let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
+                        if Task.isCancelled { return }
+                        
+                        if !completionCode.isEmpty {
+                            let aiItem = AICompletionItem(
+                                label: completionCode,
+                                detail: "AI",
+                                documentation: "AI Generated Suggestion"
+                            )
+                            await MainActor.run {
+                                guard let model = SuggestionController.shared.model as SuggestionViewModel?,
+                                      model.activeTextView === textView else { return }
+                                
+                                let currentIndex = cursorIndex(from: textView.cursorPositions.first?.start ?? pos.start, in: textView.text)
+                                let currentPrefix = getWordPrefix(text: textView.text, cursorIndex: currentIndex)
+                                
+                                if currentPrefix.hasPrefix(prefix) || prefix.hasPrefix(currentPrefix) {
+                                    if !model.items.contains(where: { $0.label == aiItem.label }) {
+                                        model.items.append(aiItem)
+                                        print("[AICompletionProvider] AI result added to suggestions")
+                                    }
+                                }
+                            }
+                        }
+                    } catch { }
+                }
+            } else {
+                // No local results. Await the AI so we don't return an empty array prematurely,
+                // which would prevent the completion window from showing.
                 do {
-                    // Debounce: Wait for user to stop typing briefly (Only for CLOUD AI)
                     try await Task.sleep(nanoseconds: 700 * 1_000_000)
+                    try Task.checkCancellation()
                     
-                    if Task.isCancelled { return }
-                    
-                   // Prepare Context
                     let context = await AIContextManager.shared.generateContext(
-                        userPrompt: String(prefix.suffix(100)), // Use recent text as the semantic query
+                        userPrompt: String(prefix.suffix(100)),
                         text: text,
                         cursorIndex: index,
                         fileURL: url,
@@ -86,8 +125,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
                     )
                     
                     let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
-                    
-                    if Task.isCancelled { return }
+                    try Task.checkCancellation()
                     
                     if !completionCode.isEmpty {
                         let aiItem = AICompletionItem(
@@ -95,31 +133,11 @@ class AICompletionProvider: CodeSuggestionDelegate {
                             detail: "AI",
                             documentation: "AI Generated Suggestion"
                         )
-                        
-                        await MainActor.run {
-                            // Only update if we're still on the same editor and potentially the same or similar prefix
-                            guard let model = SuggestionController.shared.model as SuggestionViewModel?,
-                                  model.activeTextView === textView else {
-                                return
-                            }
-                            
-                            // To prevent appending to a stale list, we check if the prefix is still valid
-                            let currentIndex = cursorIndex(from: textView.cursorPositions.first?.start ?? pos.start, in: textView.text)
-                            let currentPrefix = getWordPrefix(text: textView.text, cursorIndex: currentIndex)
-                            
-                            // If user is still typing the same prefix (or it's empty and we're just starting), or if the window is visible
-                            // We merge the AI result.
-                            if currentPrefix.hasPrefix(prefix) || prefix.hasPrefix(currentPrefix) {
-                                // Add to items if not already present (based on label)
-                                if !model.items.contains(where: { $0.label == aiItem.label }) {
-                                    model.items.append(aiItem)
-                                    print("[AICompletionProvider] AI result added to suggestions")
-                                }
-                            }
-                        }
+                        allItems.append(aiItem)
+                        print("[AICompletionProvider] AI result fetched successfully")
                     }
                 } catch is CancellationError {
-                    // Ignore
+                    // Ignored
                 } catch {
                     print("AI Completion task error: \(error)")
                 }

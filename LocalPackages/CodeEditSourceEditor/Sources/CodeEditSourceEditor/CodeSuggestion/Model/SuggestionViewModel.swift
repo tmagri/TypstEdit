@@ -74,7 +74,12 @@ public final class SuggestionViewModel: ObservableObject {
         position: CursorPosition,
         close: () -> Void
     ) {
-        guard itemsRequestTask == nil else { return }
+        if itemsRequestTask != nil {
+            itemsRequestTask?.cancel()
+            itemsRequestTask = nil
+            close()
+            return
+        }
 
         if activeTextView !== textView {
             close()
