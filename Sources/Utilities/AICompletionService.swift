@@ -373,7 +373,8 @@ class AICompletionService: ObservableObject {
 
         // 4. Escape remaining HTML tags to prevent Typst label parsing crashes
         // Swallow optional preceding backslash to prevent double-escaping into an unclosed label
-        applyRegex("(?i)\\\\?<(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
+        // We use a negative lookahead `(?!(?:[a-z0-9_-]+)>)` to ensure we do NOT escape valid Typst labels `<label>`.
+        applyRegex("(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
         
         // 5. Markdown Footnotes -> Typst #footnote[]
         var footnotes: [String: String] = [:]
