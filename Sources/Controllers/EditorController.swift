@@ -833,7 +833,17 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Undo/Redo Functions ---
     
+    private func forwardActionIfNotFirstResponder(_ action: Selector) -> Bool {
+        let isEditorFocused = textViewController != nil && NSApp.keyWindow?.firstResponder == textViewController?.textView
+        if !isEditorFocused {
+            NSApp.sendAction(action, to: nil, from: nil)
+            return true
+        }
+        return false
+    }
+
     func undo() {
+        if forwardActionIfNotFirstResponder(Selector("undo:")) { return }
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.undo()
@@ -841,6 +851,7 @@ class EditorController: NSObject, ObservableObject {
     }
 
     func redo() {
+        if forwardActionIfNotFirstResponder(Selector("redo:")) { return }
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.redo()
@@ -848,6 +859,7 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func cutSelection() {
+        if forwardActionIfNotFirstResponder(#selector(NSText.cut(_:))) { return }
         let range = selectedRange
         if range.length > 0, let r = Range(range, in: sourceCode) {
             let text = String(sourceCode[r])
@@ -858,6 +870,7 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func copySelection() {
+        if forwardActionIfNotFirstResponder(#selector(NSText.copy(_:))) { return }
         let range = selectedRange
         if range.length > 0, let r = Range(range, in: sourceCode) {
             let text = String(sourceCode[r])
@@ -867,6 +880,7 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func pasteSelection() {
+        if forwardActionIfNotFirstResponder(#selector(NSText.paste(_:))) { return }
         let pasteboard = NSPasteboard.general
         
         // 1. Prefer text data (with optional Markdown→Typst conversion).
@@ -960,6 +974,7 @@ class EditorController: NSObject, ObservableObject {
     /// If the clipboard holds an image instead of text, Vision OCR is used
     /// to extract text from it and insert the result at the cursor.
     func pasteAsPlainText() {
+        if forwardActionIfNotFirstResponder(Selector("pasteAsPlainText:")) { return }
         let pasteboard = NSPasteboard.general
         
         // 1. Prefer raw string data (no conversion).
@@ -1028,6 +1043,7 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func deleteSelection() {
+        if forwardActionIfNotFirstResponder(#selector(NSText.delete(_:))) { return }
         let range = selectedRange
         if range.length > 0 {
             insertText("", replacementRange: range)
@@ -2810,6 +2826,7 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func selectAll() {
+        if forwardActionIfNotFirstResponder(#selector(NSText.selectAll(_:))) { return }
         // Derive the full range from the TEXT VIEW's actual storage length first, falling back to
         // sourceCode. TextSelectionManager.setSelectedRanges silently drops any range whose max
         // exceeds textStorage.length, so a mismatch between sourceCode and the view (the root cause
