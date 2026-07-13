@@ -139,6 +139,8 @@ class TypstCompiler: ObservableObject {
     
     // Writes content to the shadow file. If watch is not running, starts it.
     func updateContent(source: String, fileURL: URL) async {
+        await MainActor.run { self.isCompiling = true }
+        
         let workingDirectory = fileURL.deletingLastPathComponent()
         let filename = fileURL.lastPathComponent
         
@@ -267,6 +269,7 @@ class TypstCompiler: ObservableObject {
                     
                     // Simple heuristic: if we see "compiled" or "success", update view
                     if output.contains("compiled successfully") || output.contains("compiled") {
+                         self.isCompiling = false
                          // Notify View with a small delay to ensure file is fully flushed
                          DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                              NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
@@ -279,6 +282,7 @@ class TypstCompiler: ObservableObject {
                              NotificationCenter.default.post(name: .typstErrorsUpdated, object: [])
                          }
                     } else if output.contains("error:") {
+                        self.isCompiling = false
                         print("[TYPST] Detected error message")
                         self.compilationStatus = "Compilation Error"
                         self.parseErrors(from: output)

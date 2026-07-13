@@ -289,6 +289,14 @@ struct ContentView: View {
                 onWordCountChange: { count in DispatchQueue.main.async { editorController.wordCount = count } }
             )
             .padding(20)
+            
+            if compiler.isCompiling {
+                ProgressView()
+                    .controlSize(.large)
+                    .padding()
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(10)
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             if currentPDFURL != nil {

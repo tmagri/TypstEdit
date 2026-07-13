@@ -149,16 +149,46 @@ class AICompletionProvider: CodeSuggestionDelegate {
     ) {
         let text = textView.text
         let currentPos = cursorPosition?.start ?? textView.cursorPositions.first?.start ?? .init(line: 1, column: 1)
-        let index = cursorIndex(from: currentPos, in: text)
+        let utf16Offset = cursorUTF16Offset(from: currentPos, in: text)
         
-        // Calculate the word prefix to replace
-        let prefix = getWordPrefix(text: text, cursorIndex: index)
-        let replacementRange = NSRange(location: index - prefix.count, length: prefix.count)
+        // Calculate the word prefix to replace (in UTF-16 units)
+        let prefix = getWordPrefix(text: text, utf16Offset: utf16Offset)
+        let prefixUTF16Len = (prefix as NSString).length
+        let replacementRange = NSRange(location: utf16Offset - prefixUTF16Len, length: prefixUTF16Len)
         
         textView.textView.insertText(item.label, replacementRange: replacementRange)
     }
     
-    // Helper to extract word prefix (shared logic with OfflineCompletionService)
+    // Helper to extract word prefix using UTF-16 offset
+    private func getWordPrefix(text: String, utf16Offset: Int) -> String {
+        let nsText = text as NSString
+        guard utf16Offset > 0, utf16Offset <= nsText.length else { return "" }
+        
+        var start = utf16Offset
+        while start > 0 {
+            let prevStart = start - 1
+            let charCode = nsText.character(at: prevStart)
+            guard let scalar = Unicode.Scalar(charCode) else {
+                start = prevStart
+                continue
+            }
+            
+            // Check for whitespace
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) { break }
+            // Check for delimiters
+            if ["(", ")", "[", "]", "{", "}", ",", ";"].contains(Character(scalar)) { break }
+            // Include '#' as part of the prefix (Typst function marker)
+            if scalar == Unicode.Scalar("#") {
+                start = prevStart
+                break
+            }
+            start = prevStart
+        }
+        
+        return nsText.substring(with: NSRange(location: start, length: utf16Offset - start))
+    }
+    
+    // Helper to extract word prefix using Swift character offset (for suggestion lookups)
     private func getWordPrefix(text: String, cursorIndex: Int) -> String {
         guard cursorIndex > 0, cursorIndex <= text.count else { return "" }
         let endIndex = text.index(text.startIndex, offsetBy: cursorIndex)
@@ -180,21 +210,72 @@ class AICompletionProvider: CodeSuggestionDelegate {
         return String(text[startIndex..<endIndex])
     }
     
-    // Helper to convert Position to String Index
+    // Helper to convert line/column Position to a UTF-16 offset suitable for NSRange
+    private func cursorUTF16Offset(from position: CursorPosition.Position, in text: String) -> Int {
+        let nsText = text as NSString
+        var utf16Index = 0
+        var currentLine = 1
+        
+        // Walk through the string character by character in UTF-16
+        while utf16Index < nsText.length && currentLine < position.line {
+            let ch = nsText.character(at: utf16Index)
+            utf16Index += 1
+            if ch == 0x0A { // \n
+                currentLine += 1
+            } else if ch == 0x0D { // \r
+                // If \r\n, consume the \n as well
+                if utf16Index < nsText.length && nsText.character(at: utf16Index) == 0x0A {
+                    utf16Index += 1
+                }
+                currentLine += 1
+            }
+        }
+        
+        // Now utf16Index points to the start of the target line
+        // Add column offset (1-based)
+        let col = max(0, position.column - 1)
+        // Don't go past the end of the line or the string
+        var colAdded = 0
+        while colAdded < col && utf16Index < nsText.length {
+            let ch = nsText.character(at: utf16Index)
+            if ch == 0x0A || ch == 0x0D { break } // Don't go past end of line
+            utf16Index += 1
+            colAdded += 1
+        }
+        
+        return utf16Index
+    }
+    
+    // Keep the old cursorIndex for the suggestion request logic (which uses Swift character offsets)
     private func cursorIndex(from position: CursorPosition.Position, in text: String) -> Int {
         var currentLine = 1
         var index = 0
-        let lines = text.components(separatedBy: .newlines)
+        var i = text.startIndex
         
-        for line in lines {
-            if currentLine == position.line {
-                // Determine column offset (1-based)
-                let col = max(0, position.column - 1)
-                return index + min(col, line.count)
+        while i < text.endIndex && currentLine < position.line {
+            if text[i] == "\n" {
+                currentLine += 1
+            } else if text[i] == "\r" {
+                currentLine += 1
+                let next = text.index(after: i)
+                if next < text.endIndex && text[next] == "\n" {
+                    i = next
+                    index += 1
+                }
             }
-            index += line.count + 1 // +1 for newline
-            currentLine += 1
+            i = text.index(after: i)
+            index += 1
         }
-        return text.count
+        
+        let col = max(0, position.column - 1)
+        var colAdded = 0
+        while colAdded < col && i < text.endIndex {
+            if text[i] == "\n" || text[i] == "\r" { break }
+            i = text.index(after: i)
+            index += 1
+            colAdded += 1
+        }
+        
+        return index
     }
 }
