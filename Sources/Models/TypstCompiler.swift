@@ -166,7 +166,11 @@ class TypstCompiler: ObservableObject {
             lastRawErrorLines = []
 
             if ext == "md" || ext == "note" {
-                finalSource = AICompletionService.shared.sanitizeMarkdownToTypst(finalSource, isHybrid: ext == "note")
+                let textToProcess = finalSource
+                let aiService = AICompletionService.shared
+                finalSource = await Task.detached {
+                    aiService.sanitizeMarkdownToTypst(textToProcess, isHybrid: ext == "note")
+                }.value
             }
             
             var injectedPreamble = ""
@@ -181,7 +185,10 @@ class TypstCompiler: ObservableObject {
             // Download web images and inject local paths before saving
             finalSource = await resolveWebImages(in: finalSource, projectRoot: projectRoot)
             
-            try finalSource.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
+            let finalSourceToWrite = finalSource
+            try await Task.detached {
+                try finalSourceToWrite.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
+            }.value
             
             // Clear errors on new content update
             Task { @MainActor in
@@ -586,7 +593,11 @@ class TypstCompiler: ObservableObject {
         
         let ext = fileExtension ?? currentFileExtension
         if ext == "md" || ext == "note" {
-            finalContent = AICompletionService.shared.sanitizeMarkdownToTypst(finalContent, isHybrid: ext == "note")
+            let aiService = AICompletionService.shared
+            let textToProcess = finalContent
+            finalContent = await Task.detached {
+                aiService.sanitizeMarkdownToTypst(textToProcess, isHybrid: ext == "note")
+            }.value
         }
         if ext == "note" {
             finalContent = notePreamble + finalContent

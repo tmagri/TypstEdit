@@ -908,6 +908,7 @@ struct ContentView: View {
         workItem?.cancel()
         let currentSource = content ?? editorController.sourceCode
         let isDark = editorController.isPreviewDarkMode
+        let delay = url.pathExtension.lowercased() == "note" ? 3.0 : 0.5
         let newWorkItem = DispatchWorkItem {
             Task {
                 compiler.isDarkMode = isDark
@@ -915,7 +916,9 @@ struct ContentView: View {
                 // Auto-save .note files to prevent data loss
                 if url.pathExtension.lowercased() == "note" {
                     do {
-                        try currentSource.write(to: url, atomically: true, encoding: .utf8)
+                        try await Task.detached {
+                            try currentSource.write(to: url, atomically: true, encoding: .utf8)
+                        }.value
                         DispatchQueue.main.async {
                             self.editorController.syncSavedContent(currentSource)
                             AutoRecoveryManager.shared.clearRecovery(for: url)
@@ -929,7 +932,7 @@ struct ContentView: View {
             }
         }
         workItem = newWorkItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: newWorkItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: newWorkItem)
     }
     
     @MainActor

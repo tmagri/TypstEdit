@@ -196,7 +196,7 @@ class AICompletionService: ObservableObject {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
     }
 
-    func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
+    nonisolated func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
         let processed = NSMutableString(string: text.replacingOccurrences(of: "\r\n", with: "\n"))
         
         // --- 1. MASK CODE BLOCKS ---
@@ -618,7 +618,7 @@ class AICompletionService: ObservableObject {
         
         return resultString
     }
-    private func convertMarkdownTablesToTypst(_ text: String) -> String {
+    nonisolated private func convertMarkdownTablesToTypst(_ text: String) -> String {
         // Matches a table block including potential hard-wrapped lines (matches until a blank line).
         // Supports tables both with and without outer pipes.
         let pattern = "(?m)^[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(?:\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*\\n(?:[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n?)*"
@@ -636,7 +636,7 @@ class AICompletionService: ObservableObject {
         return processed as String
     }
     
-    private func parseSingleMarkdownTable(_ markdown: String) -> String {
+    nonisolated private func parseSingleMarkdownTable(_ markdown: String) -> String {
         let rawLines = markdown.components(separatedBy: .newlines)
         var lines: [String] = []
         
@@ -769,7 +769,7 @@ class AICompletionService: ObservableObject {
     /// alone so legitimate inline Typst syntax (`#link(...)[$1]`, `*bold*`) keeps working.
     /// We only neutralise dangling backslashes at the very end of a cell, since those
     /// would otherwise escape the closing `]` and break the cell.
-    private func escapeTableCell(_ cell: String) -> String {
+    nonisolated private func escapeTableCell(_ cell: String) -> String {
         var result = cell
         // A trailing backslash would escape the cell's closing `]`; double it so it
         // becomes a literal backslash followed by the closing bracket.
@@ -785,7 +785,7 @@ class AICompletionService: ObservableObject {
     /// `youtube.com/watch?v=ID`, `youtu.be/ID`, `youtube.com/embed/ID`,
     /// `youtube.com/shorts/ID`, `m.youtube.com/...`, etc.
     /// Returns nil if `url` doesn't look like a YouTube link.
-    static func extractYouTubeID(from url: String) -> String? {
+    nonisolated static func extractYouTubeID(from url: String) -> String? {
         // Normalise HTML entities so `&amp;v=` works the same as `&v=`.
         let cleaned = url.replacingOccurrences(of: "&amp;", with: "&")
         let pattern = #"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"#
@@ -797,7 +797,7 @@ class AICompletionService: ObservableObject {
 
     /// Extracts the numeric video ID from a Vimeo URL (`vimeo.com/123456`,
     /// `player.vimeo.com/video/123456`). Returns nil otherwise.
-    static func extractVimeoID(from url: String) -> String? {
+    nonisolated static func extractVimeoID(from url: String) -> String? {
         let pattern = #"(?:player\.)?vimeo\.com/(?:video/)?(\d{6,})"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
         let nsText = url as NSString
@@ -806,7 +806,7 @@ class AICompletionService: ObservableObject {
     }
 
     /// Escapes a string for safe inclusion inside a Typst string literal `"..."`.
-    static func escapeTypstString(_ s: String) -> String {
+    nonisolated static func escapeTypstString(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
     }
@@ -814,7 +814,7 @@ class AICompletionService: ObservableObject {
     /// Wraps a video URL in a Typst clickable thumbnail embed.
     /// For YouTube we can derive a free thumbnail from `img.youtube.com`; for other hosts
     /// we just produce a styled text link with a play marker so the link is still obvious.
-    static func videoEmbed(for url: String, alt: String) -> String {
+    nonisolated static func videoEmbed(for url: String, alt: String) -> String {
         let escapedAlt = escapeTypstString(alt)
         if let ytID = extractYouTubeID(from: url) {
             let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
