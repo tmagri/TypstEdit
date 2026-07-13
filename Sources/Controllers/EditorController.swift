@@ -208,7 +208,7 @@ class EditorController: NSObject, ObservableObject {
              // model before this edit. setText calls setUpHighlighter(), guaranteeing the
              // tree-sitter parse tree and StyledRangeContainer are rebuilt against the new
              // text storage.
-             if (tvLen == 0 && insertLength > 0) || !viewInSync {
+             if (tvLen == 0 && insertLength > 0) || !viewInSync || insertLength > 100 {
                  tvc.setText(sourceCode)
              } else {
                  // Surgical update to avoid resetting the entire highlighter (fixes "going white").
@@ -299,21 +299,29 @@ class EditorController: NSObject, ObservableObject {
             }
             return event
         }
-        // Listen for Cmd+V to paste as plain text
+        // Listen for Cmd+V to paste with conversion, or Cmd+Shift+V / Cmd+Option+Shift+V for plain text
         pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
             
-            // Check if the keystroke is Cmd+V
-            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-               event.charactersIgnoringModifiers?.lowercased() == "v" {
+            if event.charactersIgnoringModifiers?.lowercased() == "v" {
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                let isCmdV = flags == .command
+                let isCmdShiftV = flags == [.command, .shift]
+                let isCmdOptShiftV = flags == [.command, .option, .shift]
                 
-                // ONLY intercept if the code editor is actively focused
-                // (We don't want to hijack pastes in the Find panel or Rename alerts)
-                if let textView = self.textViewController?.textView,
-                   NSApp.keyWindow?.firstResponder == textView {
-                    
-                    self.pasteSelection()
-                    return nil // Consume the event so macOS doesn't double-paste
+                if isCmdV || isCmdShiftV || isCmdOptShiftV {
+                    // ONLY intercept if the code editor is actively focused
+                    // (We don't want to hijack pastes in the Find panel or Rename alerts)
+                    if let textView = self.textViewController?.textView,
+                       NSApp.keyWindow?.firstResponder == textView {
+                        
+                        if isCmdShiftV || isCmdOptShiftV {
+                            self.pasteAsPlainText()
+                        } else {
+                            self.pasteSelection()
+                        }
+                        return nil // Consume the event so macOS doesn't double-paste
+                    }
                 }
             }
             return event
@@ -887,13 +895,26 @@ class EditorController: NSObject, ObservableObject {
         if let items = pasteboard.pasteboardItems?.first,
            let text = items.string(forType: .string) {
             
-            var textToInsert = text
+            let range = self.selectedRange
+            let fileType = self.currentFileType
             
-            if currentFileType == .typst {
-                textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
+            // Run conversion in the background to avoid freezing the UI on huge pastes
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                var textToInsert = text
+                
+                if fileType == .typst {
+                    // Fast heuristic to skip Typst content
+                    let looksLikeTypst = text.contains("#image") || text.contains("#link") || text.contains("#align") || text.contains("#box") || text.contains("#rect") || text.hasPrefix("#") || text.hasPrefix("=")
+                    
+                    if !looksLikeTypst {
+                        textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
+                    }
+                }
+                
+                DispatchQueue.main.async {
+                    self?.insertText(textToInsert, replacementRange: range)
+                }
             }
-            
-            insertText(textToInsert)
             return
         }
         

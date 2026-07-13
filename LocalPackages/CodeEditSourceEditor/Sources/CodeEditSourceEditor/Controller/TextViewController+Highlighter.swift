@@ -24,6 +24,9 @@ extension TextViewController {
         )
         textView.addStorageDelegate(highlighter)
         self.highlighter = highlighter
+        
+        // Trigger an initial highlight pass for the current text
+        highlighter.invalidate()
     }
 
     /// Sets new highlight providers. Recognizes when objects move in the array or are removed or inserted.
