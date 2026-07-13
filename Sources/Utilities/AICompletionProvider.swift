@@ -85,7 +85,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
                         errors: errors
                     )
                     
-                    let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context)
+                    let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
                     
                     if Task.isCancelled { return }
                     

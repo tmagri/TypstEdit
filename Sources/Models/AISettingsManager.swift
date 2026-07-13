@@ -36,6 +36,7 @@ class AISettingsManager: ObservableObject {
     @AppStorage("customEmbeddingModel") var customEmbeddingModel: String = "nomic-embed-text"
     @AppStorage("openAIEmbeddingModel") var openAIEmbeddingModel: String = "text-embedding-3-small"
     @AppStorage("aiModel") var model: String = "gpt-4o"
+    @AppStorage("aiCompletionModel") var completionModel: String = ""
     @AppStorage("aiForceCodeOutput") var forceCodeOutput: Bool = false
     @AppStorage("aiMaxContextWindow") var maxContextWindow: Int = 4096
     @AppStorage("aiIncludeProjectContext") var includeProjectContext: Bool = true
@@ -49,5 +50,13 @@ class AISettingsManager: ObservableObject {
         case .gemini: return geminiApiKey
         case .custom: return customApiKey
         }
+    }
+    
+    /// Returns the completion model if set, otherwise falls back to the chat model.
+    /// This lets users pick a cheaper/faster model for inline autocomplete while
+    /// keeping a more capable model for chat-based features (AI Prompt, Refine, etc.).
+    var effectiveCompletionModel: String {
+        let trimmed = completionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? model : trimmed
     }
 }

@@ -16,6 +16,14 @@ enum AIError: LocalizedError {
     }
 }
 
+/// Distinguishes between chat-based requests (AI Prompt, Refine, test connection)
+/// and inline completion requests (autocomplete). When the purpose is `.completion`,
+/// the optional completion model is used if configured, otherwise the chat model is used.
+enum AIRequestPurpose {
+    case chat
+    case completion
+}
+
 @MainActor
 class AICompletionService: ObservableObject {
     static let shared = AICompletionService()
@@ -24,7 +32,7 @@ class AICompletionService: ObservableObject {
     
     private init() {}
     
-    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output only the code to insert at the cursor.", maxTokens: Int = 128) async throws -> String {
+    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output only the code to insert at the cursor.", maxTokens: Int = 128, purpose: AIRequestPurpose = .chat) async throws -> String {
         isFetching = true
         defer { isFetching = false }
         
@@ -35,13 +43,23 @@ class AICompletionService: ObservableObject {
             throw AIError.apiError("API Key is missing for \(settings.provider.rawValue)")
         }
         
+        // Resolve which model to use. Completion requests use the (optional) cheaper
+        // completion model when configured, falling back to the chat model.
+        let model: String
+        switch purpose {
+        case .chat:
+            model = settings.model
+        case .completion:
+            model = settings.effectiveCompletionModel
+        }
+        
         let endpoint: String
         let isGemini = settings.provider == .gemini
         
         switch settings.provider {
         case .openAI: endpoint = "https://api.openai.com/v1/chat/completions"
         case .openRouter: endpoint = "https://openrouter.ai/api/v1/chat/completions"
-        case .gemini: endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(settings.model):generateContent?key=\(settings.apiKey)"
+        case .gemini: endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(settings.apiKey)"
         case .custom: endpoint = settings.customEndpoint
         }
         
@@ -89,7 +107,7 @@ class AICompletionService: ObservableObject {
             ]
             
             let body: [String: Any] = [
-                "model": settings.model,
+                "model": model,
                 "messages": messages,
                 "max_tokens": maxTokens,
                 "temperature": 0.2, // Deterministic

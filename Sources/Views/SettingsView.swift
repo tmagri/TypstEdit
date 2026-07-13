@@ -158,6 +158,32 @@ struct AISettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 
+                // MARK: - Optional Completion Model
+                Section(header: Text("Completion Model (Optional)")) {
+                    TextField("Completion Model (e.g. gpt-4o-mini)", text: $settings.completionModel)
+                    Text("Uses a separate, cheaper/faster model for inline autocomplete. Leave blank to use the chat model for everything.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    if !settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("Autocomplete uses: \(settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    } else {
+                        HStack(spacing: 4) {
+                            Image(systemName: "info.circle")
+                                .foregroundColor(.secondary)
+                            Text("Autocomplete will use the chat model: \(settings.model)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                
                 // MARK: - RAG & Embeddings Setup
                 Section(header: Text("Project Context (RAG & Embeddings)")) {
                     Toggle("Include Semantic Project Search (RAG)", isOn: $settings.includeProjectContext)
