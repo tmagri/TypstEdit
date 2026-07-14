@@ -900,26 +900,37 @@ class EditorController: NSObject, ObservableObject {
         // 1. Prefer text data (with optional Markdown→Typst conversion).
         if let items = pasteboard.pasteboardItems?.first,
            let text = items.string(forType: .string) {
-            
-            let range = self.selectedRange
-            let fileType = self.currentFileType
-            
-            // Run conversion in the background to avoid freezing the UI on huge pastes
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                var textToInsert = text
-                
-                if fileType == .typst {
-                    // Fast heuristic to skip Typst content
-                    let looksLikeTypst = text.contains("#image") || text.contains("#link") || text.contains("#align") || text.contains("#box") || text.contains("#rect") || text.hasPrefix("#") || text.hasPrefix("=")
-                    
-                    if !looksLikeTypst {
-                        textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
-                    }
+
+            // Perform conversion synchronously on the main thread.
+            // Doing this async previously caused the captured `selectedRange` to become
+            // stale by the time the main-thread callback fired, inserting at the wrong
+            // position. The conversion is regex-based and fast enough to run inline.
+            var textToInsert = text
+            if currentFileType == .typst {
+                // Fast heuristic to skip content that is already Typst
+                let looksLikeTypst = text.contains("#image") || text.contains("#link")
+                    || text.contains("#align") || text.contains("#box")
+                    || text.contains("#rect") || text.hasPrefix("#") || text.hasPrefix("=")
+                if !looksLikeTypst {
+                    textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
                 }
-                
-                DispatchQueue.main.async {
-                    self?.insertText(textToInsert, replacementRange: range)
-                }
+            }
+
+            // Route through the text view's own replaceCharacters so the CEUndoManager
+            // correctly records the mutation and undo works. Using insertText/setText for
+            // pastes previously called _undoManager.clearStack() (via setText → setTextStorage),
+            // wiping the undo history and making paste appear invisible until undo was pressed.
+            if let textView = textViewController?.textView {
+                let range = textView.selectedRange()
+                isApplyingProgrammaticChange = true
+                defer { isApplyingProgrammaticChange = false }
+                textView.replaceCharacters(in: range, with: textToInsert)
+                // Keep the model in sync; textViewDidChangeText will also do this but we set
+                // it early so any code that reads sourceCode afterwards sees the correct value.
+                sourceCode = textView.string
+            } else {
+                // Fallback when no live text view is available (e.g. unit tests)
+                insertText(textToInsert, replacementRange: selectedRange)
             }
             return
         }
