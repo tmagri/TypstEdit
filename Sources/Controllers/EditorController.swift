@@ -990,12 +990,14 @@ class EditorController: NSObject, ObservableObject {
             return
         }
         
-        // Compute the path to use in the #image() reference
+        // Compute the path to use in the #image() reference.
+        // The image is saved next to the current file, so use a path relative to
+        // the current file's directory. This is unambiguous and works correctly
+        // both in live preview (--root is set but paths resolve from the source file
+        // directory) and when printing from the temp/ subdirectory (rewriteRelativeImports
+        // will prepend ../ as needed).
         let imagePath: String
-        if let root = projectRootURL {
-            let rel = relativePath(from: root, to: fileURL) ?? fileName
-            imagePath = rel.hasPrefix("/") ? rel : "/\(rel)"
-        } else if let currentFile = currentFileURL {
+        if let currentFile = currentFileURL {
             let rel = relativePath(from: currentFile.deletingLastPathComponent(), to: fileURL) ?? fileName
             imagePath = rel
         } else {

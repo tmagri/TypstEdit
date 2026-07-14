@@ -642,8 +642,12 @@ class TypstCompiler: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: typstPath)
         
+        // Use the document's own directory as --root (same as the live preview in updateContent).
+        // This ensures root-relative image paths like #image("/pasted_image.png") resolve
+        // against the document folder, not the sidebar project root which may be a parent folder.
+        let effectiveRoot = preferredDirectory ?? projectRoot
         var arguments = ["compile", sourceURL.path, pdfURL.path]
-        if let root = projectRoot {
+        if let root = effectiveRoot {
             arguments.append(contentsOf: ["--root", root.path])
             process.currentDirectoryURL = root
         }
@@ -720,13 +724,16 @@ class TypstCompiler: ObservableObject {
     
     // MARK: - Relative Import Rewriter
     
-    /// Rewrites relative `#import` and `#include` paths by prepending `../`
+    /// Rewrites relative `#import`, `#include`, and `#image` paths by prepending `../`
     /// This is necessary because we compile from the `temp/` subdirectory, so relative
     /// paths need to go up one level to resolve against the original source location.
     private func rewriteRelativeImports(in content: String) -> String {
         var processed = content
-        let pattern = #"(\b(?:import|include)\s+")([^/@][^"]*)(")"#
-        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+
+        // Rewrite relative #import / #include paths
+        // Skips paths starting with / (absolute), @ (typst package), or . (already relative to parent)
+        let importPattern = #"(\b(?:import|include)\s+")([^/@.][^"]*)(")"#
+        if let regex = try? NSRegularExpression(pattern: importPattern, options: []) {
              processed = regex.stringByReplacingMatches(
                 in: processed,
                 options: [],
@@ -734,6 +741,24 @@ class TypstCompiler: ObservableObject {
                 withTemplate: "$1../$2$3"
              )
         }
+
+        // Rewrite relative #image("filename") paths.
+        // Only matches bare relative filenames — skips:
+        //   /...   (absolute)
+        //   ~...   (home-relative)
+        //   ../    (already adjusted)
+        //   http   (web URL)
+        // The negative lookahead (?!\.\./) ensures we don't double-prefix.
+        let imagePattern = #"(#image\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#
+        if let regex = try? NSRegularExpression(pattern: imagePattern, options: []) {
+            processed = regex.stringByReplacingMatches(
+                in: processed,
+                options: [],
+                range: NSRange(0..<processed.count),
+                withTemplate: "$1../$2$3"
+            )
+        }
+
         return processed
     }
 } // End of TypstCompiler class
