@@ -383,6 +383,10 @@ struct AppMenuCommands: Commands {
 
                 Divider()
 
+                Button("Label/Tag...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "openTagEditor")
+                }
+                
                 Button("Footnote") {
                     NotificationCenter.default.post(name: .menuCommand, object: "insertFootnote")
                 }

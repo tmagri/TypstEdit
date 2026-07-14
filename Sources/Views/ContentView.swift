@@ -1002,6 +1002,7 @@ struct ContentView: View {
         case "insertPageBreak": editorController.insertPageBreak()
         case "insertHorizontalLine": editorController.insertHorizontalLine()
         case "insertFootnote": editorController.openFootnoteEditor() // "insertFootnote" menu item usually opens editor or inserts default
+        case "openTagEditor": editorController.openTagEditor()
         case "insertBibliography": editorController.toggleBibliography()
         case "openContextualEditor": editorController.openContextualEditor()
         case "openFigureEditor": editorController.openFigureEditor()
