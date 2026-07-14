@@ -187,6 +187,10 @@ class TypstCompiler: ObservableObject {
             // Download web images and inject local paths before saving
             finalSource = await resolveWebImages(in: finalSource, projectRoot: projectRoot)
             
+            if projectTempDir != workingDirectory {
+                finalSource = self.rewriteRelativeImports(in: finalSource)
+            }
+            
             let finalSourceToWrite = finalSource
             try await Task.detached {
                 try finalSourceToWrite.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
@@ -625,6 +629,10 @@ class TypstCompiler: ObservableObject {
         
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
         
+        if let pref = preferredDirectory, tempDir != pref {
+            finalContent = self.rewriteRelativeImports(in: finalContent)
+        }
+        
         do {
             try finalContent.write(to: sourceURL, atomically: true, encoding: .utf8)
         } catch {
@@ -707,6 +715,25 @@ class TypstCompiler: ObservableObject {
             }
         }
         
+        return processed
+    }
+    
+    // MARK: - Relative Import Rewriter
+    
+    /// Rewrites relative `#import` and `#include` paths by prepending `../`
+    /// This is necessary because we compile from the `temp/` subdirectory, so relative
+    /// paths need to go up one level to resolve against the original source location.
+    private func rewriteRelativeImports(in content: String) -> String {
+        var processed = content
+        let pattern = #"(\b(?:import|include)\s+")([^/@][^"]*)(")"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+             processed = regex.stringByReplacingMatches(
+                in: processed,
+                options: [],
+                range: NSRange(0..<processed.count),
+                withTemplate: "$1../$2$3"
+             )
+        }
         return processed
     }
 } // End of TypstCompiler class
