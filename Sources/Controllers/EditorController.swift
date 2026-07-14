@@ -3085,9 +3085,8 @@ class EditorController: NSObject, ObservableObject {
     /// Generates a clean PDF (no dark mode, no filters) for Print or Share.
     func generateCleanPDF(compiler: TypstCompiler, fileURL: URL?) async -> URL? {
         showStatus("Preparing clean PDF...")
-        let preferredDir = fileURL?.deletingLastPathComponent()
         let ext = fileURL?.pathExtension.lowercased()
-        let result = await compiler.compileClean(content: sourceCode, fileExtension: ext, preferredDirectory: preferredDir, projectRoot: projectRootURL)
+        let result = await compiler.compileClean(content: sourceCode, fileExtension: ext, originalFileURL: fileURL, projectRoot: projectRootURL)
         
         if result.success, let url = result.pdfURL {
             self.cleanPDFURL = url

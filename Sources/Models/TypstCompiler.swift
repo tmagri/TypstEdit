@@ -582,16 +582,32 @@ class TypstCompiler: ObservableObject {
         }
     }
 
-    func compileClean(content: String, fileExtension: String? = nil, preferredDirectory: URL? = nil, projectRoot: URL?) async -> (success: Bool, pdfURL: URL?, error: String?) {
+    func compileClean(content: String, fileExtension: String? = nil, originalFileURL: URL? = nil, projectRoot: URL?) async -> (success: Bool, pdfURL: URL?, error: String?) {
         guard let typstPath = resolveTypstPath() else {
             return (false, nil, "Error: 'typst' executable not found.")
         }
         
-        // Use preferred directory (e.g. sibling of source file) to ensure relative imports work
-        let tempDir = preferredDirectory ?? FileManager.default.temporaryDirectory
-        let tempID = preferredDirectory != nil ? ".clean-\(UUID().uuidString.prefix(8))" : UUID().uuidString
-        let sourceURL = tempDir.appendingPathComponent("\(tempID).typ")
-        let pdfURL = tempDir.appendingPathComponent("\(tempID).pdf")
+        let preferredDirectory = originalFileURL?.deletingLastPathComponent()
+        
+        let tempDir: URL
+        if let pref = preferredDirectory {
+            tempDir = ensureTempDirectory(in: pref)
+        } else {
+            tempDir = FileManager.default.temporaryDirectory
+        }
+        
+        let tempID = UUID().uuidString
+        let sourceURL = tempDir.appendingPathComponent(".clean-\(tempID.prefix(8)).typ")
+        
+        let pdfURL: URL
+        if let original = originalFileURL {
+            let tempFolder = tempDir.appendingPathComponent(tempID)
+            try? FileManager.default.createDirectory(at: tempFolder, withIntermediateDirectories: true)
+            let pdfFilename = original.deletingPathExtension().appendingPathExtension("pdf").lastPathComponent
+            pdfURL = tempFolder.appendingPathComponent(pdfFilename)
+        } else {
+            pdfURL = tempDir.appendingPathComponent(".clean-\(tempID.prefix(8)).pdf")
+        }
         
         var finalContent = content
         

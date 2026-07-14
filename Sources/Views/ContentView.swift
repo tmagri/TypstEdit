@@ -872,7 +872,7 @@ struct ContentView: View {
             let ext = sourceURL.pathExtension.lowercased()
             let result = await compiler.compileClean(content: editorController.sourceCode,
                                                      fileExtension: ext,
-                                                     preferredDirectory: nil, // Use temp for export
+                                                     originalFileURL: sourceURL, // Pass source URL to inherit its filename
                                                      projectRoot: editorController.projectRootURL)
             
             if result.success, let tempPDF = result.pdfURL {
