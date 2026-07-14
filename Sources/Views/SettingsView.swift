@@ -39,19 +39,21 @@ struct GeneralSettingsView: View {
     var body: some View {
         ScrollView {
             Form {
-                Section(header: Text("Theme")) {
-                    Picker("Appearance", selection: $themeManager.appTheme) {
+                Section(header: Text("Theme").fontWeight(.semibold)) {
+                    Picker(selection: $themeManager.appTheme) {
                         ForEach(AppTheme.allCases) { theme in
                             Text(theme.rawValue).tag(theme)
                         }
+                    } label: {
+                        Text("Appearance").fontWeight(.semibold)
                     }
                     .pickerStyle(.segmented)
                 }
                 
-                Section(header: Text("Default Folder")) {
+                Section(header: Text("Default Folder").fontWeight(.semibold)) {
                     HStack {
                         Text("Notebook Location:")
-                            .fontWeight(.semibold)
+                            .fontWeight(.regular)
                         Spacer()
                         Text(notebookManager.rootDirectory.path)
                             .font(.system(.caption, design: .monospaced))
@@ -78,8 +80,10 @@ struct GeneralSettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 
-                Section(header: Text("Backups")) {
-                    Stepper("Max Backups Per File", value: $maxBackups, in: 0...20)
+                Section(header: Text("Backups").fontWeight(.semibold)) {
+                    Stepper(value: $maxBackups, in: 0...20) {
+                        Text("Max Backups Per File").fontWeight(.semibold)
+                    }
                     Text("Keeps the last \(maxBackups) saved versions per file. A rotating backup is captured each time you press Save. Set to 0 to disable. Stored in a local backups/ folder; excluded from RAG indexing.")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -111,20 +115,22 @@ struct AISettingsView: View {
             Form {
                 Section {
                 Toggle("Enable Manual Intellisense", isOn: $settings.intellisenseEnabled)
-                    .font(.body.weight(.semibold))
+                    .font(.body.weight(.regular))
                 Toggle("Enable AI Completion", isOn: $settings.isEnabled)
-                    .font(.body.weight(.semibold))
+                    .font(.body.weight(.regular))
             }
             
             if settings.isEnabled {
                 
                 // Chat Provider Setup
-                Section(header: Text("AI Provider (Chat)")) {
+                Section(header: Text("AI Provider (Chat)").fontWeight(.semibold)) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Picker("Provider", selection: $settings.provider) {
+                        Picker(selection: $settings.provider) {
                             ForEach(AIProvider.allCases) { provider in
                                 Text(provider.rawValue).tag(provider)
                             }
+                        } label: {
+                            Text("Provider").fontWeight(.semibold)
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
@@ -132,26 +138,26 @@ struct AISettingsView: View {
                     .padding(.vertical, 5)
                     
                     if settings.provider == .openAI {
-                        SecureField("OpenAI API Key", text: $settings.openAIApiKey)
+                        SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
                             .textContentType(.password)
-                        TextField("Chat Model (e.g. gpt-4o)", text: $settings.model)
+                        TextField(text: $settings.model) { Text("Chat Model (e.g. gpt-4o)").fontWeight(.semibold) }
                     } else if settings.provider == .openRouter {
-                        SecureField("OpenRouter API Key", text: $settings.openRouterApiKey)
+                        SecureField(text: $settings.openRouterApiKey) { Text("OpenRouter API Key").fontWeight(.semibold) }
                             .textContentType(.password)
-                        TextField("Chat Model (e.g. anthropic/claude-3-5-sonnet)", text: $settings.model)
+                        TextField(text: $settings.model) { Text("Chat Model (e.g. anthropic/claude-3-5-sonnet)").fontWeight(.semibold) }
                     } else if settings.provider == .gemini {
-                        SecureField("Gemini API Key", text: $settings.geminiApiKey)
+                        SecureField(text: $settings.geminiApiKey) { Text("Gemini API Key").fontWeight(.semibold) }
                             .textContentType(.password)
-                        TextField("Chat Model (e.g. gemini-1.5-flash)", text: $settings.model)
+                        TextField(text: $settings.model) { Text("Chat Model (e.g. gemini-1.5-flash)").fontWeight(.semibold) }
                     } else {
-                        TextField("Chat Endpoint URL", text: $settings.customEndpoint)
-                        SecureField("API Key (Optional)", text: $settings.customApiKey)
+                        TextField(text: $settings.customEndpoint) { Text("Chat Endpoint URL").fontWeight(.semibold) }
+                        SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
                             .textContentType(.password)
-                        TextField("Chat Model (e.g. llama3)", text: $settings.model)
+                        TextField(text: $settings.model) { Text("Chat Model (e.g. llama3)").fontWeight(.semibold) }
                     }
                     
                     Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
-                        .font(.body.weight(.semibold))
+                        .font(.body.weight(.regular))
                         .padding(.top, 5)
                     Text("Extracts content from markdown code blocks in the AI response.")
                         .font(.caption)
@@ -159,8 +165,8 @@ struct AISettingsView: View {
                 }
                 
                 // MARK: - Optional Completion Model
-                Section(header: Text("Completion Model (Optional)")) {
-                    TextField("Completion Model (e.g. gpt-4o-mini)", text: $settings.completionModel)
+                Section(header: Text("Completion Model (Optional)").fontWeight(.semibold)) {
+                    TextField(text: $settings.completionModel) { Text("Completion Model (e.g. gpt-4o-mini)").fontWeight(.semibold) }
                     Text("Uses a separate, cheaper/faster model for inline autocomplete. Leave blank to use the chat model for everything.")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -185,9 +191,9 @@ struct AISettingsView: View {
                 }
                 
                 // MARK: - RAG & Embeddings Setup
-                Section(header: Text("Project Context (RAG & Embeddings)")) {
+                Section(header: Text("Project Context (RAG & Embeddings)").fontWeight(.semibold)) {
                     Toggle("Include Semantic Project Search (RAG)", isOn: $settings.includeProjectContext)
-                        .font(.body.weight(.semibold))
+                        .font(.body.weight(.regular))
                     
                     if settings.includeProjectContext {
                         Text("Searches your project files to provide highly relevant context.")
@@ -195,7 +201,7 @@ struct AISettingsView: View {
                             .foregroundColor(.secondary)
                             
                         Toggle("Cache Embeddings to Disk", isOn: $settings.cacheEmbeddingsToDisk)
-                            .font(.body.weight(.semibold))
+                            .font(.body.weight(.regular))
                         Text("If disabled, saves disk space but increases API costs and indexing time by regenerating embeddings on every launch.")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -203,13 +209,13 @@ struct AISettingsView: View {
                         Divider()
                         
                         if settings.provider == .custom {
-                            TextField("Embedding URL", text: $settings.customEmbeddingEndpoint)
-                            TextField("Embedding Model (e.g. nomic-embed-text)", text: $settings.customEmbeddingModel)
+                            TextField(text: $settings.customEmbeddingEndpoint) { Text("Embedding URL").fontWeight(.semibold) }
+                            TextField(text: $settings.customEmbeddingModel) { Text("Embedding Model (e.g. nomic-embed-text)").fontWeight(.semibold) }
                                 .onChange(of: settings.customEmbeddingModel) { _ in
                                     // TODO: Trigger RAGManager to wipe the vector cache here
                                 }
                         } else if settings.provider == .openAI {
-                            TextField("Embedding Model", text: $settings.openAIEmbeddingModel)
+                            TextField(text: $settings.openAIEmbeddingModel) { Text("Embedding Model").fontWeight(.semibold) }
                                 .onChange(of: settings.openAIEmbeddingModel) { _ in
                                     // TODO: Trigger RAGManager to wipe the vector cache here
                                 }
@@ -221,11 +227,11 @@ struct AISettingsView: View {
                     }
                 }
                 // --- Request Configuration Section ---
-                Section(header: Text("Request Configuration")) {
+                Section(header: Text("Request Configuration").fontWeight(.semibold)) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Timeout:")
-                                .fontWeight(.semibold)
+                                .fontWeight(.regular)
                             Slider(value: $settings.timeoutSeconds, in: 5...1200, step: 5)
                             Text("\(Int(settings.timeoutSeconds))s")
                                 .monospacedDigit()
@@ -241,7 +247,7 @@ struct AISettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("Max Tokens:")
-                                .fontWeight(.semibold)
+                                .fontWeight(.regular)
                             TextField("2048", value: $settings.maxTokens, formatter: NumberFormatter())
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 80)
@@ -312,21 +318,23 @@ struct TypstSettingsView: View {
     var body: some View {
         ScrollView {
             Form {
-                Section(header: Text("Configuration")) {
+                Section(header: Text("Configuration").fontWeight(.semibold)) {
                 Toggle("Use Custom Typst (compiled or downloaded)", isOn: $settings.useCustomTypst)
-                    .font(.body.weight(.semibold))
+                    .font(.body.weight(.regular))
                 
-                Picker("Update Mode", selection: $settings.updateMode) {
+                Picker(selection: $settings.updateMode) {
                     ForEach(TypstUpdateMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
                     }
+                } label: {
+                    Text("Update Mode").fontWeight(.semibold)
                 }
                 .pickerStyle(.inline)
                 
                 if !settings.customTypstPath.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Current Path:")
-                            .font(.caption.weight(.semibold))
+                            .font(.caption.weight(.regular))
                             .foregroundColor(.secondary)
                         Text(settings.customTypstPath)
                             .font(.system(.caption, design: .monospaced))
@@ -336,7 +344,7 @@ struct TypstSettingsView: View {
                 }
             }
             
-            Section(header: Text("Update Typst")) {
+            Section(header: Text("Update Typst").fontWeight(.semibold)) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(settings.updateMode == .bleedingEdgeSource ? 
                         "This will clone the latest source from Git and compile it using Cargo." :
@@ -375,7 +383,7 @@ struct TypstSettingsView: View {
             }
             
             if settings.updateMode == .bleedingEdgeSource {
-                Section(header: Text("Source Dependencies")) {
+                Section(header: Text("Source Dependencies").fontWeight(.semibold)) {
                     HStack {
                         Image(systemName: hasGit ? "checkmark.circle.fill" : "xmark.circle.fill")
                             .foregroundColor(hasGit ? .green : .red)
@@ -417,7 +425,7 @@ struct TypstSettingsView: View {
                     }
                 }
             } else {
-                Section(header: Text("Info")) {
+                Section(header: Text("Info").fontWeight(.semibold)) {
                     HStack {
                         Image(systemName: "info.circle")
                         Text("Binary downloads are recommended and do not require Git or Rust.")
