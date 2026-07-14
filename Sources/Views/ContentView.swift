@@ -531,6 +531,7 @@ struct ContentView: View {
                 .sheet(isPresented: $editorController.showFigureEditor) { FigureEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showExternalDataEditor) { ExternalDataEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showFootnoteEditor) { FootnoteEditorView(controller: editorController) }
+                .sheet(isPresented: $editorController.showTagEditor) { TagEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showFoundationEditor) { FoundationEditorView(controller: editorController) }
                 .sheet(isPresented: $editorController.showBlockEditor) {
                     BlockEditorView(controller: editorController, onCancel: { editorController.showBlockEditor = false })

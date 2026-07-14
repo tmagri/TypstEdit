@@ -71,6 +71,19 @@ struct FormatDetector {
         return findHTMLTagRange(in: text, at: index, tag: "sup")
     }
 
+    /// Finds the range of a footnote surrounding the index.
+    static func findFootnoteRange(in text: String, at index: Int) -> NSRange? {
+        // Find `#footnote[...`
+        return findBracketedRange(in: text, at: index, prefixPattern: #"#footnote(?:\s*\([^)]*\))?\s*[\[(]"#)
+    }
+    
+    /// Finds the range of a tag/label (`<label>`) surrounding the index.
+    static func findTagRange(in text: String, at index: Int) -> NSRange? {
+        // Tag label cannot have spaces: letters, numbers, dash, underscore
+        // Negative lookbehind `(?<!\\)` prevents matching escaped tags `\<tag>`
+        return findRegexRange(in: text, at: index, pattern: #"(?<!\\)<([a-zA-Z0-9_-]+)>"#)
+    }
+
     /// Finds the range of title (#title[...]) surrounding the index.
     static func findTitleRange(in text: String, at index: Int) -> NSRange? {
         return findBracketedRange(in: text, at: index, prefixPattern: #"#title(?:\s*\([^)]*\))?\s*[\[(]"#)
@@ -331,10 +344,6 @@ struct FormatDetector {
             return lineRange 
         }
         return nil
-    }
-
-    static func findFootnoteRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#footnote\s*[\[(]"#)
     }
 
     /// Finds the range of a scoped block (#[...]) surrounding the index.

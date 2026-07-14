@@ -485,6 +485,12 @@ class EditorController: NSObject, ObservableObject {
     @Published var footnoteNumbering: String = "1"
     @Published var currentFootnoteRange: NSRange?
     
+    // --- Tag Editor State ---
+    @Published var isTagActive: Bool = false
+    @Published var showTagEditor: Bool = false
+    @Published var tagLabel: String = ""
+    @Published var currentTagRange: NSRange?
+    
     @Published var hasUnsavedChanges: Bool = false
     private var savedContent: String = ""
     @Published var viewMode: ViewMode = .both
@@ -2133,7 +2139,37 @@ class EditorController: NSObject, ObservableObject {
             self.isScopedBlockActive = FormatDetector.findScopedBlockRange(in: text, at: range.location) != nil
             self.isBlockActive = FormatDetector.findBlockRange(in: text, at: range.location) != nil
             self.isGridActive = FormatDetector.findGridRange(in: text, at: range.location) != nil
+            self.isTagActive = FormatDetector.findTagRange(in: text, at: range.location) != nil
         }
+    }
+    
+    // --- Tag Editor Functions ---
+    
+    func openTagEditor() {
+        let range = selectedRange
+        
+        // Reset state
+        self.tagLabel = ""
+        self.currentTagRange = nil
+        
+        if let tagRange = FormatDetector.findTagRange(in: sourceCode, at: range.location) {
+            self.currentTagRange = tagRange
+            let nsString = sourceCode as NSString
+            let fullTag = nsString.substring(with: tagRange)
+            if fullTag.hasPrefix("<") && fullTag.hasSuffix(">") {
+                self.tagLabel = String(fullTag.dropFirst().dropLast())
+            }
+        }
+        
+        self.showTagEditor = true
+    }
+    
+    func insertTag(label: String) {
+        let newLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newLabel.isEmpty else { return }
+        
+        let newContent = "<\(newLabel)>"
+        insertText(newContent, replacementRange: currentTagRange)
     }
     
     // --- Footnote Editor Functions ---
@@ -3075,6 +3111,12 @@ class EditorController: NSObject, ObservableObject {
         // 10. Grid
         if FormatDetector.findGridRange(in: text, at: range.location) != nil {
             openGridEditor()
+            return
+        }
+        
+        // 11. Tag
+        if FormatDetector.findTagRange(in: text, at: range.location) != nil {
+            openTagEditor()
             return
         }
         

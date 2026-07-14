@@ -175,9 +175,14 @@ struct ToolbarView: View {
                 // Actually References is small (2 buttons stacked). It can stay longer.
                 // Let's collapse it with Paragraph for simplicity or Font.
                 ToolbarGroup(title: "References", icon: "text.book.closed", isCompact: collapseInsert) {
-                    VStack(spacing: 2) {
-                        ToolbarButton(icon: "text.book.closed", tooltip: "Bibliography", isActive: controller.isBibliographyActive, action: controller.toggleBibliography)
-                        ToolbarButton(icon: "character.textbox", tooltip: "Footnote", isActive: controller.isFootnoteActive, action: controller.openFootnoteEditor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 2) {
+                            ToolbarButton(icon: "tag", tooltip: "Label/Tag", isActive: controller.isTagActive, action: controller.openTagEditor)
+                            ToolbarButton(icon: "text.book.closed", tooltip: "Bibliography", isActive: controller.isBibliographyActive, action: controller.toggleBibliography)
+                        }
+                        HStack(spacing: 2) {
+                            ToolbarButton(icon: "character.textbox", tooltip: "Footnote", isActive: controller.isFootnoteActive, action: controller.openFootnoteEditor)
+                        }
                     }
                 }
             }
