@@ -696,10 +696,11 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Error Highlighting ---
     
-    private var errorAttributes: [NSAttributedString.Key: Any] {
+    private func attributes(for severity: TypstError.Severity) -> [NSAttributedString.Key: Any] {
+        let color: NSColor = (severity == .warning) ? NSColor.yellow : NSColor.red
         return [
             .underlineStyle: NSUnderlineStyle.single.rawValue | NSUnderlineStyle.thick.rawValue,
-            .underlineColor: NSColor.red
+            .underlineColor: color
         ]
     }
     
@@ -744,7 +745,7 @@ class EditorController: NSObject, ObservableObject {
             if let range = getRangeForLine(error.line) {
                 // Ensure range is valid
                 if range.location + range.length <= textStorage.length {
-                    textStorage.addAttributes(errorAttributes, range: range)
+                    textStorage.addAttributes(attributes(for: error.severity), range: range)
                     textStorage.addAttribute(.toolTip, value: error.message, range: range)
                 }
             }

@@ -32,14 +32,28 @@ struct ErrorPanelView: View {
                 Spacer()
                 
                 if !compiler.errors.isEmpty {
-                    Text("\(compiler.errors.count)")
-                        .font(.caption)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.red)
-                        .cornerRadius(10)
-                        
+                    // Separate badges for errors (red) and advisory warnings (yellow).
+                    let errorCount = compiler.errors.filter { $0.severity == .error }.count
+                    let warningCount = compiler.errors.filter { $0.severity == .warning }.count
+                    if errorCount > 0 {
+                        Text("\(errorCount)")
+                            .font(.caption)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.red)
+                            .cornerRadius(10)
+                    }
+                    if warningCount > 0 {
+                        Text("\(warningCount)")
+                            .font(.caption)
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.yellow)
+                            .cornerRadius(10)
+                    }
+                    
                     // Pop-out button
                     Button(action: {
                         showAllErrors = true
@@ -63,7 +77,7 @@ struct ErrorPanelView: View {
                     HStack {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(.green)
-                        Text("No errors")
+                        Text("No issues")
                             .foregroundColor(themeManager.secondaryTextColor)
                             .font(.caption)
                     }
@@ -98,7 +112,7 @@ struct ErrorPanelView: View {
         .sheet(isPresented: $showAllErrors) {
             VStack(spacing: 0) {
                 HStack {
-                    Text("Compilation Errors (\(compiler.errors.count))")
+                    Text("Compilation Issues (\(compiler.errors.count))")
                         .font(.headline)
                         .foregroundColor(themeManager.textColor)
                     Spacer()
@@ -135,19 +149,28 @@ struct ErrorRowView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @State private var isHovered: Bool = false
     
+    private var isWarning: Bool { error.severity == .warning }
+
     var body: some View {
         Button(action: onClick) {
             HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.red)
+                Image(systemName: isWarning ? "exclamationmark.bubble.fill" : "exclamationmark.triangle.fill")
+                    .foregroundColor(isWarning ? .yellow : .red)
                     .font(.caption)
                     .padding(.top, 2)
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Line \(error.line)")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(themeManager.accentColor)
+                    HStack(spacing: 6) {
+                        Text(isWarning ? "Warning" : "Line \(error.line)")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(isWarning ? .yellow : themeManager.accentColor)
+                        if isWarning {
+                            Text("Line \(error.line)")
+                                .font(.caption2)
+                                .foregroundColor(themeManager.secondaryTextColor)
+                        }
+                    }
                     
                     Text(error.message)
                         .font(.caption)

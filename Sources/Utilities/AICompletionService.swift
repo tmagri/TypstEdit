@@ -606,7 +606,9 @@ class AICompletionService: ObservableObject {
             
             // Escape @ if it's preceded by a letter/number (e.g. email addresses like user@email.com)
             // or followed by a space. Typst references (like @fig1) usually have a space before them and letters after.
-            applyRegex("(?<=[a-zA-Z0-9])@|@(?=\\s)", template: "\\\\@")
+            // The `(?<!\\)` guards keep this idempotent with `TypstCompiler.delimitImproperOperators`,
+            // which already backslash-escapes these same cases (and warns the user) for `.note` files.
+            applyRegex("(?<!\\\\)(?<=[a-zA-Z0-9])@|(?<!\\\\)@(?=\\s)", template: "\\\\@")
 
             // Smart `#` escaping: in `.note` files we leave most `#`-prefixed Typst alone
             // (so `#let`, `#score(...)`, `#emph[...]` all work). But pasted Markdown often

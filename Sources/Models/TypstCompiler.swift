@@ -2,9 +2,22 @@ import Foundation
 import Combine
 
 struct TypstError: Identifiable, Equatable {
+    enum Severity: Equatable {
+        case error
+        case warning
+    }
+
     let id = UUID()
     let line: Int // 1-based
     let message: String
+    var severity: Severity = .error
+
+    /// Convenience constructor that keeps existing call sites (line/message) working.
+    init(line: Int, message: String, severity: Severity = .error) {
+        self.line = line
+        self.message = message
+        self.severity = severity
+    }
 }
 
 @MainActor
@@ -12,7 +25,26 @@ class TypstCompiler: ObservableObject {
     @Published var compilationStatus: String = "Ready"
     @Published var isCompiling: Bool = false
     @Published var errors: [TypstError] = []
-    
+
+    // Backing stores that feed the published `errors` list.
+    // `typstErrors`  – real compilation errors reported by the `typst` binary.
+    // `noteWarnings` – advisory warnings produced by `delimitImproperOperators`
+    //                  for hybrid `.note` files (one per source line that needed
+    //                  auto-delimiting). Kept separate so they survive a
+    //                  successful recompile but are cleared when content changes.
+    private var typstErrors: [TypstError] = []
+    private var noteWarnings: [TypstError] = []
+
+    /// Merges real errors + advisory warnings into the published `errors` list and
+    /// notifies observers. Real compile errors are listed first (they block output);
+    /// `.note` operator-delimiting warnings follow. Warnings persist across a
+    /// successful recompile but are cleared when the source changes.
+    private func publishIssues() {
+        let combined = typstErrors + noteWarnings
+        self.errors = combined
+        NotificationCenter.default.post(name: .typstErrorsUpdated, object: combined)
+    }
+
     var isDarkMode: Bool = false
     private var preambleLineCount: Int {
         var count = 0
@@ -167,12 +199,28 @@ class TypstCompiler: ObservableObject {
             fallbackAttempts = [:]
             lastRawErrorLines = []
 
+            // Operator-delimiting warnings for `.note` files (computed alongside
+            // sanitization below, committed to `noteWarnings` once we publish).
+            var pendingNoteWarnings: [TypstError] = []
+
             if ext == "md" || ext == "note" {
                 let textToProcess = finalSource
                 let aiService = AICompletionService.shared
-                finalSource = await Task.detached {
-                    aiService.sanitizeMarkdownToTypst(textToProcess, isHybrid: ext == "note")
+                let isHybrid = (ext == "note")
+                // For hybrid `.note` files, first delimit any operator characters
+                // (`@ # $ < >`) that aren't valid Typst so the parser doesn't have
+                // to guess. This runs on the user's original text (accurate line
+                // numbers for the warnings) and produces backslash escapes that the
+                // sanitizer's hybrid rules already treat as idempotent.
+                let (sanitized, warnings) = await Task.detached {
+                    let delimited = isHybrid ? Self.delimitImproperOperators(textToProcess) : (output: textToProcess, warnings: [TypstError]())
+                    let cleaned = aiService.sanitizeMarkdownToTypst(delimited.output, isHybrid: isHybrid)
+                    return (cleaned, delimited.warnings)
                 }.value
+                finalSource = sanitized
+                pendingNoteWarnings = warnings
+            } else {
+                pendingNoteWarnings = []
             }
             
             var injectedPreamble = ""
@@ -196,13 +244,12 @@ class TypstCompiler: ObservableObject {
                 try finalSourceToWrite.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
             }.value
             
-            // Clear errors on new content update
-            Task { @MainActor in
-                if !self.errors.isEmpty {
-                    self.errors = []
-                    NotificationCenter.default.post(name: .typstErrorsUpdated, object: [])
-                }
-            }
+            // Reset the issue list for the new content: drop stale compile errors,
+            // and install the freshly-computed operator-delimiting warnings. We're
+            // on the main actor here, so this lands before `startWatching` below.
+            self.noteWarnings = pendingNoteWarnings
+            self.typstErrors = []
+            self.publishIssues()
         } catch {
             self.compilationStatus = "Error writing shadow file: \(error)"
             return
@@ -226,7 +273,10 @@ class TypstCompiler: ObservableObject {
         }
         
         currentShadowSourceURL = sourceURL
-        self.errors = [] // Clear errors on start
+        // Clear real compile errors when (re)starting a watch; keep note warnings,
+        // which describe the source and are recomputed on each `updateContent`.
+        self.typstErrors = []
+        self.publishIssues()
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: typstPath)
@@ -278,12 +328,12 @@ class TypstCompiler: ObservableObject {
                          DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                              NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
                          }
-                         // Also clear errors if success? Ideally yes.
-                         // But if we have warnings? Typst prints warnings too.
-                         // If "compiled successfully", usually no errors.
-                         if !self.errors.isEmpty {
-                             self.errors = []
-                             NotificationCenter.default.post(name: .typstErrorsUpdated, object: [])
+                         // On a successful compile, drop stale compile errors but
+                         // keep the `.note` operator-delimiting warnings, which stay
+                         // valid until the source changes.
+                         if !self.typstErrors.isEmpty {
+                             self.typstErrors = []
+                             self.publishIssues()
                          }
                     } else if output.contains("error:") {
                         self.isCompiling = false
@@ -315,9 +365,10 @@ class TypstCompiler: ObservableObject {
         // We will iterate line by line to build a list.
         
         let lines = output.components(separatedBy: .newlines)
-        // Accumulate errors instead of resetting.
-        // We rely on updateContent() or specific "success" messages to clear old errors.
-        var newErrors: [TypstError] = self.errors 
+        // Accumulate real compile errors onto the existing `typstErrors` set.
+        // (Note warnings live in `noteWarnings` and are merged in by `publishIssues`.)
+        // We rely on updateContent() or a "compiled successfully" message to clear them.
+        var newErrors: [TypstError] = self.typstErrors
         
         var currentErrorMsg: String? = nil
         
@@ -357,11 +408,11 @@ class TypstCompiler: ObservableObject {
             lastRawErrorLines = newRawErrorLines
         }
         
-        // Update errors if changed.
-        if self.errors != newErrors {
-            self.errors = newErrors
-            NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
+        // Commit the real errors and republish (warnings are merged back in).
+        if self.typstErrors != newErrors {
+            self.typstErrors = newErrors
         }
+        self.publishIssues()
     }
 
     // MARK: - Lenient Fallback Fixer (.note / .md)
@@ -535,6 +586,142 @@ class TypstCompiler: ObservableObject {
         return result
     }
 
+    // MARK: - Improper Operator Delimiting (.note)
+
+    /// For hybrid `.note` files, locates Typst operator characters (`@ # $ < >`)
+    /// that are NOT used as valid Typst syntax and delimits each with a backslash
+    /// so the parser doesn't have to guess their meaning (and silently mis-render).
+    ///
+    /// Left untouched (i.e. legitimate Typst / Markdown that we must not break):
+    ///   - `@label`            references (an `@` followed by an identifier that
+    ///                          isn't glued to a preceding word / email)
+    ///   - `#word`, `#"…"`, `#(…)`, `#{…}`, `#123`   top-level code expressions
+    ///   - `$ … $`             math (masked out before scanning)
+    ///   - `<label>`, `<tag>`, `</tag>`, `<!--…-->`  labels & HTML (handled later)
+    ///   - anything inside inline/fenced code spans or math regions (masked out)
+    ///
+    /// Each source line that needed delimiting produces a single `.warning`
+    /// `TypstError` (1-based line numbers refer to the user's original file). The
+    /// returned `output` is meant to feed into `sanitizeMarkdownToTypst`, whose
+    /// hybrid escape rules are idempotent (`(?<!\\)`) so they won't double-escape.
+    nonisolated static func delimitImproperOperators(_ source: String) -> (output: String, warnings: [TypstError]) {
+        let ns = source as NSString
+        let length = ns.length
+        guard length > 0 else { return (source, []) }
+
+        // 1. Build a mask of the same length where protected regions (code spans
+        //    and math) are blanked to spaces — newlines preserved — so operator
+        //    scanning can't match inside them while every line offset stays exact.
+        var masked: [unichar] = Array(repeating: 0, count: length)
+        for i in 0..<length { masked[i] = ns.character(at: i) }
+        func blank(_ r: NSRange) {
+            guard r.location != NSNotFound, r.location < length, r.length > 0 else { return }
+            let end = min(r.location + r.length, length)
+            for i in r.location..<end where masked[i] != 0x0A { masked[i] = 0x20 }
+        }
+        // Inline / fenced code spans with matching backtick runs (same pattern the
+        // sanitizer uses).
+        if let codeRe = try? NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)", options: []) {
+            codeRe.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
+                if let m = m { blank(m.range) }
+            }
+        }
+        // Math regions: $$…$$, $…$, \[…\], \(…\).
+        if let mathRe = try? NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)", options: []) {
+            mathRe.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
+                if let m = m { blank(m.range) }
+            }
+        }
+        let maskedString = NSString(characters: masked, length: length) as String
+
+        // 2. Precompute a line number for every character index (O(1) lookup later).
+        var lineOf: [Int] = Array(repeating: 1, count: length + 1)
+        var running = 1
+        for i in 0..<length {
+            lineOf[i] = running
+            if masked[i] == 0x0A { running += 1 }
+        }
+        lineOf[length] = running
+
+        // 3. Character-class helpers (ASCII code points).
+        func charAt(_ i: Int) -> unichar? { (i >= 0 && i < length) ? masked[i] : nil }
+        func isDigit(_ x: unichar?) -> Bool { guard let x = x else { return false }; return (0x30...0x39).contains(x) }
+        func isAlpha(_ x: unichar?) -> Bool { guard let x = x else { return false }; return (0x41...0x5A).contains(x) || (0x61...0x7A).contains(x) }
+        func isAlnum(_ x: unichar?) -> Bool { isAlpha(x) || isDigit(x) }
+        func isIdentStart(_ x: unichar?) -> Bool { x == 0x5F || isAlpha(x) }                 // [_A-Za-z]
+        func isHashContinuation(_ x: unichar?) -> Bool {                                       // valid after '#'
+            guard let x = x else { return false }
+            if isAlnum(x) || x == 0x5F { return true }                                         // word / number
+            return x == 0x22 || x == 0x7B || x == 0x28                                         // " { (
+        }
+        func isTagStart(_ x: unichar?) -> Bool {                                               // valid after '<'
+            guard let x = x else { return false }
+            return isAlpha(x) || x == 0x2F || x == 0x21                                        // letter / !
+        }
+        func isTagEndPrev(_ x: unichar?) -> Bool {                                             // valid before '>'
+            guard let x = x else { return false }
+            if isAlnum(x) || x == 0x5F { return true }                                         // name char
+            return x == 0x2D || x == 0x2F || x == 0x22 || x == 0x27 || x == 0x3D              // - / " ' =
+        }
+
+        // 4. Enumerate every unescaped operator and classify it against its context.
+        guard let opRe = try? NSRegularExpression(pattern: "(?<!\\\\)[@#$<>]", options: []) else {
+            return (source, [])
+        }
+        var improper: [(loc: Int, op: Character)] = []
+        for m in opRe.matches(in: maskedString, options: [], range: NSRange(0..<length)) {
+            let loc = m.range.location
+            guard loc < length else { continue }
+            let u = masked[loc]
+            let prev = charAt(loc - 1)
+            let next = charAt(loc + 1)
+            let improperNow: Bool
+            switch u {
+            case 0x40: // @  — must begin a reference (not be glued to a word/email)
+                improperNow = isAlnum(prev) || !isIdentStart(next)
+            case 0x23: // #  — must be the start of a code expression
+                improperNow = !isHashContinuation(next)
+            case 0x24: // $  — any leftover $ is stray once math is masked
+                improperNow = true
+            case 0x3C: // <  — must open a label / HTML tag
+                improperNow = !isTagStart(next)
+            case 0x3E: // >  — must close a label / HTML tag
+                improperNow = !isTagEndPrev(prev)
+            default:
+                improperNow = false
+            }
+            if improperNow, let scalar = UnicodeScalar(u) {
+                improper.append((loc, Character(scalar)))
+            }
+        }
+        guard !improper.isEmpty else { return (source, []) }
+
+        // 5. Group delimitations per source line → one warning per line.
+        var byLine: [Int: [Character]] = [:]
+        var lineOrder: [Int] = []
+        for (loc, op) in improper {
+            let ln = lineOf[loc]
+            if byLine[ln] == nil { lineOrder.append(ln) }
+            var arr = byLine[ln] ?? []
+            if !arr.contains(op) { arr.append(op) }
+            byLine[ln] = arr
+        }
+        let warnings: [TypstError] = lineOrder.sorted().map { ln in
+            let ops = (byLine[ln] ?? []).map { String($0) }.joined(separator: ", ")
+            let msg = "Auto-escaped \(ops) — not valid Typst here, so the parser would " +
+                      "guess its meaning. Use proper Typst syntax or escape it yourself (e.g. \\@)."
+            return TypstError(line: ln, message: msg, severity: .warning)
+        }
+
+        // 6. Apply the backslash escapes to the original source (right-to-left so
+        //    earlier insert locations aren't shifted by later ones).
+        let mutable = NSMutableString(string: source)
+        for (loc, _) in improper.sorted(by: { $0.loc > $1.loc }) {
+            mutable.insert("\\", at: loc)
+        }
+        return ((mutable as String), warnings)
+    }
+
     // --- Export Functions ---
     
     func export(sourceURL: URL, outputURL: URL, format: String, projectRoot: URL? = nil) async -> (success: Bool, error: String?) {
@@ -619,8 +806,12 @@ class TypstCompiler: ObservableObject {
         if ext == "md" || ext == "note" {
             let aiService = AICompletionService.shared
             let textToProcess = finalContent
+            let isHybrid = (ext == "note")
             finalContent = await Task.detached {
-                aiService.sanitizeMarkdownToTypst(textToProcess, isHybrid: ext == "note")
+                // Delimit improper operators first (same pass as the live preview)
+                // so exports of `.note` files don't break on stray @/#/$/</>.
+                let input = isHybrid ? Self.delimitImproperOperators(textToProcess).output : textToProcess
+                return aiService.sanitizeMarkdownToTypst(input, isHybrid: isHybrid)
             }.value
         }
         if ext == "note" {
