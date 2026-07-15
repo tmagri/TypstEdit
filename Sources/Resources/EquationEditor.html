@@ -62,11 +62,18 @@
             if (!typst) return "";
 
             let latex = typst.trim();
+            
+            // --- 0. Strip Invisible Formatting Characters ---
+            // Typst sometimes inserts U+2061 (Function Application) and others which break regex matching.
+            latex = latex.replace(/[\u200B-\u200D\uFEFF\u2061-\u2064]/g, '');
 
             // --- 0. Escape Braces ---
-            // Escape literal braces for sets { ... }
-            latex = latex.replace(/\{/g, '\\{');
-            latex = latex.replace(/\}/g, '\\}');
+            // Removed: Escaping all braces blindly breaks LaTeX-style groupings like _{...} and \mathrm{...}
+            // If users want literal braces, they can use \{ or \lbrace.
+            
+            // --- 0.5 Unescape Subscripts ---
+            // Often imported equations or markdown-escaped equations contain \_ when they actually mean a subscript _
+            latex = latex.replace(/\\_/g, '_');
 
             // --- 1. Shorthands (Non-word chars) ---
             // Note: Order matters for overlapping shorthands
@@ -158,6 +165,17 @@
                 latex = latex.replace(re, l);
             }
 
+            // Math Functions (log, ln, sin, etc.)
+            const mathFuncs = [
+                'log', 'ln', 'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 
+                'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh', 
+                'exp', 'min', 'max', 'lim', 'det'
+            ];
+            mathFuncs.forEach(f => {
+                const re = new RegExp(`\\b${f}(?![a-zA-Z])`, 'g');
+                latex = latex.replace(re, `\\${f}`);
+            });
+
             // --- 5. Wrap-around Functions ---
             // sqrt(...) -> \sqrt{...}
             latex = latex.replace(/sqrt\s*\(([\s\S]*?)\)/g, '\\sqrt{$1}');
@@ -207,10 +225,118 @@
                 return `\\begin{${env}} ${latexRows} \\end{${env}}`;
             });
 
-            // Fractions
-            latex = latex.replace(/\(([^)]+)\)\s*\/\s*\(([^)]+)\)/g, '\\frac{$1}{$2}');
-            // Simple fractions: a/b
-            latex = latex.replace(/(\b[a-zA-Z0-9]+)\s*\/\s*(\b[a-zA-Z0-9]+)/g, '\\frac{$1}{$2}');
+            // Fractions (Robust parsing)
+            const parseFractions = (str) => {
+                let res = str;
+                let i = 0;
+                // Loop to find all `/` characters that aren't part of a command
+                while ((i = res.indexOf('/', i)) !== -1) {
+                    // Ignore if preceded by \ (like \/)
+                    if (i > 0 && res[i-1] === '\\') {
+                        i++;
+                        continue;
+                    }
+                    
+                    // 1. Find Numerator (scan backwards)
+                    let numEnd = i - 1;
+                    while (numEnd >= 0 && res[numEnd] === ' ') numEnd--; // skip spaces
+                    
+                    let numStart = numEnd;
+                    if (res[numEnd] === ')') {
+                        let depth = 0;
+                        while (numStart >= 0) {
+                            if (res[numStart] === ')') depth++;
+                            else if (res[numStart] === '(') depth--;
+                            
+                            if (depth === 0) break;
+                            numStart--;
+                        }
+                        // Include function name before parens if present (e.g. \log, \sin)
+                        while (numStart > 0 && /[a-zA-Z\\]/.test(res[numStart-1])) {
+                            numStart--;
+                        }
+                    } else if (res[numEnd] === '}') {
+                        let depth = 0;
+                        while (numStart >= 0) {
+                            if (res[numStart] === '}') depth++;
+                            else if (res[numStart] === '{') depth--;
+                            
+                            if (depth === 0) break;
+                            numStart--;
+                        }
+                        // Check for ^ or _ before {}
+                        if (numStart > 0 && (res[numStart-1] === '^' || res[numStart-1] === '_')) {
+                            numStart--;
+                            // Check for base before ^ or _
+                            while (numStart > 0 && /[a-zA-Z0-9]/.test(res[numStart-1])) {
+                                numStart--;
+                            }
+                        }
+                    } else {
+                        // Scan back word characters, numbers, and underscores (e.g., r_m)
+                        while (numStart >= 0 && /[a-zA-Z0-9_]/.test(res[numStart])) {
+                            numStart--;
+                        }
+                        numStart++;
+                    }
+                    
+                    let num = res.substring(numStart, numEnd + 1).trim();
+                    if (num.startsWith('(') && num.endsWith(')') && !/^[a-zA-Z\\]/.test(num)) {
+                        num = num.slice(1, -1);
+                    }
+                    
+                    // 2. Find Denominator (scan forwards)
+                    let denStart = i + 1;
+                    while (denStart < res.length && res[denStart] === ' ') denStart++; // skip spaces
+                    
+                    let denEnd = denStart;
+                    if (res[denStart] === '(') {
+                        let depth = 0;
+                        while (denEnd < res.length) {
+                            if (res[denEnd] === '(') depth++;
+                            else if (res[denEnd] === ')') depth--;
+                            
+                            if (depth === 0) break;
+                            denEnd++;
+                        }
+                    } else if (res[denStart] === '\\') {
+                        // Math command like \log
+                        while (denEnd < res.length && /[a-zA-Z\\]/.test(res[denEnd])) denEnd++;
+                        if (res[denEnd] === '(') {
+                            let depth = 0;
+                            while (denEnd < res.length) {
+                                if (res[denEnd] === '(') depth++;
+                                else if (res[denEnd] === ')') depth--;
+                                if (depth === 0) break;
+                                denEnd++;
+                            }
+                        } else {
+                            denEnd--;
+                        }
+                    } else {
+                        // Word characters, numbers, and underscores
+                        while (denEnd < res.length && /[a-zA-Z0-9_]/.test(res[denEnd])) {
+                            denEnd++;
+                        }
+                        denEnd--; // inclusive
+                    }
+                    
+                    let den = res.substring(denStart, denEnd + 1).trim();
+                    if (den.startsWith('(') && den.endsWith(')') && !/^[a-zA-Z\\]/.test(den)) {
+                        den = den.slice(1, -1);
+                    }
+                    
+                    // 3. Replace
+                    const replacement = `\\frac{${num}}{${den}}`;
+                    res = res.substring(0, numStart) + replacement + res.substring(denEnd + 1);
+                    
+                    // Adjust i for next search
+                    i = numStart + replacement.length;
+                }
+                return res;
+            };
+            
+            latex = parseFractions(latex);
 
             return latex;
         };
