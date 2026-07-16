@@ -57,17 +57,34 @@ class TypstCompiler: ObservableObject {
         return count
     }
     
-    private let darkModePreamble = 
-"""
+    private let darkModePreamble = """
+// Base page and text colors
 #set page(fill: rgb("#1a1a1a"))
 #set text(fill: rgb("#d1d1d1"))
+
+// Links
+#show link: set text(fill: rgb("#58a6ff"))
+
+// Geometric shape strokes (Safe to set globally)
 #set line(stroke: rgb("#d1d1d1"))
 #set rect(stroke: rgb("#d1d1d1"))
+#set square(stroke: rgb("#d1d1d1"))
 #set circle(stroke: rgb("#d1d1d1"))
-#set table(stroke: rgb("#d1d1d1"))
+#set ellipse(stroke: rgb("#d1d1d1"))
+#set polygon(stroke: rgb("#d1d1d1"))
+
+// Inline raw text (code)
 #show raw: set text(fill: rgb("#d1d1d1"))
+
+// Code blocks (adds distinct background and subtle border)
+#show raw.where(block: true): set block(
+  fill: rgb("#2a2a2a"),
+  inset: 8pt,
+  radius: 4pt,
+  stroke: rgb("#444444")
+)
 """ + "\n"
-    
+
     private let notePreamble =
 """
 #let title(body) = align(center)[#text(size: 24pt, weight: "bold")[#body]]
@@ -228,6 +245,56 @@ class TypstCompiler: ObservableObject {
                 injectedPreamble += notePreamble
             }
             if isDarkMode {
+                // 1. Inject the color into partial strokes safely
+                let strokePattern = "((?:bottom|top|left|right)\\s*:\\s*[0-9.]+\\s*pt)(?!\\s*\\+)"
+                if let strokeRegex = try? NSRegularExpression(pattern: strokePattern, options: [.caseInsensitive]) {
+                    finalSource = strokeRegex.stringByReplacingMatches(
+                        in: finalSource,
+                        options: [],
+                        range: NSRange(0..<finalSource.utf16.count),
+                        withTemplate: "$1 + rgb(\"#d1d1d1\")"
+                    )
+                }
+                
+                // 2. Automatically invert luma() for dark mode (e.g., luma(220) -> luma(35))
+                let lumaPattern = "luma\\(\\s*([0-9.]+)\\s*(%?)\\s*\\)"
+                if let lumaRegex = try? NSRegularExpression(pattern: lumaPattern, options: [.caseInsensitive]) {
+                    let nsString = NSMutableString(string: finalSource)
+                    let matches = lumaRegex.matches(in: finalSource, options: [], range: NSRange(0..<finalSource.utf16.count))
+                    
+                    // Iterate in reverse so replacing text doesn't shift the ranges of earlier matches
+                    for match in matches.reversed() {
+                        let valString = nsString.substring(with: match.range(at: 1))
+                        let isPercent = match.range(at: 2).length > 0
+                        
+                        if let val = Double(valString) {
+                            // If it's a percentage use 100 - x, otherwise use 255 - x
+                            let invertedVal = isPercent ? max(0, 100.0 - val) : max(0, 255.0 - val)
+                            
+                            // Format cleanly without trailing decimals if it's a whole number
+                            let formattedVal = invertedVal.truncatingRemainder(dividingBy: 1) == 0 ?
+                                               String(format: "%.0f", invertedVal) :
+                                               String(format: "%.1f", invertedVal)
+                            
+                            let replacement = "luma(\(formattedVal)\(isPercent ? "%" : ""))"
+                            nsString.replaceCharacters(in: match.range, with: replacement)
+                        }
+                    }
+                    finalSource = nsString as String
+                }
+                // 3. Catch explicit black colors used in parameters and invert them
+                // Matches "fill: black" or "stroke: rgb(0,0,0)" but ignores the word "black" in regular text
+                let blackPattern = "(:\\s*\\b)(black|rgb\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)|rgb\\(\"#000000\"\\))(\\b|\\))"
+                if let blackRegex = try? NSRegularExpression(pattern: blackPattern, options: [.caseInsensitive]) {
+                    finalSource = blackRegex.stringByReplacingMatches(
+                        in: finalSource,
+                        options: [],
+                        range: NSRange(0..<finalSource.utf16.count),
+                        withTemplate: "$1rgb(\"#d1d1d1\")"
+                    )
+                }
+
+                // 4. Append the preamble
                 injectedPreamble += darkModePreamble
             }
             finalSource = injectedPreamble + finalSource
