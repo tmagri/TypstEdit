@@ -12,10 +12,18 @@ struct DocumentChunk: Codable {
     let embedding: [Float]
 }
 
-enum EmbeddingError: Error {
+enum EmbeddingError: LocalizedError {
     case modelUnavailable
     case generationFailed
     case apiError(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .modelUnavailable: return "Embedding model is unavailable. Check that the endpoint is running and the model is loaded."
+        case .generationFailed: return "Failed to generate embedding. The response format was unexpected."
+        case .apiError(let msg): return msg
+        }
+    }
 }
 
 // MARK: - Embedding Interface
@@ -116,21 +124,23 @@ class RAGManager: ObservableObject {
     private var activeProvider: EmbeddingProvider {
         let settings = AISettingsManager.shared
         
-        switch settings.provider {
+        let ctx = settings.modelContext(for: .embedding)
+
+        switch ctx.source {
         case .openAI:
             return GenericAPIEmbeddingProvider(
-                dimensions: settings.openAIEmbeddingModel.contains("large") ? 3072 : 1536,
-                endpointURL: URL(string: "https://api.openai.com/v1/embeddings")!,
-                apiKey: settings.openAIApiKey,
-                modelName: settings.openAIEmbeddingModel
+                dimensions: ctx.model.contains("large") ? 3072 : 1536,
+                endpointURL: URL(string: ctx.embeddingEndpoint)!,
+                apiKey: ctx.apiKey,
+                modelName: ctx.model
             )
             
-        case .custom:
+        case .local:
             return GenericAPIEmbeddingProvider(
-                dimensions: settings.customEmbeddingModel.contains("mxbai") ? 1024 : 768, 
-                endpointURL: URL(string: settings.customEmbeddingEndpoint)!,
-                apiKey: settings.customApiKey,
-                modelName: settings.customEmbeddingModel
+                dimensions: ctx.model.contains("mxbai") ? 1024 : 768,
+                endpointURL: URL(string: ctx.embeddingEndpoint)!,
+                apiKey: ctx.apiKey,
+                modelName: ctx.model
             )
             
         default:

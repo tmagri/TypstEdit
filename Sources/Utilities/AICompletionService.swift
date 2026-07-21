@@ -5,7 +5,7 @@ enum AIError: LocalizedError {
     case noData
     case parsingError(String)
     case apiError(String)
-    
+
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "Invalid URL configuration."
@@ -17,88 +17,85 @@ enum AIError: LocalizedError {
 }
 
 /// Distinguishes between chat-based requests (AI Prompt, Refine, test connection)
-/// and inline completion requests (autocomplete). When the purpose is `.completion`,
-/// the optional completion model is used if configured, otherwise the chat model is used.
+/// and inline completion requests (autocomplete). Maps to the corresponding
+/// ModelTask so each purpose can use its own model source and configuration.
 enum AIRequestPurpose {
     case chat
     case completion
+
+    var modelTask: ModelTask {
+        switch self {
+        case .chat: return .generation
+        case .completion: return .completion
+        }
+    }
 }
 
 @MainActor
 class AICompletionService: ObservableObject {
     static let shared = AICompletionService()
-    
+
     @Published var isFetching: Bool = false
-    
+
     private init() {}
-    
+
     private func stripThinkingTags(from text: String) -> String {
         var cleanText = text
         let patterns = [
             "<think>[\\s\\S]*?<\\/think>",
             "<thought>[\\s\\S]*?<\\/thought>"
         ]
-        
+
         for pattern in patterns {
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
                 let range = NSRange(cleanText.startIndex..<cleanText.endIndex, in: cleanText)
                 cleanText = regex.stringByReplacingMatches(in: cleanText, options: [], range: range, withTemplate: "")
             }
         }
-        
+
         return cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int = 128, purpose: AIRequestPurpose = .chat) async throws -> String {
         isFetching = true
         defer { isFetching = false }
-        
+
         let settings = AISettingsManager.shared
-        
-        // Only require API key for non-custom providers, or if custom provider is not localhost
-        if settings.provider != .custom && settings.apiKey.isEmpty {
-            throw AIError.apiError("API Key is missing for \(settings.provider.rawValue)")
+
+        // Resolve the full model context for this task (source, model, endpoint, key).
+        let ctx = settings.modelContext(for: purpose.modelTask)
+
+        // Only require API key for cloud providers
+        if !ctx.isLocal && ctx.apiKey.isEmpty {
+            throw AIError.apiError("API Key is missing for \(ctx.source.rawValue)")
         }
-        
-        // Resolve which model to use. Completion requests use the (optional) cheaper
-        // completion model when configured, falling back to the chat model.
-        let model: String
-        switch purpose {
-        case .chat:
-            model = settings.model
-        case .completion:
-            model = settings.effectiveCompletionModel
-        }
-        
-        let endpoint: String
-        let isGemini = settings.provider == .gemini
-        
-        switch settings.provider {
-        case .openAI: endpoint = "https://api.openai.com/v1/chat/completions"
-        case .openRouter: endpoint = "https://openrouter.ai/api/v1/chat/completions"
-        case .gemini: endpoint = "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(settings.apiKey)"
-        case .custom: endpoint = settings.customEndpoint
-        }
-        
+
+        let endpoint = ctx.chatEndpoint
+        let isGemini = ctx.isGemini
+
         guard let url = URL(string: endpoint) else {
             throw AIError.invalidURL
         }
-        
+
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = settings.timeoutSeconds
-        // Gemini API key is in URL query parameter, not header
-        if !isGemini {
-            request.addValue("Bearer \(settings.apiKey)", forHTTPHeaderField: "Authorization")
-        }
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        
+
+        // Provider-specific auth headers
+        if ctx.isAnthropic {
+            request.addValue(ctx.apiKey, forHTTPHeaderField: "x-api-key")
+            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else if !isGemini {
+            request.addValue("Bearer \(ctx.apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
         // OpenRouter specific headers
-        if settings.provider == .openRouter {
+        if ctx.source == .openRouter {
             request.addValue("TypstEdit", forHTTPHeaderField: "HTTP-Referer")
             request.addValue("TypstEdit", forHTTPHeaderField: "X-Title")
         }
-        
+
         // Gemini Body Format
         if isGemini {
             let body: [String: Any] = [
@@ -115,16 +112,28 @@ class AICompletionService: ObservableObject {
                 ]
             ]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        } 
+        }
+        // Anthropic Messages API Format
+        else if ctx.isAnthropic {
+            let body: [String: Any] = [
+                "model": ctx.model,
+                "max_tokens": maxTokens,
+                "system": systemPrompt,
+                "messages": [
+                    ["role": "user", "content": prompt]
+                ]
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
         // OpenAI / Standard Format
         else {
             let messages: [[String: String]] = [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": prompt]
             ]
-            
+
             let body: [String: Any] = [
-                "model": model,
+                "model": ctx.model,
                 "messages": messages,
                 "max_tokens": maxTokens,
                 "temperature": 0.2, // Deterministic
@@ -132,16 +141,16 @@ class AICompletionService: ObservableObject {
             ]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
-        
+
         let (data, response) = try await URLSession.shared.data(for: request)
-        
+
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AIError.noData
         }
-        
+
         guard httpResponse.statusCode == 200 else {
             var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
-            
+
             // Attempt to extract a clean error message from the standard AI API formats
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
@@ -150,16 +159,16 @@ class AICompletionService: ObservableObject {
                     parsedErrorMsg = msg
                 }
             }
-            
+
             throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
         }
-        
+
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AIError.parsingError("Invalid JSON structure returned by provider.")
         }
-        
+
         let rawResult: String
-        
+
         // Parse Gemini Response
         if isGemini {
             if let candidates = json["candidates"] as? [[String: Any]],
@@ -175,7 +184,19 @@ class AICompletionService: ObservableObject {
             } else {
                 throw AIError.parsingError("Gemini response missing text. Keys returned: \(json.keys.joined(separator: ", "))")
             }
-        } 
+        }
+        // Parse Anthropic Response
+        else if ctx.isAnthropic {
+            if let contentArray = json["content"] as? [[String: Any]],
+               let textBlock = contentArray.first(where: { ($0["type"] as? String) == "text" }),
+               let text = textBlock["text"] as? String {
+                rawResult = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                throw AIError.apiError("API Error: \(msg)")
+            } else {
+                throw AIError.parsingError("Anthropic response missing text. Keys returned: \(json.keys.joined(separator: ", "))")
+            }
+        }
         // Parse OpenAI / OpenRouter Response
         else {
             if let choices = json["choices"] as? [[String: Any]],
@@ -189,20 +210,20 @@ class AICompletionService: ObservableObject {
                 throw AIError.parsingError("OpenAI response missing text. Keys returned: \(json.keys.joined(separator: ", "))")
             }
         }
-        
+
         var finalResult = rawResult
-        
+
         // Strip out any <think> tags that models might output
         finalResult = stripThinkingTags(from: finalResult)
-        
+
         if settings.forceCodeOutput {
             let extracted = extractCode(from: finalResult)
             // Fallback to the raw text if the AI didn't format it as a code block
             finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalResult : extracted
         }
-        
+
         let sanitizedResult = sanitizeMarkdownToTypst(finalResult)
-        
+
         print("RAW AI RESULT: '\(rawResult)'")
         print("SANITIZED RESULT: '\(sanitizedResult)'")
 
@@ -210,26 +231,26 @@ class AICompletionService: ObservableObject {
         if sanitizedResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw AIError.apiError("The AI processed the request but returned an empty response. Try rephrasing your prompt.")
         }
-        
+
         return sanitizedResult
     }
-    
+
     private func extractCode(from text: String) -> String {
         // Look for content between ``` and ```
         let pattern = "```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
             return text
         }
-        
+
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
         if let match = regex.firstMatch(in: text, options: [], range: nsRange),
            let range = Range(match.range(at: 1), in: text) {
             return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        
+
         return text
     }
-    
+
     /// Verifies the connection to the AI provider by sending a minimal prompt.
     func testConnection() async throws -> String {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
@@ -237,7 +258,7 @@ class AICompletionService: ObservableObject {
 
     nonisolated func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
         let processed = NSMutableString(string: text.replacingOccurrences(of: "\r\n", with: "\n"))
-        
+
         // --- 1. MASK CODE BLOCKS ---
         // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
         var codeBlocks: [String] = []
@@ -251,7 +272,7 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: "MASKEDCODEBLOCK\(i)ENDMASK")
             }
         } catch { print("Code block mask regex failed: \(error)") }
-        
+
         // --- 2. MASK MATH BLOCKS ---
         // Protect real equations so we can safely escape currency dollars later
         var mathBlocks: [String] = []
@@ -266,7 +287,7 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: "MASKEDMATHBLOCK\(i)ENDMASK")
             }
         } catch { print("Math block mask regex failed: \(error)") }
-        
+
         // Helper to safely apply regex replacements so one failure doesn't crash the pipeline
         func applyRegex(_ pattern: String, template: String) {
             do {
@@ -274,7 +295,7 @@ class AICompletionService: ObservableObject {
                 regex.replaceMatches(in: processed, options: [], range: NSRange(location: 0, length: processed.length), withTemplate: template)
             } catch { print("Regex failed: \(pattern) - \(error)") }
         }
-        
+
         // 3. Autolinks (Process before HTML tags to prevent crossfire).
         // Angle-bracket autolinks to known video hosts become clickable thumbnail embeds.
         if let autoRegex = try? NSRegularExpression(pattern: "<(https?://[^>\\s]+)>", options: []) {
@@ -293,7 +314,7 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: replacement)
             }
         }
-        
+
         // 3.5 Common HTML tags to Typst
         applyRegex("(?is)\\s*<p\\s+align=[\"']([^\"']+)[\"']>\\s*(.*?)\\s*</p>\\s*", template: "\n#align($1)[\n$2\n]\n")
         applyRegex("(?is)\\s*<p>\\s*(.*?)\\s*</p>\\s*", template: "\n$1\n")
@@ -308,7 +329,7 @@ class AICompletionService: ObservableObject {
         applyRegex("(?is)<u>(.*?)</u>", template: "#underline[$1]")
         applyRegex("(?is)<mark>(.*?)</mark>", template: "#highlight[$1]")
         applyRegex("(?i)<br\\s*/?>", template: "\\\\")
-        
+
         // 3.6 HTML Links and Images
         applyRegex("(?is)<a\\s+(?:[^>]*?\\s+)?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", template: "#link(\"$1\")[$2]")
         if let htmlImgRegex = try? NSRegularExpression(pattern: "(?i)<img\\s+([^>]+)>", options: []) {
@@ -319,7 +340,7 @@ class AICompletionService: ObservableObject {
                 var alt = ""
                 var width = ""
                 var height = ""
-                
+
                 if let srcMatch = try? NSRegularExpression(pattern: "(?i)src=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
                     src = (attributes as NSString).substring(with: srcMatch.range(at: 1))
                 }
@@ -332,12 +353,12 @@ class AICompletionService: ObservableObject {
                 if let heightMatch = try? NSRegularExpression(pattern: "(?i)height=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
                     height = (attributes as NSString).substring(with: heightMatch.range(at: 1))
                 }
-                
+
                 if !src.isEmpty {
                     let formattedSrc = src.lowercased().hasPrefix("http") || src.hasPrefix("/") || src.hasPrefix("data:") ? src : "/\(src)"
                     var params: [String] = ["\"\(formattedSrc)\""]
                     if !alt.isEmpty { params.append("alt: \"\(alt)\"") }
-                    
+
                     // HTML width and height are typically in pixels. In Typst, we can append 'pt' if they are pure numbers.
                     if !width.isEmpty {
                         if width.allSatisfy({ $0.isNumber }) {
@@ -353,11 +374,11 @@ class AICompletionService: ObservableObject {
                             params.append("height: \(height)")
                         }
                     }
-                    
+
                     let ext = (src as NSString).pathExtension.lowercased()
                     let isWeb = src.lowercased().hasPrefix("http")
                     let supportedExts = ["png", "jpg", "jpeg", "gif", "svg"]
-                    
+
                     let replacement: String
                     if !isWeb && !ext.isEmpty && !supportedExts.contains(ext) {
                         // Fallback to a link if format is entirely unsupported by Typst (like .icns)
@@ -375,11 +396,11 @@ class AICompletionService: ObservableObject {
         // Swallow optional preceding backslash to prevent double-escaping into an unclosed label
         // We use a negative lookahead `(?!(?:[a-z0-9_-]+)>)` to ensure we do NOT escape valid Typst labels `<label>`.
         applyRegex("(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
-        
+
         // 5. Markdown Footnotes -> Typst #footnote[]
         var footnotes: [String: String] = [:]
         // Extract reference footnote definitions: [^id]: text
-        // This regex matches `[^id]:` at the start of a line, then lazily captures text until it sees 
+        // This regex matches `[^id]:` at the start of a line, then lazily captures text until it sees
         // either the next `\n[^something]:` or the end of the string.
         if let fnDefRegex = try? NSRegularExpression(pattern: "(?m)^\\[\\^([^\\]]+)\\]:[ \\t]*(.*?)(?=\\n\\[\\^|\n\\z|\\z)", options: [.dotMatchesLineSeparators]) {
             let matches = fnDefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
@@ -390,7 +411,7 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: "")
             }
         }
-        
+
         // Replace footnote references: [^id]
         if let fnRefRegex = try? NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]", options: []) {
             let matches = fnRefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
@@ -404,10 +425,10 @@ class AICompletionService: ObservableObject {
                 }
             }
         }
-        
+
         // Inline footnotes: ^[text]
         applyRegex("(?<!!)\\^\\[([^\\]]+)\\]", template: "#footnote[$1]")
-        
+
         // 6. Headings (H1 - H6) -> Typst (=)
         if let headingRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)(#+)[ \\t]+", options: []) {
             let headingMatches = headingRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
@@ -418,7 +439,7 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: "\(prefix)\(equals) ")
             }
         }
-        
+
         // 6.5 Translate literal documentation space characters (⋅ or ·) to actual spaces
         if let dotRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+", options: []) {
             while let match = dotRegex.firstMatch(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length)) {
@@ -427,14 +448,14 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: replaced)
             }
         }
-        
+
         // 7. Task Lists -> Typst native Checkboxes
         applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[[xX]\\][ \\t]+", template: "$1- ☑ ")
         applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[ \\][ \\t]+", template: "$1- ☐ ")
-        
+
         // 8. Unordered Lists -> Typst (-)
         applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[*+][ \\t]+", template: "$1- ")
-        
+
         // 9. Ordered Lists `1. ` -> Typst auto-numbering (`+ `)
         applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)\\d+\\.[ \\t]+", template: "$1+ ")
 
@@ -449,11 +470,11 @@ class AICompletionService: ObservableObject {
         // 10.4 Bold-Italic (Markdown *** or ___) -> Typst _*
         applyRegex("\\*\\*\\*(.+?)\\*\\*\\*", template: "_*$1*_")
         applyRegex("___(.+?)___", template: "_*$1*_")
-        
+
         // 10.5 Fix asymmetrical bold markers
         applyRegex("(?<!\\*)\\*\\*\\*([^*\\n]+)\\*\\*(?!\\*)", template: "**$1**")
         applyRegex("(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)", template: "**$1**")
-        
+
         // 10.6 Escape underscores in technical terms/filenames
         // In Hybrid mode (.note), Typst handles my_variable perfectly natively, and `_underscores_` is native italic.
         // If we escape underscores, we break valid Typst syntax.
@@ -461,11 +482,11 @@ class AICompletionService: ObservableObject {
             applyRegex("(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])", template: "\\\\_")
             applyRegex("_(?=\\\\?\\*(?!\\*))", template: "\\\\_")
         }
-        
+
         // 11. Bold (Markdown ** or __) -> Typst *
         applyRegex("\\*\\*(.+?)\\*\\*", template: "*$1*")
         applyRegex("__(.+?)__", template: "*$1*")
-        
+
         // 12. Reference-Style Links & Images (Pass 1: Extract Definitions)
         var referenceLinks: [String: String] = [:]
         if let refDefRegex = try? NSRegularExpression(pattern: "(?m)^[ \\t]*\\[([^\\]]+)\\]:[ \\t]+([^ \\t\\n]+)(?:[ \\t]+[\"'(].*?[\"')])?[ \\t]*$", options: []) {
@@ -477,7 +498,7 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: "")
             }
         }
-        
+
         // 12.5 Reference-Style Images (Pass 2)
         if let refImgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\[([^\\]]*)\\]", options: []) {
             let matches = refImgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
@@ -485,7 +506,7 @@ class AICompletionService: ObservableObject {
                 let alt = processed.substring(with: match.range(at: 1))
                 var id = processed.substring(with: match.range(at: 2)).lowercased()
                 if id.isEmpty { id = alt.lowercased() }
-                
+
                 if let url = referenceLinks[id] {
                     let formattedUrl = url.lowercased().hasPrefix("http") || url.hasPrefix("/") || url.hasPrefix("data:") ? url : "/\(url)"
                     let replacement = "#image(\"\(formattedUrl)\", alt: \"\(alt)\")"
@@ -493,7 +514,7 @@ class AICompletionService: ObservableObject {
                 }
             }
         }
-        
+
         // 12.6 Reference-Style Links (Pass 2)
         if let refLinkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\[([^\\]]*)\\]", options: []) {
             let matches = refLinkRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
@@ -501,7 +522,7 @@ class AICompletionService: ObservableObject {
                 let text = processed.substring(with: match.range(at: 1))
                 var id = processed.substring(with: match.range(at: 2)).lowercased()
                 if id.isEmpty { id = text.lowercased() }
-                
+
                 if let url = referenceLinks[id] {
                     processed.replaceCharacters(in: match.range, with: "#link(\"\(url)\")[\(text)]")
                 }
@@ -514,13 +535,13 @@ class AICompletionService: ObservableObject {
             for match in matches.reversed() {
                 let altText = processed.substring(with: match.range(at: 1))
                 let urlText = processed.substring(with: match.range(at: 2))
-                
+
                 let formattedUrl = urlText.lowercased().hasPrefix("http") || urlText.hasPrefix("/") || urlText.hasPrefix("data:") ? urlText : "/\(urlText)"
                 let replacement = "#image(\"\(formattedUrl)\", alt: \"\(altText)\")"
                 processed.replaceCharacters(in: match.range, with: replacement)
             }
         }
-        
+
         // 13.1 Inline Links (with special handling for video URLs)
         // For links pointing to known video hosts (YouTube, Vimeo, etc.), auto-embed the
         // thumbnail image as a clickable link to the video, so a single Markdown link like
@@ -569,22 +590,22 @@ class AICompletionService: ObservableObject {
         // syntax (`#link(...)`, `*bold*`, etc.) by the time they're wrapped in `[...]`.
         // This prevents the inline regexes from matching the cell delimiters themselves.
         processed.setString(convertMarkdownTablesToTypst(processed as String))
-        
+
         // 13.5 Escape Markdown abbreviation definitions
         applyRegex("(?m)^\\*\\[([^\\]]+)\\]:", template: "\\\\*[$1]:")
-        
+
         // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
         applyRegex("(?m)^[-*_]{3,}[ \\t]*$", template: "#line(length: 100%)")
-        
+
         // 14b. Common HTML Entities
         applyRegex("(?i)&rarr;", template: "->")
         applyRegex("(?i)&larr;", template: "<-")
-        
+
         // 14e. Escape Stray Backticks (Always)
         // A stray backtick ALWAYS crashes Typst as an unclosed raw block.
         // Valid code blocks are already masked, so any remaining backticks are stray.
         applyRegex("(?<!\\\\)`", template: "\\\\`")
-        
+
         // In pure Markdown mode (e.g. AI completions or .md files), we escape Typst's special characters
         // so they render as literal text. In hybrid mode (.note), we apply smart escaping to prevent
         // common Markdown patterns (like $1600 or user@email.com) from crashing the compiler, while
@@ -592,10 +613,10 @@ class AICompletionService: ObservableObject {
         if !isHybrid {
             // 14. Escape Literal Dollars (Currency)
             applyRegex("(?<!\\\\)\\$", template: "\\\\$")
-            
+
             // 14c. Escape Literal Hash
             applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[)", template: "\\\\#")
-            
+
             // 14g. Escape Literal At-Signs (@)
             applyRegex("(?<!\\\\)@", template: "\\\\@")
         } else {
@@ -603,7 +624,7 @@ class AICompletionService: ObservableObject {
             // Escape dollars if followed by a digit (e.g. $1600) to prevent unclosed math block errors,
             // but leave other dollars alone so Typst math ($E=mc^2$) still works.
             applyRegex("(?<!\\\\)\\$(?=\\d)", template: "\\\\$")
-            
+
             // Escape @ if it's preceded by a letter/number (e.g. email addresses like user@email.com)
             // or followed by a space. Typst references (like @fig1) usually have a space before them and letters after.
             // The `(?<!\\)` guards keep this idempotent with `TypstCompiler.delimitImproperOperators`,
@@ -632,9 +653,9 @@ class AICompletionService: ObservableObject {
                 processed.replaceCharacters(in: match.range, with: unescaped)
             }
         }
-        
+
         var resultString = processed as String
-        
+
         // 16. UNMASK AND CONVERT MATH BLOCKS
         for (i, block) in mathBlocks.enumerated() {
             var latexMath = ""
@@ -652,12 +673,12 @@ class AICompletionService: ObservableObject {
             let typstMath = LyxToTypstConverter.convertLatexMathToTypst(latexMath)
             resultString = resultString.replacingOccurrences(of: "MASKEDMATHBLOCK\(i)ENDMASK", with: "$ \(typstMath) $")
         }
-        
+
         // 17. UNMASK CODE BLOCKS
         for (i, block) in codeBlocks.enumerated() {
             resultString = resultString.replacingOccurrences(of: "MASKEDCODEBLOCK\(i)ENDMASK", with: block)
         }
-        
+
         return resultString
     }
     nonisolated private func convertMarkdownTablesToTypst(_ text: String) -> String {
@@ -665,23 +686,23 @@ class AICompletionService: ObservableObject {
         // Supports tables both with and without outer pipes.
         let pattern = "(?m)^[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(?:\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*\\n(?:[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n?)*"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
-        
+
         let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
         let processed = NSMutableString(string: text)
-        
+
         for match in matches.reversed() {
             let tableText = processed.substring(with: match.range)
             let typstTable = parseSingleMarkdownTable(tableText)
             processed.replaceCharacters(in: match.range, with: typstTable + "\n")
         }
-        
+
         return processed as String
     }
-    
+
     nonisolated private func parseSingleMarkdownTable(_ markdown: String) -> String {
         let rawLines = markdown.components(separatedBy: .newlines)
         var lines: [String] = []
-        
+
         // Safely re-join hard-wrapped lines that belong to the same row.
         // A line is treated as the START of a new row when it contains a `|` (the universal
         // Markdown table delimiter). Lines without a pipe are continuations of the previous
@@ -690,7 +711,7 @@ class AICompletionService: ObservableObject {
         for line in rawLines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
-            
+
             if trimmed.contains("|") {
                 lines.append(trimmed)
             } else if !lines.isEmpty {
@@ -699,18 +720,18 @@ class AICompletionService: ObservableObject {
                 lines.append(trimmed)
             }
         }
-        
+
         guard lines.count >= 2 else { return markdown }
-        
+
         func extractCells(from row: String) -> [String] {
             var rowText = row.trimmingCharacters(in: .whitespaces)
             if rowText.hasPrefix("|") { rowText.removeFirst() }
             if rowText.hasSuffix("|") { rowText.removeLast() }
-            
+
             var cells: [String] = []
             var currentCell = ""
             var isEscaped = false
-            
+
             for char in rowText {
                 if isEscaped {
                     if char == "|" {
@@ -733,10 +754,10 @@ class AICompletionService: ObservableObject {
                     currentCell.append(char)
                 }
             }
-            
+
             if isEscaped { currentCell.append("\\") }
             cells.append(currentCell.trimmingCharacters(in: .whitespaces))
-            
+
             return cells
         }
 
@@ -764,7 +785,7 @@ class AICompletionService: ObservableObject {
             return stripped.isEmpty && cell.contains("-")
         }
         guard separatorIsValid else { return markdown }
-        
+
         let columnsCount = headerCells.count
 
         // Compute per-column alignments, if any non-default markers were specified.
@@ -787,19 +808,19 @@ class AICompletionService: ObservableObject {
             typst += "    [\(escapeTableCell(cell))],\n"
         }
         typst += "  ),\n"
-        
+
         // Body rows
         for i in 2..<lines.count {
             var cells = extractCells(from: lines[i])
-            
+
             while cells.count < columnsCount { cells.append("") }
             cells = Array(cells.prefix(columnsCount))
-            
+
             for cell in cells {
                 typst += "  [\(escapeTableCell(cell))],\n"
             }
         }
-        
+
         typst += ")"
         return typst
     }

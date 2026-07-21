@@ -3295,7 +3295,8 @@ class EditorController: NSObject, ObservableObject {
     /// result is shown in a preview sheet where the user can accept or reject it.
     func refineSelection(_ action: AIRefineAction) {
         let settings = AISettingsManager.shared
-        if settings.provider != .custom && settings.apiKey.isEmpty {
+        let ctx = settings.modelContext(for: .generation)
+        if !ctx.isLocal && ctx.apiKey.isEmpty {
             showStatus("Configure AI in Settings to use this feature")
             return
         }

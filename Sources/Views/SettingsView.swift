@@ -109,200 +109,294 @@ struct GeneralSettingsView: View {
 }
 struct AISettingsView: View {
     @StateObject private var settings = AISettingsManager.shared
-    
+
+    private func sourceBinding(for task: ModelTask) -> Binding<ModelSource> {
+        Binding(
+            get: { settings.source(for: task) },
+            set: { settings.setSource($0, for: task) }
+        )
+    }
+
     var body: some View {
         ScrollView {
             Form {
                 Section {
-                Toggle("Enable Manual Intellisense", isOn: $settings.intellisenseEnabled)
-                    .font(.body.weight(.regular))
-                Toggle("Enable AI Completion", isOn: $settings.isEnabled)
-                    .font(.body.weight(.regular))
-            }
-            
-            if settings.isEnabled {
-                
-                // Chat Provider Setup
-                Section(header: Text("AI Provider (Chat)").fontWeight(.semibold)) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Picker(selection: $settings.provider) {
-                            ForEach(AIProvider.allCases) { provider in
-                                Text(provider.rawValue).tag(provider)
-                            }
-                        } label: {
-                            Text("Provider").fontWeight(.semibold)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                    }
-                    .padding(.vertical, 5)
-                    
-                    if settings.provider == .openAI {
-                        SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
-                            .textContentType(.password)
-                        TextField(text: $settings.model) { Text("Chat Model (e.g. gpt-4o)").fontWeight(.semibold) }
-                    } else if settings.provider == .openRouter {
-                        SecureField(text: $settings.openRouterApiKey) { Text("OpenRouter API Key").fontWeight(.semibold) }
-                            .textContentType(.password)
-                        TextField(text: $settings.model) { Text("Chat Model (e.g. anthropic/claude-3-5-sonnet)").fontWeight(.semibold) }
-                    } else if settings.provider == .gemini {
-                        SecureField(text: $settings.geminiApiKey) { Text("Gemini API Key").fontWeight(.semibold) }
-                            .textContentType(.password)
-                        TextField(text: $settings.model) { Text("Chat Model (e.g. gemini-1.5-flash)").fontWeight(.semibold) }
-                    } else {
-                        TextField(text: $settings.customEndpoint) { Text("Chat Endpoint URL").fontWeight(.semibold) }
-                        SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
-                            .textContentType(.password)
-                        TextField(text: $settings.model) { Text("Chat Model (e.g. llama3)").fontWeight(.semibold) }
-                    }
-                    
-                    Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
+                    Toggle("Enable Manual Intellisense", isOn: $settings.intellisenseEnabled)
                         .font(.body.weight(.regular))
-                        .padding(.top, 5)
-                    Text("Extracts content from markdown code blocks in the AI response.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                // MARK: - Optional Completion Model
-                Section(header: Text("Completion Model (Optional)").fontWeight(.semibold)) {
-                    TextField(text: $settings.completionModel) { Text("Completion Model (e.g. gpt-4o-mini)").fontWeight(.semibold) }
-                    Text("Uses a separate, cheaper/faster model for inline autocomplete. Leave blank to use the chat model for everything.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    if !settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("Autocomplete uses: \(settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines))")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    } else {
-                        HStack(spacing: 4) {
-                            Image(systemName: "info.circle")
-                                .foregroundColor(.secondary)
-                            Text("Autocomplete will use the chat model: \(settings.model)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                
-                // MARK: - RAG & Embeddings Setup
-                Section(header: Text("Project Context (RAG & Embeddings)").fontWeight(.semibold)) {
-                    Toggle("Include Semantic Project Search (RAG)", isOn: $settings.includeProjectContext)
+                    Toggle("Enable AI Completion", isOn: $settings.isEnabled)
                         .font(.body.weight(.regular))
-                    
-                    if settings.includeProjectContext {
-                        Text("Searches your project files to provide highly relevant context.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            
-                        Toggle("Cache Embeddings to Disk", isOn: $settings.cacheEmbeddingsToDisk)
-                            .font(.body.weight(.regular))
-                        Text("If disabled, saves disk space but increases API costs and indexing time by regenerating embeddings on every launch.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        Divider()
-                        
-                        if settings.provider == .custom {
-                            TextField(text: $settings.customEmbeddingEndpoint) { Text("Embedding URL").fontWeight(.semibold) }
-                            TextField(text: $settings.customEmbeddingModel) { Text("Embedding Model (e.g. nomic-embed-text)").fontWeight(.semibold) }
-                                .onChange(of: settings.customEmbeddingModel) { _ in
-                                    // TODO: Trigger RAGManager to wipe the vector cache here
-                                }
-                        } else if settings.provider == .openAI {
-                            TextField(text: $settings.openAIEmbeddingModel) { Text("Embedding Model").fontWeight(.semibold) }
-                                .onChange(of: settings.openAIEmbeddingModel) { _ in
-                                    // TODO: Trigger RAGManager to wipe the vector cache here
-                                }
-                        } else {
-                            Text("Using Apple Native Embeddings (Fast, Free & On-Device)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                // --- Request Configuration Section ---
-                Section(header: Text("Request Configuration").fontWeight(.semibold)) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Timeout:")
-                                .fontWeight(.regular)
-                            Slider(value: $settings.timeoutSeconds, in: 5...1200, step: 5)
-                            Text("\(Int(settings.timeoutSeconds))s")
-                                .monospacedDigit()
-                                .frame(width: 35, alignment: .trailing)
-                        }
-                        Text("Maximum time to wait for a response from the AI provider.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Divider()
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Max Tokens:")
-                                .fontWeight(.regular)
-                            TextField("2048", value: $settings.maxTokens, formatter: NumberFormatter())
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 80)
-                        }
-                        Text("The maximum number of tokens to generate in the response.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
                 }
 
-                // MARK: - Test Connection
-                Section {
-                    Button(action: {
-                        testConnection()
-                    }) {
-                        if isTesting {
-                            ProgressView()
-                                .controlSize(.small)
-                                .padding(.trailing, 5)
+                if settings.isEnabled {
+
+                    // MARK: - Generation / Chat
+                    Section(header: Text("AI Generation / Chat").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
+                        Picker(selection: sourceBinding(for: .generation)) {
+                            ForEach(ModelSource.allCases) { source in
+                                Text(source.rawValue).tag(source)
+                            }
+                        } label: {
+                            Text("Source").fontWeight(.semibold)
                         }
-                        Text(isTesting ? "Testing..." : "Test Connection")
-                    }
-                    .disabled(isTesting)
-                    
-                    if let result = testResult {
-                        Text(result)
+                        .pickerStyle(.menu)
+
+                        generationSourceFields
+
+                        Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
+                            .font(.body.weight(.regular))
+                            .padding(.top, 5)
+                        Text("Extracts content from markdown code blocks in the AI response.")
                             .font(.caption)
-                            .foregroundColor(testSuccess ? .green : .red)
+                            .foregroundColor(.secondary)
+
+                        testButton(for: .generation)
+                    }
+
+                    Divider().padding(.vertical, 4)
+
+                    // MARK: - Completion / Autocomplete
+                    Section(header: Text("Autocomplete").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
+                        Picker(selection: sourceBinding(for: .completion)) {
+                            ForEach(ModelSource.allCases) { source in
+                                Text(source.rawValue).tag(source)
+                            }
+                        } label: {
+                            Text("Source").fontWeight(.semibold)
+                        }
+                        .pickerStyle(.menu)
+
+                        completionSourceFields
+
+                        Text("Uses a separate, cheaper/faster model for inline autocomplete. Leave the model blank to fall back to the generation model.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        testButton(for: .completion)
+                    }
+
+                    Divider().padding(.vertical, 4)
+
+                    // MARK: - Embeddings (RAG)
+                    Section(header: Text("Embeddings (RAG)").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
+                        Toggle("Include Semantic Project Search (RAG)", isOn: $settings.includeProjectContext)
+                            .font(.body.weight(.regular))
+
+                        if settings.includeProjectContext {
+                            Picker(selection: sourceBinding(for: .embedding)) {
+                                ForEach(ModelSource.allCases) { source in
+                                    Text(source.rawValue).tag(source)
+                                }
+                            } label: {
+                                Text("Source").fontWeight(.semibold)
+                            }
+                            .pickerStyle(.menu)
+
+                            embeddingSourceFields
+
+                            Toggle("Cache Embeddings to Disk", isOn: $settings.cacheEmbeddingsToDisk)
+                                .font(.body.weight(.regular))
+                            Text("If disabled, saves disk space but increases API costs and indexing time by regenerating embeddings on every launch.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            testButton(for: .embedding)
+                        }
+                    }
+
+                    Divider().padding(.vertical, 4)
+
+                    // MARK: - Request Configuration
+                    Section(header: Text("Request Configuration").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Timeout:")
+                                    .fontWeight(.regular)
+                                Slider(value: $settings.timeoutSeconds, in: 5...1200, step: 5)
+                                Text("\(Int(settings.timeoutSeconds))s")
+                                    .monospacedDigit()
+                                    .frame(width: 35, alignment: .trailing)
+                            }
+                            Text("Maximum time to wait for a response from the AI provider.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Max Tokens:")
+                                    .fontWeight(.regular)
+                                TextField("2048", value: $settings.maxTokens, formatter: NumberFormatter())
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 80)
+                            }
+                            Text("The maximum number of tokens to generate in the response.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }
-        }
-        .padding()
+            .padding()
         }
     }
-    
-    @State private var isTesting = false
-    @State private var testResult: String?
-    @State private var testSuccess = false
-    
-    private func testConnection() {
-        isTesting = true
-        testResult = "Connecting..."
-        testSuccess = false
-        
+
+    // MARK: - Per-Source Field Builders
+
+    @ViewBuilder
+    private var generationSourceFields: some View {
+        switch settings.source(for: .generation) {
+        case .openAI:
+            SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.generationModel) { Text("Model (e.g. gpt-4o)").fontWeight(.semibold) }
+        case .openRouter:
+            SecureField(text: $settings.openRouterApiKey) { Text("OpenRouter API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.generationModel) { Text("Model (e.g. anthropic/claude-3-5-sonnet)").fontWeight(.semibold) }
+        case .anthropic:
+            SecureField(text: $settings.anthropicApiKey) { Text("Anthropic API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.generationModel) { Text("Model (e.g. claude-sonnet-4-20250514)").fontWeight(.semibold) }
+        case .gemini:
+            SecureField(text: $settings.geminiApiKey) { Text("Gemini API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.generationModel) { Text("Model (e.g. gemini-1.5-flash)").fontWeight(.semibold) }
+        case .local:
+            TextField(text: $settings.generationEndpoint) { Text("Endpoint URL").fontWeight(.semibold) }
+            SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.generationModel) { Text("Model (e.g. llama3)").fontWeight(.semibold) }
+        }
+    }
+
+    @ViewBuilder
+    private var completionSourceFields: some View {
+        let src = settings.source(for: .completion)
+        switch src {
+        case .openAI:
+            SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.completionModel) { Text("Model (e.g. gpt-4o-mini)").fontWeight(.semibold) }
+        case .openRouter:
+            SecureField(text: $settings.openRouterApiKey) { Text("OpenRouter API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.completionModel) { Text("Model (e.g. anthropic/claude-3-5-haiku)").fontWeight(.semibold) }
+        case .anthropic:
+            SecureField(text: $settings.anthropicApiKey) { Text("Anthropic API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.completionModel) { Text("Model (e.g. claude-3-5-haiku-20241022)").fontWeight(.semibold) }
+        case .gemini:
+            SecureField(text: $settings.geminiApiKey) { Text("Gemini API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.completionModel) { Text("Model (e.g. gemini-1.5-flash)").fontWeight(.semibold) }
+        case .local:
+            TextField(text: $settings.completionEndpoint) { Text("Endpoint URL").fontWeight(.semibold) }
+            SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.completionModel) { Text("Model (e.g. qwen2.5-coder:1.5b)").fontWeight(.semibold) }
+        }
+
+        if settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            HStack(spacing: 4) {
+                Image(systemName: "info.circle")
+                    .foregroundColor(.secondary)
+                Text("Falling back to generation model: \(settings.generationModel)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        } else {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                Text("Using: \(settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines)) via \(src.rawValue)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var embeddingSourceFields: some View {
+        switch settings.source(for: .embedding) {
+        case .openAI:
+            SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.openAIEmbeddingModel) { Text("Embedding Model (e.g. text-embedding-3-small)").fontWeight(.semibold) }
+                .onChange(of: settings.openAIEmbeddingModel) { _ in
+                    // TODO: Trigger RAGManager to wipe the vector cache here
+                }
+        case .local:
+            TextField(text: $settings.embeddingEndpoint) { Text("Embedding URL").fontWeight(.semibold) }
+            SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
+                .textContentType(.password)
+            TextField(text: $settings.embeddingModel) { Text("Embedding Model (e.g. nomic-embed-text)").fontWeight(.semibold) }
+                .onChange(of: settings.embeddingModel) { _ in
+                    // TODO: Trigger RAGManager to wipe the vector cache here
+                }
+        default:
+            Text("Using Apple Native Embeddings (Fast, Free & On-Device)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    @State private var testingTask: ModelTask?
+    @State private var testResults: [ModelTask: (success: Bool, message: String)] = [:]
+
+    private func testConnection(for task: ModelTask) {
+        testingTask = task
+        testResults[task] = nil
+
         Task {
             do {
-                let response = try await AICompletionService.shared.testConnection()
-                testResult = "Success: Received response '\(response)'"
-                testSuccess = true
+                if task == .embedding {
+                    let ctx = settings.modelContext(for: .embedding)
+                    if ctx.isLocal || ctx.source == .openAI {
+                        let provider = GenericAPIEmbeddingProvider(
+                            dimensions: 768,
+                            endpointURL: URL(string: ctx.embeddingEndpoint)!,
+                            apiKey: ctx.apiKey,
+                            modelName: ctx.model
+                        )
+                        _ = try await provider.getEmbedding(for: "test")
+                    }
+                    testResults[task] = (true, "Success: Embedding endpoint reachable")
+                } else {
+                    let purpose: AIRequestPurpose = (task == .completion) ? .completion : .chat
+                    let response = try await AICompletionService.shared.fetchCompletion(
+                        prompt: "Hello. Respond with exactly the word 'OK'.",
+                        purpose: purpose
+                    )
+                    testResults[task] = (true, "Success: '\(response)'")
+                }
             } catch {
-                testResult = "Error: \(error.localizedDescription)"
-                testSuccess = false
+                testResults[task] = (false, error.localizedDescription)
             }
-            isTesting = false
+            testingTask = nil
+        }
+    }
+
+    @ViewBuilder
+    private func testButton(for task: ModelTask) -> some View {
+        HStack(spacing: 8) {
+            Button(action: { testConnection(for: task) }) {
+                if testingTask == task {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Text("Test Connection")
+                }
+            }
+            .disabled(testingTask != nil)
+
+            if let result = testResults[task] {
+                Text(result.message)
+                    .font(.caption)
+                    .foregroundColor(result.success ? .green : .red)
+                    .lineLimit(1)
+            }
         }
     }
 }
