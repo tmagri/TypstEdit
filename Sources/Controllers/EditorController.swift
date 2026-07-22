@@ -350,13 +350,24 @@ class EditorController: NSObject, ObservableObject {
             tvc.textView.needsDisplay = true
         }
         
-        updateTextViewWrapping()
+        updateTextViewWrapping(force: true)
     }
-    
-    func updateTextViewWrapping() {
+
+    func updateTextViewWrapping(force: Bool = false) {
         guard let tvc = textViewController,
               let textView = tvc.textView,
               let scrollView = tvc.scrollView else { return }
+
+        // Called on every keystroke/selection change. Once wrapping is configured
+        // for this text view there is nothing to re-apply, so skip the work. We only
+        // short-circuit in wrap-ON mode (the default): wrap-OFF forces a layout pass
+        // to size the canvas for horizontal scrolling, so that path is left intact.
+        let textViewID = ObjectIdentifier(textView)
+        if !force, wrapLines, lastAppliedWrapLines == wrapLines, lastWrappedTextViewID == textViewID {
+            return
+        }
+        lastAppliedWrapLines = wrapLines
+        lastWrappedTextViewID = textViewID
         
         textView.translatesAutoresizingMaskIntoConstraints = true
         textView.wrapLines = wrapLines
@@ -472,6 +483,10 @@ class EditorController: NSObject, ObservableObject {
             setupDefaultConfiguration()
         }
     }
+    // Tracks the last wrapping configuration applied to a given text view so
+    // `updateTextViewWrapping` can skip redundant per-keystroke work.
+    private var lastAppliedWrapLines: Bool?
+    private var lastWrappedTextViewID: ObjectIdentifier?
     @Published var isBulletListActive: Bool = false
     @Published var isNumberListActive: Bool = false
     @Published var isDescriptionListActive: Bool = false
@@ -2110,51 +2125,73 @@ class EditorController: NSObject, ObservableObject {
         }
     }
     
+    /// Assigns a `@Published` property only when its value actually changes, so we
+    /// don't fire `objectWillChange` (which invalidates every observing SwiftUI
+    /// view, e.g. the large ContentView) when the formatting state is unchanged.
+    private func publishIfChanged<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<EditorController, T>, _ newValue: T) {
+        if self[keyPath: keyPath] != newValue {
+            self[keyPath: keyPath] = newValue
+        }
+    }
+
     func updateFormattingState() {
         let range = selectedRange
         let text = sourceCode
-        
-        // Use async to avoid "Publishing changes from within view updates is not allowed"
+        let isMarkdown = self.isMarkdownFile
+
+        // Defer publishing off the current view-update cycle ("Publishing changes
+        // from within view updates is not allowed"). Each property is only written
+        // when it actually changed (publishIfChanged) to avoid needless SwiftUI
+        // invalidation on every cursor move.
         DispatchQueue.main.async {
-            // Debug Log
-            print("[EditorController] updateFormattingState at \(range), textLen: \(text.count)")
-            
-            self.isBoldActive = FormatDetector.findBoldRange(in: text, at: range.location, isMarkdown: self.isMarkdownFile) != nil
-            self.isItalicActive = FormatDetector.findItalicRange(in: text, at: range.location, isMarkdown: self.isMarkdownFile) != nil
-            self.isUnderlineActive = FormatDetector.findUnderlineRange(in: text, at: range.location) != nil
-            self.isHighlightActive = FormatDetector.findHighlightRange(in: text, at: range.location) != nil
-            self.isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
-            self.isStrikeActive = FormatDetector.findStrikeRange(in: text, at: range.location) != nil
-            self.isTextColorActive = FormatDetector.findTextColorRange(in: text, at: range.location) != nil 
-            self.isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
-            self.isCodeActive = FormatDetector.findCodeRange(in: text, at: range.location) != nil
-            self.isLinkActive = FormatDetector.findLinkRange(in: text, at: range.location) != nil
-            self.isQuoteActive = FormatDetector.findQuoteRange(in: text, at: range.location) != nil
-            self.isCodeBlockActive = FormatDetector.findCodeBlockRange(in: text, at: range.location) != nil
-            self.isSubscriptActive = FormatDetector.findSubscriptRange(in: text, at: range.location) != nil
-            self.isSuperscriptActive = FormatDetector.findSuperscriptRange(in: text, at: range.location) != nil
-            
-            self.isTitleActive = FormatDetector.detectIsTitle(in: text, at: range.location)
-            self.currentHeadingLevel = FormatDetector.detectHeadingLevel(in: text, at: range.location)
-            
-            self.isEquationActive = EquationDetector.findEquationRange(in: text, at: range.location) != nil
-            self.isTableActive = TableDetector.findTableRange(in: text, at: range.location) != nil
-            self.isImageActive = ImageDetector.findImageRange(in: text, at: range.location) != nil
-            self.isBibliographyActive = BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil
-            self.isOutlineActive = OutlineDetector.findOutlineRange(in: text, at: range.location) != nil
-            
-            self.isBulletListActive = FormatDetector.isBulletListActive(in: text, at: range.location)
-            self.isNumberListActive = FormatDetector.isNumberListActive(in: text, at: range.location)
-            self.isDescriptionListActive = FormatDetector.isDescriptionListActive(in: text, at: range.location)
-            self.isFootnoteActive = FormatDetector.findFootnoteRange(in: text, at: range.location) != nil
-            self.isPageBreakActive = FormatDetector.findPageBreakRange(in: text, at: range.location) != nil
-            self.isHorizontalLineActive = FormatDetector.findHorizontalLineRange(in: text, at: range.location) != nil
-            self.isFigureActive = FormatDetector.findFigureRange(in: text, at: range.location) != nil
-            self.isScopedBlockActive = FormatDetector.findScopedBlockRange(in: text, at: range.location) != nil
-            self.isBlockActive = FormatDetector.findBlockRange(in: text, at: range.location) != nil
-            self.isGridActive = FormatDetector.findGridRange(in: text, at: range.location) != nil
-            self.isTagActive = FormatDetector.findTagRange(in: text, at: range.location) != nil
+            self.publishIfChanged(\.isBoldActive, FormatDetector.findBoldRange(in: text, at: range.location, isMarkdown: isMarkdown) != nil)
+            self.publishIfChanged(\.isItalicActive, FormatDetector.findItalicRange(in: text, at: range.location, isMarkdown: isMarkdown) != nil)
+            self.publishIfChanged(\.isUnderlineActive, FormatDetector.findUnderlineRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isHighlightActive, FormatDetector.findHighlightRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isStrikeActive, FormatDetector.findStrikeRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isTextColorActive, FormatDetector.findTextColorRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isCodeActive, FormatDetector.findCodeRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isLinkActive, FormatDetector.findLinkRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isQuoteActive, FormatDetector.findQuoteRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isCodeBlockActive, FormatDetector.findCodeBlockRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isSubscriptActive, FormatDetector.findSubscriptRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isSuperscriptActive, FormatDetector.findSuperscriptRange(in: text, at: range.location) != nil)
+
+            self.publishIfChanged(\.isTitleActive, FormatDetector.detectIsTitle(in: text, at: range.location))
+            self.publishIfChanged(\.currentHeadingLevel, FormatDetector.detectHeadingLevel(in: text, at: range.location))
+
+            self.publishIfChanged(\.isEquationActive, EquationDetector.findEquationRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isTableActive, TableDetector.findTableRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isImageActive, ImageDetector.findImageRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isBibliographyActive, BibliographyDetector.findBibliographyRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isOutlineActive, OutlineDetector.findOutlineRange(in: text, at: range.location) != nil)
+
+            self.publishIfChanged(\.isBulletListActive, FormatDetector.isBulletListActive(in: text, at: range.location))
+            self.publishIfChanged(\.isNumberListActive, FormatDetector.isNumberListActive(in: text, at: range.location))
+            self.publishIfChanged(\.isDescriptionListActive, FormatDetector.isDescriptionListActive(in: text, at: range.location))
+            self.publishIfChanged(\.isFootnoteActive, FormatDetector.findFootnoteRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isPageBreakActive, FormatDetector.findPageBreakRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isHorizontalLineActive, FormatDetector.findHorizontalLineRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isFigureActive, FormatDetector.findFigureRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isScopedBlockActive, FormatDetector.findScopedBlockRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isBlockActive, FormatDetector.findBlockRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isGridActive, FormatDetector.findGridRange(in: text, at: range.location) != nil)
+            self.publishIfChanged(\.isTagActive, FormatDetector.findTagRange(in: text, at: range.location) != nil)
         }
+    }
+
+    /// Debounced entry point used by the high-frequency selection-change callback.
+    /// Coalesces rapid cursor movements so `updateFormattingState` runs at most
+    /// ~once per 80ms instead of on every selection change. Discrete programmatic
+    /// edits still call `updateFormattingState` directly for immediate toolbar state.
+    private var formattingUpdateWorkItem: DispatchWorkItem?
+    func scheduleFormattingUpdate() {
+        formattingUpdateWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.updateFormattingState()
+        }
+        formattingUpdateWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item)
     }
     
     // --- Tag Editor Functions ---
@@ -3594,8 +3631,9 @@ class SourceEditorBridge: TextViewCoordinator {
                 // Aggressively re-apply wrapping settings
                 ctrl.updateTextViewWrapping()
             }
-            // Update formatting state (bold/italic detection)
-            ctrl.updateFormattingState()
+            // Update formatting state (bold/italic detection). Debounced so rapid
+            // cursor movement doesn't re-scan the document on every selection change.
+            ctrl.scheduleFormattingUpdate()
         }
     }
     

@@ -146,16 +146,16 @@ public struct EditorTheme: Equatable {
             return font
         }
 
-        var font = font
+        // Resolve the bold/italic face *within the same family* via the font
+        // descriptor's symbolic traits. Unlike `NSFontManager.convert(_:toHaveTrait:)`,
+        // this never substitutes an unrelated family (e.g. the proportional SF Pro
+        // system font) when the requested face can't be resolved — it stays on the
+        // editor's monospaced font, falling back to the base font if a face is missing.
+        var traits = font.fontDescriptor.symbolicTraits
+        if attributes.bold { traits.insert(.bold) }
+        if attributes.italic { traits.insert(.italic) }
 
-        if attributes.bold {
-            font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
-        }
-
-        if attributes.italic {
-            font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
-        }
-
-        return font
+        let descriptor = font.fontDescriptor.withSymbolicTraits(traits)
+        return NSFont(descriptor: descriptor, size: font.pointSize) ?? font
     }
 }

@@ -95,11 +95,26 @@ struct FormatDetector {
         return NSRange(location: start, length: end - start)
     }
 
+    // MARK: - Regex cache
+    // These detectors run on every cursor move, and compiling an
+    // NSRegularExpression is far more expensive than running it. Cache the
+    // compiled expressions keyed by pattern + options. NSCache is thread-safe
+    // and evicts automatically under memory pressure.
+    nonisolated(unsafe) private static let regexCache = NSCache<NSString, NSRegularExpression>()
+
+    private static func cachedRegex(_ pattern: String, options: NSRegularExpression.Options = []) -> NSRegularExpression? {
+        let key = "\(pattern)|\(options.rawValue)" as NSString
+        if let existing = regexCache.object(forKey: key) { return existing }
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return nil }
+        regexCache.setObject(regex, forKey: key)
+        return regex
+    }
+
     private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
         let nsText = text as NSString
         let length = nsText.length
         let safeIndex = max(0, min(index, length))
-        guard let regex = try? NSRegularExpression(pattern: prefixPattern, options: []) else { return nil }
+        guard let regex = cachedRegex(prefixPattern) else { return nil }
         
         let searchRange = getSearchRange(around: safeIndex, in: length, windowSize: 5000)
         let matches = regex.matches(in: text, options: [], range: searchRange)
@@ -130,7 +145,7 @@ struct FormatDetector {
         
         // Match both Typst (=) and Markdown (#)
         let pattern = #"^(=+|#+)\s"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return 0 }
+        guard let regex = cachedRegex(pattern) else { return 0 }
         
         if let match = regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.count)) {
             if let markerRange = Range(match.range(at: 1), in: line) {
@@ -152,7 +167,7 @@ struct FormatDetector {
         let safeIndex = max(0, min(index, length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        let regex = try? NSRegularExpression(pattern: #"^[-*]\s+"#)
+        let regex = cachedRegex(#"^[-*]\s+"#)
         return regex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
     }
 
@@ -162,7 +177,7 @@ struct FormatDetector {
         let safeIndex = max(0, min(index, nsText.length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        let regex = try? NSRegularExpression(pattern: #"^(?:\+|\d+\.)\s+"#)
+        let regex = cachedRegex(#"^(?:\+|\d+\.)\s+"#)
         return regex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
     }
     
@@ -173,7 +188,7 @@ struct FormatDetector {
         let safeIndex = max(0, min(index, length))
         let lineRange = nsText.lineRange(for: NSRange(location: safeIndex, length: 0))
         let line = nsText.substring(with: lineRange).trimmingCharacters(in: .whitespaces)
-        let regex = try? NSRegularExpression(pattern: #"^/\s+"#)
+        let regex = cachedRegex(#"^/\s+"#)
         return regex?.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.utf16.count)) != nil
     }
     
@@ -185,7 +200,7 @@ struct FormatDetector {
         let line = nsText.substring(with: lineRange)
         
         let pattern = #"^(=+|#+)\s"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        guard let regex = cachedRegex(pattern) else { return nil }
         
         if let match = regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: line.count)) {
             return NSRange(location: lineRange.location, length: match.range.length)
@@ -276,7 +291,7 @@ struct FormatDetector {
         let patterns = [#"(?s)(`+).*?(?<!`)\1(?!`)"#]
         
         for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            guard let regex = cachedRegex(pattern) else { continue }
             let matches = regex.matches(in: text, options: [], range: searchRange)
             
             for match in matches {
@@ -299,7 +314,7 @@ struct FormatDetector {
         let searchRange = getSearchRange(around: safeIndex, in: nsText.length, windowSize: 2000)
         
         for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            guard let regex = cachedRegex(pattern) else { continue }
             let matches = regex.matches(in: text, options: [], range: searchRange)
             for match in matches {
                 if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
@@ -314,7 +329,7 @@ struct FormatDetector {
         // Simple detection for triple backticks
         // This is a naive implementation and might need robustness for nested blocks if supported
         let pattern = #"```[\s\S]*?```"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        guard let regex = cachedRegex(pattern) else { return nil }
         
         let nsText = text as NSString
         let length = nsText.length
@@ -759,7 +774,7 @@ struct FormatDetector {
     private static func findRegexRange(in text: String, at index: Int, pattern: String, windowSize: Int = 2000) -> NSRange? {
         let nsText = text as NSString
         let safeIndex = max(0, min(index, nsText.length))
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        guard let regex = cachedRegex(pattern) else { return nil }
         
         let searchRange = getSearchRange(around: safeIndex, in: nsText.length, windowSize: windowSize)
         let matches = regex.matches(in: text, options: [], range: searchRange)
