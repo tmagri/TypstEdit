@@ -344,6 +344,18 @@ struct ContentView: View {
                         .help("Split Horizontally")
                     }
                     
+                    Divider().frame(height: 12).padding(.horizontal, 4)
+                    
+                    Button(action: {
+                        toggleMaximizeWindow()
+                    }) {
+                        Image(systemName: "macwindow")
+                            .font(.system(size: 11))
+                            .foregroundColor(themeManager.textColor.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Toggle Maximize / Window")
+                    
                     Spacer()
                     HStack(spacing: 8) {
                         // AI / Intellisense Status Indicator
@@ -1179,6 +1191,19 @@ struct ContentView: View {
         
         if editorController.isPreviewDarkMode != isDark {
             editorController.isPreviewDarkMode = isDark
+        }
+    }
+    
+    private func toggleMaximizeWindow() {
+        let app = NSApplication.shared
+        let keyWin = app.windows.first(where: { $0.isKeyWindow })
+        let target = keyWin ?? app.mainWindow
+        if let window = target {
+            if window.styleMask.contains(.fullScreen) {
+                window.toggleFullScreen(nil)
+            } else {
+                window.zoom(nil)
+            }
         }
     }
 }

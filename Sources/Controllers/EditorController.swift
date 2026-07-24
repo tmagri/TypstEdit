@@ -916,6 +916,11 @@ class EditorController: NSObject, ObservableObject {
         // 1. Prefer text data (with optional Markdown→Typst conversion).
         if let items = pasteboard.pasteboardItems?.first,
            let text = items.string(forType: .string) {
+            
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                showStatus("Nothing to paste")
+                return
+            }
 
             // Perform conversion synchronously on the main thread.
             // Doing this async previously caused the captured `selectedRange` to become
@@ -1035,6 +1040,10 @@ class EditorController: NSObject, ObservableObject {
         
         // 1. Prefer raw string data (no conversion).
         if let text = pasteboard.string(forType: .string) {
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                showStatus("Nothing to paste")
+                return
+            }
             insertText(text)
             return
         }
@@ -1082,7 +1091,7 @@ class EditorController: NSObject, ObservableObject {
                 let recognized = lines.joined(separator: "\n")
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    if recognized.isEmpty {
+                    if recognized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         self.showStatus("OCR found no text in the image")
                     } else {
                         self.insertText(recognized)
@@ -2117,11 +2126,12 @@ class EditorController: NSObject, ObservableObject {
             insertText(prefix + suffix, replacementRange: range, newCursorRange: newCursor)
         } else {
             // Surround selection
-             if let r = Range(range, in: sourceCode) {
-                 let selectedText = sourceCode[r]
-                 let newText = prefix + selectedText + suffix
-                 insertText(newText, replacementRange: range)
-             }
+            let nsText = sourceCode as NSString
+            if range.location != NSNotFound && range.location + range.length <= nsText.length {
+                let selectedText = nsText.substring(with: range)
+                let newText = prefix + selectedText + suffix
+                insertText(newText, replacementRange: range)
+            }
         }
     }
     
@@ -2192,6 +2202,111 @@ class EditorController: NSObject, ObservableObject {
         }
         formattingUpdateWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item)
+    }
+    
+    // --- Smart Text Selection ---
+    
+    private var smartSelectionWorkItem: DispatchWorkItem?
+    private var smartSelectionTimer: Timer?
+    private var smartSelectionProgressLayer: CAShapeLayer?
+    
+    func scheduleSmartSelection() {
+        smartSelectionWorkItem?.cancel()
+        smartSelectionTimer?.invalidate()
+        smartSelectionProgressLayer?.removeFromSuperlayer()
+        smartSelectionProgressLayer = nil
+        
+        let range = selectedRange
+        guard range.length > 0 else { return }
+        
+        let nsText = sourceCode as NSString
+        guard range.location + range.length <= nsText.length else { return }
+        
+        var expandedRange = range
+        
+        let searchRangeStart = max(0, range.location - 100)
+        let searchRangeEnd = min(nsText.length, NSMaxRange(range) + 100)
+        let searchRange = NSRange(location: searchRangeStart, length: searchRangeEnd - searchRangeStart)
+        
+        nsText.enumerateSubstrings(in: searchRange, options: .byWords) { _, wordRange, _, _ in
+            if NSIntersectionRange(range, wordRange).length > 0 {
+                // Check start boundary intersection
+                if range.location > wordRange.location && range.location < NSMaxRange(wordRange) {
+                    let overlap = NSMaxRange(wordRange) - range.location
+                    let percent = Double(overlap) / Double(wordRange.length)
+                    let shouldExpand = (wordRange.length <= 3 && (wordRange.length - overlap) <= 1) || percent > 0.80
+                    if shouldExpand {
+                        expandedRange.location = min(expandedRange.location, wordRange.location)
+                        expandedRange.length = NSMaxRange(range) - expandedRange.location
+                    }
+                }
+                
+                // Check end boundary intersection
+                let currentMax = NSMaxRange(range)
+                if currentMax > wordRange.location && currentMax < NSMaxRange(wordRange) {
+                    let overlap = currentMax - wordRange.location
+                    let percent = Double(overlap) / Double(wordRange.length)
+                    let shouldExpand = (wordRange.length <= 3 && (wordRange.length - overlap) <= 1) || percent > 0.80
+                    if shouldExpand {
+                        expandedRange.length = NSMaxRange(wordRange) - expandedRange.location
+                    }
+                }
+            }
+        }
+        
+        guard expandedRange != range else { return }
+        
+        // Draw the progress ring
+        if let tvc = textViewController, let layout = tvc.textView.layoutManager {
+            if let rect = layout.rectForOffset(NSMaxRange(range)) {
+                let shape = CAShapeLayer()
+                let radius: CGFloat = 6.0
+                let center = CGPoint(x: rect.maxX + radius + 4, y: rect.midY)
+                
+                let path = CGMutablePath()
+                path.addArc(center: center, radius: radius, startAngle: -.pi/2, endAngle: .pi * 1.5, clockwise: false)
+                shape.path = path
+                
+                shape.strokeColor = NSColor.controlAccentColor.cgColor
+                shape.fillColor = NSColor.clear.cgColor
+                shape.lineWidth = 2.0
+                shape.strokeEnd = 0.0
+                
+                tvc.textView.layer?.addSublayer(shape)
+                smartSelectionProgressLayer = shape
+            }
+        }
+        
+        let duration = 0.8
+        let interval = 0.02
+        var elapsed = 0.0
+        
+        smartSelectionTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] t in
+            guard let self = self else { t.invalidate(); return }
+            elapsed += interval
+            
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.smartSelectionProgressLayer?.strokeEnd = CGFloat(min(elapsed / duration, 1.0))
+            CATransaction.commit()
+            
+            if elapsed >= duration {
+                t.invalidate()
+                self.smartSelectionProgressLayer?.removeFromSuperlayer()
+                self.smartSelectionProgressLayer = nil
+                self.performSmartSelectionExpansion(to: expandedRange)
+            }
+        }
+    }
+    
+    private func performSmartSelectionExpansion(to expandedRange: NSRange) {
+        guard let textView = textViewController?.textView else { return }
+        let currentRange = textView.selectedRange()
+        
+        if expandedRange != currentRange {
+            textViewController?.setCursorPositions([.init(range: expandedRange)], scrollToVisible: false)
+            textView.selectionManager.setSelectedRange(expandedRange)
+        }
     }
     
     // --- Tag Editor Functions ---
@@ -2389,36 +2504,42 @@ class EditorController: NSObject, ObservableObject {
      
     func toggleBold() {
         let range = selectedRange
-        if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location, isMarkdown: isMarkdownFile),
-           let r = Range(boldRange, in: sourceCode) {
-            let snippet = sourceCode[r]
-            // If it's Markdown (** or __), unwrap 2 characters; otherwise 1 for Typst (*)
-            let prefixLen = (snippet.hasPrefix("**") || snippet.hasPrefix("__")) ? 2 : 1
-            
-            unwrapFormatting(range: boldRange, prefixLen: prefixLen, suffixLen: prefixLen)
-            showStatus("Removed Bold")
-        } else {
-            let marker = isMarkdownFile ? "**" : "*"
-            wrapSelection(prefix: marker, suffix: marker)
-            showStatus("Applied Bold")
+        if let boldRange = FormatDetector.findBoldRange(in: sourceCode, at: range.location, isMarkdown: isMarkdownFile) {
+            let nsText = sourceCode as NSString
+            if boldRange.location + boldRange.length <= nsText.length {
+                let snippet = nsText.substring(with: boldRange)
+                let prefixLen = (snippet.hasPrefix("**") || snippet.hasPrefix("__")) ? 2 : 1
+                
+                unwrapFormatting(range: boldRange, prefixLen: prefixLen, suffixLen: prefixLen)
+                showStatus("Removed Bold")
+                updateFormattingState()
+                return
+            }
         }
+        
+        let marker = isMarkdownFile ? "**" : "*"
+        wrapSelection(prefix: marker, suffix: marker)
+        showStatus("Applied Bold")
         updateFormattingState()
     }
     
     func toggleItalic() {
         let range = selectedRange
-        if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location, isMarkdown: isMarkdownFile),
-           let r = Range(italicRange, in: sourceCode) {
-            let snippet = sourceCode[r]
-            let prefixLen = 1 // Both Markdown (*) and Typst (_) use 1 character
-            
-            unwrapFormatting(range: italicRange, prefixLen: prefixLen, suffixLen: prefixLen)
-            showStatus("Removed Italic")
-        } else {
-            let marker = isMarkdownFile ? "*" : "_"
-            wrapSelection(prefix: marker, suffix: marker)
-            showStatus("Applied Italic")
+        if let italicRange = FormatDetector.findItalicRange(in: sourceCode, at: range.location, isMarkdown: isMarkdownFile) {
+            let nsText = sourceCode as NSString
+            if italicRange.location + italicRange.length <= nsText.length {
+                let prefixLen = 1 // Both Markdown (*) and Typst (_) use 1 character
+                
+                unwrapFormatting(range: italicRange, prefixLen: prefixLen, suffixLen: prefixLen)
+                showStatus("Removed Italic")
+                updateFormattingState()
+                return
+            }
         }
+        
+        let marker = isMarkdownFile ? "*" : "_"
+        wrapSelection(prefix: marker, suffix: marker)
+        showStatus("Applied Italic")
         updateFormattingState()
     }
     
@@ -3634,6 +3755,7 @@ class SourceEditorBridge: TextViewCoordinator {
             // Update formatting state (bold/italic detection). Debounced so rapid
             // cursor movement doesn't re-scan the document on every selection change.
             ctrl.scheduleFormattingUpdate()
+            ctrl.scheduleSmartSelection()
         }
     }
     
