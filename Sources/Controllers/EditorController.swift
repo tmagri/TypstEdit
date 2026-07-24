@@ -2234,7 +2234,7 @@ class EditorController: NSObject, ObservableObject {
                 if range.location > wordRange.location && range.location < NSMaxRange(wordRange) {
                     let overlap = NSMaxRange(wordRange) - range.location
                     let percent = Double(overlap) / Double(wordRange.length)
-                    let shouldExpand = (wordRange.length <= 3 && (wordRange.length - overlap) <= 1) || percent > 0.80
+                    let shouldExpand = (wordRange.length <= 3 && (wordRange.length - overlap) <= 1) || percent > 0.70
                     if shouldExpand {
                         expandedRange.location = min(expandedRange.location, wordRange.location)
                         expandedRange.length = NSMaxRange(range) - expandedRange.location
@@ -2246,7 +2246,7 @@ class EditorController: NSObject, ObservableObject {
                 if currentMax > wordRange.location && currentMax < NSMaxRange(wordRange) {
                     let overlap = currentMax - wordRange.location
                     let percent = Double(overlap) / Double(wordRange.length)
-                    let shouldExpand = (wordRange.length <= 3 && (wordRange.length - overlap) <= 1) || percent > 0.80
+                    let shouldExpand = (wordRange.length <= 3 && (wordRange.length - overlap) <= 1) || percent > 0.70
                     if shouldExpand {
                         expandedRange.length = NSMaxRange(wordRange) - expandedRange.location
                     }
