@@ -244,30 +244,144 @@ struct ContentView: View {
     }
     
     private var editorPreviewArea: some View {
-        ZStack {
-            themeManager.contentOverlay.ignoresSafeArea()
-            themeManager.mainBackground.ignoresSafeArea()
-            
-            let isTypst = editorController.currentFileType == .typst
-            let isCompilable = isTypst || editorController.isMarkdownFile
-            
-            if isCompilable {
-                if editorController.viewMode == .editorOnly {
-                    editorBox.padding(.horizontal, 12)
-                } else if editorController.viewMode == .previewOnly {
-                    pdfBox
+        VStack(spacing: 0) {
+            ZStack {
+                themeManager.contentOverlay.ignoresSafeArea()
+                themeManager.mainBackground.ignoresSafeArea()
+                
+                let isTypst = editorController.currentFileType == .typst
+                let isCompilable = isTypst || editorController.isMarkdownFile
+                
+                if isCompilable {
+                    if editorController.viewMode == .editorOnly {
+                        editorBox.padding(.horizontal, 12)
+                    } else if editorController.viewMode == .previewOnly {
+                        pdfBox.padding(.leading, 12)
+                    } else {
+                        ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                            editorBox.padding(.leading, 12)
+                        } right: {
+                            pdfBox
+                        }
+                    }
                 } else {
-                    ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
-                        editorBox.padding(.leading, 12)
-                    } right: {
-                        pdfBox
+                    editorBox.padding(.horizontal, 12)
+                }
+            }
+            .layoutPriority(1)
+            
+            statusBar
+        }
+    }
+    
+    private var statusBar: some View {
+        Group {
+            if editorController.isTypstFile || editorController.isMarkdownFile {
+                HStack {
+                    // Toggle Sidebar Button
+                    Button(action: {
+                        withAnimation {
+                            editorController.isSidebarVisible.toggle()
+                        }
+                    }) {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 11))
+                            .foregroundColor(editorController.isSidebarVisible ? .accentColor : themeManager.textColor.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Toggle Sidebar")
+                    
+                    Divider().frame(height: 12).padding(.horizontal, 4)
+
+                    if editorController.isTypstFile {
+                        Text("Words: \(editorController.wordCount)").font(.caption).monospacedDigit().foregroundColor(themeManager.textColor)
+                        
+                        Divider().frame(height: 12).padding(.horizontal, 4)
+                    }
+                    
+                    // View Mode Options
+                    HStack(spacing: 8) {
+                        Button(action: {
+                            editorController.viewMode = .editorOnly
+                        }) {
+                            Image(systemName: "doc.text")
+                                .font(.system(size: 11))
+                                .foregroundColor(editorController.viewMode == .editorOnly ? .accentColor : themeManager.textColor.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Only Show Editor")
+                        
+                        Button(action: {
+                            editorController.viewMode = .previewOnly
+                        }) {
+                            Image(systemName: "doc.richtext")
+                                .font(.system(size: 11))
+                                .foregroundColor(editorController.viewMode == .previewOnly ? .accentColor : themeManager.textColor.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Preview Only")
+                        
+                        Button(action: {
+                            editorController.viewMode = .both
+                            editorController.isVerticalSplit = true
+                        }) {
+                            Image(systemName: "square.split.2x1")
+                                .font(.system(size: 11))
+                                .foregroundColor(editorController.viewMode == .both && editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Split Vertically")
+                        
+                        Button(action: {
+                            editorController.viewMode = .both
+                            editorController.isVerticalSplit = false
+                        }) {
+                            Image(systemName: "square.split.1x2")
+                                .font(.system(size: 11))
+                                .foregroundColor(editorController.viewMode == .both && !editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Split Horizontally")
+                    }
+                    
+                    Spacer()
+                    HStack(spacing: 8) {
+                        // AI / Intellisense Status Indicator
+                        if aiService.isFetching || aiSettings.intellisenseEnabled || aiSettings.isEnabled {
+                            HStack(spacing: 4) {
+                                if aiService.isFetching {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .scaleEffect(0.6)
+                                    Text("AI")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.blue)
+                                } else if aiSettings.intellisenseEnabled {
+                                    Text("Intellisense")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.green)
+                                } else if aiSettings.isEnabled {
+                                    Text("AI")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.blue.opacity(0.7))
+                                }
+                            }
+                        }
+                        
+                        // Editor Status Message (e.g., "File Saved")
+                        if editorController.showStatusMessage {
+                            Text(editorController.statusMessage)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .transition(.opacity)
+                        }
                     }
                 }
-            } else {
-                editorBox.padding(.horizontal, 12)
+                .padding(.horizontal, 12).padding(.vertical, 4)
+                .background(Color.primary.opacity(0.3))
+                .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
             }
         }
-        .layoutPriority(1)
     }
     
     private var pdfBox: some View {
@@ -577,47 +691,6 @@ struct ContentView: View {
                     }
                 } message: {
                     Text("Unsaved changes were found for this file. Do you want to recover them?")
-                }
-            
-                if editorController.isTypstFile {
-                    HStack {
-                        Text("Words: \(editorController.wordCount)").font(.caption).monospacedDigit().foregroundColor(themeManager.textColor)
-                        Spacer()
-                        HStack(spacing: 8) {
-                            // AI / Intellisense Status Indicator
-                            if aiService.isFetching || aiSettings.intellisenseEnabled || aiSettings.isEnabled {
-                                HStack(spacing: 4) {
-                                    if aiService.isFetching {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .scaleEffect(0.6)
-                                        Text("AI")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(.blue)
-                                    } else if aiSettings.intellisenseEnabled {
-                                        Text("Intellisense")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(.green)
-                                    } else if aiSettings.isEnabled {
-                                        Text("AI")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(.blue.opacity(0.7))
-                                    }
-                                }
-                            }
-                            
-                            // Editor Status Message (e.g., "File Saved")
-                            if editorController.showStatusMessage {
-                                Text(editorController.statusMessage)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .transition(.opacity)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.3))
-                    .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
                 }
             }
         }
