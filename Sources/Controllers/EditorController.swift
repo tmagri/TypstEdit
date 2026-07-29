@@ -173,8 +173,7 @@ class EditorController: NSObject, ObservableObject {
     
     func insertText(_ text: String, replacementRange: NSRange? = nil, newCursorRange: NSRange? = nil) {
         let range = replacementRange ?? selectedRange
-        print("[EditorController] insertText: '\(text)' at \(range)")
-        
+
         guard let stringRange = Range(range, in: sourceCode) else { 
              print("[EditorController] insertText FAILED: Invalid range \(range) for len \(sourceCode.count)")
              showStatus("Insert failed: invalid range")
@@ -200,7 +199,6 @@ class EditorController: NSObject, ObservableObject {
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
          if let tvc = textViewController {
-             print("[EditorController] Syncing with TextViewController: \(ObjectIdentifier(tvc))")
              let tvLen = (tvc.textView.string as NSString).length
              let insertLength = (text as NSString).length
 
@@ -325,6 +323,33 @@ class EditorController: NSObject, ObservableObject {
                 }
             }
             return event
+        }
+
+        // Funnel the text view's own responder-chain `paste:` (fires via
+        // `interpretKeyEvents`/`sendAction` whenever the Cmd+V monitor above does not
+        // consume — e.g. the file-switch race where `textViewController` briefly points
+        // at a stale controller) through the same single-insertion logic the monitor
+        // and menu paths use. Without this, that path runs the library default, which
+        // inserts the full clipboard once per cursor/selection (the "4-line text,
+        // 4 copies pasted" bug with a multi-line column selection).
+        TextView.appPasteHandler = { [weak self] textView in
+            MainActor.assumeIsolated {
+                guard let self = self else { return false }
+                if textView === self.textViewController?.textView {
+                    return self.performPaste(into: textView, plain: false)
+                }
+                // Stale/racing text view: plain single-insert directly into this view.
+                // Never fall through to the library default's per-selection insertion.
+                var range = textView.selectedRange()
+                if range.location == NSNotFound {
+                    range = NSRange(location: (textView.string as NSString).length, length: 0)
+                }
+                guard let string = NSPasteboard.general.string(forType: .string) else { return false }
+                textView.replaceCharacters(in: range, with: string)
+                textView.selectionManager.setSelectedRange(
+                    NSRange(location: range.location + (string as NSString).length, length: 0))
+                return true
+            }
         }
     }
     
@@ -911,23 +936,70 @@ class EditorController: NSObject, ObservableObject {
     
     func pasteSelection() {
         if forwardActionIfNotFirstResponder(#selector(NSText.paste(_:))) { return }
+        if let textView = textViewController?.textView {
+            performPaste(into: textView, plain: false)
+        } else {
+            // Fallback when no live text view is available (e.g. unit tests)
+            pasteViaModel(plain: false)
+        }
+    }
+
+    // --- Paste dedupe state ---
+    // A single physical Cmd+V can trigger more than one paste entry point (the keyDown
+    // monitor, the SwiftUI menu, and the text view's responder-chain `paste:` via
+    // `interpretKeyEvents`), all of which now funnel into `performPaste`. An identical
+    // (pasteboard changeCount, insertion location) pair arriving within 250ms is the
+    // same paste racing with itself and is dropped. Genuine key-repeat pastes advance
+    // the cursor on every fire, so their locations differ and are not affected.
+    private var lastPaste: (changeCount: Int, location: Int, time: CFAbsoluteTime)?
+
+    /// The single paste implementation. Every route — the Cmd+V event monitor, the Edit
+    /// menu, the context menu, and the TextView's own responder-chain `paste:` (via
+    /// `TextView.appPasteHandler`) — funnels here, so one keystroke can only ever
+    /// produce one insertion.
+    ///
+    /// Inserts at the FIRST selection only, then collapses the selection to a single
+    /// caret. Multi-cursor paste is deliberately disabled: the app UI never exposes
+    /// multi-cursor editing, and inserting the clipboard at every cursor (one full copy
+    /// per cursor) was the source of the "4-line text, 4 copies pasted" bug whenever a
+    /// multi-line column selection was active.
+    /// - Returns: `true` if the paste was handled (consumed by the library hook).
+    @discardableResult
+    func performPaste(into textView: TextView, plain: Bool) -> Bool {
         let pasteboard = NSPasteboard.general
-        
+
         // 1. Prefer text data (with optional Markdown→Typst conversion).
         if let items = pasteboard.pasteboardItems?.first,
            let text = items.string(forType: .string) {
-            
+
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 showStatus("Nothing to paste")
-                return
+                return true
             }
+
+            // Guard against a missing/cleared selection — fall back to end of document.
+            var range = textView.selectedRange()
+            if range.location == NSNotFound {
+                range = NSRange(location: (textView.string as NSString).length, length: 0)
+            }
+
+            // Drop racing duplicate invocations of the same physical paste.
+            let changeCount = pasteboard.changeCount
+            let now = CFAbsoluteTimeGetCurrent()
+            if let last = lastPaste,
+               last.changeCount == changeCount,
+               last.location == range.location,
+               now - last.time < 0.25 {
+                return true
+            }
+            lastPaste = (changeCount, range.location, now)
 
             // Perform conversion synchronously on the main thread.
             // Doing this async previously caused the captured `selectedRange` to become
             // stale by the time the main-thread callback fired, inserting at the wrong
             // position. The conversion is regex-based and fast enough to run inline.
             var textToInsert = text
-            if currentFileType == .typst {
+            if !plain, currentFileType == .typst {
                 // Fast heuristic to skip content that is already Typst
                 let looksLikeTypst = text.contains("#image") || text.contains("#link")
                     || text.contains("#align") || text.contains("#box")
@@ -941,31 +1013,66 @@ class EditorController: NSObject, ObservableObject {
             // correctly records the mutation and undo works. Using insertText/setText for
             // pastes previously called _undoManager.clearStack() (via setText → setTextStorage),
             // wiping the undo history and making paste appear invisible until undo was pressed.
-            if let textView = textViewController?.textView {
-                let range = textView.selectedRange()
-                isApplyingProgrammaticChange = true
-                defer { isApplyingProgrammaticChange = false }
-                textView.replaceCharacters(in: range, with: textToInsert)
-                // Keep the model in sync; textViewDidChangeText will also do this but we set
-                // it early so any code that reads sourceCode afterwards sees the correct value.
-                sourceCode = textView.string
-            } else {
-                // Fallback when no live text view is available (e.g. unit tests)
-                insertText(textToInsert, replacementRange: selectedRange)
-            }
-            return
+            isApplyingProgrammaticChange = true
+            defer { isApplyingProgrammaticChange = false }
+            textView.replaceCharacters(in: range, with: textToInsert)
+            // Keep the model in sync; textViewDidChangeText will also do this but we set
+            // it early so any code that reads sourceCode afterwards sees the correct value.
+            sourceCode = textView.string
+
+            // Collapse any extra cursors (e.g. a leftover column selection) to a single
+            // caret after the inserted text. Without this, surviving cursors would make
+            // the next typed character duplicate once per leftover selection.
+            textView.selectionManager.setSelectedRange(
+                NSRange(location: range.location + (textToInsert as NSString).length, length: 0))
+            return true
         }
-        
-        // 2. Fall back to pasting image data as a saved file with an #image() reference.
-        //    Read raw bytes eagerly on the main thread via data(forType:) to avoid
-        //    the lazy-data IPC deadlock described in pasteAsPlainText().
+
+        // 2. Fall back to image data on the clipboard.
+        if plain {
+            return pasteImageAsOCR(from: pasteboard)
+        }
+        return pasteImageAsFile(from: pasteboard)
+    }
+
+    /// Model-only paste used when no live text view exists (e.g. unit tests).
+    private func pasteViaModel(plain: Bool) {
+        let pasteboard = NSPasteboard.general
+        if let text = pasteboard.string(forType: .string) {
+            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                showStatus("Nothing to paste")
+                return
+            }
+            var textToInsert = text
+            if !plain, currentFileType == .typst {
+                let looksLikeTypst = text.contains("#image") || text.contains("#link")
+                    || text.contains("#align") || text.contains("#box")
+                    || text.contains("#rect") || text.hasPrefix("#") || text.hasPrefix("=")
+                if !looksLikeTypst {
+                    textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
+                }
+            }
+            insertText(textToInsert, replacementRange: selectedRange)
+        } else if plain {
+            _ = pasteImageAsOCR(from: pasteboard)
+        } else {
+            _ = pasteImageAsFile(from: pasteboard)
+        }
+    }
+
+    /// Paste clipboard image data as a saved PNG file with an #image() reference.
+    /// Read raw bytes eagerly on the main thread via data(forType:) to avoid
+    /// the lazy-data IPC deadlock described in `pasteImageAsOCR`.
+    /// - Returns: `true` if the clipboard contained image data (handled).
+    @discardableResult
+    private func pasteImageAsFile(from pasteboard: NSPasteboard) -> Bool {
         let imageTypes: [NSPasteboard.PasteboardType] = [
             .tiff,
             NSPasteboard.PasteboardType("public.png"),
             NSPasteboard.PasteboardType("public.jpeg"),
             NSPasteboard.PasteboardType("com.apple.pict")
         ]
-        
+
         var rawData: Data?
         for type in imageTypes {
             if let d = pasteboard.data(forType: type) {
@@ -973,22 +1080,22 @@ class EditorController: NSObject, ObservableObject {
                 break
             }
         }
-        
-        guard let data = rawData else { return }
-        
+
+        guard let data = rawData else { return false }
+
         // Convert to PNG regardless of source format
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             showStatus("Could not decode clipboard image")
-            return
+            return true
         }
-        
+
         let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
         guard let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
             showStatus("Could not encode image as PNG")
-            return
+            return true
         }
-        
+
         // Determine save directory: current file's directory > project root
         let saveDir: URL
         if let fileDir = currentFileURL?.deletingLastPathComponent() {
@@ -997,20 +1104,20 @@ class EditorController: NSObject, ObservableObject {
             saveDir = root
         } else {
             showStatus("No project or file open — cannot save pasted image")
-            return
+            return true
         }
-        
+
         let timestamp = Int(Date().timeIntervalSince1970)
         let fileName = "pasted_image_\(timestamp).png"
         let fileURL = saveDir.appendingPathComponent(fileName)
-        
+
         do {
             try pngData.write(to: fileURL)
         } catch {
             showStatus("Failed to save pasted image: \(error.localizedDescription)")
-            return
+            return true
         }
-        
+
         // Compute the path to use in the #image() reference.
         // The image is saved next to the current file, so use a path relative to
         // the current file's directory. This is unambiguous and works correctly
@@ -1024,10 +1131,11 @@ class EditorController: NSObject, ObservableObject {
         } else {
             imagePath = fileName
         }
-        
+
         insertText("#image(\"\(imagePath)\")")
         showStatus("Pasted image saved as \(fileName)")
         NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+        return true
     }
     
     /// Paste the clipboard contents as literal plain text, bypassing any
@@ -1036,30 +1144,29 @@ class EditorController: NSObject, ObservableObject {
     /// to extract text from it and insert the result at the cursor.
     func pasteAsPlainText() {
         if forwardActionIfNotFirstResponder(Selector("pasteAsPlainText:")) { return }
-        let pasteboard = NSPasteboard.general
-        
-        // 1. Prefer raw string data (no conversion).
-        if let text = pasteboard.string(forType: .string) {
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                showStatus("Nothing to paste")
-                return
-            }
-            insertText(text)
-            return
+        if let textView = textViewController?.textView {
+            performPaste(into: textView, plain: true)
+        } else {
+            pasteViaModel(plain: true)
         }
-        
-        // 2. Fall back to OCR when the clipboard contains image data.
-        //    Critically: read the raw bytes eagerly here on the MAIN thread using
-        //    data(forType:) — NOT NSImage(pasteboard:), which uses a lazy data
-        //    provider that can IPC back to the source app and trigger a
-        //    dispatch_sync-on-main-queue deadlock (→ EXC_BREAKPOINT / libdispatch crash).
+    }
+
+    /// Paste clipboard image data by running Vision OCR and inserting the
+    /// recognized text at the cursor.
+    /// - Returns: `true` if the clipboard contained image data (handled).
+    @discardableResult
+    private func pasteImageAsOCR(from pasteboard: NSPasteboard) -> Bool {
+        // Critically: read the raw bytes eagerly here on the MAIN thread using
+        // data(forType:) — NOT NSImage(pasteboard:), which uses a lazy data
+        // provider that can IPC back to the source app and trigger a
+        // dispatch_sync-on-main-queue deadlock (→ EXC_BREAKPOINT / libdispatch crash).
         let imageTypes: [NSPasteboard.PasteboardType] = [
             .tiff,
             NSPasteboard.PasteboardType("public.png"),
             NSPasteboard.PasteboardType("public.jpeg"),
             NSPasteboard.PasteboardType("com.apple.pict")
         ]
-        
+
         var rawData: Data?
         for type in imageTypes {
             if let d = pasteboard.data(forType: type) {
@@ -1067,24 +1174,24 @@ class EditorController: NSObject, ObservableObject {
                 break
             }
         }
-        
+
         guard let data = rawData else {
             showStatus("Nothing to paste")
-            return
+            return true
         }
-        
+
         showStatus("Running OCR on clipboard image…")
-        
+
         // All heavy work (image decode + Vision) runs off the main thread.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            
+
             guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                   let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
                 DispatchQueue.main.async { self.showStatus("Could not decode clipboard image") }
                 return
             }
-            
+
             let request = VNRecognizeTextRequest { req, _ in
                 let lines = (req.results as? [VNRecognizedTextObservation] ?? [])
                     .compactMap { $0.topCandidates(1).first?.string }
@@ -1101,10 +1208,11 @@ class EditorController: NSObject, ObservableObject {
             }
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
-            
+
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             try? handler.perform([request])
         }
+        return true
     }
     
     func deleteSelection() {
@@ -2116,8 +2224,7 @@ class EditorController: NSObject, ObservableObject {
     
     func wrapSelection(prefix: String, suffix: String) {
         let range = selectedRange
-        print("[EditorController] wrapSelection prefix='\(prefix)' suffix='\(suffix)' at \(range)")
-        
+
         if range.length == 0 {
             // Insert markers and place cursor in between. Use UTF-16 offset for the cursor
             // (NSRange uses UTF-16), clamped to document length to stay valid.
@@ -2215,19 +2322,24 @@ class EditorController: NSObject, ObservableObject {
         smartSelectionTimer?.invalidate()
         smartSelectionProgressLayer?.removeFromSuperlayer()
         smartSelectionProgressLayer = nil
-        
+
+        // Skip while a programmatic change is in flight — otherwise every paste or
+        // snippet insert would arm the expansion countdown against the edit's
+        // post-insert selection.
+        guard !isApplyingProgrammaticChange else { return }
+
         let range = selectedRange
         guard range.length > 0 else { return }
-        
+
         let nsText = sourceCode as NSString
         guard range.location + range.length <= nsText.length else { return }
-        
+
         var expandedRange = range
-        
+
         let searchRangeStart = max(0, range.location - 100)
         let searchRangeEnd = min(nsText.length, NSMaxRange(range) + 100)
         let searchRange = NSRange(location: searchRangeStart, length: searchRangeEnd - searchRangeStart)
-        
+
         nsText.enumerateSubstrings(in: searchRange, options: .byWords) { _, wordRange, _, _ in
             if NSIntersectionRange(range, wordRange).length > 0 {
                 // Check start boundary intersection
@@ -2240,7 +2352,7 @@ class EditorController: NSObject, ObservableObject {
                         expandedRange.length = NSMaxRange(range) - expandedRange.location
                     }
                 }
-                
+
                 // Check end boundary intersection
                 let currentMax = NSMaxRange(range)
                 if currentMax > wordRange.location && currentMax < NSMaxRange(wordRange) {
@@ -2253,43 +2365,63 @@ class EditorController: NSObject, ObservableObject {
                 }
             }
         }
-        
+
         guard expandedRange != range else { return }
-        
+
+        // Wait for the selection to settle before arming the ring + countdown.
+        // This callback fires on every selection change (~60Hz while dragging out a
+        // selection), and the previous implementation started the 50Hz animation
+        // timer immediately each time — tearing down and recreating the timer and
+        // progress layer on every mouse move. Debouncing means the ring only appears
+        // once the user has paused with a stable selection. Any selection change
+        // re-enters this function, whose teardown at the top cancels the pending
+        // work item and any running countdown.
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // Re-check the selection is still exactly what we computed against.
+            guard self.selectedRange == range else { return }
+            self.armSmartSelectionRing(from: range, expandingTo: expandedRange)
+        }
+        smartSelectionWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+    }
+
+    /// Draws the progress ring and starts the countdown that expands the selection.
+    private func armSmartSelectionRing(from range: NSRange, expandingTo expandedRange: NSRange) {
         // Draw the progress ring
         if let tvc = textViewController, let layout = tvc.textView.layoutManager {
             if let rect = layout.rectForOffset(NSMaxRange(range)) {
                 let shape = CAShapeLayer()
                 let radius: CGFloat = 6.0
                 let center = CGPoint(x: rect.maxX + radius + 4, y: rect.midY)
-                
+
                 let path = CGMutablePath()
                 path.addArc(center: center, radius: radius, startAngle: -.pi/2, endAngle: .pi * 1.5, clockwise: false)
                 shape.path = path
-                
+
                 shape.strokeColor = NSColor.controlAccentColor.cgColor
                 shape.fillColor = NSColor.clear.cgColor
                 shape.lineWidth = 2.0
                 shape.strokeEnd = 0.0
-                
+
                 tvc.textView.layer?.addSublayer(shape)
                 smartSelectionProgressLayer = shape
             }
         }
-        
+
         let duration = 0.8
         let interval = 0.02
         var elapsed = 0.0
-        
+
         smartSelectionTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] t in
             guard let self = self else { t.invalidate(); return }
             elapsed += interval
-            
+
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             self.smartSelectionProgressLayer?.strokeEnd = CGFloat(min(elapsed / duration, 1.0))
             CATransaction.commit()
-            
+
             if elapsed >= duration {
                 t.invalidate()
                 self.smartSelectionProgressLayer?.removeFromSuperlayer()
@@ -2949,7 +3081,14 @@ class EditorController: NSObject, ObservableObject {
     }
     
     // MARK: - Live Markdown Auto-Translation
-    
+
+    /// Pre-compiled patterns for `handleMarkdownAutoformat`. This runs on every text
+    /// change, so compiling the expressions inline was a measurable per-keystroke cost.
+    private static let autoformatHeadingRegex = try? NSRegularExpression(pattern: "^(#{1,6})( )", options: [])
+    private static let autoformatImageRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: [])
+    private static let autoformatLinkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: [])
+    private static let autoformatBoldRegex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*", options: [])
+
     /// Detects Markdown syntax on the current line in a `.typ` file and
     /// auto-replaces it with the equivalent Typst syntax in real-time.
     func handleMarkdownAutoformat() {
@@ -2971,7 +3110,7 @@ class EditorController: NSObject, ObservableObject {
         // Only fires when the ENTIRE line content before the space is solely # characters
         // (i.e. "# Title" → "= Title"), but NOT for "#functionCall" or "#import" etc.
         // The space must immediately follow the hashes with nothing else on the line before it.
-        if let headingRegex = try? NSRegularExpression(pattern: "^(#{1,6})( )", options: []) {
+        if let headingRegex = Self.autoformatHeadingRegex {
             let nsLine = lineContent as NSString
             if let match = headingRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: nsLine.length)) {
                 
@@ -2993,7 +3132,7 @@ class EditorController: NSObject, ObservableObject {
         }
         
         // --- 2. Images: ![alt](url "title") -> #image("url", alt: "alt") ---
-        if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
+        if let imgRegex = Self.autoformatImageRegex {
             if let match = imgRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
                 let nsLine = lineContent as NSString
                 let altText = nsLine.substring(with: match.range(at: 1))
@@ -3012,7 +3151,7 @@ class EditorController: NSObject, ObservableObject {
         }
         
         // --- 3. Links: [text](url "title") -> #link("url")[text] ---
-        if let linkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
+        if let linkRegex = Self.autoformatLinkRegex {
             if let match = linkRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
                 let nsLine = lineContent as NSString
                 let linkText = nsLine.substring(with: match.range(at: 1))
@@ -3029,7 +3168,7 @@ class EditorController: NSObject, ObservableObject {
         }
         
         // --- 4. Bold: **text** -> *text* ---
-        if let boldRegex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*", options: []) {
+        if let boldRegex = Self.autoformatBoldRegex {
             if let match = boldRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: lineContent.utf16.count)) {
                 let nsLine = lineContent as NSString
                 let innerText = nsLine.substring(with: match.range(at: 1))

@@ -153,9 +153,17 @@ struct ContentView: View {
                 self.reloadToken = UUID()
             }
         }
-        .onChange(of: editorController.sourceCode) { newValue in 
+        .onChange(of: editorController.sourceCode) { newValue in
             editorController.checkUnsavedChanges(currentContent: newValue)
             scheduleCompilation(with: newValue)
+        }
+        .onChange(of: editorController.viewMode) { _ in
+            // Notes don't auto-compile while typing — when the user brings the
+            // preview back on screen, refresh it once so it isn't left stale/blank.
+            if editorController.viewMode != .editorOnly,
+               selectedFile?.pathExtension.lowercased() == "note" {
+                scheduleCompilation()
+            }
         }
 
         .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in saveFile(to: notification.object as? URL) }
@@ -915,7 +923,7 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 if url == self.selectedFile || fileSystem.isNewUnsavedFile {
                     self.editorController.syncSavedContent(self.editorController.sourceCode)
-                    self.scheduleCompilation(with: self.editorController.sourceCode)
+                    self.scheduleCompilation(with: self.editorController.sourceCode, force: true)
                     self.exportPDF(from: url) // Update clean PDF on disk on save
                     self.lastSaved = Date()
                     self.editorController.showStatus("File Saved")
@@ -991,25 +999,31 @@ struct ContentView: View {
         document.printOperation(for: printInfo, scalingMode: .pageScaleToFit, autoRotate: true)?.run()
     }
     
-    func scheduleCompilation(with content: String? = nil) {
+    func scheduleCompilation(with content: String? = nil, force: Bool = false) {
         let isUnsaved = fileSystem.isNewUnsavedFile && selectedFile == nil
         let isCompilable = editorController.isTypstFile || editorController.isMarkdownFile
         guard (selectedFile != nil || isUnsaved), isCompilable else {
             compiler.cleanUp(); currentPDFURL = nil; return
         }
-        
+
         let url = selectedFile ?? FileManager.default.temporaryDirectory.appendingPathComponent("untitled.typ")
-        
+
         workItem?.cancel()
         let currentSource = content ?? editorController.sourceCode
         let isDark = editorController.isPreviewDarkMode
-        let delay = url.pathExtension.lowercased() == "note" ? 3.0 : 0.5
+        let isNote = url.pathExtension.lowercased() == "note"
+        let delay = isNote ? 3.0 : 0.5
+        // Note files: auto-save always runs, but compilation (whole-document
+        // Markdown→Typst sanitization + a typst CLI process) is deliberately NOT
+        // triggered by typing — it runs only on explicit save (`force`) or while the
+        // preview pane is actually visible.
+        let shouldCompile = !isNote || force || editorController.viewMode != .editorOnly
         let newWorkItem = DispatchWorkItem {
             Task {
                 compiler.isDarkMode = isDark
 
                 // Auto-save .note files to prevent data loss
-                if url.pathExtension.lowercased() == "note" {
+                if isNote {
                     do {
                         try await Task.detached {
                             try currentSource.write(to: url, atomically: true, encoding: .utf8)
@@ -1023,6 +1037,7 @@ struct ContentView: View {
                     }
                 }
 
+                guard shouldCompile else { return }
                 await compiler.updateContent(source: currentSource, fileURL: url)
             }
         }

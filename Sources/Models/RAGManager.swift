@@ -400,7 +400,8 @@ class RAGManager: ObservableObject {
             
             let plaintextExtensions = ["typ", "md", "bib", "txt", "csv", "yaml", "yml", "note"]
             if plaintextExtensions.contains(ext) {
-                if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                if let data = try? Data(contentsOf: fileURL) {
+                    let content = TextFileEncoding.decode(data).text
                     extractedTextChunks = content.components(separatedBy: "\n\n")
                         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { $0.count > 50 }

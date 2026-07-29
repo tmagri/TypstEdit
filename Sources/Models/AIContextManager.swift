@@ -78,7 +78,8 @@ class AIContextManager {
         
         let candidates = files.filter { $0.pathExtension == "typ" && $0 != currentURL }.prefix(3)
         for file in candidates {
-            if let content = try? String(contentsOf: file, encoding: .utf8) {
+            if let data = try? Data(contentsOf: file) {
+                let content = TextFileEncoding.decode(data).text
                 let snippet = String(content.prefix(300)) // First 300 chars
                 result += "--- File: \(file.lastPathComponent) ---\n"
                 result += snippet + (content.count > 300 ? "..." : "") + "\n\n"

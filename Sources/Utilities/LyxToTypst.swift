@@ -653,18 +653,15 @@ class LyxToTypstConverter {
             
             try? FileManager.default.removeItem(at: tempGzip)
             
-            if process.terminationStatus == 0, let content = String(data: decompressedData, encoding: .utf8) ?? String(data: decompressedData, encoding: .isoLatin1) {
-                return content
+            if process.terminationStatus == 0 {
+                return TextFileEncoding.decode(decompressedData).text
             }
         }
-        
-        // Fallback to normal string loading with encoding detection
-        var encoding: String.Encoding = .utf8
-        do {
-            return try String(contentsOf: url, usedEncoding: &encoding)
-        } catch {
-            return try String(contentsOf: url, encoding: .isoLatin1)
-        }
+
+        // Decode with automatic encoding detection (BOM sniffing → strict UTF-8 →
+        // BOM-less UTF-16 heuristic → Windows-1252 → Latin-1). Never throws on
+        // encoding; only file-access errors propagate.
+        return TextFileEncoding.decode(data).text
     }
 
     private func parseInset(type: String) {
