@@ -297,24 +297,28 @@ class EditorController: NSObject, ObservableObject {
             }
             return event
         }
-        // Listen for Cmd+V to paste with conversion, or Cmd+Shift+V / Cmd+Option+Shift+V for plain text
+        // Listen for Cmd+V to paste with conversion, Cmd+Shift+V / Cmd+Option+Shift+V
+        // for plain text, and Cmd+Option+V to force-convert Markdown to Typst
         pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
-            
+
             if event.charactersIgnoringModifiers?.lowercased() == "v" {
                 let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 let isCmdV = flags == .command
                 let isCmdShiftV = flags == [.command, .shift]
                 let isCmdOptShiftV = flags == [.command, .option, .shift]
-                
-                if isCmdV || isCmdShiftV || isCmdOptShiftV {
+                let isCmdOptV = flags == [.command, .option]
+
+                if isCmdV || isCmdShiftV || isCmdOptShiftV || isCmdOptV {
                     // ONLY intercept if the code editor is actively focused
                     // (We don't want to hijack pastes in the Find panel or Rename alerts)
                     if let textView = self.textViewController?.textView,
                        NSApp.keyWindow?.firstResponder == textView {
-                        
+
                         if isCmdShiftV || isCmdOptShiftV {
                             self.pasteAsPlainText()
+                        } else if isCmdOptV {
+                            self.pasteForceConvertToTypst()
                         } else {
                             self.pasteSelection()
                         }
@@ -336,7 +340,7 @@ class EditorController: NSObject, ObservableObject {
             MainActor.assumeIsolated {
                 guard let self = self else { return false }
                 if textView === self.textViewController?.textView {
-                    return self.performPaste(into: textView, plain: false)
+                    return self.performPaste(into: textView, mode: .smart)
                 }
                 // Stale/racing text view: plain single-insert directly into this view.
                 // Never fall through to the library default's per-selection insertion.
@@ -937,10 +941,10 @@ class EditorController: NSObject, ObservableObject {
     func pasteSelection() {
         if forwardActionIfNotFirstResponder(#selector(NSText.paste(_:))) { return }
         if let textView = textViewController?.textView {
-            performPaste(into: textView, plain: false)
+            performPaste(into: textView, mode: .smart)
         } else {
             // Fallback when no live text view is available (e.g. unit tests)
-            pasteViaModel(plain: false)
+            pasteViaModel(mode: .smart)
         }
     }
 
@@ -952,6 +956,17 @@ class EditorController: NSObject, ObservableObject {
     // same paste racing with itself and is dropped. Genuine key-repeat pastes advance
     // the cursor on every fire, so their locations differ and are not affected.
     private var lastPaste: (changeCount: Int, location: Int, time: CFAbsoluteTime)?
+
+    /// Which Markdown→Typst conversion policy a paste applies.
+    enum PasteConversionMode {
+        /// Convert unless the clipboard already looks like Typst (default, Cmd+V).
+        case smart
+        /// Insert verbatim, never convert (Cmd+Shift+V).
+        case plain
+        /// Always run the Markdown→Typst conversion, ignoring the "looks like
+        /// Typst" skip heuristic (Cmd+Option+V).
+        case forceTypst
+    }
 
     /// The single paste implementation. Every route — the Cmd+V event monitor, the Edit
     /// menu, the context menu, and the TextView's own responder-chain `paste:` (via
@@ -965,7 +980,7 @@ class EditorController: NSObject, ObservableObject {
     /// multi-line column selection was active.
     /// - Returns: `true` if the paste was handled (consumed by the library hook).
     @discardableResult
-    func performPaste(into textView: TextView, plain: Bool) -> Bool {
+    func performPaste(into textView: TextView, mode: PasteConversionMode) -> Bool {
         let pasteboard = NSPasteboard.general
 
         // 1. Prefer text data (with optional Markdown→Typst conversion).
@@ -998,16 +1013,7 @@ class EditorController: NSObject, ObservableObject {
             // Doing this async previously caused the captured `selectedRange` to become
             // stale by the time the main-thread callback fired, inserting at the wrong
             // position. The conversion is regex-based and fast enough to run inline.
-            var textToInsert = text
-            if !plain, currentFileType == .typst {
-                // Fast heuristic to skip content that is already Typst
-                let looksLikeTypst = text.contains("#image") || text.contains("#link")
-                    || text.contains("#align") || text.contains("#box")
-                    || text.contains("#rect") || text.hasPrefix("#") || text.hasPrefix("=")
-                if !looksLikeTypst {
-                    textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
-                }
-            }
+            let textToInsert = applyPasteConversion(text, mode: mode)
 
             // Route through the text view's own replaceCharacters so the CEUndoManager
             // correctly records the mutation and undo works. Using insertText/setText for
@@ -1028,35 +1034,54 @@ class EditorController: NSObject, ObservableObject {
             return true
         }
 
-        // 2. Fall back to image data on the clipboard.
-        if plain {
-            return pasteImageAsOCR(from: pasteboard)
+        // 2. Fall back to image data on the clipboard. Plain paste runs OCR and
+        //    inserts the raw text; force-convert runs OCR and force-converts any
+        //    Markdown in the recognized text to Typst; smart paste saves the image
+        //    next to the document and inserts an #image() reference.
+        switch mode {
+        case .plain:
+            return pasteImageAsOCR(from: pasteboard, forceConvert: false)
+        case .forceTypst:
+            return pasteImageAsOCR(from: pasteboard, forceConvert: true)
+        case .smart:
+            return pasteImageAsFile(from: pasteboard)
         }
-        return pasteImageAsFile(from: pasteboard)
     }
 
     /// Model-only paste used when no live text view exists (e.g. unit tests).
-    private func pasteViaModel(plain: Bool) {
+    private func pasteViaModel(mode: PasteConversionMode) {
         let pasteboard = NSPasteboard.general
         if let text = pasteboard.string(forType: .string) {
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 showStatus("Nothing to paste")
                 return
             }
-            var textToInsert = text
-            if !plain, currentFileType == .typst {
-                let looksLikeTypst = text.contains("#image") || text.contains("#link")
-                    || text.contains("#align") || text.contains("#box")
-                    || text.contains("#rect") || text.hasPrefix("#") || text.hasPrefix("=")
-                if !looksLikeTypst {
-                    textToInsert = AICompletionService.shared.sanitizeMarkdownToTypst(textToInsert)
-                }
-            }
-            insertText(textToInsert, replacementRange: selectedRange)
-        } else if plain {
-            _ = pasteImageAsOCR(from: pasteboard)
+            insertText(applyPasteConversion(text, mode: mode), replacementRange: selectedRange)
         } else {
-            _ = pasteImageAsFile(from: pasteboard)
+            switch mode {
+            case .plain: _ = pasteImageAsOCR(from: pasteboard, forceConvert: false)
+            case .forceTypst: _ = pasteImageAsOCR(from: pasteboard, forceConvert: true)
+            case .smart: _ = pasteImageAsFile(from: pasteboard)
+            }
+        }
+    }
+
+    /// Applies the paste's conversion mode to clipboard text. Only converts while
+    /// editing a Typst file — other file types always get the verbatim text.
+    private func applyPasteConversion(_ text: String, mode: PasteConversionMode) -> String {
+        guard currentFileType == .typst else { return text }
+        switch mode {
+        case .plain:
+            return text
+        case .forceTypst:
+            // Force convert: always run the conversion, no "looks like Typst" skip.
+            return AICompletionService.shared.sanitizeMarkdownToTypst(text)
+        case .smart:
+            // Fast heuristic to skip content that is already Typst
+            let looksLikeTypst = text.contains("#image") || text.contains("#link")
+                || text.contains("#align") || text.contains("#box")
+                || text.contains("#rect") || text.hasPrefix("#") || text.hasPrefix("=")
+            return looksLikeTypst ? text : AICompletionService.shared.sanitizeMarkdownToTypst(text)
         }
     }
 
@@ -1145,17 +1170,33 @@ class EditorController: NSObject, ObservableObject {
     func pasteAsPlainText() {
         if forwardActionIfNotFirstResponder(Selector("pasteAsPlainText:")) { return }
         if let textView = textViewController?.textView {
-            performPaste(into: textView, plain: true)
+            performPaste(into: textView, mode: .plain)
         } else {
-            pasteViaModel(plain: true)
+            pasteViaModel(mode: .plain)
+        }
+    }
+
+    /// Paste the clipboard with forced Markdown→Typst conversion: any detected
+    /// Markdown syntax is converted regardless of the "already looks like Typst"
+    /// heuristic that the default paste uses to skip conversion. If the clipboard
+    /// holds an image, Vision OCR extracts its text and any Markdown in the
+    /// recognized text is likewise force-converted.
+    func pasteForceConvertToTypst() {
+        if forwardActionIfNotFirstResponder(#selector(NSText.paste(_:))) { return }
+        if let textView = textViewController?.textView {
+            performPaste(into: textView, mode: .forceTypst)
+        } else {
+            pasteViaModel(mode: .forceTypst)
         }
     }
 
     /// Paste clipboard image data by running Vision OCR and inserting the
     /// recognized text at the cursor.
+    /// - Parameter forceConvert: when `true`, any Markdown detected in the
+    ///   recognized text is force-converted to Typst before insertion.
     /// - Returns: `true` if the clipboard contained image data (handled).
     @discardableResult
-    private func pasteImageAsOCR(from pasteboard: NSPasteboard) -> Bool {
+    private func pasteImageAsOCR(from pasteboard: NSPasteboard, forceConvert: Bool) -> Bool {
         // Critically: read the raw bytes eagerly here on the MAIN thread using
         // data(forType:) — NOT NSImage(pasteboard:), which uses a lazy data
         // provider that can IPC back to the source app and trigger a
@@ -1201,8 +1242,16 @@ class EditorController: NSObject, ObservableObject {
                     if recognized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         self.showStatus("OCR found no text in the image")
                     } else {
-                        self.insertText(recognized)
-                        self.showStatus("Pasted \(lines.count) line(s) via OCR")
+                        // Force-convert mode: any Markdown in the recognized text is
+                        // converted to Typst (no "looks like Typst" skip). No-op for
+                        // non-Typst files and for text without Markdown syntax.
+                        let output = forceConvert
+                            ? self.applyPasteConversion(recognized, mode: .forceTypst)
+                            : recognized
+                        self.insertText(output)
+                        self.showStatus(output != recognized
+                            ? "Pasted \(lines.count) line(s) via OCR, converted to Typst"
+                            : "Pasted \(lines.count) line(s) via OCR")
                     }
                 }
             }
@@ -3721,6 +3770,11 @@ class EditorController: NSObject, ObservableObject {
         pastePlainItem.target = self
         pastePlainItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
         baseMenu.addItem(pastePlainItem)
+
+        let pasteConvertItem = NSMenuItem(title: "Paste and Convert to Typst", action: #selector(contextMenuPasteForceTypst(_:)), keyEquivalent: "")
+        pasteConvertItem.target = self
+        pasteConvertItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
+        baseMenu.addItem(pasteConvertItem)
         
         // AI Refine / Grammar — only when the user has selected text.
         if selectedRange.length > 0 {
@@ -3811,6 +3865,10 @@ class EditorController: NSObject, ObservableObject {
     
     @objc func contextMenuPasteAsPlainText(_ sender: NSMenuItem) {
         pasteAsPlainText()
+    }
+
+    @objc func contextMenuPasteForceTypst(_ sender: NSMenuItem) {
+        pasteForceConvertToTypst()
     }
     
     @objc func applyStaticFix(_ sender: NSMenuItem) {

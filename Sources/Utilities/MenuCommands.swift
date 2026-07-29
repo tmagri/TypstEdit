@@ -149,6 +149,11 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "pasteAsPlainText")
             }
             .keyboardShortcut("v", modifiers: [.command, .shift])
+
+            Button("Paste and Convert to Typst") {
+                NotificationCenter.default.post(name: .menuCommand, object: "pasteForceTypst")
+            }
+            .keyboardShortcut("v", modifiers: [.command, .option])
             
             Button("Delete") {
                 NotificationCenter.default.post(name: .menuCommand, object: "delete")

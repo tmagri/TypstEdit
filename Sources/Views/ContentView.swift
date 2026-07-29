@@ -1075,6 +1075,7 @@ struct ContentView: View {
         case "copy": editorController.copySelection()
         case "paste": editorController.pasteSelection()
         case "pasteAsPlainText": editorController.pasteAsPlainText()
+        case "pasteForceTypst": editorController.pasteForceConvertToTypst()
 
         case "delete": editorController.deleteSelection()
         case "goToLine": editorController.showGoToLineAlert = true
