@@ -151,18 +151,29 @@ struct ContentView: View {
             if let url = notification.object as? URL {
                 self.currentPDFURL = url
                 self.reloadToken = UUID()
+                // A fresh PDF just landed — the preview is no longer stale.
+                if self.editorController.isNoteFile {
+                    self.editorController.previewStale = false
+                }
             }
         }
         .onChange(of: editorController.sourceCode) { newValue in
             editorController.checkUnsavedChanges(currentContent: newValue)
+            // Editing a note makes the existing PDF preview stale. It is refreshed
+            // only on explicit Save, so just flag it here for the status badge.
+            if editorController.isNoteFile && editorController.hasUnsavedChanges {
+                editorController.previewStale = true
+            }
             scheduleCompilation(with: newValue)
         }
         .onChange(of: editorController.viewMode) { _ in
-            // Notes don't auto-compile while typing — when the user brings the
-            // preview back on screen, refresh it once so it isn't left stale/blank.
+            // Notes no longer auto-compile while typing. When the user first reveals
+            // the preview pane, generate the preview exactly once (if we don't already
+            // have one). After that, the stale badge guides them to Save to refresh.
             if editorController.viewMode != .editorOnly,
-               selectedFile?.pathExtension.lowercased() == "note" {
-                scheduleCompilation()
+               editorController.isNoteFile,
+               currentPDFURL == nil {
+                scheduleCompilation(force: true)
             }
         }
 
@@ -430,6 +441,34 @@ struct ContentView: View {
                     .padding()
                     .background(.ultraThinMaterial)
                     .cornerRadius(10)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            // Notes only refresh their PDF on explicit Save. While the user is still
+            // editing, surface a low-profile badge on the preview so it's obvious the
+            // rendered PDF is behind the text. Tapping it save+recompiles immediately.
+            if editorController.isNoteFile,
+               editorController.previewStale,
+               !compiler.isCompiling,
+               currentPDFURL != nil {
+                Button(action: { scheduleCompilation(force: true) }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Stale preview — tap to update")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.white.opacity(0.95))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.orange.opacity(0.9))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .help("Notes update their preview on Save. Click to save and rebuild now.")
+                .padding(10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -832,6 +871,8 @@ struct ContentView: View {
                     RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
                     
                     self.editorController.syncSavedContent(content)
+                    // Freshly loaded content has an up-to-date (soon-to-be-built) preview.
+                    self.editorController.previewStale = false
                     print("[DEBUG] loadFile: Updating sourceCode")
                     self.editorController.sourceCode = content
                     // Reset undo manager/state by creating new state?
@@ -1013,11 +1054,13 @@ struct ContentView: View {
         let isDark = editorController.isPreviewDarkMode
         let isNote = url.pathExtension.lowercased() == "note"
         let delay = isNote ? 3.0 : 0.5
-        // Note files: auto-save always runs, but compilation (whole-document
-        // Markdown→Typst sanitization + a typst CLI process) is deliberately NOT
-        // triggered by typing — it runs only on explicit save (`force`) or while the
-        // preview pane is actually visible.
-        let shouldCompile = !isNote || force || editorController.viewMode != .editorOnly
+        // Note files: auto-save always runs (prevents data loss), but compilation
+        // (the whole-document Markdown→Typst sanitization + a typst CLI process + a
+        // PDF snapshot) is deliberately NOT triggered by typing or by merely showing
+        // the preview pane — that is what grinds large notes to a halt on memory-
+        // constrained machines. The preview is regenerated ONLY on an explicit Save
+        // (`force`). While stale, the preview pane shows a "tap to update" badge.
+        let shouldCompile = !isNote || force
         let newWorkItem = DispatchWorkItem {
             Task {
                 compiler.isDarkMode = isDark

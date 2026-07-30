@@ -692,6 +692,17 @@ class EditorController: NSObject, ObservableObject {
         currentFileType == .markdown
     }
 
+    /// `.note` files share the Typst compiler pipeline but are treated as notes:
+    /// Markdown-with-Typst-overlay. Used to gate expensive auto-compile behavior.
+    var isNoteFile: Bool {
+        currentFileURL?.pathExtension.lowercased() == "note"
+    }
+
+    /// True when the PDF preview is out of date relative to the editor's text.
+    /// Only meaningful for `.note` files, whose preview is regenerated solely on
+    /// explicit Save (not on every edit/autosave) to keep large documents responsive.
+    @Published var previewStale: Bool = false
+
     /// The `CodeLanguage` used by the source editor for syntax highlighting.
     /// `.note` files use a Markdown grammar with a Typst overlay: Typst constructs are
     /// highlighted as Typst and win on overlap, while Markdown fills in everything else.
