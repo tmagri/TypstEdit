@@ -41,3 +41,14 @@
   (raw_blck)
   (raw_span)
 ] @text.literal
+
+; ESCAPES & LINE BREAKS
+; An escaped backslash (\\) is a literal backslash character -> plain text.
+; Declared BEFORE the general operator rule so its (lower) capture index wins
+; precedence for the same node range.
+(escape) @punctuation.delimiter
+(#match? @punctuation.delimiter "^\\\\\\\\$")
+; Every other escape sequence (\n, \t, \u{1F600}, ...) and a bare line-break
+; backslash are operators -> styled distinctly, never confused with plain text.
+(escape) @operator
+(linebreak) @operator

@@ -44,6 +44,7 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
     case textStrike
     case punctuationSpecial
     case punctuationDelimiter
+    case `operator`
 
     var alternate: CaptureName {
         switch self {
@@ -125,6 +126,8 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
             return .punctuationSpecial
         case "punctuation.delimiter":
             return .punctuationDelimiter
+        case "operator":
+            return .`operator`
         default:
             return nil
         }
@@ -197,6 +200,8 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
             return "punctuationSpecial"
         case .punctuationDelimiter:
             return "punctuationDelimiter"
+        case .`operator`:
+            return "operator"
         }
     }
 }

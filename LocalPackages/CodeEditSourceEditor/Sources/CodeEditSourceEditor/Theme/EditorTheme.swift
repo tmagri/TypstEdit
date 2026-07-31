@@ -48,6 +48,7 @@ public struct EditorTheme: Equatable {
     public var markupList: Attribute
     public var markupQuote: Attribute
     public var markupLink: Attribute
+    public var operators: Attribute
 
     public init(
         text: Attribute,
@@ -72,7 +73,8 @@ public struct EditorTheme: Equatable {
         markupStrikethrough: Attribute = .init(color: .textColor),
         markupList: Attribute = .init(color: .textColor),
         markupQuote: Attribute = .init(color: .textColor, italic: true),
-        markupLink: Attribute = .init(color: .linkColor)
+        markupLink: Attribute = .init(color: .linkColor),
+        operators: Attribute = .init(color: .textColor)
     ) {
         self.text = text
         self.insertionPoint = insertionPoint
@@ -97,6 +99,7 @@ public struct EditorTheme: Equatable {
         self.markupList = markupList
         self.markupQuote = markupQuote
         self.markupLink = markupLink
+        self.operators = operators
     }
 
     /// Maps a capture type to the attributes for that capture determined by the theme.
@@ -124,6 +127,7 @@ public struct EditorTheme: Equatable {
         case .textList: return markupList
         case .textStrike: return markupStrikethrough
         case .punctuationSpecial, .punctuationDelimiter: return text
+        case .`operator`: return operators
         default: return text
         }
     }

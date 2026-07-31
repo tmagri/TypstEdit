@@ -639,7 +639,8 @@ class EditorController: NSObject, ObservableObject {
             markupStrikethrough: attr(gray),
             markupList: attr(orange),
             markupQuote: attr(green, italic: true),
-            markupLink: attr(teal)
+            markupLink: attr(teal),
+            operators: attr(orange)
         )
         _customTheme = theme
         _customThemeIsDark = isDark
