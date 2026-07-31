@@ -23,6 +23,7 @@ struct ContentView: View {
     
     // Debounce timer
     @State private var workItem: DispatchWorkItem?
+    @State private var pendingCompilationIsForced: Bool = false
     
     @State private var reloadToken: UUID = UUID()
     @State private var lastSaved: Date?
@@ -880,9 +881,7 @@ struct ContentView: View {
                     // Better to reset state for new file
                     self.editorController.editorState = .init()
                     
-
-                    
-                    self.scheduleCompilation(with: content)
+                    self.scheduleCompilation(with: content, force: true)
                     
                     // Check for recovery
                     if AutoRecoveryManager.shared.hasRecovery(for: url) {
@@ -1049,6 +1048,9 @@ struct ContentView: View {
 
         let url = selectedFile ?? FileManager.default.temporaryDirectory.appendingPathComponent("untitled.typ")
 
+        let effectiveForce = force || (workItem != nil && pendingCompilationIsForced)
+        pendingCompilationIsForced = effectiveForce
+
         workItem?.cancel()
         let currentSource = content ?? editorController.sourceCode
         let isDark = editorController.isPreviewDarkMode
@@ -1060,8 +1062,9 @@ struct ContentView: View {
         // the preview pane — that is what grinds large notes to a halt on memory-
         // constrained machines. The preview is regenerated ONLY on an explicit Save
         // (`force`). While stale, the preview pane shows a "tap to update" badge.
-        let shouldCompile = !isNote || force
+        let shouldCompile = !isNote || effectiveForce
         let newWorkItem = DispatchWorkItem {
+            self.pendingCompilationIsForced = false
             Task {
                 compiler.isDarkMode = isDark
 

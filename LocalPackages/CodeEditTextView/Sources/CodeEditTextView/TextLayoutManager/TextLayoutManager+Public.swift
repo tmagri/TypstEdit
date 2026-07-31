@@ -124,7 +124,10 @@ extension TextLayoutManager {
             // If this isn't the last fragment, we want to place the cursor at the offset right before the break
             // index, to appear on the end of *this* fragment.
             let string = (textStorage?.string as? NSString)
-            return string?.rangeOfComposedCharacterSequence(at: endPosition - 1).location
+            if let string = string, endPosition > 0, endPosition <= string.length {
+                return string.rangeOfComposedCharacterSequence(at: endPosition - 1).location
+            }
+            return endPosition - 1
         } else {
             // Otherwise, return the end of the fragment (and the end of the line).
             return endPosition
@@ -184,7 +187,11 @@ extension TextLayoutManager {
         let realRange = if textStorage?.length == 0 {
             NSRange(location: offset, length: 0)
         } else if let string = textStorage?.string as? NSString {
-            string.rangeOfComposedCharacterSequence(at: offset)
+            if offset >= string.length {
+                NSRange(location: offset, length: 0)
+            } else {
+                string.rangeOfComposedCharacterSequence(at: offset)
+            }
         } else {
             NSRange(location: offset, length: 0)
         }
@@ -224,8 +231,11 @@ extension TextLayoutManager {
         guard let textStorage = (textStorage?.string as? NSString) else { return [] }
 
         // Don't make rects in between characters
-        let realRangeStart = textStorage.rangeOfComposedCharacterSequence(at: range.lowerBound)
-        let realRangeEnd = textStorage.rangeOfComposedCharacterSequence(at: range.upperBound - 1)
+        let safeLowerBound = max(0, min(range.lowerBound, textStorage.length - 1))
+        let safeUpperBound = max(0, min(range.upperBound - 1, textStorage.length - 1))
+        
+        let realRangeStart = textStorage.length > 0 ? textStorage.rangeOfComposedCharacterSequence(at: safeLowerBound) : NSRange(location: range.lowerBound, length: 0)
+        let realRangeEnd = textStorage.length > 0 ? textStorage.rangeOfComposedCharacterSequence(at: safeUpperBound) : NSRange(location: range.upperBound, length: 0)
 
         // Fragments are relative to the line
         let relativeRange = NSRange(
