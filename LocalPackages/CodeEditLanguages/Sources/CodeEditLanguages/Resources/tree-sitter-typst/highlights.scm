@@ -1,9 +1,6 @@
 ; HEADINGS (Blue Bold)
 (heading) @type
 
-; MATH (Yellow)
-(math) @number
-"$" @number
 
 ; MARKUP (Purple + Bold/Italic)
 (strong) @text.strong
@@ -52,3 +49,23 @@
 ; backslash are operators -> styled distinctly, never confused with plain text.
 (escape) @operator
 (linebreak) @operator
+
+
+
+; MATH (Yellow)
+; Placed at the very bottom so it overrides any prior general matches (like call idents).
+(math) @number
+"$" @number
+(formula) @number
+(letter) @number
+(symbol) @number
+(fraction) @number
+(attach) @number
+(fac) @number
+(align) @number
+(formula (ident) @number)
+(formula (call item: (ident) @number))
+(group ["(" ")" "[" "]" "{" "}"] @number)
+(apply ["(" ")" "[" "]" "{" "}"] @number)
+"/" @number
+"^" @number
