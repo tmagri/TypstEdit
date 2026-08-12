@@ -2144,108 +2144,90 @@ class EditorController: NSObject, ObservableObject {
         toggleListMode(.description)
     }
     
-    private func toggleListMode(_ type: ListType) {
-        let range = selectedRange
-        guard Range(range, in: sourceCode) != nil else { return }
-        
-        let targetPrefix = type.defaultPrefix(isMarkdown: isMarkdownFile)
+    /// Pure text transformation for toggling list mode on a block of text.
+    /// Handles multiline selection, single-line with content, and list type conversion.
+    /// Returns the original text unchanged if no effective lines are found.
+    nonisolated static func transformListToggle(
+        text: String,
+        type: ListType,
+        isMarkdown: Bool
+    ) -> String {
+        let targetPrefix = type.defaultPrefix(isMarkdown: isMarkdown)
         let targetRegex = try! NSRegularExpression(pattern: type.targetPattern, options: [])
         let allListRegex = try! NSRegularExpression(pattern: #"^([-*]|\+|\d+\.|/)\s+"#, options: [])
-        
-        let nsText = sourceCode as NSString
-        let lineRange = nsText.lineRange(for: range)
-        let lineContent = nsText.substring(with: lineRange)
-        
-        let hadTrailingNewline = lineContent.hasSuffix("\n")
-        let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
-        let trimmed = lineContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        if isSingleLineRepresentation {
-            let nsContent = lineContent as NSString
-            if let match = allListRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: nsContent.length)) {
-                let existingPrefix = nsContent.substring(with: match.range)
-                let textAfter = nsContent.substring(from: match.range.length).trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                if textAfter.isEmpty {
-                    if targetRegex.firstMatch(in: existingPrefix, options: [], range: NSRange(location: 0, length: existingPrefix.utf16.count)) != nil {
-                        let newText = hadTrailingNewline ? "\n" : ""
-                        let newCursor = NSRange(location: lineRange.location, length: 0)
-                        insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
-                    } else {
-                        let newText = targetPrefix + (hadTrailingNewline ? "\n" : "")
-                        let newCursor = NSRange(location: lineRange.location + targetPrefix.utf16.count, length: 0)
-                        insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
-                    }
-                    return
-                }
-            } else if trimmed.isEmpty {
-                let newText = targetPrefix + (hadTrailingNewline ? "\n" : "")
-                let newCursor = NSRange(location: lineRange.location + targetPrefix.utf16.count, length: 0)
-                insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
-                return
-            }
-        }
-        
-        // --- Multiline selection or non-empty line ---
-        var lineStrings = lineContent.components(separatedBy: .newlines)
+        let wsRegex = try! NSRegularExpression(pattern: #"^\s+"#, options: [])
+
+        let hadTrailingNewline = text.hasSuffix("\n")
+        var lineStrings = text.components(separatedBy: .newlines)
         if hadTrailingNewline { lineStrings.removeLast() }
-        
+
         let headingPattern = #"^(=+|#+)\s"#
-        guard let headingRegex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
-        
+        guard let headingRegex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return text }
+
         struct LineInfo {
             let headingPrefix: String
+            let leadingWhitespace: String
             let existingListPrefix: String?
             let contentAfterListPrefix: String
             let isTargetPrefix: Bool
             let isBlank: Bool
         }
-        
+
         var infos: [LineInfo] = []
         for line in lineStrings {
             var headingPrefix = ""
+            var leadingWS = ""
             var remaining = line
-            
+
             if let match = headingRegex.firstMatch(in: remaining, options: [], range: NSRange(location: 0, length: remaining.utf16.count)) {
                 headingPrefix = (remaining as NSString).substring(with: match.range)
                 remaining = (remaining as NSString).substring(from: match.range.length)
             }
-            
+
+            let nsRemainingBeforeWS = remaining as NSString
+            if let wsMatch = wsRegex.firstMatch(in: remaining, options: [], range: NSRange(location: 0, length: nsRemainingBeforeWS.length)) {
+                leadingWS = nsRemainingBeforeWS.substring(with: wsMatch.range)
+                remaining = nsRemainingBeforeWS.substring(from: wsMatch.range.length)
+            }
+
             var existingPrefix: String? = nil
             var isTarget = false
             let nsRemaining = remaining as NSString
             if let match = allListRegex.firstMatch(in: remaining, options: [], range: NSRange(location: 0, length: nsRemaining.length)) {
                 existingPrefix = nsRemaining.substring(with: match.range)
                 remaining = nsRemaining.substring(from: match.range.length)
-                
+
                 if targetRegex.firstMatch(in: existingPrefix!, options: [], range: NSRange(location: 0, length: existingPrefix!.utf16.count)) != nil {
                     isTarget = true
                 }
             }
-            
+
             let isBlank = remaining.trimmingCharacters(in: .whitespaces).isEmpty
             infos.append(LineInfo(
                 headingPrefix: headingPrefix,
+                leadingWhitespace: leadingWS,
                 existingListPrefix: existingPrefix,
                 contentAfterListPrefix: remaining,
                 isTargetPrefix: isTarget,
                 isBlank: isBlank
             ))
         }
-        
-        let nonBlankInfos = infos.filter { !$0.isBlank }
-        if nonBlankInfos.isEmpty { return }
-        
-        let allHaveTarget = nonBlankInfos.allSatisfy { $0.isTargetPrefix }
-        
+
+        // Lines with content OR an existing list prefix participate in toggle decisions.
+        // Truly blank lines (no prefix, no content) are skipped.
+        let effectiveInfos = infos.filter { !$0.isBlank || $0.existingListPrefix != nil }
+        if effectiveInfos.isEmpty { return text }
+
+        let allHaveTarget = effectiveInfos.allSatisfy { $0.isTargetPrefix }
+
         var newLines: [String] = []
         for info in infos {
-            if info.isBlank {
-                newLines.append(info.headingPrefix + (info.existingListPrefix ?? "") + info.contentAfterListPrefix)
+            if info.isBlank && info.existingListPrefix == nil {
+                newLines.append(info.headingPrefix + info.leadingWhitespace + info.contentAfterListPrefix)
                 continue
             }
-            
-            var newLine = info.headingPrefix
+
+            var newLine = info.headingPrefix + info.leadingWhitespace
             if allHaveTarget {
                 newLine += info.contentAfterListPrefix
             } else {
@@ -2253,11 +2235,76 @@ class EditorController: NSObject, ObservableObject {
             }
             newLines.append(newLine)
         }
-        
+
         var replacement = newLines.joined(separator: "\n")
         if hadTrailingNewline { replacement += "\n" }
-        
+        return replacement
+    }
+
+    private func toggleListMode(_ type: ListType) {
+        let range = selectedRange
+        guard Range(range, in: sourceCode) != nil else { return }
+
+        let targetPrefix = type.defaultPrefix(isMarkdown: isMarkdownFile)
+        let targetRegex = try! NSRegularExpression(pattern: type.targetPattern, options: [])
+        let allListRegex = try! NSRegularExpression(pattern: #"^([-*]|\+|\d+\.|/)\s+"#, options: [])
+        let wsRegex = try! NSRegularExpression(pattern: #"^\s+"#, options: [])
+
+        let nsText = sourceCode as NSString
+        let lineRange = nsText.lineRange(for: range)
+        let lineContent = nsText.substring(with: lineRange)
+
+        let hadTrailingNewline = lineContent.hasSuffix("\n")
+        let isSingleLineRepresentation = !lineContent.dropLast(hadTrailingNewline ? 1 : 0).contains("\n")
+        let trimmed = lineContent.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Single-line cursor-positioning cases: empty line or prefix-only line.
+        // Everything else (multiline, single-line with content) delegates to
+        // transformListToggle which handles conversion, toggle-off, and indentation.
+        if isSingleLineRepresentation {
+            let nsContent = lineContent as NSString
+
+            var leadingWS = ""
+            if let wsMatch = wsRegex.firstMatch(in: lineContent, options: [], range: NSRange(location: 0, length: nsContent.length)) {
+                leadingWS = nsContent.substring(with: wsMatch.range)
+            }
+            let afterWS = nsContent.substring(from: (leadingWS as NSString).length)
+            let nsAfterWS = afterWS as NSString
+
+            if let match = allListRegex.firstMatch(in: afterWS, options: [], range: NSRange(location: 0, length: nsAfterWS.length)) {
+                let existingPrefix = nsAfterWS.substring(with: match.range)
+                let textAfter = nsAfterWS.substring(from: match.range.length).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if textAfter.isEmpty {
+                    let wsLen = (leadingWS as NSString).length
+                    if targetRegex.firstMatch(in: existingPrefix, options: [], range: NSRange(location: 0, length: existingPrefix.utf16.count)) != nil {
+                        let newText = leadingWS + (hadTrailingNewline ? "\n" : "")
+                        let newCursor = NSRange(location: lineRange.location + wsLen, length: 0)
+                        insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+                    } else {
+                        let newText = leadingWS + targetPrefix + (hadTrailingNewline ? "\n" : "")
+                        let newCursor = NSRange(location: lineRange.location + wsLen + targetPrefix.utf16.count, length: 0)
+                        insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+                    }
+                    updateFormattingState()
+                    return
+                }
+            } else if trimmed.isEmpty {
+                let newText = targetPrefix + (hadTrailingNewline ? "\n" : "")
+                let newCursor = NSRange(location: lineRange.location + targetPrefix.utf16.count, length: 0)
+                insertText(newText, replacementRange: lineRange, newCursorRange: newCursor)
+                updateFormattingState()
+                return
+            }
+        }
+
+        let replacement = Self.transformListToggle(
+            text: lineContent,
+            type: type,
+            isMarkdown: isMarkdownFile
+        )
         insertText(replacement, replacementRange: lineRange)
+        updateFormattingState()
     }
 
     func showFindPanel() {

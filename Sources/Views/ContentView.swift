@@ -1141,6 +1141,7 @@ struct ContentView: View {
         // Lists & Code
         case "toggleBulletList": editorController.toggleBulletList()
         case "toggleNumberList": editorController.toggleNumberList()
+        case "toggleDescriptionList": editorController.toggleDescriptionList()
         case "toggleCode": editorController.toggleCode()
         case "toggleCodeBlock": editorController.toggleCodeBlock()
         case "toggleQuote": editorController.toggleQuote()
