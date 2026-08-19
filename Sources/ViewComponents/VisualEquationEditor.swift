@@ -90,8 +90,8 @@ struct WebViewWrapper: NSViewRepresentable {
         
         // Helper to find resources whether SPM flattened them or kept the folder
         func getResourceURL(name: String, ext: String) -> URL? {
-            return Bundle.module.url(forResource: name, withExtension: ext) ??
-                   Bundle.module.url(forResource: name, withExtension: ext, subdirectory: "Vendor") ??
+            return ModuleResources.main.url(forResource: name, withExtension: ext) ??
+                   ModuleResources.main.url(forResource: name, withExtension: ext, subdirectory: "Vendor") ??
                    Bundle.main.url(forResource: name, withExtension: ext) ??
                    Bundle.main.url(forResource: name, withExtension: ext, subdirectory: "Vendor")
         }

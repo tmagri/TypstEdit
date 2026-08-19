@@ -69,7 +69,7 @@ public struct CodeLanguage {
     }
 
     /// The bundle's resource URL
-    internal var resourceURL: URL? = Bundle.module.resourceURL
+    internal var resourceURL: URL? = CodeLanguage.packageResourceBundle?.resourceURL
 
     /// A set of aditional identifiers to use for things like shebang matching.
     public let additionalIdentifiers: Set<String>
@@ -181,6 +181,24 @@ public struct CodeLanguage {
 }
 
 extension CodeLanguage: Hashable {
+
+    static let packageResourceBundle: Bundle? = {
+        let name = "CodeEditLanguages_CodeEditLanguages.bundle"
+        let candidates = [
+            Bundle.main.resourceURL,
+            Bundle(for: BundleToken.self).resourceURL,
+            Bundle(for: BundleToken.self).bundleURL.deletingLastPathComponent(),
+            Bundle.main.bundleURL
+        ]
+        for candidate in candidates {
+            if let path = candidate?.appendingPathComponent(name).path,
+               let bundle = Bundle(path: path) {
+                return bundle
+            }
+        }
+        return nil
+    }()
+
     public static func == (lhs: CodeLanguage, rhs: CodeLanguage) -> Bool {
         return lhs.id == rhs.id
     }
@@ -189,6 +207,8 @@ extension CodeLanguage: Hashable {
         hasher.combine(id)
     }
 }
+
+private final class BundleToken {}
 
 public enum DocumentationComments: Hashable {
     public static func == (lhs: DocumentationComments, rhs: DocumentationComments) -> Bool {

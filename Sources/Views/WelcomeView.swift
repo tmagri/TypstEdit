@@ -20,7 +20,7 @@ struct WelcomeView: View {
         }
         
         // Try looking in the module bundle specifically (SPM)
-        if let path = Bundle.module.path(forResource: "AppIcon", ofType: "png") {
+        if let path = ModuleResources.main.path(forResource: "AppIcon", ofType: "png") {
             if let image = NSImage(contentsOfFile: path) {
                 print("[DEBUG] WelcomeView: Loaded AppIcon via Bundle.module.path (Root)")
                 return Image(nsImage: image)
@@ -28,7 +28,7 @@ struct WelcomeView: View {
         }
         
         // Try looking in the bundle by path (Loose file in Media.xcassets/AppIcon.imageset if not compiled)
-        if let path = Bundle.module.path(forResource: "AppIcon", ofType: "png", inDirectory: "Media.xcassets/AppIcon.imageset") {
+        if let path = ModuleResources.main.path(forResource: "AppIcon", ofType: "png", inDirectory: "Media.xcassets/AppIcon.imageset") {
             if let image = NSImage(contentsOfFile: path) {
                 print("[DEBUG] WelcomeView: Loaded AppIcon via Bundle.module.path (xcassets)")
                 return Image(nsImage: image)
