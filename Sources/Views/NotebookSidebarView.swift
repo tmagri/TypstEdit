@@ -111,21 +111,26 @@ struct NotebookSidebarView: View {
                                 }
                                 .font(.system(size: 12))
                                 .foregroundColor(themeManager.textColor.opacity(0.5))
-                                .padding(.vertical, 4)
+                                .padding(.vertical, 2)
                             }
                             .buttonStyle(.plain)
+                            .listRowSeparator(.hidden)
                         } label: {
                             NotebookRow(notebook: notebook, manager: notebookManager, onAddNote: {
                                 selectedNotebookForNewPage = notebook
                                 showNewPageAlert = true
                             })
                             .environmentObject(themeManager)
+                            .listRowSeparator(.hidden)
                         }
                     }
                 }
             }
-            .listStyle(.sidebar)
+            // Same density rule as the project sidebar: .plain rows hug
+            // their content; .sidebar forces tall platform rows.
+            .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 22)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.sidebarBackground.ignoresSafeArea())
@@ -193,14 +198,16 @@ struct NotebookRow: View {
     @State private var renameText = ""
     
     var body: some View {
-        HStack {
+        HStack(spacing: 4) {
             Image(systemName: "book.closed.fill")
                 .foregroundColor(.indigo)
-            Text(notebook.name)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12))
+            Text(explorerAbbreviatedName(notebook.name))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundColor(themeManager.textColor)
+                .lineLimit(1)
             Spacer()
-            
+
             Button(action: onAddNote) {
                 Image(systemName: "plus")
                     .foregroundColor(themeManager.textColor.opacity(0.6))
@@ -208,6 +215,8 @@ struct NotebookRow: View {
             .buttonStyle(.plain)
             .help("Add Note")
         }
+        .padding(.vertical, 2)
+        .help(notebook.name)
         .contentShape(Rectangle())
         .contextMenu {
             Button("Rename Notebook") {
@@ -271,18 +280,22 @@ struct NotebookPageRow: View {
     }
     
     var body: some View {
-        HStack {
+        HStack(spacing: 4) {
             Image(systemName: "doc.text.fill")
                 .foregroundColor(.orange)
-            Text(page.name)
-                .font(.system(size: 13))
+                .font(.system(size: 12))
+            Text(explorerAbbreviatedName(page.name))
+                .font(.system(size: 12))
                 .foregroundColor(isSelected ? .white : themeManager.textColor)
+                .lineLimit(1)
             Spacer()
         }
-        .padding(.vertical, 4)
+        .help(page.name)
+        .padding(.vertical, 2)
         .padding(.horizontal, 4)
         .background(isSelected ? Color.accentColor.opacity(0.8) : Color.clear)
         .cornerRadius(4)
+        .listRowSeparator(.hidden)
         .contentShape(Rectangle())
         .onTapGesture {
             selectedFile = page.url

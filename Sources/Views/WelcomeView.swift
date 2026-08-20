@@ -277,9 +277,9 @@ struct WelcomeView: View {
         .background(themeManager.mainBackground.ignoresSafeArea())
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
-            if let window = NSApp.keyWindow {
-                window.zoom(nil)
-            }
+            // Funnel through the shared, debounced entry point so a double-click
+            // that is also seen by the AppKit title-bar monitor zooms exactly once.
+            AppDelegate.toggleWindowZoom()
         }
         .sheet(isPresented: $showingTemplateSelection) {
             TemplateSelectionView { template in

@@ -30,10 +30,50 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             if mouseLocation.y > window.frame.maxY - titleBarHeight &&
                mouseLocation.x >= window.frame.minX && mouseLocation.x <= window.frame.maxX {
-                DispatchQueue.main.async { window.zoom(nil) }
+                // Local event monitors run on the main thread. Handle the zoom
+                // synchronously (via the shared, debounced entry point) so the
+                // timestamp is recorded before the same clicks are also dispatched
+                // to any SwiftUI double-tap gesture underneath the pointer.
+                MainActor.assumeIsolated {
+                    AppDelegate.toggleWindowZoom(preferred: window)
+                }
             }
 
             return event
+        }
+    }
+
+    // MARK: - Window Zoom / Maximize (single source of truth)
+
+    /// Timestamp of the last zoom/fullscreen toggle. A single double-click is
+    /// observed by BOTH this AppKit title-bar monitor and any SwiftUI
+    /// `.onTapGesture(count: 2)` under the pointer, and each independently calls
+    /// `NSWindow.zoom(_:)`. Because `zoom` is a toggle, two calls cancel out
+    /// (zoom then immediately un-zoom), which reads as a flicker or a "glitchy"
+    /// maximize. Debouncing guarantees one physical double-click produces exactly
+    /// one toggle.
+    private static var lastZoomToggle: CFAbsoluteTime = 0
+
+    /// Toggles window zoom (or fullscreen). All double-click-to-maximize paths —
+    /// the title-bar event monitor, the SwiftUI double-tap gestures, and the
+    /// toolbar button — funnel through here so the behavior is consistent
+    /// (fullscreen-aware) and can never double-trigger.
+    @MainActor
+    static func toggleWindowZoom(preferred window: NSWindow? = nil) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastZoomToggle > 0.3 else { return }
+        lastZoomToggle = now
+
+        let target = window
+            ?? NSApp.windows.first(where: { $0.isKeyWindow })
+            ?? NSApp.keyWindow
+            ?? NSApp.mainWindow
+        guard let target else { return }
+
+        if target.styleMask.contains(.fullScreen) {
+            target.toggleFullScreen(nil)
+        } else {
+            target.zoom(nil)
         }
     }
     

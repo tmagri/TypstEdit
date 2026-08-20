@@ -234,30 +234,35 @@ struct ContentView: View {
                 .background(themeManager.mainBackground)
             } else {
                 VStack(spacing: 0) {
-                    HSplitView {
-                        if editorController.isSidebarVisible {
-                            SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
-                                .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
-                                .onAppear { editorController.projectRootURL = fileSystem.currentFolder }
-                                .frame(minWidth: 200, idealWidth: 200, maxWidth: 400)
+                    // Sidebar defaults to a narrow, explorer-style fixed width
+                    // (like VS Code's side bar); the editor + preview fill the
+                    // rest and split it evenly. Still drag-resizable.
+                    FractionalSplitView(
+                        showLeft: editorController.isSidebarVisible,
+                        initialLeftWidth: 180
+                    ) {
+                        SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+                            .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
+                            .onAppear { editorController.projectRootURL = fileSystem.currentFolder }
+                    } right: {
+                        Group {
+                            if selectedFile != nil || fileSystem.isNewUnsavedFile {
+                                editorPreviewArea
+                            } else {
+                                emptyStateView
+                            }
                         }
-                        
-                        if selectedFile != nil || fileSystem.isNewUnsavedFile {
-                            editorPreviewArea
-                        } else {
-                            emptyStateView
-                        }
                     }
-                    .onChange(of: editorController.isPreviewDarkMode) { newValue in
-                        compiler.isDarkMode = newValue
-                        scheduleCompilation()
-                    }
-                    .toolbar { appToolbar }
-                    .onChange(of: compiler.errors) { newErrors in
-                        editorController.errors = newErrors
-                        editorController.needsRedraw()
-                        NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
-                    }
+                }
+                .onChange(of: editorController.isPreviewDarkMode) { newValue in
+                    compiler.isDarkMode = newValue
+                    scheduleCompilation()
+                }
+                .toolbar { appToolbar }
+                .onChange(of: compiler.errors) { newErrors in
+                    editorController.errors = newErrors
+                    editorController.needsRedraw()
+                    NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
                 }
             }
         }
@@ -367,7 +372,7 @@ struct ContentView: View {
                     Divider().frame(height: 12).padding(.horizontal, 4)
                     
                     Button(action: {
-                        toggleMaximizeWindow()
+                        toggleWindowMaximize()
                     }) {
                         Image(systemName: "macwindow")
                             .font(.system(size: 11))
@@ -827,9 +832,9 @@ struct ContentView: View {
     
     // MARK: - Helper Methods
     private func toggleWindowMaximize() {
-        if let window = NSApp.keyWindow {
-            window.zoom(nil)
-        }
+        // Funnel through the shared, debounced entry point so a double-click that
+        // is also seen by the AppKit title-bar monitor zooms exactly once.
+        AppDelegate.toggleWindowZoom()
     }
     
     func loadFile(url: URL?) {
@@ -1254,19 +1259,6 @@ struct ContentView: View {
         
         if editorController.isPreviewDarkMode != isDark {
             editorController.isPreviewDarkMode = isDark
-        }
-    }
-    
-    private func toggleMaximizeWindow() {
-        let app = NSApplication.shared
-        let keyWin = app.windows.first(where: { $0.isKeyWindow })
-        let target = keyWin ?? app.mainWindow
-        if let window = target {
-            if window.styleMask.contains(.fullScreen) {
-                window.toggleFullScreen(nil)
-            } else {
-                window.zoom(nil)
-            }
         }
     }
 }

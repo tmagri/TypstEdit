@@ -9,6 +9,15 @@ struct FileNode: Identifiable, Hashable {
     var children: [FileNode]?
 }
 
+/// Explorer-style abbreviation shared by the sidebar rows: keep the head of
+/// the name but always leave the file extension visible ("IT Team Meet….note")
+/// so long names stay scannable in the narrow sidebar. The full name stays
+/// available through the hover tooltip.
+func explorerAbbreviatedName(_ name: String, pathExtension: String = "") -> String {
+    guard name.count > 24 else { return name }
+    return "\(name.prefix(12))…\(pathExtension.isEmpty ? "" : ".\(pathExtension)")"
+}
+
 @MainActor
 class FileSystemModel: ObservableObject {
     @Published var rootNodes: [FileNode] = []
@@ -349,14 +358,18 @@ struct SidebarView: View {
                 List(model.rootNodes, children: \.children) { node in
                     SidebarRow(node: node, selectedFile: $selectedFile, editorController: editorController)
                         .environmentObject(model)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+                        .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
                         .listRowSeparator(.hidden)
                         .listRowBackground(
                             selectedFile == node.url ? Color.accentColor.opacity(0.8) : Color.clear
                         )
                 }
-                .listStyle(.sidebar)
+                // .plain rows hug their content (~22pt, VS Code-explorer
+                // density); the .sidebar style forces tall ~40pt rows and
+                // ignores defaultMinListRowHeight.
+                .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .environment(\.defaultMinListRowHeight, 22)
             } // Close VStack
             } else {
                 NotebookSidebarView(selectedFile: $selectedFile)
@@ -407,20 +420,23 @@ struct SidebarRow: View {
     var isSelected: Bool {
         selectedFile == node.url
     }
-    
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             Image(systemName: iconName(for: node))
                 .foregroundColor(iconColor(for: node))
-                .font(.system(size: 13))
-            
-            Text("\(node.name)\(isSelected && editorController.hasUnsavedChanges ? "*" : "")")
-                .font(.system(size: 13))
+                .font(.system(size: 12))
+
+            Text("\(explorerAbbreviatedName(node.name, pathExtension: node.url.pathExtension))\(isSelected && editorController.hasUnsavedChanges ? "*" : "")")
+                .font(.system(size: 12))
                 .foregroundColor(isSelected ? .white : themeManager.textColor)
-            
+                .lineLimit(1)
+                .truncationMode(.middle)
+
             Spacer()
         }
-        .padding(.vertical, 4)
+        .help(node.name)
+        .padding(.vertical, 2)
         .contentShape(Rectangle()) // Make full row clickable
         .onTapGesture {
             if !node.isDirectory {
