@@ -48,168 +48,181 @@ struct ContentView: View {
     // MARK: - Body
     
     var body: some View {
-        ZStack {
-            VisualEffectView(material: .hudWindow, blendingMode: .withinWindow, state: .active, emphasized: false)
-                .ignoresSafeArea()
-            
-            themeManager.mainBackground.ignoresSafeArea()
-            
-            mainLayout
-            
-            savePopup
-        }
-        .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
-        .cornerRadius(12)
-        .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
-        .padding(.vertical, 12)
-        .onChange(of: selectedFile) { newValue in handleFileSelectionChange(newValue: newValue) }
-        .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in handleSnippetInsertion(notification: notification) }
-        .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in handleBackup() }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in editorController.toggleLink() }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertTable"))) { _ in editorController.insertTableSnippet() }
-        .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
-            if let command = notification.object as? String { handleMenuCommand(command) }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openStandaloneFile)) { notification in
-            if let url = notification.object as? URL {
-                self.selectedFile = url
-                self.loadFile(url: url)
-                fileSystem.currentFolder = nil // Ensures it stays in standalone mode
-                fileSystem.rootNodes = []
-                editorController.projectRootURL = nil
-                editorController.isSidebarVisible = false
-                RAGManager.shared.disableForStandaloneMode()
+        applyThemeModifiers(to:
+            applyFileModifiers(to:
+                applyNotificationModifiers(to:
+                    ZStack {
+                        VisualEffectView(material: .hudWindow, blendingMode: .withinWindow, state: .active, emphasized: false)
+                            .ignoresSafeArea()
+                        
+                        themeManager.mainBackground.ignoresSafeArea()
+                        
+                        mainLayout
+                        
+                        savePopup
+                    }
+                    .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
+                    .cornerRadius(12)
+                    .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
+                    .padding(.vertical, 12)
+                )
+            )
+        )
+    }
+    
+    @ViewBuilder
+    private func applyNotificationModifiers(to content: some View) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in handleSnippetInsertion(notification: notification) }
+            .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in handleBackup() }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in editorController.toggleLink() }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertTable"))) { _ in editorController.insertTableSnippet() }
+            .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
+                if let command = notification.object as? String { handleMenuCommand(command) }
             }
-        }
-        .onOpenURL { url in 
-            handleOpenURL(url) 
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
-            if let url = notification.object as? URL {
-                self.selectedFile = url
-                self.loadFile(url: url)
-                let folder = url.deletingLastPathComponent()
-                fileSystem.currentFolder = folder
-                fileSystem.loadFiles()
+            .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
+                if let url = notification.object as? URL {
+                    self.currentPDFURL = url
+                    self.reloadToken = UUID()
+                    if self.editorController.isNoteFile {
+                        self.editorController.previewStale = false
+                    }
+                }
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("openNotebooks"))) { _ in
-            fileSystem.currentFolder = NotebookManager.shared.rootDirectory
-            fileSystem.isNewUnsavedFile = false
-            fileSystem.rootNodes = [] // Just keep empty to not load file system for it
-            editorController.isSidebarVisible = true
-            self.selectedFile = nil
-            self.editorController.currentFileURL = nil
-            self.editorController.sourceCode = ""
-            self.currentPDFURL = nil
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openProjectFolder)) { notification in
-            if let url = notification.object as? URL {
-                fileSystem.currentFolder = url
+            .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in saveFile(to: notification.object as? URL) }
+            .onReceive(NotificationCenter.default.publisher(for: .resetToWelcome)) { _ in
+                self.selectedFile = nil
+                self.fileSystem.currentFolder = nil
+                self.fileSystem.isNewUnsavedFile = false
+                self.editorController.currentFileURL = nil
+                self.editorController.projectRootURL = nil
+                self.editorController.sourceCode = ""
+                self.editorController.syncSavedContent("")
+                self.currentPDFURL = nil
+                self.editorController.isSidebarVisible = false
+            }
+    }
+
+    @ViewBuilder
+    private func applyFileModifiers(to content: some View) -> some View {
+        content
+            .onChange(of: selectedFile) { newValue in handleFileSelectionChange(newValue: newValue) }
+            .onReceive(NotificationCenter.default.publisher(for: .openStandaloneFile)) { notification in
+                if let url = notification.object as? URL {
+                    self.selectedFile = url
+                    self.loadFile(url: url)
+                    fileSystem.currentFolder = nil
+                    fileSystem.rootNodes = []
+                    editorController.projectRootURL = nil
+                    editorController.isSidebarVisible = false
+                    RAGManager.shared.disableForStandaloneMode()
+                }
+            }
+            .onOpenURL { url in 
+                handleOpenURL(url) 
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
+                if let url = notification.object as? URL {
+                    self.selectedFile = url
+                    self.loadFile(url: url)
+                    let folder = url.deletingLastPathComponent()
+                    fileSystem.currentFolder = folder
+                    fileSystem.loadFiles()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("openNotebooks"))) { _ in
+                fileSystem.currentFolder = NotebookManager.shared.rootDirectory
+                NotebookManager.shared.loadNotebooks()
                 fileSystem.isNewUnsavedFile = false
-                fileSystem.loadFiles()
+                fileSystem.rootNodes = []
                 editorController.isSidebarVisible = true
-                
-                // Try to open main.typ if it exists, otherwise clear selection
-                let mainFile = url.appendingPathComponent("main.typ")
-                if FileManager.default.fileExists(atPath: mainFile.path) {
-                    self.selectedFile = mainFile
-                    self.loadFile(url: mainFile)
+                self.selectedFile = nil
+                self.editorController.currentFileURL = nil
+                self.editorController.sourceCode = ""
+                self.currentPDFURL = nil
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openProjectFolder)) { notification in
+                if let url = notification.object as? URL {
+                    fileSystem.currentFolder = url
+                    fileSystem.isNewUnsavedFile = false
+                    fileSystem.loadFiles()
+                    editorController.isSidebarVisible = true
+                    
+                    let mainFile = url.appendingPathComponent("main.typ")
+                    if FileManager.default.fileExists(atPath: mainFile.path) {
+                        self.selectedFile = mainFile
+                        self.loadFile(url: mainFile)
+                    } else {
+                        self.selectedFile = nil
+                        self.editorController.currentFileURL = nil
+                        self.editorController.sourceCode = ""
+                        self.currentPDFURL = nil
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
+                if let url = notification.object as? URL {
+                    self.selectedFile = url
+                    fileSystem.isNewUnsavedFile = false
                 } else {
                     self.selectedFile = nil
                     self.editorController.currentFileURL = nil
                     self.editorController.sourceCode = ""
-                    self.currentPDFURL = nil
+                    self.editorController.editorState = .init()
+                    self.editorController.syncSavedContent("")
+                    fileSystem.isNewUnsavedFile = true
+                    self.editorController.isSidebarVisible = false
                 }
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
-            if let url = notification.object as? URL {
-                self.selectedFile = url
-                fileSystem.isNewUnsavedFile = false
-            } else {
-                // New unsaved file
-                self.selectedFile = nil
-                self.editorController.currentFileURL = nil
-                self.editorController.sourceCode = ""
-                self.editorController.editorState = .init()
-                self.editorController.syncSavedContent("")
-                fileSystem.isNewUnsavedFile = true
-                self.editorController.isSidebarVisible = false
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
-            if let url = notification.object as? URL {
-                self.renameTargetURL = url
-                self.newFileName = url.lastPathComponent
-                self.showRenameAlert = true
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
-            if let info = notification.object as? [String: URL], let newURL = info["new"] { self.selectedFile = newURL }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
-            if let url = notification.object as? URL {
-                self.currentPDFURL = url
-                self.reloadToken = UUID()
-                // A fresh PDF just landed — the preview is no longer stale.
-                if self.editorController.isNoteFile {
-                    self.editorController.previewStale = false
+            .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
+                if let url = notification.object as? URL {
+                    self.renameTargetURL = url
+                    self.newFileName = url.lastPathComponent
+                    self.showRenameAlert = true
                 }
             }
-        }
-        .onChange(of: editorController.sourceCode) { newValue in
-            editorController.checkUnsavedChanges(currentContent: newValue)
-            // Editing a note makes the existing PDF preview stale. It is refreshed
-            // only on explicit Save, so just flag it here for the status badge.
-            if editorController.isNoteFile && editorController.hasUnsavedChanges {
-                editorController.previewStale = true
+            .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
+                if let info = notification.object as? [String: URL], let newURL = info["new"] { self.selectedFile = newURL }
             }
-            scheduleCompilation(with: newValue)
-        }
-        .onChange(of: editorController.viewMode) { _ in
-            // Notes no longer auto-compile while typing. When the user first reveals
-            // the preview pane, generate the preview exactly once (if we don't already
-            // have one). After that, the stale badge guides them to Save to refresh.
-            if editorController.viewMode != .editorOnly,
-               editorController.isNoteFile,
-               currentPDFURL == nil {
-                scheduleCompilation(force: true)
-            }
-        }
+    }
 
-        .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in saveFile(to: notification.object as? URL) }
-        .preferredColorScheme(themeManager.appTheme.colorScheme)
-        .onAppear { 
-            if let file = selectedFile { loadFile(url: file) }
-            applyAppKitAppearance(themeManager.appTheme)
-            editorController.applyTheme()
-            syncPreviewTheme()
-        }
-        .onChange(of: themeManager.appTheme) { newTheme in 
-            editorController.setupDefaultConfiguration()
-            applyAppKitAppearance(newTheme)
-            editorController.applyTheme() 
-            syncPreviewTheme()
-        }
-        .onChange(of: colorScheme) { _ in 
-            editorController.setupDefaultConfiguration()
-            editorController.applyTheme() 
-            syncPreviewTheme()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .resetToWelcome)) { _ in
-            // Clear all active file/project state to trigger the WelcomeView
-            self.selectedFile = nil
-            self.fileSystem.currentFolder = nil
-            self.fileSystem.isNewUnsavedFile = false
-            self.editorController.currentFileURL = nil
-            self.editorController.projectRootURL = nil
-            self.editorController.sourceCode = ""
-            self.editorController.syncSavedContent("")
-            self.currentPDFURL = nil
-            self.editorController.isSidebarVisible = false
-        }
-    } // End of ZStack
+    @ViewBuilder
+    private func applyThemeModifiers(to content: some View) -> some View {
+        content
+            .onChange(of: editorController.sourceCode) { newValue in
+                editorController.checkUnsavedChanges(currentContent: newValue)
+                let isProgrammatic = editorController.isApplyingProgrammaticChange
+                if editorController.isNoteFile && editorController.hasUnsavedChanges {
+                    editorController.previewStale = !isProgrammatic
+                }
+                scheduleCompilation(with: newValue, force: isProgrammatic)
+            }
+            .onChange(of: editorController.viewMode) { _ in
+                if editorController.viewMode != .editorOnly,
+                   editorController.isNoteFile,
+                   currentPDFURL == nil {
+                    scheduleCompilation(force: true)
+                }
+            }
+            .preferredColorScheme(themeManager.appTheme.colorScheme)
+            .onAppear { 
+                if let file = selectedFile { loadFile(url: file) }
+                applyAppKitAppearance(themeManager.appTheme)
+                editorController.applyTheme()
+                syncPreviewTheme()
+            }
+            .onChange(of: themeManager.appTheme) { newTheme in 
+                editorController.setupDefaultConfiguration()
+                applyAppKitAppearance(newTheme)
+                editorController.applyTheme() 
+                syncPreviewTheme()
+            }
+            .onChange(of: colorScheme) { _ in 
+                editorController.setupDefaultConfiguration()
+                editorController.applyTheme() 
+                syncPreviewTheme()
+            }
+    }
     
     // MARK: - Subviews
     
@@ -478,7 +491,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if currentPDFURL != nil {
+            if currentPDFURL != nil || editorController.isTypstFile {
                 pdfZoomControls
                     .padding(14)
             }
@@ -511,6 +524,16 @@ struct ContentView: View {
 
             zoomButton(icon: "arrow.up.left.and.arrow.down.right") { resetZoom() }
                 .keyboardShortcut("0", modifiers: .command)
+
+            Divider()
+                .frame(height: 14)
+                .padding(.horizontal, 2)
+
+            zoomButton(icon: "arrow.clockwise") {
+                scheduleCompilation(with: editorController.sourceCode, force: true)
+                reloadToken = UUID()
+            }
+            .help("Refresh Preview (Cmd+R)")
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
@@ -1179,6 +1202,11 @@ struct ContentView: View {
         case "openFoundationEditor": editorController.openFoundationEditor()
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()
+        case "refreshPreview":
+            scheduleCompilation(with: editorController.sourceCode, force: true)
+            reloadToken = UUID()
+        case "refreshNotebooks":
+            NotebookManager.shared.loadNotebooks()
         case "restoreBackup": showRestoreBackupSheet()
         default: break
         }

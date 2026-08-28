@@ -192,12 +192,15 @@ class EditorController: NSObject, ObservableObject {
         // re-queries every range from scratch.
         let viewInSync = textViewController?.textView.string == sourceCode
 
+        // Set isApplyingProgrammaticChange before mutating sourceCode so that
+        // onChange listeners observe the programmatic edit and can force a preview refresh.
+        isApplyingProgrammaticChange = true
+        defer { isApplyingProgrammaticChange = false }
+
         sourceCode.replaceSubrange(stringRange, with: text)
 
         // --- Sync with actual editor if available ---
         // This is necessary because SourceEditor's binding is one-way (upwards) in some versions
-        isApplyingProgrammaticChange = true
-        defer { isApplyingProgrammaticChange = false }
          if let tvc = textViewController {
              let tvLen = (tvc.textView.string as NSString).length
              let insertLength = (text as NSString).length
@@ -570,7 +573,7 @@ class EditorController: NSObject, ObservableObject {
     /// (insertText / restoreContent / reconcileTextView). Used to suppress the bridge's
     /// text-change side effects (markdown autoformat, wrap re-application) that would
     /// otherwise re-enter `insertText` recursively and desync `sourceCode` from the view.
-    fileprivate var isApplyingProgrammaticChange: Bool = false
+    @Published var isApplyingProgrammaticChange: Bool = false
     
     // Stable configuration to prevent "going white" due to frequent resets
     @Published var editorConfiguration: SourceEditorConfiguration!

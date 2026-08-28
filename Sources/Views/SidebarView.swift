@@ -222,6 +222,7 @@ extension Notification.Name {
     static let fileDidCreate = Notification.Name("fileDidCreate")
     static let requestRename = Notification.Name("requestRename")
     static let fileDidRename = Notification.Name("fileDidRename")
+    static let refreshNotebooks = Notification.Name("refreshNotebooks")
 }
 
 struct SidebarView: View {
@@ -392,10 +393,22 @@ struct SidebarView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .refreshProjectSidebar)) { _ in
             model.loadFiles()
+            NotebookManager.shared.loadNotebooks()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .refreshNotebooks)) { _ in
+            NotebookManager.shared.loadNotebooks()
+        }
+        .onChange(of: sidebarMode) { newMode in
+            if newMode == 1 {
+                NotebookManager.shared.loadNotebooks()
+            } else {
+                model.loadFiles()
+            }
         }
         .onChange(of: model.currentFolder) { newValue in
             if newValue == NotebookManager.shared.rootDirectory {
                 sidebarMode = 1
+                NotebookManager.shared.loadNotebooks()
             } else {
                 sidebarMode = 0
             }
@@ -403,6 +416,7 @@ struct SidebarView: View {
         .onAppear {
             if model.currentFolder == NotebookManager.shared.rootDirectory {
                 sidebarMode = 1
+                NotebookManager.shared.loadNotebooks()
             }
         }
     }

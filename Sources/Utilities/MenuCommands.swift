@@ -110,6 +110,13 @@ struct AppMenuCommands: Commands {
             Button("Restore Backup...") {
                 NotificationCenter.default.post(name: .menuCommand, object: "restoreBackup")
             }
+            
+            Divider()
+            
+            Button("Refresh Notebooks") {
+                NotificationCenter.default.post(name: .menuCommand, object: "refreshNotebooks")
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
         }
         
         // MARK: - Edit Menu
@@ -490,6 +497,12 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("-", modifiers: .command)
             
+            Divider()
+            
+            Button("Refresh Preview") {
+                NotificationCenter.default.post(name: .menuCommand, object: "refreshPreview")
+            }
+            .keyboardShortcut("r", modifiers: .command)
         }
         
         CommandGroup(replacing: .help) {

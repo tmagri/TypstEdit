@@ -16,13 +16,22 @@ struct NotebookSidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            HStack {
+            HStack(spacing: 8) {
                 Text("NOTEBOOKS")
                     .font(.system(size: 11, weight: .bold))
                     .tracking(1)
                     .foregroundColor(themeManager.textColor.opacity(0.6))
                 
                 Spacer()
+                
+                Button(action: {
+                    notebookManager.loadNotebooks()
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .foregroundColor(themeManager.textColor.opacity(0.6))
+                }
+                .buttonStyle(.plain)
+                .help("Refresh Notebooks")
                 
                 Button(action: {
                     if let firstNotebook = notebookManager.notebooks.first {
@@ -156,6 +165,14 @@ struct NotebookSidebarView: View {
                 }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .refreshNotebooks)) { _ in
+            notebookManager.loadNotebooks()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
+            if let command = notification.object as? String, command == "refreshNotebooks" {
+                notebookManager.loadNotebooks()
+            }
+        }
     }
     
     private func importNotebook() {
@@ -219,6 +236,12 @@ struct NotebookRow: View {
         .help(notebook.name)
         .contentShape(Rectangle())
         .contextMenu {
+            Button("Refresh Notebooks") {
+                manager.loadNotebooks()
+            }
+            
+            Divider()
+            
             Button("Rename Notebook") {
                 renameText = notebook.name
                 showRenameAlert = true
@@ -301,6 +324,12 @@ struct NotebookPageRow: View {
             selectedFile = page.url
         }
         .contextMenu {
+            Button("Refresh Notebooks") {
+                NotebookManager.shared.loadNotebooks()
+            }
+            
+            Divider()
+            
             Button("Rename Page") {
                 renameText = page.name
                 showRenameAlert = true
