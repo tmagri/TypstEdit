@@ -58,38 +58,68 @@ class FileSystemModel: ObservableObject {
         }
     }
     
+    // Auto-generated directories that shouldn't clutter the project sidebar.
+    private static let hiddenFolders: Set<String> = ["backups", "temp", "vectorcaches"]
+
+    /// Loads **one level** of a directory. Subdirectories are given an empty
+    /// `children` array (so SwiftUI renders the disclosure chevron) but their
+    /// contents are NOT loaded yet — they are fetched lazily via
+    /// `loadChildren(for:)` when the user first expands the row.
+    ///
+    /// This breaks the deep recursion that caused the
+    /// `OutlineListCoordinator.recursivelyDiffRows` crash (RECURSION LEVEL 11).
     private func loadDirectory(at url: URL) -> [FileNode] {
-        // Auto-generated directories that shouldn't clutter the project sidebar.
-        let hiddenFolders: Set<String> = ["backups", "temp", "vectorcaches"]
         var nodes: [FileNode] = []
         do {
-            let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
-            
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            )
+
             let sortedContents = contents.sorted { lhs, rhs in
                 let lhsDir = (try? lhs.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
                 let rhsDir = (try? rhs.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                
-                if lhsDir != rhsDir {
-                    return lhsDir // Directories first
-                }
+                if lhsDir != rhsDir { return lhsDir } // Directories first
                 return lhs.lastPathComponent.localizedStandardCompare(rhs.lastPathComponent) == .orderedAscending
             }
-            
+
             for file in sortedContents {
                 let isDir = (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                if isDir && hiddenFolders.contains(file.lastPathComponent) { continue }
-                var children: [FileNode]? = nil
-                
-                if isDir {
-                    children = loadDirectory(at: file)
-                }
-                
+                if isDir && Self.hiddenFolders.contains(file.lastPathComponent) { continue }
+
+                // Directories start with an empty (not nil) children array so
+                // SwiftUI shows the disclosure triangle, but the contents are
+                // loaded on demand — never recursively here.
+                let children: [FileNode]? = isDir ? [] : nil
+
                 nodes.append(FileNode(url: file, name: file.lastPathComponent, isDirectory: isDir, children: children))
             }
         } catch {
             print("Error listing directory: \(error)")
         }
         return nodes
+    }
+
+    /// Called by `SidebarRow` the first time a folder is expanded.
+    /// Replaces the placeholder `[]` with the actual one-level contents.
+    func loadChildren(for node: FileNode) {
+        guard node.isDirectory else { return }
+        let children = loadDirectory(at: node.url)
+        // Walk the tree and replace the matching node in-place.
+        rootNodes = rootNodes.map { updateChildren(in: $0, target: node.url, children: children) }
+    }
+
+    private func updateChildren(in node: FileNode, target: URL, children: [FileNode]) -> FileNode {
+        if node.url == target {
+            var updated = node
+            updated.children = children
+            return updated
+        }
+        guard let existing = node.children else { return node }
+        var updated = node
+        updated.children = existing.map { updateChildren(in: $0, target: target, children: children) }
+        return updated
     }
     
     func createNewProject(template: ProjectTemplate) {
@@ -452,6 +482,15 @@ struct SidebarRow: View {
         .help(node.name)
         .padding(.vertical, 2)
         .contentShape(Rectangle()) // Make full row clickable
+        .onAppear {
+            // Lazily load this directory's children the first time the row
+            // becomes visible (i.e. after the user expands the disclosure
+            // chevron). The model only stores a placeholder [] at load time;
+            // this call replaces it with the real one-level contents.
+            if node.isDirectory {
+                fileSystemModel.loadChildren(for: node)
+            }
+        }
         .onTapGesture {
             if !node.isDirectory {
                 selectedFile = node.url
