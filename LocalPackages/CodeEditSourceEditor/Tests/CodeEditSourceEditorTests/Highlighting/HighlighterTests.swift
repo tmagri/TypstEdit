@@ -277,4 +277,41 @@ final class HighlighterTests: XCTestCase {
         textView.insertText("func helloWorld() {\n\tprint(\"Hello World!\")\n}")
         XCTAssertEqual(textView.string, "func helloWorld() {\n\tprint(\"Hello World!\")\n}")
     }
+
+    @MainActor
+    func test_deleteMultiLineFromBeginningKeepsHighlighting() {
+        let highlightProvider = TreeSitterClient()
+        highlightProvider.forceSyncOperation = true
+        textView.setText("func helloWorld() {\n\tprint(\"Hello World!\")\n\treturn 42\n}")
+
+        let highlighter = Mock.highlighter(
+            textView: textView,
+            highlightProviders: [highlightProvider],
+            attributeProvider: attributeProvider
+        )
+        textView.addStorageDelegate(highlighter)
+        highlighter.setLanguage(language: .swift)
+        highlighter.invalidate()
+
+        // Select from index 0 across multiple lines: "func helloWorld() {\n\tprint(" (length 28)
+        let deleteRange = NSRange(location: 0, length: 28)
+        textView.replaceCharacters(in: [deleteRange], with: "")
+
+        print("[TEST] After multi-line deletion from beginning, text is:\n\(textView.string)")
+
+        // Query highlights for remaining text
+        var receivedHighlights: [HighlightRange] = []
+        highlightProvider.queryHighlightsFor(textView: textView, range: textView.documentRange) { result in
+            switch result {
+            case .success(let highlights):
+                receivedHighlights = highlights
+                print("[TEST] Received \(highlights.count) highlights: \(highlights.map { "\($0.range): \($0.capture)" })")
+            case .failure(let error):
+                print("[TEST] Query highlights failed with error: \(error)")
+            }
+        }
+
+        XCTAssertFalse(receivedHighlights.isEmpty, "Highlights should not be empty after multi-line deletion from beginning!")
+    }
 }
+

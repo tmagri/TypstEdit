@@ -269,4 +269,33 @@ struct TextLayoutManagerTests {
 
         #expect(invalidatedLineIds.isSuperset(of: Set(expectedLineIds)))
     }
+
+    @Test
+    func testDeleteMultiLineFromBeginning() throws {
+        let tv = TextView(string: "First line\nSecond line\nThird line\nFourth line\nFifth line")
+        tv.frame = NSRect(x: 0, y: 0, width: 1000, height: 1000)
+        tv.updateFrameIfNeeded()
+        let lm = try #require(tv.layoutManager)
+        lm.layoutLines(in: NSRect(x: 0, y: 0, width: 1000, height: 1000))
+        
+        #expect(lm.lineCount == 5)
+        #expect(tv.subviews.count > 0)
+        
+        // Select from very beginning (index 0) through second line exactly (multi-line selection including index 0)
+        let selectionRange = NSRange(location: 0, length: 23)
+        tv.selectionManager.setSelectedRange(selectionRange)
+        tv.deleteBackward(nil)
+        
+        lm.layoutLines(in: NSRect(x: 0, y: 0, width: 1000, height: 1000))
+        
+        #expect(tv.textStorage.string == "Third line\nFourth line\nFifth line")
+        #expect(lm.lineCount == 3)
+        #expect(lm.visibleLineIds.count == 3)
+        
+        let visibleSubviews = tv.subviews.filter { !$0.isHidden && $0.frame.width > 0 && $0.frame.height > 0 }
+        #expect(visibleSubviews.count == 3, "Surviving lines should have visible subviews positioned properly")
+        #expect(lm.lineStorage.length == tv.textStorage.length)
+        lm.lineStorage.validateInternalState()
+    }
 }
+

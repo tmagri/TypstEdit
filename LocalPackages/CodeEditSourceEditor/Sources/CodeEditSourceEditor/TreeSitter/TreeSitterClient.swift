@@ -152,6 +152,7 @@ public final class TreeSitterClient: HighlightProviding {
         completion: @escaping @MainActor (Result<IndexSet, Error>) -> Void
     ) {
         let oldEndPoint: Point = self.oldEndPoint ?? textView.pointForLocation(range.max) ?? .zero
+        self.oldEndPoint = nil
         guard let edit = InputEdit(range: range, delta: delta, oldEndPoint: oldEndPoint, textView: textView) else {
             completion(.failure(TreeSitterClientError.invalidEdit))
             return

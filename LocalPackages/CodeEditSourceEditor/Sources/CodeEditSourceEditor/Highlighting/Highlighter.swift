@@ -246,7 +246,8 @@ extension Highlighter: @preconcurrency NSTextStorageDelegate {
         changeInLength delta: Int
     ) {
         guard editedMask.contains(.editedCharacters) else { return }
-        highlightProviders.forEach { $0.storageWillUpdate(in: editedRange) }
+        let providerRange = NSRange(location: editedRange.location, length: editedRange.length - delta)
+        highlightProviders.forEach { $0.storageWillUpdate(in: providerRange) }
     }
 }
 
