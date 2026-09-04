@@ -197,7 +197,8 @@ public struct SourceEditor: NSViewControllerRepresentable {
 
         // Restore a sane caret position after the full replace.
         textView.selectionManager.setSelectedRange(NSRange(location: clampedLocation, length: 0))
-        textView.layoutManager.setNeedsLayout()
+        textView.updateFrameIfNeeded()
+        textView.layoutManager.layoutLines()
         textView.needsDisplay = true
     }
 

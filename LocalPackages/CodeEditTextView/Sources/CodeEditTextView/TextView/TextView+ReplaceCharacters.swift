@@ -48,6 +48,10 @@ extension TextView {
 
         textStorage.endEditing()
 
+        updateFrameIfNeeded()
+        layoutManager.layoutLines()
+        needsDisplay = true
+
         if !skipUpdateSelection {
             selectionManager.notifyAfterEdit()
         }

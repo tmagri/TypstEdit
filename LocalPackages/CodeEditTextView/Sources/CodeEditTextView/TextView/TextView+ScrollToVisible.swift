@@ -26,15 +26,22 @@ extension TextView {
         var lastFrame: CGRect = .zero
         while let boundingRect = getSelection()?.boundingRect, lastFrame != boundingRect {
             lastFrame = boundingRect
-            layoutManager.layoutLines()
-            selectionManager.updateSelectionViews()
-            selectionManager.drawSelections(in: visibleRect)
 
             if lastFrame != .zero {
                 scrollView.contentView.scrollToVisible(lastFrame)
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             }
+
+            updateFrameIfNeeded()
+            layoutManager.layoutLines()
+            selectionManager.updateSelectionViews()
+            selectionManager.drawSelections(in: visibleRect)
         }
+
+        // Final pass: ensure lines in the settled visibleRect are laid out
+        updateFrameIfNeeded()
+        layoutManager.layoutLines()
+        selectionManager.updateSelectionViews()
     }
 
     /// Scrolls the view to the specified range.

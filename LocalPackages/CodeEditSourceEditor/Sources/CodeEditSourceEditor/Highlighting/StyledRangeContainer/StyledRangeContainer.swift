@@ -143,30 +143,38 @@ extension StyledRangeContainer: HighlightProviderStateDelegate {
             assertionFailure("No storage found for the given provider: \(provider)")
             return
         }
+
+        let docLength = storage.length
+        guard docLength > 0, rangeToHighlight.location < docLength else { return }
+        let clampedLength = min(rangeToHighlight.length, docLength - rangeToHighlight.location)
+        guard clampedLength > 0 else { return }
+        let safeRange = NSRange(location: rangeToHighlight.location, length: clampedLength)
+
         var runs: [RangeStoreRun<StyleElement>] = []
-        var lastIndex = rangeToHighlight.lowerBound
+        var lastIndex = safeRange.lowerBound
 
         for highlight in highlights {
-            if highlight.range.lowerBound > lastIndex {
-                runs.append(.empty(length: highlight.range.lowerBound - lastIndex))
-            } else if highlight.range.lowerBound < lastIndex {
+            guard let hRange = highlight.range.intersection(safeRange) else { continue }
+            if hRange.lowerBound > lastIndex {
+                runs.append(.empty(length: hRange.lowerBound - lastIndex))
+            } else if hRange.lowerBound < lastIndex {
                 continue // Skip! Overlapping
             }
             runs.append(
                 RangeStoreRun<StyleElement>(
-                    length: highlight.range.length,
+                    length: hRange.length,
                     value: StyleElement(capture: highlight.capture, modifiers: highlight.modifiers)
                 )
             )
-            lastIndex = highlight.range.max
+            lastIndex = hRange.max
         }
 
-        if lastIndex < rangeToHighlight.upperBound {
-            runs.append(.empty(length: rangeToHighlight.upperBound - lastIndex))
+        if lastIndex < safeRange.upperBound {
+            runs.append(.empty(length: safeRange.upperBound - lastIndex))
         }
 
-        storage.set(runs: runs, for: rangeToHighlight.intRange)
+        storage.set(runs: runs, for: safeRange.intRange)
         _storage[provider]?.store = storage
-        delegate?.styleContainerDidUpdate(in: rangeToHighlight)
+        delegate?.styleContainerDidUpdate(in: safeRange)
     }
 }

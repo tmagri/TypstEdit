@@ -72,7 +72,8 @@ public extension TextLayoutManager {
                 }
                 self.currentPosition = layoutManager?.determineVisiblePosition(for: nextPosition)
                 return self.currentPosition?.position
-            } else if let position = layoutManager?.lineStorage.getLine(atPosition: minY) {
+            } else if let position = layoutManager?.lineStorage.getLine(atPosition: Swift.max(minY, 0))
+                        ?? layoutManager?.lineStorage.first {
                 currentPosition = layoutManager?.determineVisiblePosition(for: position)
                 return currentPosition?.position
             }

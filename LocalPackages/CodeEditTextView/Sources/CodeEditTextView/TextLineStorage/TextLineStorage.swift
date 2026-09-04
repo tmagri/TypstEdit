@@ -150,6 +150,10 @@ public final class TextLineStorage<Data: Identifiable> {
     /// - Parameter position: The position to fetch for.
     /// - Returns: A  ``TextLineStorage/TextLinePosition`` struct with relevant position and line information.
     public func getLine(atPosition posY: CGFloat) -> TextLinePosition? {
+        guard count > 0 else { return nil }
+        guard posY > 0 else {
+            return first
+        }
         guard posY < height else {
             return last
         }
@@ -160,26 +164,35 @@ public final class TextLineStorage<Data: Identifiable> {
         var currentIndex: Int = root?.leftSubtreeCount ?? 0
         while let node = currentNode {
             // If index is in the range [currentOffset..<currentOffset + length) it's in the line
-            if posY >= currentYPosition && posY < currentYPosition + node.height {
+            if (posY >= currentYPosition || (node.left == nil && posY >= 0)) && posY < currentYPosition + node.height {
                 return TextLinePosition(
                     data: node.data,
                     range: NSRange(location: currentOffset, length: node.length),
-                    yPos: currentYPosition,
+                    yPos: Swift.max(0, currentYPosition),
                     height: node.height,
                     index: currentIndex
                 )
             } else if currentYPosition > posY {
+                if node.left == nil {
+                    // Floating point discrepancy: posY is slightly less than currentYPosition,
+                    // but there are no earlier lines in this subtree. Return this line.
+                    return TextLinePosition(
+                        data: node.data,
+                        range: NSRange(location: currentOffset, length: node.length),
+                        yPos: Swift.max(0, currentYPosition),
+                        height: node.height,
+                        index: currentIndex
+                    )
+                }
                 currentNode = node.left
                 currentOffset = (currentOffset - node.leftSubtreeOffset) + (node.left?.leftSubtreeOffset ?? 0)
                 currentYPosition = (currentYPosition - node.leftSubtreeHeight) + (node.left?.leftSubtreeHeight ?? 0)
                 currentIndex = (currentIndex - node.leftSubtreeCount) + (node.left?.leftSubtreeCount ?? 0)
-            } else if node.leftSubtreeHeight < posY {
+            } else {
                 currentNode = node.right
                 currentOffset += node.length + (node.right?.leftSubtreeOffset ?? 0)
                 currentYPosition += node.height + (node.right?.leftSubtreeHeight ?? 0)
                 currentIndex += 1 + (node.right?.leftSubtreeCount ?? 0)
-            } else {
-                currentNode = nil
             }
         }
 
@@ -337,6 +350,11 @@ private extension TextLineStorage {
     /// - Parameter offset: The offset to look for in the document.
     /// - Returns: A tuple containing a node if it was found, and the offset of the node in the document.
     func search(for offset: Int) -> NodePosition? {
+        guard count > 0 else { return nil }
+        guard offset > 0 else {
+            guard let firstNode = root?.minimum() else { return nil }
+            return NodePosition(node: firstNode, yPos: 0, textPos: 0, index: 0)
+        }
         var currentNode = root
         var currentOffset: Int = root?.leftSubtreeOffset ?? 0
         var currentYPosition: CGFloat = root?.leftSubtreeHeight ?? 0
@@ -346,17 +364,18 @@ private extension TextLineStorage {
             if offset == currentOffset || (offset >= currentOffset && offset < currentOffset + node.length) {
                 return NodePosition(node: node, yPos: currentYPosition, textPos: currentOffset, index: currentIndex)
             } else if currentOffset > offset {
+                if node.left == nil {
+                    return NodePosition(node: node, yPos: currentYPosition, textPos: currentOffset, index: currentIndex)
+                }
                 currentNode = node.left
                 currentOffset = (currentOffset - node.leftSubtreeOffset) + (node.left?.leftSubtreeOffset ?? 0)
                 currentYPosition = (currentYPosition - node.leftSubtreeHeight) + (node.left?.leftSubtreeHeight ?? 0)
                 currentIndex = (currentIndex - node.leftSubtreeCount) + (node.left?.leftSubtreeCount ?? 0)
-            } else if node.leftSubtreeOffset < offset {
+            } else {
                 currentNode = node.right
                 currentOffset += node.length + (node.right?.leftSubtreeOffset ?? 0)
                 currentYPosition += node.height + (node.right?.leftSubtreeHeight ?? 0)
                 currentIndex += 1 + (node.right?.leftSubtreeCount ?? 0)
-            } else {
-                currentNode = nil
             }
         }
         return nil
@@ -555,6 +574,9 @@ private extension TextLineStorage {
             if node.left === ref.takeUnretainedValue() {
                 node.leftSubtreeOffset += delta
                 node.leftSubtreeHeight += deltaHeight
+                if abs(node.leftSubtreeHeight) < 1e-9 {
+                    node.leftSubtreeHeight = 0
+                }
                 switch nodeAction {
                 case .inserted:
                     node.leftSubtreeCount += 1

@@ -140,6 +140,8 @@ class Highlighter: NSObject {
             range: NSRange(location: 0, length: textView.textStorage.length)
         )
         textView.layoutManager.invalidateLayoutForRect(textView.visibleRect)
+        textView.layoutManager.layoutLines()
+        textView.needsDisplay = true
 
         highlightProviders.forEach { $0.setLanguage(language: language) }
     }
@@ -255,21 +257,29 @@ extension Highlighter: @preconcurrency NSTextStorageDelegate {
 
 extension Highlighter: StyledRangeContainerDelegate {
     func styleContainerDidUpdate(in range: NSRange) {
-        guard let textView, let attributeProvider else { return }
-        textView.textStorage.beginEditing()
+        guard let textView, let attributeProvider, let storage = textView.textStorage else { return }
 
-        let storage = textView.textStorage
+        // Clamp the range to the current document length. Async highlight results may arrive after a
+        // deletion has shortened the document; calling setAttributes with an out-of-range NSRange raises
+        // an AppKit exception that corrupts attribute state and produces a blank editor.
+        let docLength = storage.length
+        guard docLength > 0, range.location < docLength else { return }
+        let safeRange = NSRange(location: range.location, length: min(range.length, docLength - range.location))
 
-        var offset = range.location
-        for run in styleContainer.runsIn(range: range) {
-            guard let range = NSRange(location: offset, length: run.length).intersection(range) else {
+        storage.beginEditing()
+
+        var offset = safeRange.location
+        for run in styleContainer.runsIn(range: safeRange) {
+            guard let runRange = NSRange(location: offset, length: run.length).intersection(safeRange) else {
                 continue
             }
-            storage?.setAttributes(attributeProvider.attributesFor(run.value?.capture), range: range)
-            offset += range.length
+            storage.setAttributes(attributeProvider.attributesFor(run.value?.capture), range: runRange)
+            offset += runRange.length
         }
 
-        textView.textStorage.endEditing()
+        storage.endEditing()
+        textView.layoutManager.layoutLines()
+        textView.needsDisplay = true
     }
 }
 

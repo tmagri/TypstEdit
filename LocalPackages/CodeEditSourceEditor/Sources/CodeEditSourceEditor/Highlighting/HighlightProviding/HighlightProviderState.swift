@@ -45,6 +45,9 @@ class HighlightProviderState {
     /// The set of valid indexes
     private var validSet: IndexSet = IndexSet()
 
+    /// Monotonically increasing counter to discard stale async query results after an edit.
+    private var generation: Int = 0
+
     // MARK: - Providers
 
     private weak var delegate: HighlightProviderStateDelegate?
@@ -101,6 +104,7 @@ class HighlightProviderState {
 
     /// Invalidates all pending and valid ranges, resetting the provider.
     func invalidate() {
+        generation += 1
         validSet.removeAll()
         pendingSet.removeAll()
         highlightInvalidRanges()
@@ -136,18 +140,25 @@ extension HighlightProviderState {
     }
 
     func storageDidUpdate(range: NSRange, delta: Int) {
+        generation += 1
+        pendingSet.removeAll()
+        validSet = validSet.applyingEdit(range: range, delta: delta)
+
         guard let textView else { return }
+        let currentGeneration = self.generation
         highlightProvider?.applyEdit(textView: textView, range: range, delta: delta) { [weak self] result in
+            guard let self, self.generation == currentGeneration else { return }
             switch result {
             case .success(let invalidSet):
                 let modifiedRange = NSRange(location: range.location, length: range.length + delta)
                 // Make sure we add in the edited range too
-                self?.invalidate(invalidSet.union(IndexSet(integersIn: modifiedRange)))
+                self.invalidate(invalidSet.union(IndexSet(integersIn: modifiedRange)))
             case .failure(let error):
                 if case HighlightProvidingError.operationCancelled = error {
-                    self?.invalidate(IndexSet(integersIn: range))
+                    self.invalidate(IndexSet(integersIn: range))
                 } else {
-                    self?.logger.error("Failed to apply edit. Query returned with error: \(error)")
+                    self.logger.error("Failed to apply edit. Query returned with error: \(error)")
+                    self.invalidate()
                 }
             }
         }
@@ -178,17 +189,19 @@ private extension HighlightProviderState {
     /// - Parameter rangesToHighlight: The ranges to request highlights for.
     func queryHighlights(for rangesToHighlight: [NSRange]) {
         guard let textView else { return }
+        let currentGeneration = self.generation
         for range in rangesToHighlight {
             highlightProvider?.queryHighlightsFor(textView: textView, range: range) { [weak self] result in
-                guard let providerId = self?.id else { return }
+                guard let self, self.generation == currentGeneration else { return }
+                let providerId = self.id
                 assert(Thread.isMainThread, "Highlighted ranges called on non-main thread.")
 
-                self?.pendingSet.remove(integersIn: range)
-                self?.validSet.insert(range: range)
+                self.pendingSet.remove(integersIn: range)
+                self.validSet.insert(range: range)
 
                 switch result {
                 case .success(let highlights):
-                    self?.delegate?.applyHighlightResult(
+                    self.delegate?.applyHighlightResult(
                         provider: providerId,
                         highlights: highlights,
                         rangeToHighlight: range
@@ -196,9 +209,9 @@ private extension HighlightProviderState {
                 case .failure(let error):
                     // Only invalidate if it was cancelled.
                     if let error = error as? HighlightProvidingError, error == .operationCancelled {
-                        self?.invalidate(IndexSet(integersIn: range))
+                        self.invalidate(IndexSet(integersIn: range))
                     } else {
-                        self?.logger.debug("Highlighter Error: \(error.localizedDescription)")
+                        self.logger.debug("Highlighter Error: \(error.localizedDescription)")
                     }
                 }
             }

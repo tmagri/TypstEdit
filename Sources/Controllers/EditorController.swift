@@ -219,7 +219,8 @@ class EditorController: NSObject, ObservableObject {
              }
 
              // Force layout update and redraw to ensure changes are visible immediately
-             tvc.textView.layoutManager.setNeedsLayout()
+             tvc.textView.updateFrameIfNeeded()
+             tvc.textView.layoutManager.layoutLines()
              tvc.textView.needsDisplay = true
 
              // Safety net: make sure the view's text now matches the model. With the
@@ -268,7 +269,8 @@ class EditorController: NSObject, ObservableObject {
         tvc.setText(sourceCode)
 
         textView.selectionManager.setSelectedRange(NSRange(location: clamped, length: 0))
-        textView.layoutManager.setNeedsLayout()
+        textView.updateFrameIfNeeded()
+        textView.layoutManager.layoutLines()
         textView.needsDisplay = true
     }
 
@@ -588,7 +590,7 @@ class EditorController: NSObject, ObservableObject {
         switch appThemeString {
         case "Light": isDark = false
         case "Dark": isDark = true
-        default: isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        default: isDark = (NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) ?? .darkAqua) == .darkAqua
         }
         
         // Return cached theme if the color scheme hasn't changed

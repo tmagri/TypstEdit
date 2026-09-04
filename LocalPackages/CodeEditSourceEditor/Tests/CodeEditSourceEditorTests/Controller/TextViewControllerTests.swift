@@ -578,6 +578,195 @@ final class TextViewControllerTests: XCTestCase {
             XCTFail("Incorrect character style for warning character")
         }
     }
+
+    func test_interestNoteDeletion() throws {
+        let fullText = """
+        = Interest
+
+        Variables:
+        B is Balance 
+        p is Principle
+        i is Interest Rate
+        t is Time (repayments as a continuous function)
+        k is Pay Rate Increase
+        r is Base Repayment Amount
+        $B=p(1+i)^{t}+∑_{k=1}^{t}[r H(t-k)(1+i)^{t-k}]$
+        $B= p(1+i)^t+r/i ((1+i)^t−1)$
+
+        $p=−290000$
+        $ⅈ=((1+0.044)^(1/12) )−1$
+        $r=728×4$
+
+        How long will it take to pay off (B=0)?
+        Months
+        $r\\_m$  Monthly repayment (assume constant)
+        $i\\_m$  Effective monthly Interest Rate
+        $t\\_m$  is time <months>
+        $i\\_m=((1+i)^(1/12) )−1$
+        $r\\_m=((1+r)^(1/12) )−1$
+        $t\\_m=log⁡(r\\_m/(r\\_m+i_m p))/log⁡(i\\_m+1)$   
+        $t\\_y=t\\_m/12$
+
+        How many repayments is required to pay off at what specific interval  (B=0)? 
+
+        $r=−(i p(1+i)^t)/((i+1)^t−1)$
+
+        As of 27-05-2017
+        $k\\_m  = 0.00165158$ assuming 2% per annum
+        $i\\_m  = 0.004471699$ assuming 5.5% per annum 
+        $p=-285847.63$
+        $r=2400$
+
+        $B=-100000$, this will happen at 8.07 years
+        $B=-200000$, this will happen at 4.66 years
+        $B=0.5p$, this will happen at 6.76 years
+
+        $B=0$, this will happen at  t\\_f  = 10.566 years
+
+
+        Interest Payed from point onwards =
+         $∫_0^{t_{f}}(r\\_y(1+k)^{t})\\mathrm{dt}+B$
+        $= r[(k+1)^(t\\_f )/log⁡(k+1) −1/log⁡(k+1) ]+B$
+        ≈ \\$52630
+
+        Total Interest including from actual = $25974+52630=78604$
+
+        $B=p(1+i)^t+((r*(1+k)^t)/i)((1+i)^t-1)$
+
+        $B=(p+R/i)*(1+i)^t-(R/i)$
+        """
+        controller.language = .note
+        controller.textView.setText(fullText)
+        controller.view.layoutSubtreeIfNeeded()
+        controller.textView.layoutManager.layoutLines()
+
+        let deletePrefix = """
+        = Interest
+
+        Variables:
+        B is Balance 
+        p is Principle
+        i is Interest Rate
+        t is Time (repayments as a continuous function)
+        k is Pay Rate Increase
+        r is Base Repayment Amount
+        $B=p(1+i)^{t}+∑_{k=1}^
+        """
+        let deleteRange = NSRange(location: 0, length: (deletePrefix as NSString).length)
+
+        // Select the range first (just like the user does with mouse / shift-click)
+        controller.textView.selectionManager.setSelectedRange(deleteRange)
+
+        // Delete the selection
+        controller.textView.deleteBackward(nil)
+
+        print("[DEBUG-TEST] After deletion: textView.string.count=\(controller.textView.string.count)")
+        print("[DEBUG-TEST] textView.frame=\(controller.textView.frame)")
+        print("[DEBUG-TEST] gutterView.frame=\(controller.gutterView.frame)")
+        print("[DEBUG-TEST] visibleRect=\(controller.textView.visibleRect)")
+        let lines = Array(controller.textView.layoutManager.linesStartingAt(controller.textView.visibleRect.minY, until: controller.textView.visibleRect.maxY))
+        print("[DEBUG-TEST] visible lines count=\(lines.count)")
+        for l in lines.prefix(5) {
+            print("[DEBUG-TEST] line index=\(l.index), yPos=\(l.yPos), height=\(l.height), range=\(l.range)")
+        }
+
+        XCTAssertFalse(lines.isEmpty, "Lines starting in visible rect must not be empty!")
+    }
+
+    func test_interestNoteDeletionWhenScrolled() throws {
+        let fullText = """
+        = Interest
+
+        Variables:
+        B is Balance 
+        p is Principle
+        i is Interest Rate
+        t is Time (repayments as a continuous function)
+        k is Pay Rate Increase
+        r is Base Repayment Amount
+        $B=p(1+i)^{t}+∑_{k=1}^{t}[r H(t-k)(1+i)^{t-k}]$
+        $B= p(1+i)^t+r/i ((1+i)^t−1)$
+
+        $p=−290000$
+        $ⅈ=((1+0.044)^(1/12) )−1$
+        $r=728×4$
+
+        How long will it take to pay off (B=0)?
+        Months
+        $r\\_m$  Monthly repayment (assume constant)
+        $i\\_m$  Effective monthly Interest Rate
+        $t\\_m$  is time <months>
+        $i\\_m=((1+i)^(1/12) )−1$
+        $r\\_m=((1+r)^(1/12) )−1$
+        $t\\_m=log⁡(r\\_m/(r\\_m+i_m p))/log⁡(i\\_m+1)$   
+        $t\\_y=t\\_m/12$
+
+        How many repayments is required to pay off at what specific interval  (B=0)? 
+
+        $r=−(i p(1+i)^t)/((i+1)^t−1)$
+
+        As of 27-05-2017
+        $k\\_m  = 0.00165158$ assuming 2% per annum
+        $i\\_m  = 0.004471699$ assuming 5.5% per annum 
+        $p=-285847.63$
+        $r=2400$
+
+        $B=-100000$, this will happen at 8.07 years
+        $B=-200000$, this will happen at 4.66 years
+        $B=0.5p$, this will happen at 6.76 years
+
+        $B=0$, this will happen at  t\\_f  = 10.566 years
+
+
+        Interest Payed from point onwards =
+         $∫_0^{t_{f}}(r\\_y(1+k)^{t})\\mathrm{dt}+B$
+        $= r[(k+1)^(t\\_f )/log⁡(k+1) −1/log⁡(k+1) ]+B$
+        ≈ \\$52630
+
+        Total Interest including from actual = $25974+52630=78604$
+
+        $B=p(1+i)^t+((r*(1+k)^t)/i)((1+i)^t-1)$
+
+        $B=(p+R/i)*(1+i)^t-(R/i)$
+        """
+        controller.language = .note
+        controller.textView.setText(fullText)
+        controller.view.frame = NSRect(x: 0, y: 0, width: 600, height: 200)
+        controller.view.layoutSubtreeIfNeeded()
+        controller.textView.layoutManager.layoutLines()
+
+        // Scroll down
+        controller.scrollView.contentView.scroll(to: NSPoint(x: 0, y: 120))
+        controller.scrollView.reflectScrolledClipView(controller.scrollView.contentView)
+
+        let deletePrefix = """
+        = Interest
+
+        Variables:
+        B is Balance 
+        p is Principle
+        i is Interest Rate
+        t is Time (repayments as a continuous function)
+        k is Pay Rate Increase
+        r is Base Repayment Amount
+        $B=p(1+i)^{t}+∑_{k=1}^
+        """
+        let deleteRange = NSRange(location: 0, length: (deletePrefix as NSString).length)
+
+        // Select the range first
+        controller.textView.selectionManager.setSelectedRange(deleteRange)
+
+        // Delete the selection
+        controller.textView.deleteBackward(nil)
+
+        print("[DEBUG-SCROLLED] After deletion: textView.string.count=\(controller.textView.string.count)")
+        print("[DEBUG-SCROLLED] textView.frame=\(controller.textView.frame)")
+        print("[DEBUG-SCROLLED] visibleRect=\(controller.textView.visibleRect)")
+        let lines = Array(controller.textView.layoutManager.linesStartingAt(controller.textView.visibleRect.minY, until: controller.textView.visibleRect.maxY))
+        print("[DEBUG-SCROLLED] visible lines count=\(lines.count)")
+
+        XCTAssertFalse(lines.isEmpty, "Lines starting in visible rect must not be empty after scrolled deletion!")
+    }
 }
 
 // swiftlint:disable:this file_length

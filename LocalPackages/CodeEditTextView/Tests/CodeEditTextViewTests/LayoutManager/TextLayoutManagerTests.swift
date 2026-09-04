@@ -297,5 +297,139 @@ struct TextLayoutManagerTests {
         #expect(lm.lineStorage.length == tv.textStorage.length)
         lm.lineStorage.validateInternalState()
     }
+
+    @Test
+    func testDeleteMultiLineFromBeginningInScrollViewWithScrollOffset() throws {
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let tv = TextView(string: "First line\nSecond line\nThird line\nFourth line\nFifth line\nSixth line\nSeventh line\nEighth line")
+        tv.frame = NSRect(x: 0, y: 0, width: 400, height: 600)
+        scrollView.documentView = tv
+        tv.updateFrameIfNeeded()
+        let lm = try #require(tv.layoutManager)
+        lm.layoutLines()
+
+        // Simulate user having scrolled down during selection
+        scrollView.contentView.scroll(to: CGPoint(x: 0, y: 50))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        lm.layoutLines()
+
+        // Select from 0 through second line
+        let selectionRange = NSRange(location: 0, length: 23)
+        tv.selectionManager.setSelectedRange(selectionRange)
+        tv.deleteBackward(nil)
+
+        let visibleSubviews = tv.subviews.filter { !$0.isHidden && $0.frame.width > 0 && $0.frame.height > 0 }
+        #expect(!visibleSubviews.isEmpty, "Surviving lines must NOT be hidden or blank after deleting from beginning while scrolled")
+        #expect(tv.visibleRect.minY == 0, "Visible rect should have scrolled to the beginning where the cursor is")
+    }
+
+    @Test
+    func testMultiStorageDelegatePrioritizesTextLayoutManager() throws {
+        var callOrder: [String] = []
+
+        class TrackingDelegate: NSObject, NSTextStorageDelegate {
+            let name: String
+            let onCall: (String) -> Void
+            init(name: String, onCall: @escaping (String) -> Void) {
+                self.name = name
+                self.onCall = onCall
+            }
+            func textStorage(
+                _ textStorage: NSTextStorage,
+                didProcessEditing editedMask: NSTextStorageEditActions,
+                range editedRange: NSRange,
+                changeInLength delta: Int
+            ) {
+                onCall(name)
+            }
+        }
+
+        let multi = MultiStorageDelegate()
+        let tracker = TrackingDelegate(name: "Highlighter") { callOrder.append($0) }
+        multi.addDelegate(tracker)
+
+        let tv = TextView(string: "Hello")
+        let lm = try #require(tv.layoutManager)
+        multi.addDelegate(lm)
+
+        let storage = NSTextStorage(string: "Hello")
+        storage.delegate = multi
+        storage.replaceCharacters(in: NSRange(location: 0, length: 5), with: "World")
+
+        #expect(!callOrder.isEmpty)
+    }
+
+    @Test
+    func testDeleteFromBeginningWhenDocumentFitsInViewportLaysOutLinesImmediately() throws {
+        // Document smaller than scrollview so frame height does NOT change on edit
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let tv = TextView(string: "= Title\n*Bold sentence here*\n$x + y = z$\nFinal line")
+        scrollView.documentView = tv
+        tv.updateFrameIfNeeded()
+        let lm = try #require(tv.layoutManager)
+        lm.layoutLines()
+
+        #expect(!tv.subviews.filter({ !$0.isHidden && $0.frame.width > 0 && $0.frame.height > 0 }).isEmpty)
+
+        // Select from 0 into between "*Bold" and "sentence":
+        // "= Title\n*Bold " (length: 8 + 6 = 14)
+        let selectionRange = NSRange(location: 0, length: 14)
+        tv.selectionManager.setSelectedRange(selectionRange)
+        tv.deleteBackward(nil)
+
+        #expect(tv.textStorage.string == "sentence here*\n$x + y = z$\nFinal line")
+
+        // Crucial check: line fragment views MUST exist and be visible immediately, even without frame change or window resize
+        let visibleSubviews = tv.subviews.filter { !$0.isHidden && $0.frame.width > 0 && $0.frame.height > 0 }
+        #expect(visibleSubviews.count == 3, "All 3 surviving lines must have visible line fragment views immediately")
+    }
+
+    @Test
+    func testSetTextStorageImmediatelyLaysOutLinesAndPopulatesSubviews() throws {
+        let tv = TextView(string: "Initial text")
+        tv.frame = NSRect(x: 0, y: 0, width: 500, height: 500)
+        let lm = try #require(tv.layoutManager)
+        lm.layoutLines()
+
+        // Replace entire text storage via setText
+        tv.setText("New line 1\nNew line 2\nNew line 3")
+
+        let visibleSubviews = tv.subviews.filter { !$0.isHidden && $0.frame.width > 0 && $0.frame.height > 0 }
+        #expect(visibleSubviews.count == 3, "setText must immediately lay out line views and never leave subviews empty/blank")
+    }
+
+    /// Regression test for the blank-editor bug caused by `layoutLines` being called while the scroll
+    /// position is still below the (newly-shrunk) document height.
+    ///
+    /// Before the fix, `linesStartingAt(800, until: 820)` returned zero lines for a ~100px document,
+    /// causing `enqueueViews(notInSet:)` to hide every fragment view — producing a blank editor.
+    /// The guard at the top of `layoutLines` should return early without touching fragment views.
+    @Test
+    func testLayoutLinesWithStaleVisibleRectBeyondDocHeightDoesNotBlank() throws {
+        // Small content — document height will be much less than 800px.
+        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let tv = TextView(string: "Line one\nLine two\nLine three")
+        tv.frame = NSRect(x: 0, y: 0, width: 400, height: 200)
+        scrollView.documentView = tv
+        tv.updateFrameIfNeeded()
+        let lm = try #require(tv.layoutManager)
+        lm.layoutLines()
+
+        // Force-layout to populate fragment views.
+        let initialVisible = tv.subviews.filter { !$0.isHidden && $0.frame.width > 0 && $0.frame.height > 0 }
+        #expect(!initialVisible.isEmpty, "Fragment views should exist before the test")
+
+        // Simulate calling layoutLines with a rect that is entirely BELOW the document.
+        // This mimics the race: scroll position is stale at y=800, document is only ~60px tall.
+        let staleRect = NSRect(x: 0, y: 800, width: 400, height: 200)
+        lm.layoutLines(in: staleRect)
+
+        // The guard must prevent enqueueViews from hiding all fragment views.
+        let afterStale = tv.subviews.filter { !$0.isHidden && $0.frame.width > 0 && $0.frame.height > 0 }
+        #expect(
+            afterStale.count == initialVisible.count,
+            "layoutLines with a stale out-of-bounds rect must NOT hide existing fragment views"
+        )
+    }
 }
 

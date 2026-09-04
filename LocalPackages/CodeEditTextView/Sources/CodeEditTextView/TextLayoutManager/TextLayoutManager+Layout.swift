@@ -69,14 +69,29 @@ extension TextLayoutManager {
             return []
         }
 
+        // Guard against a stale (scrolled-down) visibleRect that extends beyond the current document height.
+        // This can occur when text is deleted causing the document to shrink while the scroll position has not
+        // yet been updated. In that situation linesStartingAt would return zero lines, causing
+        // enqueueViews(notInSet:) to hide every fragment view — producing a blank editor.
+        let docHeight = lineStorage.height
+        guard docHeight == 0 || visibleRect.minY <= docHeight else {
+            // The visible rect is entirely below the document — nothing to lay out.
+            // Do NOT enqueue existing views; they are still valid until the scroll position settles.
+            return []
+        }
+
         // The macOS may call `layout` on the textView while we're laying out fragment views. This ensures the view
         // tree modifications caused by this method are atomic, so macOS won't call `layout` while we're already doing
         // that
         CATransaction.begin()
         layoutLock.lock()
 
-        let minY = max(visibleRect.minY - verticalLayoutPadding, 0)
-        let maxY = max(visibleRect.maxY + verticalLayoutPadding, 0)
+        // Clamp visible rect to actual document bounds so that linesStartingAt always iterates over a
+        // valid y-range, even if the scroll view has not yet settled to its new position after a deletion.
+        let clampedMinY = max(visibleRect.minY - verticalLayoutPadding, 0)
+        let clampedMaxY = docHeight > 0 ? min(visibleRect.maxY + verticalLayoutPadding, docHeight) : 0
+        let minY = clampedMinY
+        let maxY = max(clampedMaxY, clampedMinY)
         let originalHeight = lineStorage.height
         var usedFragmentIDs = Set<LineFragment.ID>()
         let forceLayout: Bool = needsLayout
@@ -123,13 +138,11 @@ extension TextLayoutManager {
             if forceLayout || linePositionNeedsLayout || wasNotVisible || lineNotEntirelyLaidOut {
                 fullLineLayout()
             } else {
-                if didLayoutChange || yContentAdjustment > 0 {
-                    // Layout happened and this line needs to be moved but not necessarily re-added
-                    let needsFullLayout = updateLineViewPositions(linePosition)
-                    if needsFullLayout {
-                        fullLineLayout()
-                        continue
-                    }
+                // Ensure this line's fragment views are placed at its current position
+                let needsFullLayout = updateLineViewPositions(linePosition)
+                if needsFullLayout {
+                    fullLineLayout()
+                    continue
                 }
 
                 // Make sure the used fragment views aren't dequeued.

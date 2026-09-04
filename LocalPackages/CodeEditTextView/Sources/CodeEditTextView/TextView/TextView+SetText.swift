@@ -45,6 +45,8 @@ extension TextView {
         _undoManager?.clearStack()
 
         textStorage.delegate = storageDelegate
+        updateFrameIfNeeded()
+        layoutManager.layoutLines()
         needsDisplay = true
         needsLayout = true
     }

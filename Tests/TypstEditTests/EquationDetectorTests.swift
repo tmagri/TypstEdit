@@ -28,13 +28,18 @@ final class EquationDetectorTests: XCTestCase {
     }
     
     func testEscapedDollar() {
+        // Swift literal "Cost is \\$5.00 but $x=5$" decodes to the 24-char string:
+        //   C(0) o(1) s(2) t(3) ' '(4) i(5) s(6) ' '(7) \(8) $(9) 5(10) .(11) 0(12) 0(13)
+        //   ' '(14) b(15) u(16) t(17) ' '(18) $(19) x(20) =(21) 5(22) $(23)
+        // The escaped pair \$ occupies indices 8–9; the real opening $ is at index 19.
         let text = "Cost is \\$5.00 but $x=5$"
-        // Cursor at 19 (x)
-        // First $ is escaped at 8. Real start $ is at 18.
-        
-        let range = EquationDetector.findEquationRange(in: text, at: 19)
+
+        // Cursor at 20 (inside 'x'), which is inside the equation $x=5$.
+        let range = EquationDetector.findEquationRange(in: text, at: 20)
         XCTAssertNotNil(range)
-        XCTAssertEqual(range?.location, 18)
+        // Real opening $ is at 19, closing $ at 23 → length 5.
+        XCTAssertEqual(range?.location, 19)
+        XCTAssertEqual(range?.length, 5)
     }
     
     func testNoEquation() {

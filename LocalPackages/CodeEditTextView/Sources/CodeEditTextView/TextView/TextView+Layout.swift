@@ -46,11 +46,16 @@ extension TextView {
     }
 
     public var visibleTextRange: NSRange? {
-        let minY = max(visibleRect.minY, 0)
-        let maxY = min(visibleRect.maxY, layoutManager.estimatedHeight())
+        let docHeight = layoutManager.estimatedHeight()
+        // Clamp both bounds into [0, docHeight] so that a stale scroll position (e.g. the view
+        // has been scrolled past the end of a freshly-shortened document) never causes
+        // textLineForPosition to return nil and leave the visible range undefined.
+        let minY = max(min(visibleRect.minY, max(docHeight - 1, 0)), 0)
+        let maxY = min(visibleRect.maxY, max(docHeight, 0))
         guard let minYLine = layoutManager.textLineForPosition(minY),
               let maxYLine = layoutManager.textLineForPosition(maxY) else {
-            return nil
+            // Fallback: return the full document range so the highlighter always has valid indices.
+            return NSRange(location: 0, length: textStorage.length)
         }
         return NSRange(
             location: minYLine.range.location,

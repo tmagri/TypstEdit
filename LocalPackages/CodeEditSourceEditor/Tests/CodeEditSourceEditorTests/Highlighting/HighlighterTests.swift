@@ -3,6 +3,7 @@ import CodeEditTextView
 import CodeEditLanguages
 @testable import CodeEditSourceEditor
 
+// swiftlint:disable type_body_length line_length trailing_whitespace
 final class HighlighterTests: XCTestCase {
     class MockHighlightProvider: HighlightProviding {
         var setUpCount = 0
@@ -313,5 +314,135 @@ final class HighlighterTests: XCTestCase {
 
         XCTAssertFalse(receivedHighlights.isEmpty, "Highlights should not be empty after multi-line deletion from beginning!")
     }
-}
 
+    @MainActor
+    func test_deleteMultiLineFromBeginningEndingAtNonZeroColumnKeepsHighlighting() {
+        let highlightProvider = TreeSitterClient()
+        highlightProvider.forceSyncOperation = true
+        textView.setText("let a = 1\nlet b = 2\nlet c = 3\nlet d = 4")
+
+        let highlighter = Mock.highlighter(
+            textView: textView,
+            highlightProviders: [highlightProvider],
+            attributeProvider: attributeProvider
+        )
+        textView.addStorageDelegate(highlighter)
+        highlighter.setLanguage(language: .swift)
+        highlighter.invalidate()
+
+        // Select from index 0 across line 1 and into line 2 ending at column 5: "let a = 1\nlet b" (length 15)
+        let deleteRange = NSRange(location: 0, length: 15)
+        textView.replaceCharacters(in: [deleteRange], with: "")
+
+        // Query highlights for remaining text
+        var receivedHighlights: [HighlightRange] = []
+        highlightProvider.queryHighlightsFor(textView: textView, range: textView.documentRange) { result in
+            switch result {
+            case .success(let highlights):
+                receivedHighlights = highlights
+            case .failure(let error):
+                XCTFail("Query highlights failed with error: \(error)")
+            }
+        }
+
+        XCTAssertFalse(receivedHighlights.isEmpty, "Highlights should remain intact after deletion ending at non-zero column!")
+    }
+
+    @MainActor
+    func test_deleteFromTopIntoBoldTypst() {
+        let highlightProvider = TreeSitterClient()
+        highlightProvider.forceSyncOperation = true
+        textView.setText("= Heading\nSome text\n*Bold sentence here*\n$x + y = z$\nFinal line")
+
+        let highlighter = Mock.highlighter(
+            textView: textView,
+            highlightProviders: [highlightProvider],
+            attributeProvider: attributeProvider
+        )
+        textView.addStorageDelegate(highlighter)
+        highlighter.setLanguage(language: .typst)
+        highlighter.invalidate()
+
+        // Delete from index 0 to between "Bold" and "sentence":
+        // "= Heading\nSome text\n*Bold " (length: 10 + 10 + 6 = 26)
+        let deleteRange = NSRange(location: 0, length: 26)
+        textView.replaceCharacters(in: [deleteRange], with: "")
+
+        print("[TEST-TYPST] After deletion, text is:\n\(textView.string)")
+
+        var receivedHighlights: [HighlightRange] = []
+        highlightProvider.queryHighlightsFor(textView: textView, range: textView.documentRange) { result in
+            switch result {
+            case .success(let highlights):
+                receivedHighlights = highlights
+                print("[TEST-TYPST] Received \(highlights.count) highlights: \(highlights.map { "\($0.range): \($0.capture)" })")
+            case .failure(let error):
+                XCTFail("Query highlights failed with error: \(error)")
+            }
+        }
+
+        XCTAssertFalse(receivedHighlights.isEmpty, "Highlights should exist for remaining lines like equation!")
+    }
+
+    @MainActor
+    func test_deleteFromTopIntoMidEquationWithUnicodeTypst() {
+        let text = """
+        = Interest
+
+        Variables:
+        B is Balance 
+        p is Principle
+        i is Interest Rate
+        t is Time (repayments as a continuous function)
+        k is Pay Rate Increase
+        r is Base Repayment Amount
+        $B=p(1+i)^{t}+∑_{k=1}^{t}[r H(t-k)(1+i)^{t-k}]$
+        $B= p(1+i)^t+r/i ((1+i)^t−1)$
+
+        $p=−290000$
+        $ⅈ=((1+0.044)^(1/12) )−1$
+        $r=728×4$
+        """
+        let highlightProvider = TreeSitterClient()
+        highlightProvider.forceSyncOperation = true
+        textView.setText(text)
+
+        let highlighter = Mock.highlighter(
+            textView: textView,
+            highlightProviders: [highlightProvider],
+            attributeProvider: attributeProvider
+        )
+        textView.addStorageDelegate(highlighter)
+        highlighter.setLanguage(language: .typst)
+        highlighter.invalidate()
+
+        let deletePrefix = """
+        = Interest
+
+        Variables:
+        B is Balance 
+        p is Principle
+        i is Interest Rate
+        t is Time (repayments as a continuous function)
+        k is Pay Rate Increase
+        r is Base Repayment Amount
+        $B=p(1+i)^{t}+∑_{k=1}^
+        """
+        let deleteRange = NSRange(location: 0, length: (deletePrefix as NSString).length)
+        textView.replaceCharacters(in: [deleteRange], with: "")
+
+        XCTAssertFalse(textView.string.isEmpty)
+
+        var receivedHighlights: [HighlightRange] = []
+        highlightProvider.queryHighlightsFor(textView: textView, range: textView.documentRange) { result in
+            switch result {
+            case .success(let highlights):
+                receivedHighlights = highlights
+            case .failure(let error):
+                XCTFail("Query highlights failed with error: \(error)")
+            }
+        }
+
+        XCTAssertFalse(receivedHighlights.isEmpty, "Highlights should exist after deletion ending mid-equation with unicode!")
+    }
+}

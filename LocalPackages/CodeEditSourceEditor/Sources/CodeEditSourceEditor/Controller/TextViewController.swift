@@ -30,8 +30,8 @@ public class TextViewController: NSViewController {
 
     internal(set) public var scrollView: NSScrollView!
     internal(set) public var textView: TextView!
-    var gutterView: GutterView!
-    var minimapView: MinimapView!
+    internal(set) public var gutterView: GutterView!
+    internal(set) public var minimapView: MinimapView!
 
     /// The reformatting guide view
     var reformattingGuideView: ReformattingGuideView!
