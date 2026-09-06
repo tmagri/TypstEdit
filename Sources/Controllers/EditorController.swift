@@ -968,11 +968,12 @@ class EditorController: NSObject, ObservableObject {
     // --- Paste dedupe state ---
     // A single physical Cmd+V can trigger more than one paste entry point (the keyDown
     // monitor, the SwiftUI menu, and the text view's responder-chain `paste:` via
-    // `interpretKeyEvents`), all of which now funnel into `performPaste`. An identical
-    // (pasteboard changeCount, insertion location) pair arriving within 250ms is the
-    // same paste racing with itself and is dropped. Genuine key-repeat pastes advance
-    // the cursor on every fire, so their locations differ and are not affected.
-    private var lastPaste: (changeCount: Int, location: Int, time: CFAbsoluteTime)?
+    // `interpretKeyEvents`), all of which now funnel into `performPaste`. Duplicates of
+    // the same pasteboard changeCount arriving within 250ms at either the previous
+    // insertion's start or its post-insert caret are the same paste racing with itself
+    // and are dropped. Genuine pastes somewhere else produce a location matching
+    // neither end, so they always insert.
+    private var lastPaste: (changeCount: Int, location: Int, endLocation: Int, insertedLength: Int, time: CFAbsoluteTime)?
 
     /// Which Markdown→Typst conversion policy a paste applies.
     enum PasteConversionMode {
@@ -1015,22 +1016,33 @@ class EditorController: NSObject, ObservableObject {
                 range = NSRange(location: (textView.string as NSString).length, length: 0)
             }
 
-            // Drop racing duplicate invocations of the same physical paste.
-            let changeCount = pasteboard.changeCount
-            let now = CFAbsoluteTimeGetCurrent()
-            if let last = lastPaste,
-               last.changeCount == changeCount,
-               last.location == range.location,
-               now - last.time < 0.25 {
-                return true
-            }
-            lastPaste = (changeCount, range.location, now)
-
             // Perform conversion synchronously on the main thread.
             // Doing this async previously caused the captured `selectedRange` to become
             // stale by the time the main-thread callback fired, inserting at the wrong
             // position. The conversion is regex-based and fast enough to run inline.
             let textToInsert = applyPasteConversion(text, mode: mode)
+
+            // Drop racing duplicate invocations of the same physical paste. The keyDown
+            // monitor, the SwiftUI menu, and the responder-chain `paste:` can each fire a
+            // beat apart, and every invocation after the first reads a caret that the
+            // previous insertion already advanced — so comparing against the original
+            // location alone let duplicates slip through and paste two/three copies.
+            // Match either end of the previous insertion: its start (a duplicate that
+            // captured the range before the insert landed) or its post-insert caret.
+            let changeCount = pasteboard.changeCount
+            let now = CFAbsoluteTimeGetCurrent()
+            let insertedLength = (textToInsert as NSString).length
+            if let last = lastPaste,
+               last.changeCount == changeCount,
+               now - last.time < 0.25,
+               range.location == last.location || range.location == last.endLocation {
+                // Extend the tracked window so a third racing invocation (caret
+                // advanced by yet another would-be insertion) is dropped too.
+                let newEnd = max(last.endLocation, range.location) + last.insertedLength
+                lastPaste = (changeCount, last.location, newEnd, last.insertedLength, last.time)
+                return true
+            }
+            lastPaste = (changeCount, range.location, range.location + insertedLength, insertedLength, now)
 
             // Route through the text view's own replaceCharacters so the CEUndoManager
             // correctly records the mutation and undo works. Using insertText/setText for
