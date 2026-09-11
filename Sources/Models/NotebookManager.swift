@@ -56,6 +56,8 @@ class NotebookManager: ObservableObject {
         loadNotebooks()
     }
     
+    static let hiddenFolders: Set<String> = ["vectorcaches", "temp", "backups"]
+
     func loadNotebooks() {
         var loaded: [Notebook] = []
         do {
@@ -63,6 +65,11 @@ class NotebookManager: ObservableObject {
             
             for folder in contents {
                 guard (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+                
+                let folderName = folder.lastPathComponent
+                if Self.hiddenFolders.contains(folderName.lowercased()) {
+                    continue
+                }
                 
                 var pages: [NotebookPage] = []
                 if let pageFiles = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
@@ -80,7 +87,11 @@ class NotebookManager: ObservableObject {
     }
     
     func createNotebook(name: String) {
-        let url = rootDirectory.appendingPathComponent(name)
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !Self.hiddenFolders.contains(trimmed.lowercased()) else {
+            return
+        }
+        let url = rootDirectory.appendingPathComponent(trimmed)
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             loadNotebooks()
@@ -121,7 +132,12 @@ class NotebookManager: ObservableObject {
     }
     
     func renameNotebook(url: URL, newName: String) -> URL? {
-        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !Self.hiddenFolders.contains(trimmed.lowercased()) else {
+            print("Error renaming notebook: Invalid notebook name.")
+            return nil
+        }
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(trimmed)
         guard !FileManager.default.fileExists(atPath: newURL.path) else {
             print("Error renaming notebook: A notebook with that name already exists.")
             return nil
@@ -172,7 +188,12 @@ class NotebookManager: ObservableObject {
     }
     
     func restoreNotebook(from zipURL: URL, name: String) async -> Bool {
-        let destFolder = rootDirectory.appendingPathComponent(name)
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !Self.hiddenFolders.contains(trimmed.lowercased()) else {
+            print("Error restoring notebook: Invalid notebook name.")
+            return false
+        }
+        let destFolder = rootDirectory.appendingPathComponent(trimmed)
         do {
             if !FileManager.default.fileExists(atPath: destFolder.path) {
                 try FileManager.default.createDirectory(at: destFolder, withIntermediateDirectories: true)

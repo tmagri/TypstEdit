@@ -125,6 +125,7 @@ extension SourceEditor {
             }
             // A plain string binding is one-way (from this view, up the hierarchy) so it's not in the state binding
             if case .binding(let binding) = text {
+                self.isUpdateFromTextView = true
                 binding.wrappedValue = textView.string
             }
         }

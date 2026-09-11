@@ -106,8 +106,12 @@ class TypstCompiler: ObservableObject {
             }
         }
         
-        // Priority 2: Common system paths
+        // Priority 2: Common system paths and workspace bundled binary
+        let localProjectPath = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("typst-aarch64-apple-darwin/typst").path
         let paths = [
+            localProjectPath,
+            "/Users/troymagri/Desktop/TypstEdit/typst-aarch64-apple-darwin/typst",
             "/opt/homebrew/bin/typst",
             "/usr/local/bin/typst",
             "/usr/bin/typst",
@@ -128,6 +132,7 @@ class TypstCompiler: ObservableObject {
     
     // We keep track of the current shadow file being watched
     private var currentShadowSourceURL: URL?
+    public private(set) var currentShadowPDFURL: URL?
 
     // Lenient-mode fallback tracking (used for .note / .md files)
     // `fallbackAttempts[line] = n` records how many escalating fixes we've applied
@@ -146,6 +151,7 @@ class TypstCompiler: ObservableObject {
         processOutputPipe?.fileHandleForReading.readabilityHandler = nil
         processOutputPipe = nil
         currentShadowSourceURL = nil
+        currentShadowPDFURL = nil
         // We do not clear fallback tracking here because updateContent() sets them
         // up just before cleanUp() is called to switch processes.
     }
@@ -221,6 +227,9 @@ class TypstCompiler: ObservableObject {
             var pendingNoteWarnings: [TypstError] = []
 
             if ext == "md" || ext == "note" {
+                if ext == "note" {
+                    finalSource = Self.autoFixBrokenNoteSyntax(finalSource)
+                }
                 let textToProcess = finalSource
                 let aiService = AICompletionService.shared
                 let isHybrid = (ext == "note")
@@ -340,6 +349,7 @@ class TypstCompiler: ObservableObject {
         }
         
         currentShadowSourceURL = sourceURL
+        currentShadowPDFURL = outputURL
         // Clear real compile errors when (re)starting a watch; keep note warnings,
         // which describe the source and are recomputed on each `updateContent`.
         self.typstErrors = []
@@ -509,26 +519,50 @@ class TypstCompiler: ObservableObject {
     /// `#import` may briefly fail while the package downloads, and silently escaping it
     /// would break the rest of the document. The original error is surfaced to the user
     /// instead of being swallowed by the fallback.
-    private func attemptFallbackFix(rawErrorLines: [Int]) {
-        guard let shadowURL = currentShadowSourceURL else { return }
-        guard FileManager.default.fileExists(atPath: shadowURL.path) else { return }
+    /// Parses raw line numbers where Typst reported errors in its stderr output.
+    private func parseRawErrorLines(from output: String) -> [Int] {
+        var rawLines: [Int] = []
+        let lines = output.components(separatedBy: .newlines)
+        var currentErrorMsg: String? = nil
+        for line in lines {
+            if line.starts(with: "error: ") {
+                currentErrorMsg = String(line.dropFirst("error: ".count))
+            } else if currentErrorMsg != nil, let range = line.range(of: ":\\d+:\\d+", options: .regularExpression) {
+                let match = String(line[range]) // ":10:5"
+                let parts = match.split(separator: ":")
+                if parts.count >= 1, let lineNum = Int(parts[0]) {
+                    if !rawLines.contains(lineNum) {
+                        rawLines.append(lineNum)
+                    }
+                }
+                currentErrorMsg = nil
+            }
+        }
+        return rawLines
+    }
+
+    /// Applies the lenient fallback fix (Strategy 1: escape special characters; Strategy 2: wrap in #raw())
+    /// to the specified source file URL for the offending error lines. Returns true if file was modified.
+    @discardableResult
+    private func applyFallbackFix(to fileURL: URL, rawErrorLines: [Int], attempts: inout [Int: Int], isHybrid: Bool) -> Bool {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return false }
 
         // Group the offending lines by which strategy we should try next.
         // Lines we've already maxed out (attempt >= 2) are skipped.
         var escapeTargets: [Int] = []
         var rawWrapTargets: [Int] = []
         for line in rawErrorLines {
-            let attempt = fallbackAttempts[line, default: 0]
+            let attempt = attempts[line, default: 0]
             if attempt == 0 { escapeTargets.append(line) }
             else if attempt == 1 { rawWrapTargets.append(line) }
         }
         guard !(escapeTargets.isEmpty && rawWrapTargets.isEmpty) else {
             print("[FallbackFix] All error lines already maxed out — skipping.")
-            return
+            return false
         }
 
         do {
-            let content = try String(contentsOf: shadowURL, encoding: .utf8)
+            let content = try String(contentsOf: fileURL, encoding: .utf8)
             var fileLines = content.components(separatedBy: "\n")
             var modified = false
 
@@ -541,15 +575,14 @@ class TypstCompiler: ObservableObject {
                 let trimmed = original.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty { continue }                          // nothing to escape
                 if trimmed.hasPrefix("#raw(\"") { continue }             // already a raw block
-                if isProtectedTypstDirective(trimmed, isHybrid: currentFileExtension == "note") {
-                    // Don't mangle intentional Typst — surface the error instead.
-                    fallbackAttempts[rawLine] = 2  // mark as maxed so we don't keep retrying
+                if isProtectedTypstDirective(trimmed, isHybrid: isHybrid) {
+                    attempts[rawLine] = 2  // mark as maxed so we don't keep retrying
                     print("[FallbackFix][skip] line \(rawLine): protected directive — \(trimmed.prefix(40))")
                     continue
                 }
 
                 fileLines[idx] = escapeTypstLine(original)
-                fallbackAttempts[rawLine] = 1
+                attempts[rawLine] = 1
                 modified = true
                 print("[FallbackFix][escape] line \(rawLine): \(original.prefix(60))")
             }
@@ -563,8 +596,8 @@ class TypstCompiler: ObservableObject {
                 let trimmed = original.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty { continue }
                 if trimmed.hasPrefix("#raw(\"") { continue }             // idempotent
-                if isProtectedTypstDirective(trimmed, isHybrid: currentFileExtension == "note") {
-                    fallbackAttempts[rawLine] = 2
+                if isProtectedTypstDirective(trimmed, isHybrid: isHybrid) {
+                    attempts[rawLine] = 2
                     print("[FallbackFix][skip] line \(rawLine): protected directive — \(trimmed.prefix(40))")
                     continue
                 }
@@ -574,18 +607,27 @@ class TypstCompiler: ObservableObject {
                     .replacingOccurrences(of: "\\", with: "\\\\")
                     .replacingOccurrences(of: "\"", with: "\\\"")
                 fileLines[idx] = "#raw(\"\(escaped)\", block: true)"
-                fallbackAttempts[rawLine] = 2
+                attempts[rawLine] = 2
                 modified = true
                 print("[FallbackFix][raw-wrap] line \(rawLine): \(original.prefix(60))")
             }
 
             if modified {
                 let newContent = fileLines.joined(separator: "\n")
-                try newContent.write(to: shadowURL, atomically: true, encoding: .utf8)
-                print("[FallbackFix] Shadow file updated — typst watch will recompile.")
+                try newContent.write(to: fileURL, atomically: true, encoding: .utf8)
+                return true
             }
         } catch {
             print("[FallbackFix] Failed to apply fallback fix: \(error)")
+        }
+        return false
+    }
+
+    private func attemptFallbackFix(rawErrorLines: [Int]) {
+        guard let shadowURL = currentShadowSourceURL else { return }
+        let modified = applyFallbackFix(to: shadowURL, rawErrorLines: rawErrorLines, attempts: &fallbackAttempts, isHybrid: currentFileExtension == "note")
+        if modified {
+            print("[FallbackFix] Shadow file updated — typst watch will recompile.")
         }
     }
 
@@ -651,6 +693,137 @@ class TypstCompiler: ObservableObject {
         result = result.replacingOccurrences(of: "`",  with: "\\`")
         
         return result
+    }
+
+    // MARK: - Auto-Fix Broken Syntax (.note)
+
+    /// Proactively repairs broken or incomplete syntax in `.note` files prior to compilation,
+    /// ensuring quick compilation without having to fail and recompile through watch cycles.
+    ///
+    /// Fixes:
+    /// - Unclosed code fences (odd count of ```) -> closed at EOF
+    /// - Unclosed single-line math expressions ($... without closing $) -> closed with $
+    /// - Dangling exponents and subscripts in math ($...^$ or $..._$) -> completed with ^{} or _{}
+    /// - Dangling binary / relational operators before closing $ -> completed with ""
+    /// - Unbalanced delimiters within math blocks (parentheses, brackets, braces)
+    /// - Trailing lone carets (^) in content mode outside math -> escaped as \^
+    /// - Trailing bare hash (#) in content mode -> escaped as \#
+    nonisolated static func autoFixBrokenNoteSyntax(_ source: String) -> String {
+        guard !source.isEmpty else { return source }
+        
+        var lines = source.components(separatedBy: "\n")
+        
+        // 1. Check code fences: if count of triple-backtick lines is odd, close at EOF
+        var inCodeBlock = false
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inCodeBlock.toggle()
+            }
+        }
+        if inCodeBlock {
+            lines.append("```")
+        }
+        
+        // 2. Process line by line for inline math and syntax fixes outside code blocks
+        var currentlyInCode = false
+        for i in 0..<lines.count {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                currentlyInCode.toggle()
+                continue
+            }
+            if currentlyInCode { continue }
+            
+            var line = lines[i]
+            
+            // Fix unclosed single-line math $...
+            // Count unescaped $ signs
+            var dollarIndices: [Int] = []
+            let chars = Array(line)
+            for j in 0..<chars.count {
+                if chars[j] == "$" {
+                    let isEscaped = (j > 0 && chars[j - 1] == "\\")
+                    if !isEscaped {
+                        dollarIndices.append(j)
+                    }
+                }
+            }
+            
+            // If odd number of $, and it's not a single bare currency like $5 without any other math
+            if dollarIndices.count % 2 != 0 {
+                let lastDollarIdx = dollarIndices.last!
+                let isCurrency = (lastDollarIdx + 1 < chars.count && chars[lastDollarIdx + 1].isNumber && dollarIndices.count == 1 && !line.contains("=") && !line.contains("^") && !line.contains("_") && !line.contains("\\"))
+                if !isCurrency {
+                    line.append("$")
+                }
+            }
+            
+            // Fix dangling ^ or _ or binary operators inside math blocks: $...$ or $$...$$
+            if let mathRegex = try? NSRegularExpression(pattern: "\\$\\$?([^\\$]+)\\$\\$?", options: []) {
+                let nsLine = line as NSString
+                let matches = mathRegex.matches(in: line, options: [], range: NSRange(0..<nsLine.length))
+                var fixedLine = line
+                for m in matches.reversed() {
+                    let mathContent = nsLine.substring(with: m.range(at: 1))
+                    var fixedMath = mathContent
+                    
+                    // Replace trailing ^ or _ before end of math: e.g. "k=1^" -> "k=1^{}"
+                    if let trailSupSub = try? NSRegularExpression(pattern: "([\\^_])\\s*$", options: []) {
+                        fixedMath = trailSupSub.stringByReplacingMatches(in: fixedMath, options: [], range: NSRange(0..<fixedMath.utf16.count), withTemplate: "$1{}")
+                    }
+                    
+                    // Replace trailing binary/relational operators before end of math: e.g. "x + " -> "x + \"\""
+                    if let trailOp = try? NSRegularExpression(pattern: "([+\\-*\\/=<>]|\\\\times|\\\\cdot)\\s*$", options: []) {
+                        fixedMath = trailOp.stringByReplacingMatches(in: fixedMath, options: [], range: NSRange(0..<fixedMath.utf16.count), withTemplate: "$1 \"\"")
+                    }
+                    
+                    // Replace trailing lone backslash
+                    if fixedMath.hasSuffix("\\") && !fixedMath.hasSuffix("\\\\") {
+                        fixedMath.removeLast()
+                    }
+                    
+                    // Check balanced delimiters inside this math block: ( ), [ ], { }
+                    var parenCount = 0
+                    var bracketCount = 0
+                    var braceCount = 0
+                    for c in fixedMath {
+                        if c == "(" { parenCount += 1 }
+                        else if c == ")" { parenCount = max(0, parenCount - 1) }
+                        else if c == "[" { bracketCount += 1 }
+                        else if c == "]" { bracketCount = max(0, bracketCount - 1) }
+                        else if c == "{" { braceCount += 1 }
+                        else if c == "}" { braceCount = max(0, braceCount - 1) }
+                    }
+                    if braceCount > 0 { fixedMath.append(String(repeating: "}", count: braceCount)) }
+                    if bracketCount > 0 { fixedMath.append(String(repeating: "]", count: bracketCount)) }
+                    if parenCount > 0 { fixedMath.append(String(repeating: ")", count: parenCount)) }
+                    
+                    if fixedMath != mathContent {
+                        let fullMatchRange = m.range
+                        let delimiter = (nsLine.substring(with: fullMatchRange).hasPrefix("$$")) ? "$$" : "$"
+                        let replacement = "\(delimiter)\(fixedMath)\(delimiter)"
+                        fixedLine = (fixedLine as NSString).replacingCharacters(in: fullMatchRange, with: replacement)
+                    }
+                }
+                line = fixedLine
+            }
+            
+            // Content mode fixes:
+            // Escape lone trailing ^ at end of line (outside math):
+            if let loneCaret = try? NSRegularExpression(pattern: "(?<![\\\\\\$])\\^\\s*$", options: []) {
+                line = loneCaret.stringByReplacingMatches(in: line, options: [], range: NSRange(0..<line.utf16.count), withTemplate: "\\\\^")
+            }
+            
+            // Bare trailing # at end of line:
+            if let bareHash = try? NSRegularExpression(pattern: "(?<!\\\\)#\\s*$", options: []) {
+                line = bareHash.stringByReplacingMatches(in: line, options: [], range: NSRange(0..<line.utf16.count), withTemplate: "\\\\#")
+            }
+            
+            lines[i] = line
+        }
+        
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Improper Operator Delimiting (.note)
@@ -840,6 +1013,103 @@ class TypstCompiler: ObservableObject {
         }
     }
 
+    /// Exports note/markdown content to PNG, SVG, or PDF by preprocessing Markdown,
+    /// adding necessary preambles, resolving images, and applying fallback fixes on error.
+    func exportFormatted(content: String, fileExtension: String, originalFileURL: URL, outputURL: URL, format: String, projectRoot: URL? = nil) async -> (success: Bool, error: String?) {
+        guard let typstPath = resolveTypstPath() else {
+            return (false, "Error: 'typst' executable not found.")
+        }
+        
+        let preferredDirectory = originalFileURL.deletingLastPathComponent()
+        let tempDir = ensureTempDirectory(in: preferredDirectory)
+        let tempID = UUID().uuidString
+        let sourceURL = tempDir.appendingPathComponent(".export-\(tempID.prefix(8)).typ")
+        
+        var finalContent = content
+        let ext = fileExtension.lowercased()
+        let isHybrid = (ext == "note")
+        
+        if isHybrid {
+            finalContent = Self.autoFixBrokenNoteSyntax(finalContent)
+        }
+        
+        if ext == "md" || ext == "note" {
+            let aiService = AICompletionService.shared
+            let textToProcess = finalContent
+            finalContent = await Task.detached {
+                let input = isHybrid ? Self.delimitImproperOperators(textToProcess).output : textToProcess
+                return aiService.sanitizeMarkdownToTypst(input, isHybrid: isHybrid)
+            }.value
+        }
+        if ext == "note" {
+            finalContent = notePreamble + finalContent
+        }
+        
+        finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
+        
+        if tempDir != preferredDirectory {
+            finalContent = self.rewriteRelativeImports(in: finalContent)
+        }
+        
+        do {
+            try finalContent.write(to: sourceURL, atomically: true, encoding: .utf8)
+        } catch {
+            return (false, "Failed to write temp export source: \(error.localizedDescription)")
+        }
+        
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+        }
+        
+        let effectiveRoot = preferredDirectory
+        var arguments = ["compile", sourceURL.path, outputURL.path, "--format", format]
+        arguments.append(contentsOf: ["--root", effectiveRoot.path])
+        
+        var cleanFallbackAttempts: [Int: Int] = [:]
+        var iteration = 0
+        var lastOutput = ""
+        
+        while iteration < 3 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: typstPath)
+            process.currentDirectoryURL = effectiveRoot
+            process.arguments = arguments
+            
+            let pipe = Pipe()
+            process.standardError = pipe
+            process.standardOutput = pipe
+            
+            do {
+                try process.run()
+                process.waitUntilExit()
+                
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                lastOutput = String(data: data, encoding: .utf8) ?? ""
+                
+                if process.terminationStatus == 0 {
+                    return (true, nil)
+                }
+                
+                if ext == "note" || ext == "md" {
+                    let rawLines = parseRawErrorLines(from: lastOutput)
+                    if !rawLines.isEmpty {
+                        let modified = applyFallbackFix(to: sourceURL, rawErrorLines: rawLines, attempts: &cleanFallbackAttempts, isHybrid: isHybrid)
+                        if modified {
+                            iteration += 1
+                            continue
+                        }
+                    }
+                }
+                
+                return (false, lastOutput.isEmpty ? "Unknown Typst error (exit code \(process.terminationStatus))" : lastOutput)
+            } catch {
+                return (false, error.localizedDescription)
+            }
+        }
+        
+        return (false, lastOutput)
+    }
+
     func compileClean(content: String, fileExtension: String? = nil, originalFileURL: URL? = nil, projectRoot: URL?) async -> (success: Bool, pdfURL: URL?, error: String?) {
         guard let typstPath = resolveTypstPath() else {
             return (false, nil, "Error: 'typst' executable not found.")
@@ -870,10 +1140,15 @@ class TypstCompiler: ObservableObject {
         var finalContent = content
         
         let ext = fileExtension ?? currentFileExtension
+        let isHybrid = (ext == "note")
+        
+        if isHybrid {
+            finalContent = Self.autoFixBrokenNoteSyntax(finalContent)
+        }
+        
         if ext == "md" || ext == "note" {
             let aiService = AICompletionService.shared
             let textToProcess = finalContent
-            let isHybrid = (ext == "note")
             finalContent = await Task.detached {
                 // Delimit improper operators first (same pass as the live preview)
                 // so exports of `.note` files don't break on stray @/#/$/</>.
@@ -897,42 +1172,61 @@ class TypstCompiler: ObservableObject {
             return (false, nil, "Failed to write temp source: \(error.localizedDescription)")
         }
         
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: typstPath)
-        
-        // Use the document's own directory as --root (same as the live preview in updateContent).
-        // This ensures root-relative image paths like #image("/pasted_image.png") resolve
-        // against the document folder, not the sidebar project root which may be a parent folder.
         let effectiveRoot = preferredDirectory ?? projectRoot
         var arguments = ["compile", sourceURL.path, pdfURL.path]
         if let root = effectiveRoot {
             arguments.append(contentsOf: ["--root", root.path])
-            process.currentDirectoryURL = root
         }
-        process.arguments = arguments
-        
-        let pipe = Pipe()
-        process.standardError = pipe
         
         defer {
             // Clean up temp source file
             try? FileManager.default.removeItem(at: sourceURL)
         }
         
-        do {
-            try process.run()
-            process.waitUntilExit()
-            
-            if process.terminationStatus != 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? "Unknown error"
-                return (false, nil, output)
+        var cleanFallbackAttempts: [Int: Int] = [:]
+        var iteration = 0
+        var lastOutput = ""
+        
+        while iteration < 3 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: typstPath)
+            if let root = effectiveRoot {
+                process.currentDirectoryURL = root
             }
+            process.arguments = arguments
             
-            return (true, pdfURL, nil)
-        } catch {
-            return (false, nil, error.localizedDescription)
+            let pipe = Pipe()
+            process.standardError = pipe
+            
+            do {
+                try process.run()
+                process.waitUntilExit()
+                
+                if process.terminationStatus == 0 {
+                    return (true, pdfURL, nil)
+                }
+                
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                lastOutput = String(data: data, encoding: .utf8) ?? "Unknown error"
+                
+                if ext == "note" || ext == "md" {
+                    let rawLines = parseRawErrorLines(from: lastOutput)
+                    if !rawLines.isEmpty {
+                        let modified = applyFallbackFix(to: sourceURL, rawErrorLines: rawLines, attempts: &cleanFallbackAttempts, isHybrid: isHybrid)
+                        if modified {
+                            iteration += 1
+                            continue
+                        }
+                    }
+                }
+                
+                return (false, nil, lastOutput)
+            } catch {
+                return (false, nil, error.localizedDescription)
+            }
         }
+        
+        return (false, nil, lastOutput)
     }
 
     // MARK: - Web Image Resolver

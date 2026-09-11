@@ -10,6 +10,7 @@ struct ContentView: View {
     @ObservedObject var editorController: EditorController
     @ObservedObject private var aiService = AICompletionService.shared
     @ObservedObject private var aiSettings = AISettingsManager.shared
+    @ObservedObject private var typstUpdater = TypstUpdater.shared
     
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
@@ -210,6 +211,7 @@ struct ContentView: View {
                 applyAppKitAppearance(themeManager.appTheme)
                 editorController.applyTheme()
                 syncPreviewTheme()
+                typstUpdater.checkOnLaunchIfNeeded()
             }
             .onChange(of: themeManager.appTheme) { newTheme in 
                 editorController.setupDefaultConfiguration()
@@ -221,6 +223,11 @@ struct ContentView: View {
                 editorController.setupDefaultConfiguration()
                 editorController.applyTheme() 
                 syncPreviewTheme()
+            }
+            .onChange(of: typstUpdater.isUpdating) { isUpdating in
+                if !isUpdating && typstUpdater.lastError == nil && typstUpdater.progress >= 1.0 {
+                    editorController.showStatus(typstUpdater.status, duration: 4.0)
+                }
             }
     }
     
@@ -418,6 +425,18 @@ struct ContentView: View {
                             }
                         }
                         
+                        // Typst Update Status Indicator
+                        if typstUpdater.isUpdating {
+                            HStack(spacing: 6) {
+                                ProgressView(value: typstUpdater.progress)
+                                    .progressViewStyle(.linear)
+                                    .frame(width: 50)
+                                Text(typstUpdater.status)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
                         // Editor Status Message (e.g., "File Saved")
                         if editorController.showStatusMessage {
                             Text(editorController.statusMessage)
@@ -642,11 +661,11 @@ struct ContentView: View {
                         }
                         .help("Print").buttonStyle(.plain)
                         
-                        ShareButton(fileURL: editorController.cleanPDFURL ?? exportedPDFURL).frame(width: 28, height: 28)
+                        ShareButton(fileURL: editorController.cleanPDFURL ?? exportedPDFURL ?? currentPDFURL ?? compiler.currentShadowPDFURL).frame(width: 28, height: 28)
                             .padding(4).background(Color.primary.opacity(0.3)).cornerRadius(8).help("Share")
                             .onHover { inside in
                                 if inside && editorController.cleanPDFURL == nil {
-                                    Task { await editorController.generateCleanPDF(compiler: compiler, fileURL: selectedFile) }
+                                    Task { await editorController.generateCleanPDF(compiler: compiler, fileURL: selectedFile, fallbackPreviewURL: currentPDFURL) }
                                 }
                             }
                     }
@@ -779,6 +798,21 @@ struct ContentView: View {
                     }
                 } message: {
                     Text("Unsaved changes were found for this file. Do you want to recover them?")
+                }
+                .alert("New Typst Engine Available", isPresented: $typstUpdater.showUpdatePrompt) {
+                    Button("Update Now") {
+                        typstUpdater.update()
+                    }
+                    Button("Later", role: .cancel) { }
+                    Button("Don't Ask Again") {
+                        GeneralSettingsManager.shared.checkForTypstUpdatesOnLaunch = false
+                    }
+                } message: {
+                    if let release = typstUpdater.availableRelease {
+                        Text("A new stable version of the Typst compiler (\(release.tag_name)) is available.\n\nCurrent version: \(typstUpdater.currentVersion ?? "Bundled (0.12.0)")\nLatest version: \(release.tag_name)\n\nWould you like to download and use this updated version?")
+                    } else {
+                        Text("A new stable version of the Typst engine is available. Would you like to update?")
+                    }
                 }
             }
         }
@@ -1013,14 +1047,78 @@ struct ContentView: View {
         panel.nameFieldStringValue = suggestedName
         if panel.runModal() == .OK, let dest = panel.url {
             Task {
-                let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: editorController.projectRootURL)
-                await MainActor.run {
-                    if result.success {
-                        NSWorkspace.shared.open(dest)
-                        if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
-                    } else {
-                        editorController.lastExportError = result.error ?? "Unknown error"
+                let ext = url.pathExtension.lowercased()
+                let isNoteOrMd = (ext == "note" || ext == "md")
+                
+                if format == "pdf" {
+                    let cleanResult = await compiler.compileClean(content: editorController.sourceCode,
+                                                                 fileExtension: ext,
+                                                                 originalFileURL: url,
+                                                                 projectRoot: editorController.projectRootURL)
+                    if cleanResult.success, let tempPDF = cleanResult.pdfURL {
+                        do {
+                            if FileManager.default.fileExists(atPath: dest.path) {
+                                try FileManager.default.removeItem(at: dest)
+                            }
+                            try FileManager.default.copyItem(at: tempPDF, to: dest)
+                            await MainActor.run {
+                                NSWorkspace.shared.open(dest)
+                                if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
+                            }
+                            return
+                        } catch {
+                            // Fall through to preview fallback
+                        }
+                    }
+                    
+                    // Fallback to preview PDF if available (e.g. when syntax is broken)
+                    if let previewPDF = currentPDFURL ?? compiler.currentShadowPDFURL,
+                       FileManager.default.fileExists(atPath: previewPDF.path) {
+                        do {
+                            if FileManager.default.fileExists(atPath: dest.path) {
+                                try FileManager.default.removeItem(at: dest)
+                            }
+                            try FileManager.default.copyItem(at: previewPDF, to: dest)
+                            await MainActor.run {
+                                NSWorkspace.shared.open(dest)
+                                if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
+                            }
+                            return
+                        } catch {
+                            print("[ERROR] Failed to export preview PDF to \(dest.lastPathComponent): \(error)")
+                        }
+                    }
+                    
+                    await MainActor.run {
+                        editorController.lastExportError = cleanResult.error ?? "Failed to export PDF"
                         editorController.showExportErrorAlert = true
+                    }
+                } else if isNoteOrMd {
+                    let result = await compiler.exportFormatted(content: editorController.sourceCode,
+                                                               fileExtension: ext,
+                                                               originalFileURL: url,
+                                                               outputURL: dest,
+                                                               format: format,
+                                                               projectRoot: editorController.projectRootURL)
+                    await MainActor.run {
+                        if result.success {
+                            NSWorkspace.shared.open(dest)
+                            if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
+                        } else {
+                            editorController.lastExportError = result.error ?? "Unknown error"
+                            editorController.showExportErrorAlert = true
+                        }
+                    }
+                } else {
+                    let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: editorController.projectRootURL)
+                    await MainActor.run {
+                        if result.success {
+                            NSWorkspace.shared.open(dest)
+                            if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
+                        } else {
+                            editorController.lastExportError = result.error ?? "Unknown error"
+                            editorController.showExportErrorAlert = true
+                        }
                     }
                 }
             }
@@ -1049,6 +1147,22 @@ struct ContentView: View {
                 } catch {
                     print("[ERROR] Failed to export clean PDF: \(error)")
                 }
+            } else if ext == "note" || ext == "md",
+                      let fallbackPDF = self.currentPDFURL ?? self.compiler.currentShadowPDFURL,
+                      FileManager.default.fileExists(atPath: fallbackPDF.path) {
+                // Fallback for broken syntax: export the working preview PDF so final file exists
+                do {
+                    if FileManager.default.fileExists(atPath: pdfDestination.path) {
+                        try FileManager.default.removeItem(at: pdfDestination)
+                    }
+                    try FileManager.default.copyItem(at: fallbackPDF, to: pdfDestination)
+                    await MainActor.run {
+                        self.exportedPDFURL = pdfDestination
+                        print("[INFO] Exported preview PDF to \(pdfDestination.lastPathComponent) as fallback")
+                    }
+                } catch {
+                    print("[ERROR] Failed to export preview fallback PDF: \(error)")
+                }
             }
         }
     }
@@ -1058,10 +1172,10 @@ struct ContentView: View {
         if let cleanURL = editorController.cleanPDFURL {
             pdfURLToPrint = cleanURL
         } else {
-            pdfURLToPrint = await editorController.generateCleanPDF(compiler: compiler, fileURL: selectedFile)
+            pdfURLToPrint = await editorController.generateCleanPDF(compiler: compiler, fileURL: selectedFile, fallbackPreviewURL: currentPDFURL)
         }
         
-        guard let url = pdfURLToPrint, let document = PDFDocument(url: url) else { return }
+        guard let url = pdfURLToPrint ?? currentPDFURL ?? compiler.currentShadowPDFURL, let document = PDFDocument(url: url) else { return }
         let printInfo = NSPrintInfo.shared
         printInfo.topMargin = 0; printInfo.bottomMargin = 0; printInfo.leftMargin = 0; printInfo.rightMargin = 0
         document.printOperation(for: printInfo, scalingMode: .pageScaleToFit, autoRotate: true)?.run()

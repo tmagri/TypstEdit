@@ -403,7 +403,7 @@ struct AISettingsView: View {
 
 struct TypstSettingsView: View {
     @StateObject private var settings = GeneralSettingsManager.shared
-    @StateObject private var updater = TypstUpdater()
+    @ObservedObject private var updater = TypstUpdater.shared
     
     @State private var hasGit: Bool = false
     @State private var hasCargo: Bool = false
@@ -413,68 +413,138 @@ struct TypstSettingsView: View {
         ScrollView {
             Form {
                 Section(header: Text("Configuration").fontWeight(.semibold)) {
-                Toggle("Use Custom Typst (compiled or downloaded)", isOn: $settings.useCustomTypst)
-                    .font(.body.weight(.regular))
-                
-                Picker(selection: $settings.updateMode) {
-                    ForEach(TypstUpdateMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
+                    Toggle("Use Custom Typst (compiled or downloaded)", isOn: $settings.useCustomTypst)
+                        .font(.body.weight(.regular))
+                    
+                    Toggle("Check for Typst engine updates on launch", isOn: $settings.checkForTypstUpdatesOnLaunch)
+                        .font(.body.weight(.regular))
+                    Text("When enabled, TypstEdit will check for new stable versions of the Typst compiler each time the app loads. You can re-enable this if you previously chose 'Don't Ask Again'.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    Picker(selection: $settings.updateMode) {
+                        ForEach(TypstUpdateMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    } label: {
+                        Text("Update Mode").fontWeight(.semibold)
                     }
-                } label: {
-                    Text("Update Mode").fontWeight(.semibold)
+                    .pickerStyle(.inline)
+                    
+                    if !settings.customTypstPath.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Current Path:")
+                                .font(.caption.weight(.regular))
+                                .foregroundColor(.secondary)
+                            Text(settings.customTypstPath)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                        .padding(.vertical, 4)
+                    }
                 }
-                .pickerStyle(.inline)
                 
-                if !settings.customTypstPath.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Current Path:")
-                            .font(.caption.weight(.regular))
-                            .foregroundColor(.secondary)
-                        Text(settings.customTypstPath)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
+                Section(header: Text("Typst Engine Version").fontWeight(.semibold)) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Installed Version:")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Text(updater.currentVersion ?? "Detecting...")
+                                .font(.system(.subheadline, design: .monospaced))
+                                .fontWeight(.medium)
+                            Spacer()
+                            if let activePath = updater.resolveActiveTypstPath() {
+                                Text(activePath.contains("stable_bin") ? "Downloaded" : (activePath.contains("bin/typst") ? "Bundled" : "System"))
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.15))
+                                    .cornerRadius(4)
+                            }
+                        }
+
+                        HStack {
+                            Text("Latest Stable:")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            if updater.isCheckingForUpdate {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else if let release = updater.availableRelease {
+                                Text(release.tag_name)
+                                    .font(.system(.subheadline, design: .monospaced))
+                                    .fontWeight(.medium)
+                            } else {
+                                Text("Not checked")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Button("Check for Updates") {
+                                Task {
+                                    await updater.checkForUpdates(userInitiated: true)
+                                }
+                            }
+                            .disabled(updater.isCheckingForUpdate || updater.isUpdating)
+                        }
+
+                        if let checkErr = updater.checkError {
+                            Text(checkErr)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        } else if let release = updater.availableRelease,
+                                  let current = updater.currentVersion,
+                                  TypstUpdater.isVersion(current, strictlyOlderThan: release.tag_name) {
+                            HStack {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .foregroundColor(.blue)
+                                Text("A new stable version (\(release.tag_name)) is available!")
+                                    .font(.caption)
+                                    .foregroundColor(.blue)
+                            }
+                        }
                     }
                     .padding(.vertical, 4)
                 }
-            }
-            
-            Section(header: Text("Update Typst").fontWeight(.semibold)) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(settings.updateMode == .bleedingEdgeSource ? 
-                        "This will clone the latest source from Git and compile it using Cargo." :
-                        "This will download the latest official pre-compiled binary from GitHub.")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                    
-                    if updater.isUpdating {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text(updater.status)
-                                .font(.caption)
-                            ProgressView(value: updater.progress)
-                                .progressViewStyle(.linear)
-                        }
-                    } else {
-                        if let error = updater.lastError {
-                            Text(error)
-                                .font(.caption)
-                                .foregroundColor(.red)
-                        } else if updater.status != "Ready" {
-                            Text(updater.status)
-                                .font(.caption)
-                                .foregroundColor(.green)
-                        }
+
+                Section(header: Text("Update Typst").fontWeight(.semibold)) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(settings.updateMode == .bleedingEdgeSource ? 
+                            "This will clone the latest source from Git and compile it using Cargo." :
+                            "This will download the latest official pre-compiled binary from GitHub.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
                         
-                        Button(action: {
-                            updater.update()
-                        }) {
-                            Label(settings.updateMode == .bleedingEdgeSource ? "Build from Source" : "Download Latest Binary", 
-                                  systemImage: settings.updateMode == .bleedingEdgeSource ? "hammer.fill" : "arrow.down.circle")
+                        if updater.isUpdating {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(updater.status)
+                                    .font(.caption)
+                                ProgressView(value: updater.progress)
+                                    .progressViewStyle(.linear)
+                            }
+                        } else {
+                            if let error = updater.lastError {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundColor(.red)
+                            } else if updater.status != "Ready" {
+                                Text(updater.status)
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                            }
+                            
+                            Button(action: {
+                                updater.update()
+                            }) {
+                                Label(settings.updateMode == .bleedingEdgeSource ? "Build from Source" : "Download Latest Binary", 
+                                      systemImage: settings.updateMode == .bleedingEdgeSource ? "hammer.fill" : "arrow.down.circle")
+                            }
+                            .disabled(settings.updateMode == .bleedingEdgeSource && (!hasGit || !hasCargo))
                         }
-                        .disabled(settings.updateMode == .bleedingEdgeSource && (!hasGit || !hasCargo))
                     }
+                    .padding(.vertical, 5)
                 }
-                .padding(.vertical, 5)
-            }
             
             if settings.updateMode == .bleedingEdgeSource {
                 Section(header: Text("Source Dependencies").fontWeight(.semibold)) {
@@ -533,6 +603,9 @@ struct TypstSettingsView: View {
         }
         .onAppear {
             checkDependencies()
+            Task {
+                await updater.detectCurrentVersion()
+            }
         }
     }
     

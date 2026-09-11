@@ -256,7 +256,7 @@ open class TextView: NSView, NSTextContent {
 
     // MARK: - Private Properties
 
-    var isFirstResponder: Bool = false
+    public internal(set) var isFirstResponder: Bool = false
 
     /// When dragging to create a selection, these enable us to scroll the view as the user drags outside the view's
     /// bounds.

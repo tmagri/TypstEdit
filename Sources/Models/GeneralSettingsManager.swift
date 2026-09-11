@@ -14,6 +14,7 @@ class GeneralSettingsManager: ObservableObject {
     @AppStorage("useCustomTypst") var useCustomTypst: Bool = false
     @AppStorage("customTypstPath") var customTypstPath: String = ""
     @AppStorage("typstUpdateMode") var updateModeString: String = TypstUpdateMode.stableBinary.rawValue
+    @AppStorage("checkForTypstUpdatesOnLaunch") var checkForTypstUpdatesOnLaunch: Bool = true
     
     var updateMode: TypstUpdateMode {
         get { TypstUpdateMode(rawValue: updateModeString) ?? .stableBinary }

@@ -102,7 +102,7 @@ struct NotebookSidebarView: View {
                     .padding(.top, 40)
                     .listRowBackground(Color.clear)
                 } else {
-                    ForEach(notebookManager.notebooks) { notebook in
+                    ForEach(notebookManager.notebooks.filter { !NotebookManager.hiddenFolders.contains($0.name.lowercased()) }) { notebook in
                         DisclosureGroup {
                             ForEach(notebook.pages) { page in
                                 NotebookPageRow(page: page, selectedFile: $selectedFile)

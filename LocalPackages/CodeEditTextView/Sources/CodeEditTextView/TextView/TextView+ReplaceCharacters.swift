@@ -59,8 +59,17 @@ extension TextView {
 
         // `scrollSelectionToVisible` is a little expensive to call every time. Instead we just check if the first
         // selection is entirely visible. `.contains` checks that all points in the rect are inside. 
-        if let selection = selectionManager.textSelections.first, !visibleRect.contains(selection.boundingRect) {
-            scrollSelectionToVisible()
+        if let selection = selectionManager.textSelections.first {
+            var rect = selection.boundingRect
+            if (rect == .zero || rect.width <= 0 || rect.height <= 0),
+               let computed = layoutManager.rectForOffset(selection.range.location) {
+                rect = computed
+            }
+            if rect.width <= 0 { rect.size.width = 2.0 }
+            if rect.height <= 0 { rect.size.height = layoutManager.estimateLineHeight() }
+            if !visibleRect.contains(rect) {
+                scrollSelectionToVisible()
+            }
         }
     }
 

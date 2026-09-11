@@ -200,15 +200,21 @@ public struct SourceEditor: NSViewControllerRepresentable {
         textView.updateFrameIfNeeded()
         textView.layoutManager.layoutLines()
         textView.needsDisplay = true
+        textView.scrollSelectionToVisible()
     }
 
     private func updateControllerWithState(_ state: SourceEditorState, controller: TextViewController) {
-        if let cursorPositions = state.cursorPositions, cursorPositions != state.cursorPositions {
+        if let cursorPositions = state.cursorPositions, cursorPositions != controller.cursorPositions {
             controller.setCursorPositions(cursorPositions)
         }
 
         let scrollView = controller.scrollView
-        if let scrollPosition = state.scrollPosition, scrollPosition != scrollView?.contentView.bounds.origin {
+        // Only restore scroll position from external state if the text view is not actively focused/editing.
+        // During active editing, the text view manages its own scroll position to keep the cursor visible,
+        // and overriding it with a stale state.scrollPosition causes the viewport to jump to the top.
+        if !(controller.textView?.isFirstResponder ?? false),
+           let scrollPosition = state.scrollPosition,
+           scrollPosition != scrollView?.contentView.bounds.origin {
             controller.scrollView.scroll(controller.scrollView.contentView, to: scrollPosition)
             controller.scrollView.reflectScrolledClipView(controller.scrollView.contentView)
             controller.gutterView.needsDisplay = true

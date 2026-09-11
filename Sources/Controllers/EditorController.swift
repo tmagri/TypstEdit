@@ -209,7 +209,7 @@ class EditorController: NSObject, ObservableObject {
              // model before this edit. setText calls setUpHighlighter(), guaranteeing the
              // tree-sitter parse tree and StyledRangeContainer are rebuilt against the new
              // text storage.
-             if (tvLen == 0 && insertLength > 0) || !viewInSync || insertLength > 100 {
+             if (tvLen == 0 && insertLength > 0) || !viewInSync {
                  tvc.setText(sourceCode)
              } else {
                  // Surgical update to avoid resetting the entire highlighter (fixes "going white").
@@ -272,6 +272,7 @@ class EditorController: NSObject, ObservableObject {
         textView.updateFrameIfNeeded()
         textView.layoutManager.layoutLines()
         textView.needsDisplay = true
+        textView.scrollSelectionToVisible()
     }
 
 
@@ -969,11 +970,9 @@ class EditorController: NSObject, ObservableObject {
     // A single physical Cmd+V can trigger more than one paste entry point (the keyDown
     // monitor, the SwiftUI menu, and the text view's responder-chain `paste:` via
     // `interpretKeyEvents`), all of which now funnel into `performPaste`. Duplicates of
-    // the same pasteboard changeCount arriving within 250ms at either the previous
-    // insertion's start or its post-insert caret are the same paste racing with itself
-    // and are dropped. Genuine pastes somewhere else produce a location matching
-    // neither end, so they always insert.
-    private var lastPaste: (changeCount: Int, location: Int, endLocation: Int, insertedLength: Int, time: CFAbsoluteTime)?
+    // the same pasteboard changeCount arriving within 250ms are dropped unless it is a
+    // genuine key repeat.
+    private var lastPaste: (changeCount: Int, time: CFAbsoluteTime, event: NSEvent?)?
 
     /// Which Markdown→Typst conversion policy a paste applies.
     enum PasteConversionMode {
@@ -1022,27 +1021,23 @@ class EditorController: NSObject, ObservableObject {
             // position. The conversion is regex-based and fast enough to run inline.
             let textToInsert = applyPasteConversion(text, mode: mode)
 
-            // Drop racing duplicate invocations of the same physical paste. The keyDown
-            // monitor, the SwiftUI menu, and the responder-chain `paste:` can each fire a
-            // beat apart, and every invocation after the first reads a caret that the
-            // previous insertion already advanced — so comparing against the original
-            // location alone let duplicates slip through and paste two/three copies.
-            // Match either end of the previous insertion: its start (a duplicate that
-            // captured the range before the insert landed) or its post-insert caret.
+            // Drop racing duplicate invocations of the same physical paste. A single physical
+            // Cmd+V can fire across the local keyDown monitor, the SwiftUI menu shortcut, and
+            // the responder-chain `paste:`. Dropping invocations of the identical pasteboard
+            // changeCount within 250ms reliably drops all duplicate routes while permitting
+            // genuine key repeats (where event.isARepeat is true on a subsequent repeat event).
+            let currentEvent = NSApp.currentEvent
             let changeCount = pasteboard.changeCount
             let now = CFAbsoluteTimeGetCurrent()
-            let insertedLength = (textToInsert as NSString).length
             if let last = lastPaste,
                last.changeCount == changeCount,
-               now - last.time < 0.25,
-               range.location == last.location || range.location == last.endLocation {
-                // Extend the tracked window so a third racing invocation (caret
-                // advanced by yet another would-be insertion) is dropped too.
-                let newEnd = max(last.endLocation, range.location) + last.insertedLength
-                lastPaste = (changeCount, last.location, newEnd, last.insertedLength, last.time)
-                return true
+               now - last.time < 0.25 {
+                let isNewRepeatEvent = currentEvent != nil && currentEvent !== last.event && currentEvent?.isARepeat == true
+                if !isNewRepeatEvent {
+                    return true
+                }
             }
-            lastPaste = (changeCount, range.location, range.location + insertedLength, insertedLength, now)
+            lastPaste = (changeCount, now, currentEvent)
 
             // Route through the text view's own replaceCharacters so the CEUndoManager
             // correctly records the mutation and undo works. Using insertText/setText for
@@ -1060,6 +1055,7 @@ class EditorController: NSObject, ObservableObject {
             // the next typed character duplicate once per leftover selection.
             textView.selectionManager.setSelectedRange(
                 NSRange(location: range.location + (textToInsert as NSString).length, length: 0))
+            textView.scrollSelectionToVisible()
             return true
         }
 
@@ -3561,7 +3557,7 @@ class EditorController: NSObject, ObservableObject {
     }
     
     /// Generates a clean PDF (no dark mode, no filters) for Print or Share.
-    func generateCleanPDF(compiler: TypstCompiler, fileURL: URL?) async -> URL? {
+    func generateCleanPDF(compiler: TypstCompiler, fileURL: URL?, fallbackPreviewURL: URL? = nil) async -> URL? {
         showStatus("Preparing clean PDF...")
         let ext = fileURL?.pathExtension.lowercased()
         let result = await compiler.compileClean(content: sourceCode, fileExtension: ext, originalFileURL: fileURL, projectRoot: projectRootURL)
@@ -3569,6 +3565,10 @@ class EditorController: NSObject, ObservableObject {
         if result.success, let url = result.pdfURL {
             self.cleanPDFURL = url
             return url
+        } else if let fallback = fallbackPreviewURL ?? compiler.currentShadowPDFURL, FileManager.default.fileExists(atPath: fallback.path) {
+            self.cleanPDFURL = fallback
+            showStatus("PDF ready from preview")
+            return fallback
         } else {
             showStatus("Failed to generate clean PDF: \(result.error ?? "Unknown error")")
             return nil

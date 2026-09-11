@@ -24,7 +24,23 @@ extension TextView {
         // pass and scroll to that rect.
 
         var lastFrame: CGRect = .zero
-        while let boundingRect = getSelection()?.boundingRect, lastFrame != boundingRect {
+        var iterations = 0
+        while let selection = getSelection(), iterations < 10 {
+            iterations += 1
+            var boundingRect = selection.boundingRect
+            if (boundingRect == .zero || boundingRect.width <= 0 || boundingRect.height <= 0),
+               let computedRect = layoutManager.rectForOffset(selection.range.location) {
+                boundingRect = computedRect
+                selection.boundingRect = computedRect
+            }
+            if boundingRect.width <= 0 {
+                boundingRect.size.width = 2.0
+            }
+            if boundingRect.height <= 0 {
+                boundingRect.size.height = layoutManager.estimateLineHeight()
+            }
+
+            guard boundingRect != .zero, lastFrame != boundingRect else { break }
             lastFrame = boundingRect
 
             if lastFrame != .zero {
