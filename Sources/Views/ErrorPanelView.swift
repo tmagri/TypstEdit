@@ -20,7 +20,7 @@ struct ErrorPanelView: View {
                         }
                     }
                 
-                Text("Errors")
+                Text(compiler.errors.contains(where: { $0.severity == .error }) ? "Errors" : "Issues")
                     .font(.headline)
                     .foregroundColor(themeManager.textColor)
                     .onTapGesture {

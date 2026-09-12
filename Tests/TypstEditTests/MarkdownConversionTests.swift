@@ -197,7 +197,10 @@ final class MarkdownConversionTests: XCTestCase {
     /// Resolve the bundled typst binary, falling back to common system paths.
     private var typstPath: String? {
         let candidates = [
-            "/Users/troymagri/Desktop/TypstEdit/typst-aarch64-apple-darwin/typst",
+            // Package root when run via `swift test`; $HOME-relative otherwise.
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("typst-aarch64-apple-darwin/typst").path,
+            NSString(string: "~/Desktop/TypstEdit/typst-aarch64-apple-darwin/typst").expandingTildeInPath,
             "/opt/homebrew/bin/typst",
             "/usr/local/bin/typst",
         ]

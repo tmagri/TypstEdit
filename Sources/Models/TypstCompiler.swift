@@ -27,20 +27,23 @@ class TypstCompiler: ObservableObject {
     @Published var errors: [TypstError] = []
 
     // Backing stores that feed the published `errors` list.
-    // `typstErrors`  – real compilation errors reported by the `typst` binary.
-    // `noteWarnings` – advisory warnings produced by `delimitImproperOperators`
-    //                  for hybrid `.note` files (one per source line that needed
-    //                  auto-delimiting). Kept separate so they survive a
-    //                  successful recompile but are cleared when content changes.
+    // `typstErrors`   – real compilation errors reported by the `typst` binary.
+    // `typstWarnings` – `warning:` diagnostics reported by the `typst` binary
+    //                   (non-blocking; the document still compiles).
+    // `noteWarnings`  – advisory warnings produced by `delimitImproperOperators`
+    //                   for hybrid `.note` files (one per source line that needed
+    //                   auto-delimiting). Kept separate so they survive a
+    //                   successful recompile but are cleared when content changes.
     private var typstErrors: [TypstError] = []
+    private var typstWarnings: [TypstError] = []
     private var noteWarnings: [TypstError] = []
 
     /// Merges real errors + advisory warnings into the published `errors` list and
     /// notifies observers. Real compile errors are listed first (they block output);
-    /// `.note` operator-delimiting warnings follow. Warnings persist across a
-    /// successful recompile but are cleared when the source changes.
+    /// warnings follow. Compile diagnostics are cleared on a successful recompile;
+    /// `.note` delimiting warnings persist until the source changes.
     private func publishIssues() {
-        let combined = typstErrors + noteWarnings
+        let combined = typstErrors + typstWarnings + noteWarnings
         self.errors = combined
         NotificationCenter.default.post(name: .typstErrorsUpdated, object: combined)
     }
@@ -111,7 +114,7 @@ class TypstCompiler: ObservableObject {
             .appendingPathComponent("typst-aarch64-apple-darwin/typst").path
         let paths = [
             localProjectPath,
-            "/Users/troymagri/Desktop/TypstEdit/typst-aarch64-apple-darwin/typst",
+            NSString(string: "~/Desktop/TypstEdit/typst-aarch64-apple-darwin/typst").expandingTildeInPath,
             "/opt/homebrew/bin/typst",
             "/usr/local/bin/typst",
             "/usr/bin/typst",
@@ -141,7 +144,20 @@ class TypstCompiler: ObservableObject {
     //   0 → (untouched)   1 → escape special chars   2 → wrap whole line in #raw()
     private var currentFileExtension: String = ""
     private var fallbackAttempts: [Int: Int] = [:]
-    private var lastRawErrorLines: [Int] = []        // raw shadow-file line numbers from last error
+    private var pendingFallbackRawLines: [Int] = []   // shadow-file error lines awaiting a fallback fix
+
+    // Watch-output stream state. `typst watch` diagnostics can be split across
+    // arbitrary pipe chunks, so output is buffered until a complete line arrives,
+    // and each diagnostic's `error:`/`warning:` line is held until its location
+    // line (`┌─ file:line:col`) is seen.
+    private var pendingOutputBuffer: String = ""
+    private var pendingDiagnosticLine: String? = nil
+
+    /// Maps a converted-output line number (1-based, excluding the injected preamble)
+    /// back to the user's source line, so compile errors are reported against the text
+    /// in the editor rather than the intermediate shadow file. Rebuilt on each
+    /// `updateContent`.
+    private var shadowToSourceLine: [Int: Int] = [:]
     
     func cleanUp() {
         if let process = currentProcess {
@@ -152,6 +168,10 @@ class TypstCompiler: ObservableObject {
         processOutputPipe = nil
         currentShadowSourceURL = nil
         currentShadowPDFURL = nil
+        // Drop any partially-buffered watch output so the next watch starts clean.
+        pendingOutputBuffer = ""
+        pendingDiagnosticLine = nil
+        pendingFallbackRawLines = []
         // We do not clear fallback tracking here because updateContent() sets them
         // up just before cleanUp() is called to switch processes.
     }
@@ -217,10 +237,13 @@ class TypstCompiler: ObservableObject {
             let ext = fileURL.pathExtension.lowercased()
 
             // Track the file type for lenient-mode fallback, and reset escape history
-            // because the user typed new content — start fresh.
+            // and the watch-output stream state because the user typed new content —
+            // start fresh.
             currentFileExtension = ext
             fallbackAttempts = [:]
-            lastRawErrorLines = []
+            pendingFallbackRawLines = []
+            pendingDiagnosticLine = nil
+            pendingOutputBuffer = ""
 
             // Operator-delimiting warnings for `.note` files (computed alongside
             // sanitization below, committed to `noteWarnings` once we publish).
@@ -238,15 +261,20 @@ class TypstCompiler: ObservableObject {
                 // to guess. This runs on the user's original text (accurate line
                 // numbers for the warnings) and produces backslash escapes that the
                 // sanitizer's hybrid rules already treat as idempotent.
-                let (sanitized, warnings) = await Task.detached {
+                let (sanitized, warnings, lineMap) = await Task.detached {
                     let delimited = isHybrid ? Self.delimitImproperOperators(textToProcess) : (output: textToProcess, warnings: [TypstError]())
                     let cleaned = aiService.sanitizeMarkdownToTypst(delimited.output, isHybrid: isHybrid)
-                    return (cleaned, delimited.warnings)
+                    // Map converted-output lines back to the user's source so compile
+                    // errors land on the line the user actually wrote.
+                    let map = Self.buildLineMap(source: source, output: cleaned)
+                    return (cleaned, delimited.warnings, map)
                 }.value
                 finalSource = sanitized
+                shadowToSourceLine = lineMap
                 pendingNoteWarnings = warnings
             } else {
                 pendingNoteWarnings = []
+                shadowToSourceLine = [:]
             }
             
             var injectedPreamble = ""
@@ -320,11 +348,13 @@ class TypstCompiler: ObservableObject {
                 try finalSourceToWrite.write(to: shadowSourceURL, atomically: true, encoding: .utf8)
             }.value
             
-            // Reset the issue list for the new content: drop stale compile errors,
-            // and install the freshly-computed operator-delimiting warnings. We're
-            // on the main actor here, so this lands before `startWatching` below.
+            // Reset the issue list for the new content: drop stale compile errors
+            // and warnings, and install the freshly-computed operator-delimiting
+            // warnings. We're on the main actor here, so this lands before
+            // `startWatching` below.
             self.noteWarnings = pendingNoteWarnings
             self.typstErrors = []
+            self.typstWarnings = []
             self.publishIssues()
         } catch {
             self.compilationStatus = "Error writing shadow file: \(error)"
@@ -350,9 +380,13 @@ class TypstCompiler: ObservableObject {
         
         currentShadowSourceURL = sourceURL
         currentShadowPDFURL = outputURL
-        // Clear real compile errors when (re)starting a watch; keep note warnings,
+        // Clear compile diagnostics when (re)starting a watch; keep note warnings,
         // which describe the source and are recomputed on each `updateContent`.
         self.typstErrors = []
+        self.typstWarnings = []
+        self.pendingDiagnosticLine = nil
+        self.pendingOutputBuffer = ""
+        self.pendingFallbackRawLines = []
         self.publishIssues()
         
         let process = Process()
@@ -391,105 +425,221 @@ class TypstCompiler: ObservableObject {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty { return }
-            
-            if let output = String(data: data, encoding: .utf8) {
-                print("[TYPST-OUTPUT]: \(output)") // Enhanced logging
-                
-                Task { @MainActor [weak self] in
-                    guard let self = self else { return }
-                    
-                    // Simple heuristic: if we see "compiled" or "success", update view
-                    if output.contains("compiled successfully") || output.contains("compiled") {
-                         self.isCompiling = false
-                         // Notify View with a small delay to ensure file is fully flushed
-                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                             NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
-                         }
-                         // On a successful compile, drop stale compile errors but
-                         // keep the `.note` operator-delimiting warnings, which stay
-                         // valid until the source changes.
-                         if !self.typstErrors.isEmpty {
-                             self.typstErrors = []
-                             self.publishIssues()
-                         }
-                    } else if output.contains("error:") {
-                        self.isCompiling = false
-                        print("[TYPST] Detected error message")
-                        self.compilationStatus = "Compilation Error"
-                        self.parseErrors(from: output)
 
-                        // Lenient mode: for .note and .md files, escape the exact lines that
-                        // Typst rejected so the document always compiles and text is preserved.
-                        if self.currentFileExtension == "note" || self.currentFileExtension == "md" {
-                            let rawLines = self.lastRawErrorLines
-                            if !rawLines.isEmpty {
-                                self.attemptFallbackFix(rawErrorLines: rawLines)
-                            }
-                        }
-                    }
-                }
+            guard let chunk = String(data: data, encoding: .utf8) else { return }
+
+            Task { @MainActor [weak self] in
+                self?.handleCompilerOutput(chunk, outputURL: outputURL)
             }
         }
     }
-    
-    private func parseErrors(from output: String) {
-        // Regex to match "error: message" and subsequent "  at file:line:col"
-        // Typst error format often looks like:
-        // error: expected length, found string
-        //    at file.typ:15:10
-        //
-        // Or sometimes just "error: ..." if no location.
-        // We will iterate line by line to build a list.
-        
-        let lines = output.components(separatedBy: .newlines)
-        // Accumulate real compile errors onto the existing `typstErrors` set.
-        // (Note warnings live in `noteWarnings` and are merged in by `publishIssues`.)
-        // We rely on updateContent() or a "compiled successfully" message to clear them.
-        var newErrors: [TypstError] = self.typstErrors
-        
-        var currentErrorMsg: String? = nil
-        
-        var newRawErrorLines: [Int] = []
 
+    /// Processes one chunk of `typst watch` output. Chunks arrive at arbitrary
+    /// boundaries — a diagnostic's `error:` line and its `┌─ file:line:col` location
+    /// can land in different chunks, and even mid-line — so text is buffered and only
+    /// complete lines are handed to `consumeCompilerOutputLine`.
+    private func handleCompilerOutput(_ chunk: String, outputURL: URL) {
+        pendingOutputBuffer += chunk
+        var lines = pendingOutputBuffer.components(separatedBy: "\n")
+        // The final element is an incomplete line unless the chunk ended with "\n";
+        // keep it buffered until its remainder arrives.
+        pendingOutputBuffer = lines.popLast() ?? ""
         for line in lines {
-            if line.starts(with: "error: ") {
-                // If we had a previous error pending without a location, maybe add it? 
-                // But usually we want location. For now, let's start a new error.
-                currentErrorMsg = String(line.dropFirst("error: ".count))
-            } else if let msg = currentErrorMsg, let range = line.range(of: ":\\d+:\\d+", options: .regularExpression) {
-                // We found a location line for the current error
-                // Extract line number
-                let match = String(line[range]) // ":10:5"
-                let parts = match.split(separator: ":")
-                if parts.count >= 1, let lineNum = Int(parts[0]) {
-                    // Keep the raw shadow-file line for fallback fix purposes
-                    if !newRawErrorLines.contains(lineNum) {
-                        newRawErrorLines.append(lineNum)
-                    }
+            consumeCompilerOutputLine(line, outputURL: outputURL)
+        }
+    }
 
-                    let adjustedLine = max(1, lineNum - preambleLineCount)
-                    
-                    // Avoid duplicate errors for the same line if possible, or just allow them
-                    // Check if we already have this error
-                    let error = TypstError(line: adjustedLine, message: msg)
-                    if !newErrors.contains(where: { $0.line == adjustedLine && $0.message == msg }) {
-                        newErrors.append(error)
-                    }
-                }
-                currentErrorMsg = nil // Consumed
+    private func consumeCompilerOutputLine(_ line: String, outputURL: URL) {
+        print("[TYPST-OUTPUT]: \(line)")
+
+        if line.contains("compiling ...") {
+            isCompiling = true
+            compilationStatus = "Compiling..."
+            return
+        }
+
+        if line.contains("compiled successfully") {
+            isCompiling = false
+            compilationStatus = "Watching..."
+            // Notify the view with a small delay to ensure the file is fully flushed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
+            }
+            // A successful compile clears stale compile diagnostics, but keeps the
+            // `.note` operator-delimiting warnings, which stay valid until the
+            // source changes.
+            typstErrors = []
+            typstWarnings = []
+            publishIssues()
+            return
+        }
+
+        if line.contains("compiled with errors") {
+            // NOTE: this contains the substring "compiled", so it must be checked
+            // separately from the success case above. `typst watch` keeps running
+            // after a failed compile and re-reports the full diagnostic set below
+            // this marker, so start the batch from a clean slate.
+            isCompiling = false
+            compilationStatus = "Compilation Error"
+            typstErrors = []
+            typstWarnings = []
+            pendingDiagnosticLine = nil
+            return
+        }
+
+        if line.hasPrefix("error: ") || line.hasPrefix("warning: ")
+            || pendingDiagnosticLine != nil
+            || line.trimmingCharacters(in: .whitespaces).isEmpty {
+            consumeDiagnosticLine(line)
+            return
+        }
+    }
+
+    /// State machine for one diagnostic block:
+    ///
+    ///     error: unclosed raw text
+    ///       ┌─ file.typ:256:209
+    ///
+    /// The `error:`/`warning:` line is remembered until its location line arrives;
+    /// a blank line ends the block. Location-less diagnostics are dropped (they
+    /// surface through `compilationStatus` instead), matching the previous behavior.
+    private func consumeDiagnosticLine(_ line: String) {
+        if line.hasPrefix("error: ") || line.hasPrefix("warning: ") {
+            pendingDiagnosticLine = line
+            return
+        }
+
+        if pendingDiagnosticLine != nil {
+            if let range = line.range(of: ":\\d+:\\d+", options: .regularExpression) {
+                recordDiagnosticLocation(String(line[range]))
+                pendingDiagnosticLine = nil
+            } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                pendingDiagnosticLine = nil
+            }
+            return
+        }
+
+        if line.trimmingCharacters(in: .whitespaces).isEmpty {
+            // Blank line ends a diagnostic block — repair anything it flagged.
+            flushPendingFallbackFix()
+        }
+    }
+
+    /// Batch variant of the incremental diagnostic parser for one-shot compile runs
+    /// (e.g. exports) where the full compiler output is already in memory.
+    private func parseErrors(from output: String) {
+        for line in output.components(separatedBy: "\n") {
+            consumeDiagnosticLine(line)
+        }
+    }
+
+    /// Records the file location of the pending diagnostic, mapping the shadow-file
+    /// line back to the user's source line. `warning:` diagnostics are kept separate
+    /// from errors: they don't block output but are still surfaced and navigable.
+    private func recordDiagnosticLocation(_ locationMatch: String) {
+        let parts = locationMatch.split(separator: ":")
+        guard let lineNum = parts.first.flatMap({ Int($0) }) else { return }
+
+        if !pendingFallbackRawLines.contains(lineNum) {
+            pendingFallbackRawLines.append(lineNum)
+        }
+
+        guard let diagnosticLine = pendingDiagnosticLine else { return }
+        let isWarning = diagnosticLine.hasPrefix("warning: ")
+        let prefix = isWarning ? "warning: " : "error: "
+        let message = String(diagnosticLine.dropFirst(prefix.count))
+
+        let error = TypstError(
+            line: sourceLine(forShadowLine: lineNum),
+            message: message,
+            severity: isWarning ? .warning : .error
+        )
+        if isWarning {
+            if !typstWarnings.contains(where: { $0.line == error.line && $0.message == message }) {
+                typstWarnings.append(error)
+            }
+        } else {
+            if !typstErrors.contains(where: { $0.line == error.line && $0.message == message }) {
+                typstErrors.append(error)
             }
         }
+        publishIssues()
+    }
 
-        // Store raw error lines so the fallback fixer can locate them in the shadow file
-        if !newRawErrorLines.isEmpty {
-            lastRawErrorLines = newRawErrorLines
+    /// Runs the lenient fallback fixer for any diagnostics that completed since the
+    /// last flush. For `.note` / `.md` files this rewrites the offending shadow-file
+    /// lines so the document compiles and the preview is preserved.
+    private func flushPendingFallbackFix() {
+        let rawLines = pendingFallbackRawLines
+        pendingFallbackRawLines = []
+        guard !rawLines.isEmpty else { return }
+        guard currentFileExtension == "note" || currentFileExtension == "md" else { return }
+        attemptFallbackFix(rawErrorLines: rawLines)
+    }
+
+    /// Maps a shadow-file line number to the line in the user's editor buffer. The
+    /// shadow file holds the converted text (Markdown→Typst for `.note` / `.md`)
+    /// plus the injected preamble, so raw compiler positions don't address the
+    /// source; `shadowToSourceLine` — built on each `updateContent` — bridges them,
+    /// falling back to the preamble-only adjustment for unmatched lines.
+    private func sourceLine(forShadowLine line: Int) -> Int {
+        let outputLine = line - preambleLineCount
+        if outputLine >= 1, let mapped = shadowToSourceLine[outputLine] {
+            return mapped
         }
-        
-        // Commit the real errors and republish (warnings are merged back in).
-        if self.typstErrors != newErrors {
-            self.typstErrors = newErrors
+        return max(1, outputLine)
+    }
+
+    // MARK: - Shadow → Source Line Mapping
+
+    /// Builds a map from converted-output line (1-based) to source line by walking
+    /// both texts in order and matching normalized lines within a small look-ahead
+    /// window. The conversion is mostly structure-preserving (headings, lists,
+    /// paragraphs and fenced code stay one line each); block-level expansions such
+    /// as Markdown tables → `#table(...)` calls insert extra output lines, which the
+    /// window absorbs before the next anchor re-syncs the walk.
+    nonisolated static func buildLineMap(source: String, output: String) -> [Int: Int] {
+        let srcLines = source.components(separatedBy: "\n")
+        let outLines = output.components(separatedBy: "\n")
+        var map: [Int: Int] = [:]
+        var s = 0 // next source line candidate (0-based)
+        let window = 8
+
+        for (i, outLine) in outLines.enumerated() {
+            let normalized = normalizedForLineMap(outLine)
+            var bestJ = -1
+            var bestScore = 0.0
+            if !normalized.isEmpty {
+                let upper = min(srcLines.count, s + window)
+                for j in s..<upper {
+                    let score = lineMapSimilarity(normalized, normalizedForLineMap(srcLines[j]))
+                    if score > bestScore {
+                        bestScore = score
+                        bestJ = j
+                    }
+                }
+            }
+            if bestJ >= 0 && bestScore >= 0.6 {
+                map[i + 1] = bestJ + 1
+                s = bestJ + 1
+            } else {
+                // Unanchored line (blank separator, expanded table cell, …): keep it
+                // at the current source position.
+                map[i + 1] = min(s + 1, max(srcLines.count, 1))
+            }
         }
-        self.publishIssues()
+        return map
+    }
+
+    private nonisolated static func normalizedForLineMap(_ line: String) -> String {
+        String(line.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+    }
+
+    private nonisolated static func lineMapSimilarity(_ a: String, _ b: String) -> Double {
+        if a.isEmpty || b.isEmpty { return 0 }
+        if a == b { return 1 }
+        let common = a.commonPrefix(with: b).count
+        return Double(common) / Double(max(a.count, b.count))
     }
 
     // MARK: - Lenient Fallback Fixer (.note / .md)
@@ -736,35 +886,54 @@ class TypstCompiler: ObservableObject {
             if currentlyInCode { continue }
             
             var line = lines[i]
-            
+
+            // Inline code spans are blanked (length-preserving) before any math
+            // heuristics run: a lone `$` inside `code` (e.g. the register `$2002`)
+            // is not unclosed math, and code contents (`_`, `=`, `\` …) must not
+            // veto the currency heuristic for real dollars elsewhere on the line.
+            let codeRanges = Self.inlineCodeRanges(in: line)
+            let maskedLine = Self.lineMaskingCodeSpans(line, ranges: codeRanges)
+            let nsMasked = maskedLine as NSString
+
             // Fix unclosed single-line math $...
-            // Count unescaped $ signs
+            // Count unescaped $ signs outside code spans (UTF-16 offsets, matching NSRegularExpression)
             var dollarIndices: [Int] = []
-            let chars = Array(line)
-            for j in 0..<chars.count {
-                if chars[j] == "$" {
-                    let isEscaped = (j > 0 && chars[j - 1] == "\\")
+            for j in 0..<nsMasked.length {
+                if nsMasked.character(at: j) == 0x24 { // $
+                    let isEscaped = (j > 0 && nsMasked.character(at: j - 1) == 0x5C) // backslash
                     if !isEscaped {
                         dollarIndices.append(j)
                     }
                 }
             }
-            
-            // If odd number of $, and it's not a single bare currency like $5 without any other math
+
+            // If odd number of $, close the math — unless the dollars read as
+            // currency amounts (e.g. `$4017 … $4015`, all followed by a digit and
+            // no math operators anywhere). Closing those would pair two currency
+            // dollars into a bogus math region that swallows the rest of the line;
+            // the delimiting pass escapes them as literal text instead.
             if dollarIndices.count % 2 != 0 {
-                let lastDollarIdx = dollarIndices.last!
-                let isCurrency = (lastDollarIdx + 1 < chars.count && chars[lastDollarIdx + 1].isNumber && dollarIndices.count == 1 && !line.contains("=") && !line.contains("^") && !line.contains("_") && !line.contains("\\"))
-                if !isCurrency {
+                let isCurrency = !dollarIndices.isEmpty && dollarIndices.allSatisfy { idx in
+                    idx + 1 < nsMasked.length && (0x30...0x39).contains(nsMasked.character(at: idx + 1))
+                }
+                let hasMathOperators = maskedLine.contains("=") || maskedLine.contains("^")
+                    || maskedLine.contains("_") || maskedLine.contains("\\")
+                if !(isCurrency && !hasMathOperators) {
                     line.append("$")
                 }
             }
-            
+
             // Fix dangling ^ or _ or binary operators inside math blocks: $...$ or $$...$$
             if let mathRegex = try? NSRegularExpression(pattern: "\\$\\$?([^\\$]+)\\$\\$?", options: []) {
                 let nsLine = line as NSString
                 let matches = mathRegex.matches(in: line, options: [], range: NSRange(0..<nsLine.length))
                 var fixedLine = line
                 for m in matches.reversed() {
+                    // Never "fix" content inside inline code spans (`` `$x +$` `` is
+                    // the user's code, not broken math).
+                    if codeRanges.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) {
+                        continue
+                    }
                     let mathContent = nsLine.substring(with: m.range(at: 1))
                     var fixedMath = mathContent
                     
@@ -824,6 +993,33 @@ class TypstCompiler: ObservableObject {
         }
         
         return lines.joined(separator: "\n")
+    }
+
+    /// Ranges of inline code spans (`` `…` ``) in a single line, using the same
+    /// matching-backtick-run rule as the sanitizer and `delimitImproperOperators`.
+    nonisolated static func inlineCodeRanges(in line: String) -> [NSRange] {
+        let ns = line as NSString
+        guard ns.length > 0,
+              let re = try? NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)", options: [])
+        else { return [] }
+        return re.matches(in: line, options: [], range: NSRange(0..<ns.length)).map { $0.range }
+    }
+
+    /// Returns a copy of `line` where every character inside `ranges` is replaced by a
+    /// space (newlines preserved). The result has exactly the same UTF-16 length, so
+    /// offsets in the masked string address the original line.
+    nonisolated static func lineMaskingCodeSpans(_ line: String, ranges: [NSRange]) -> String {
+        let ns = line as NSString
+        guard ns.length > 0 else { return line }
+        var chars: [unichar] = (0..<ns.length).map { ns.character(at: $0) }
+        for r in ranges {
+            let end = min(r.location + r.length, chars.count)
+            guard r.location < end else { continue }
+            for i in r.location..<end where chars[i] != 0x0A {
+                chars[i] = 0x20
+            }
+        }
+        return NSString(characters: chars, length: chars.count) as String
     }
 
     // MARK: - Improper Operator Delimiting (.note)
@@ -903,6 +1099,29 @@ class TypstCompiler: ObservableObject {
             if isAlnum(x) || x == 0x5F { return true }                                         // name char
             return x == 0x2D || x == 0x2F || x == 0x22 || x == 0x27 || x == 0x3D              // - / " ' =
         }
+        // An ATX Markdown heading (`#`, `##` … followed by a space, at line start,
+        // optionally inside a blockquote). The sanitizer converts these to Typst `=`
+        // headings, so every `#` of the heading run must reach it unescaped.
+        func isMarkdownHeadingStart(_ loc: Int) -> Bool {
+            var i = loc - 1
+            // Skip back over the rest of the heading run, then any blockquote/space prefix.
+            while i >= 0, let c = charAt(i), c == 0x23 { i -= 1 }                              // '#'
+            while i >= 0, let c = charAt(i), c == 0x20 || c == 0x09 || c == 0x3E { i -= 1 }    // space, tab, '>'
+            if i >= 0, let c = charAt(i), c != 0x0A { return false }                           // not at line start
+            var j = loc
+            while let c = charAt(j), c == 0x23 { j += 1 }                                      // run of '#'
+            guard let after = charAt(j) else { return true }
+            return after == 0x20 || after == 0x09
+        }
+        // A Markdown blockquote marker: `>` at line start (optionally nested after
+        // other `>`), which the sanitizer's heading/list rules recognize as a prefix.
+        func isBlockquoteMarker(_ loc: Int) -> Bool {
+            var i = loc - 1
+            while i >= 0, let c = charAt(i), c == 0x20 || c == 0x09 || c == 0x3E { i -= 1 }    // space, tab, '>'
+            if i >= 0, let c = charAt(i), c != 0x0A { return false }
+            guard let next = charAt(loc + 1) else { return true }                              // bare '>' line
+            return next == 0x20 || next == 0x09 || next == 0x0A
+        }
 
         // 4. Enumerate every unescaped operator and classify it against its context.
         guard let opRe = try? NSRegularExpression(pattern: "(?<!\\\\)[@#$<>]", options: []) else {
@@ -920,13 +1139,13 @@ class TypstCompiler: ObservableObject {
             case 0x40: // @  — must begin a reference (not be glued to a word/email)
                 improperNow = isAlnum(prev) || !isIdentStart(next)
             case 0x23: // #  — must be the start of a code expression
-                improperNow = !isHashContinuation(next)
+                improperNow = !isHashContinuation(next) && !isMarkdownHeadingStart(loc)
             case 0x24: // $  — any leftover $ is stray once math is masked
                 improperNow = true
             case 0x3C: // <  — must open a label / HTML tag
                 improperNow = !isTagStart(next)
-            case 0x3E: // >  — must close a label / HTML tag
-                improperNow = !isTagEndPrev(prev)
+            case 0x3E: // >  — must close a label / HTML tag (or open a blockquote)
+                improperNow = !isTagEndPrev(prev) && !isBlockquoteMarker(loc)
             default:
                 improperNow = false
             }

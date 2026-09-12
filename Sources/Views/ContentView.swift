@@ -1204,7 +1204,10 @@ struct ContentView: View {
         // the preview pane — that is what grinds large notes to a halt on memory-
         // constrained machines. The preview is regenerated ONLY on an explicit Save
         // (`force`). While stale, the preview pane shows a "tap to update" badge.
-        let shouldCompile = !isNote || effectiveForce
+        // The FIRST compile is exempt: until a PDF exists there is nothing to show
+        // and no badge to tap, so a freshly opened/pasted note would render an
+        // empty preview pane forever.
+        let shouldCompile = !isNote || effectiveForce || compiler.currentShadowPDFURL == nil
         let newWorkItem = DispatchWorkItem {
             self.pendingCompilationIsForced = false
             Task {

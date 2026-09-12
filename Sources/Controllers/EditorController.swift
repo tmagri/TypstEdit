@@ -1093,15 +1093,25 @@ class EditorController: NSObject, ObservableObject {
 
     /// Applies the paste's conversion mode to clipboard text. Only converts while
     /// editing a Typst file — other file types always get the verbatim text.
+    ///
+    /// `.note` files are handled differently: they are Markdown with a Typst overlay,
+    /// and the compiler already runs the hybrid Markdown conversion on every compile.
+    /// So a smart paste inserts the Markdown verbatim (the note will render it), and
+    /// force-convert normalizes through the *hybrid* sanitizer — the pure-Markdown
+    /// sanitizer would escape Typst constructs (`$math$`, `@refs`, `#calls`) that
+    /// `.note` files support natively, and double-convert the content on compile.
     private func applyPasteConversion(_ text: String, mode: PasteConversionMode) -> String {
         guard currentFileType == .typst else { return text }
+        let isNote = isNoteFile
         switch mode {
         case .plain:
             return text
         case .forceTypst:
             // Force convert: always run the conversion, no "looks like Typst" skip.
-            return AICompletionService.shared.sanitizeMarkdownToTypst(text)
+            return AICompletionService.shared.sanitizeMarkdownToTypst(text, isHybrid: isNote)
         case .smart:
+            // Notes render pasted Markdown themselves — leave it untouched.
+            if isNote { return text }
             // Fast heuristic to skip content that is already Typst
             let looksLikeTypst = text.contains("#image") || text.contains("#link")
                 || text.contains("#align") || text.contains("#box")
