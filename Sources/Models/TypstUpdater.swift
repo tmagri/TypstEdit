@@ -10,16 +10,26 @@ class TypstUpdater: ObservableObject {
     @Published var status: String = "Ready"
     @Published var progress: Double = 0
     @Published var lastError: String? = nil
-    
+
+    // Finished-update feedback (shown in the status bar after isUpdating flips off)
+    @Published var showResult: Bool = false
+    @Published var resultIsSuccess: Bool = false
+    // Completion dialog for updates started from the launch-check prompt
+    @Published var showSuccessAlert: Bool = false
+    @Published var completedVersion: String? = nil
+
     // Update check properties
     @Published var isCheckingForUpdate: Bool = false
     @Published var currentVersion: String? = nil
+    @Published var bundledVersion: String? = nil
     @Published var availableRelease: GitHubRelease? = nil
     @Published var showUpdatePrompt: Bool = false
     @Published var checkError: String? = nil
 
     private var hasCheckedOnLaunch: Bool = false
     private var currentProcess: Process?
+    private var resultDismissTask: Task<Void, Never>?
+    private var updateWasPrompted: Bool = false
     
     private let repoURL = "https://github.com/typst/typst.git"
     private let releasesAPI = "https://api.github.com/repos/typst/typst/releases/latest"
@@ -77,21 +87,47 @@ class TypstUpdater: ObservableObject {
             return nil
         }
 
+        let version = await queryVersion(atPath: typstPath)
+        self.currentVersion = version
+        return version
+    }
+
+    /// Detects the version of the typst binary bundled inside TypstEdit itself,
+    /// independent of which typst is currently active. Used as a fallback when
+    /// the active binary can't be queried so dialogs never show a hardcoded guess.
+    @discardableResult
+    func detectBundledVersion() async -> String? {
+        guard let bundlePath = Bundle.main.resourcePath else { return nil }
+        let bundledTypst = "\(bundlePath)/bin/typst"
+        guard FileManager.default.fileExists(atPath: bundledTypst) else { return nil }
+
+        bundledVersion = await queryVersion(atPath: bundledTypst)
+        return bundledVersion
+    }
+
+    /// Human-readable version for dialogs: the active compiler's version, or
+    /// the bundled binary's version when the active one couldn't be detected.
+    var displayVersion: String {
+        currentVersion ?? bundledVersion.map { "Bundled (\($0))" } ?? "Unknown"
+    }
+
+    /// Runs `typst --version` at the given path and extracts the version token.
+    private func queryVersion(atPath path: String) async -> String? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: typstPath)
+        process.executableURL = URL(fileURLWithPath: path)
         process.arguments = ["--version"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
 
-        let version: String? = await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             process.terminationHandler = { proc in
                 guard proc.terminationStatus == 0 else {
                     continuation.resume(returning: nil)
                     return
                 }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty else {
                     continuation.resume(returning: nil)
                     return
                 }
@@ -101,7 +137,10 @@ class TypstUpdater: ObservableObject {
                    let range = Range(match.range, in: output) {
                     continuation.resume(returning: String(output[range]))
                 } else {
-                    continuation.resume(returning: output)
+                    // Version format changed (no x.y token): fall back to the
+                    // token after the binary name, then the raw output.
+                    let tokens = output.split(separator: " ").map(String.init)
+                    continuation.resume(returning: tokens.count > 1 ? tokens[1] : output)
                 }
             }
 
@@ -111,9 +150,6 @@ class TypstUpdater: ObservableObject {
                 continuation.resume(returning: nil)
             }
         }
-
-        self.currentVersion = version
-        return version
     }
 
     /// Compares two version strings (e.g. "0.12.0" and "0.15.1" or "v0.15.1").
@@ -156,6 +192,11 @@ class TypstUpdater: ObservableObject {
         checkError = nil
 
         _ = await detectCurrentVersion()
+        if currentVersion == nil {
+            // Active binary missing or didn't report a version; fall back to the
+            // app-bundled binary for display purposes.
+            _ = await detectBundledVersion()
+        }
 
         do {
             let release = try await fetchLatestRelease()
@@ -185,10 +226,14 @@ class TypstUpdater: ObservableObject {
         isCheckingForUpdate = false
     }
 
-    /// Invoked on app load to check for updates if enabled in settings.
+    /// Invoked on app load. Always detects the local Typst version (shown in the
+    /// status bar), then checks GitHub for a newer release if enabled in settings.
     func checkOnLaunchIfNeeded() {
         guard !hasCheckedOnLaunch else { return }
         hasCheckedOnLaunch = true
+
+        // Populate currentVersion for the status bar even when auto-check is off.
+        Task { _ = await detectCurrentVersion() }
 
         guard GeneralSettingsManager.shared.checkForTypstUpdatesOnLaunch else { return }
 
@@ -198,17 +243,22 @@ class TypstUpdater: ObservableObject {
             await checkForUpdates(userInitiated: false)
         }
     }
-    
-    func update() {
+
+    /// - Parameter fromPrompt: true when started from the launch-check
+    ///   "New Typst Engine Available" dialog; those get a completion dialog.
+    func update(fromPrompt: Bool = false) {
         guard !isUpdating else { return }
-        
+
         isUpdating = true
         status = "Initializing..."
         progress = 0.05
         lastError = nil
-        
+        showResult = false
+        updateWasPrompted = fromPrompt
+        resultDismissTask?.cancel()
+
         let mode = GeneralSettingsManager.shared.updateMode
-        
+
         Task {
             if mode == .bleedingEdgeSource {
                 await updateFromSource()
@@ -451,19 +501,43 @@ class TypstUpdater: ObservableObject {
     }
     
     private func setError(_ msg: String) {
-        self.status = "Failed"
+        self.status = "Update failed"
         self.lastError = msg
         self.isUpdating = false
+        self.resultIsSuccess = false
+        self.showResult = true
+        scheduleResultDismissal()
     }
-    
+
     private func setFinished(path: String) {
-        self.status = "Update successful!"
         self.progress = 1.0
-        self.isUpdating = false
+        self.status = "Finalizing..."
         GeneralSettingsManager.shared.customTypstPath = path
         GeneralSettingsManager.shared.useCustomTypst = true
+
         Task {
-            _ = await detectCurrentVersion()
+            // Keep the progress UI up until the new binary reports its version,
+            // so the completion state can name exactly what was installed.
+            let version = await detectCurrentVersion()
+            completedVersion = version
+            self.status = version.map { "Updated to Typst \($0)" } ?? "Update successful!"
+            self.isUpdating = false
+            self.resultIsSuccess = true
+            self.showResult = true
+            if updateWasPrompted {
+                self.showSuccessAlert = true
+            }
+            scheduleResultDismissal()
+        }
+    }
+
+    /// Hides the status-bar result banner after a while; a new update cancels this.
+    private func scheduleResultDismissal() {
+        resultDismissTask?.cancel()
+        resultDismissTask = Task {
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            guard !Task.isCancelled else { return }
+            self.showResult = false
         }
     }
 }

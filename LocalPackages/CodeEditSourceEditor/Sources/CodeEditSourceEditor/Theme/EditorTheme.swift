@@ -49,6 +49,9 @@ public struct EditorTheme: Equatable {
     public var markupQuote: Attribute
     public var markupLink: Attribute
     public var operators: Attribute
+    /// Dimmed color for structural punctuation: Markdown heading markers (`#`), list
+    /// delimiters, code-fence backticks, escapes. Kept visible but visually quiet.
+    public var punctuation: Attribute
 
     public init(
         text: Attribute,
@@ -74,7 +77,8 @@ public struct EditorTheme: Equatable {
         markupList: Attribute = .init(color: .textColor),
         markupQuote: Attribute = .init(color: .textColor, italic: true),
         markupLink: Attribute = .init(color: .linkColor),
-        operators: Attribute = .init(color: .textColor)
+        operators: Attribute = .init(color: .textColor),
+        punctuation: Attribute = .init(color: .secondaryLabelColor)
     ) {
         self.text = text
         self.insertionPoint = insertionPoint
@@ -100,6 +104,7 @@ public struct EditorTheme: Equatable {
         self.markupQuote = markupQuote
         self.markupLink = markupLink
         self.operators = operators
+        self.punctuation = punctuation
     }
 
     /// Maps a capture type to the attributes for that capture determined by the theme.
@@ -126,7 +131,7 @@ public struct EditorTheme: Equatable {
         case .textQuote: return markupQuote
         case .textList: return markupList
         case .textStrike: return markupStrikethrough
-        case .punctuationSpecial, .punctuationDelimiter: return text
+        case .punctuationSpecial, .punctuationDelimiter: return punctuation
         case .`operator`: return operators
         default: return text
         }

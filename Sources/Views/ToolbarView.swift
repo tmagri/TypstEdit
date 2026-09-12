@@ -2,24 +2,33 @@ import SwiftUI
 
 struct ToolbarView: View {
     @ObservedObject var controller: EditorController
-    @State private var availableWidth: CGFloat = 800
     @State private var showColorPopover = false
     @State private var customColor: Color = .blue
 
     var body: some View {
         GeometryReader { geometry in
-            let width = geometry.size.width
-            
-            // Granular collapsing thresholds based on priority
-            // Collapsing order: Insert -> Font -> Paragraph -> Layout -> All
-            let collapseInsert = width < 550
-            let collapseFont = width < 480
-            let collapseParagraph = width < 420
-            let collapseLayout = width < 360
-            
-            HStack(alignment: .top, spacing: 4) {
+            // Measure-and-fit instead of hardcoded width thresholds: the first
+            // ribbon variant whose content actually fits the available width is
+            // used, so groups collapse before anything can clip off the right
+            // edge. Collapsing order: Insert -> Font -> Paragraph -> Document.
+            ViewThatFits(in: .horizontal) {
+                ribbon(insert: true, font: true, paragraph: true, layout: true)
+                ribbon(insert: false, font: true, paragraph: true, layout: true)
+                ribbon(insert: false, font: false, paragraph: true, layout: true)
+                ribbon(insert: false, font: false, paragraph: false, layout: true)
+                ribbon(insert: false, font: false, paragraph: false, layout: false)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(width: geometry.size.width)
+        }
+        .frame(height: 100) // Allow sufficient height for the ribbon
+    }
+
+    private func ribbon(insert: Bool, font: Bool, paragraph: Bool, layout: Bool) -> some View {
+        HStack(alignment: .top, spacing: 4) {
                 // --- Group 1: Document ---
-                ToolbarGroup(title: "Document", icon: "doc.text", isCompact: collapseLayout) {
+                ToolbarGroup(title: "Document", icon: "doc.text", isCompact: !layout) {
                      VStack(spacing: 4) {
                         HStack(spacing: 4) {
                             Menu {
@@ -50,7 +59,7 @@ struct ToolbarView: View {
                 Divider().frame(height: 32)
                 
                 // --- Group 2: Font ---
-                ToolbarGroup(title: "Font", icon: "textformat", isCompact: collapseFont) {
+                ToolbarGroup(title: "Font", icon: "textformat", isCompact: !font) {
                     VStack(spacing: 2) {
                         HStack(spacing: 2) {
                             ToolbarButton(icon: "bold", tooltip: "Bold (Cmd+B)", isActive: controller.isBoldActive, action: controller.toggleBold)
@@ -124,7 +133,7 @@ struct ToolbarView: View {
                 Divider().frame(height: 32)
                 
                 // --- Group 3: Paragraph ---
-                ToolbarGroup(title: "Paragraph", icon: "paragraphsign", isCompact: collapseParagraph) {
+                ToolbarGroup(title: "Paragraph", icon: "paragraphsign", isCompact: !paragraph) {
                      VStack(spacing: 2) {
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "list.bullet", tooltip: "Bullet List (Cmd+Shift+8)", isActive: controller.isBulletListActive, action: controller.toggleBulletList)
@@ -142,7 +151,7 @@ struct ToolbarView: View {
                 Divider().frame(height: 32)
 
                 // --- Group 4: Insert ---
-                ToolbarGroup(title: "Insert", icon: "plus.square", isCompact: collapseInsert) {
+                ToolbarGroup(title: "Insert", icon: "plus.square", isCompact: !insert) {
                      VStack(alignment: .leading, spacing: 2) {
                          HStack(spacing: 2) {
                              ToolbarButton(icon: "cursorarrow.rays", tooltip: "Edit at Cursor (Cmd+Shift+E)", action: controller.openContextualEditor)
@@ -169,12 +178,10 @@ struct ToolbarView: View {
                 
                 Divider().frame(height: 32)
                 
-                // --- Group 5: References (Always check space or always compact if Insert is compact?)
-                // Let's make References collapse with Insert for now as they are both "extras", or give it its own status.
-                // Given the user request, let's allow it to stay if space permits, or collapse last.
-                // Actually References is small (2 buttons stacked). It can stay longer.
-                // Let's collapse it with Paragraph for simplicity or Font.
-                ToolbarGroup(title: "References", icon: "text.book.closed", isCompact: collapseInsert) {
+                // --- Group 5: References ---
+                // Smallest group and the one that was getting clipped, so it
+                // stays expanded the longest (collapses only in the last variant).
+                ToolbarGroup(title: "References", icon: "text.book.closed", isCompact: !layout) {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 2) {
                             ToolbarButton(icon: "tag", tooltip: "Label/Tag", isActive: controller.isTagActive, action: controller.openTagEditor)
@@ -185,10 +192,7 @@ struct ToolbarView: View {
                         }
                     }
                 }
-            }
-            .padding(4)
         }
-        .frame(height: 100) // Allow sufficient height for the ribbon
     }
 
     private func colorFromName(_ name: String) -> Color {

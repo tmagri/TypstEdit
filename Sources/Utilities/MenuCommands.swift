@@ -87,17 +87,17 @@ struct AppMenuCommands: Commands {
                 Button("PDF") {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportPDF")
                 }
-                .disabled(!editorController.isTypstFile)
-                
+                .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
+
                 Button("PNG") {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportPNG")
                 }
-                .disabled(!editorController.isTypstFile)
-                
+                .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
+
                 Button("SVG") {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportSVG")
                 }
-                .disabled(!editorController.isTypstFile)
+                .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
             }
             
             Divider()

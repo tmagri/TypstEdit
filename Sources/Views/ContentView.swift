@@ -338,9 +338,20 @@ struct ContentView: View {
                     
                     Divider().frame(height: 12).padding(.horizontal, 4)
 
+                    // Active Typst compiler version
+                    if let typstVersion = typstUpdater.currentVersion {
+                        Text("Typst \(typstVersion)")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundColor(themeManager.textColor)
+                            .help("Typst compiler version")
+
+                        Divider().frame(height: 12).padding(.horizontal, 4)
+                    }
+
                     if editorController.isTypstFile {
                         Text("Words: \(editorController.wordCount)").font(.caption).monospacedDigit().foregroundColor(themeManager.textColor)
-                        
+
                         Divider().frame(height: 12).padding(.horizontal, 4)
                     }
                     
@@ -435,6 +446,18 @@ struct ContentView: View {
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
+                        } else if typstUpdater.showResult {
+                            // Lingers after the update ends so the outcome is visible
+                            HStack(spacing: 4) {
+                                Image(systemName: typstUpdater.resultIsSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(typstUpdater.resultIsSuccess ? .green : .orange)
+                                Text(typstUpdater.status)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .transition(.opacity)
+                            .help(typstUpdater.lastError ?? typstUpdater.status)
                         }
 
                         // Editor Status Message (e.g., "File Saved")
@@ -654,13 +677,15 @@ struct ContentView: View {
                     }
                     .help("Save (Cmd+S)").keyboardShortcut("s", modifiers: .command).buttonStyle(.plain)
                     
-                    if editorController.isTypstFile {
+                    // Markdown files compile to PDF exactly like Typst files (the
+                    // preview pipeline converts them), so they get Print/Share too.
+                    if editorController.isTypstFile || editorController.isMarkdownFile {
                         Button(action: { Task { await printPDF() } }) {
                             Image(systemName: "printer").foregroundColor(themeManager.textColor)
                                 .padding(6).background(Color.primary.opacity(0.05)).cornerRadius(8)
                         }
                         .help("Print").buttonStyle(.plain)
-                        
+
                         ShareButton(fileURL: editorController.cleanPDFURL ?? exportedPDFURL ?? currentPDFURL ?? compiler.currentShadowPDFURL).frame(width: 28, height: 28)
                             .padding(4).background(Color.primary.opacity(0.3)).cornerRadius(8).help("Share")
                             .onHover { inside in
@@ -801,7 +826,7 @@ struct ContentView: View {
                 }
                 .alert("New Typst Engine Available", isPresented: $typstUpdater.showUpdatePrompt) {
                     Button("Update Now") {
-                        typstUpdater.update()
+                        typstUpdater.update(fromPrompt: true)
                     }
                     Button("Later", role: .cancel) { }
                     Button("Don't Ask Again") {
@@ -809,10 +834,15 @@ struct ContentView: View {
                     }
                 } message: {
                     if let release = typstUpdater.availableRelease {
-                        Text("A new stable version of the Typst compiler (\(release.tag_name)) is available.\n\nCurrent version: \(typstUpdater.currentVersion ?? "Bundled (0.12.0)")\nLatest version: \(release.tag_name)\n\nWould you like to download and use this updated version?")
+                        Text("A new stable version of the Typst compiler (\(release.tag_name)) is available.\n\nCurrent version: \(typstUpdater.displayVersion)\nLatest version: \(release.tag_name)\n\nWould you like to download and use this updated version?")
                     } else {
                         Text("A new stable version of the Typst engine is available. Would you like to update?")
                     }
+                }
+                .alert("Update Complete", isPresented: $typstUpdater.showSuccessAlert) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text("Typst was successfully updated\(typstUpdater.completedVersion.map { " to \($0)" } ?? ""). Your documents will be compiled with this version from now on.")
                 }
             }
         }
@@ -834,21 +864,11 @@ struct ContentView: View {
                 fileSystem.isNewUnsavedFile = false
                 fileSystem.loadFiles()
                 editorController.isSidebarVisible = true
-                
-            } else if url.pathExtension.lowercased() == "typ" {
-                // 2. If it's a Typst file, open its parent folder as a project AND open the file
-                let folder = url.deletingLastPathComponent()
-                fileSystem.currentFolder = folder
-                fileSystem.isNewUnsavedFile = false
-                fileSystem.loadFiles()
-                
-                self.selectedFile = url
-                self.loadFile(url: url)
-                
-                editorController.isSidebarVisible = true
-                
+
             } else {
-                // 3. If it's a Markdown file (or anything else), force standalone mode
+                // 2. Any single file (typ, note, md, …) opens in standalone mode:
+                // no parent folder as project, no sidebar, no RAG indexing — so
+                // opening a lone file never scatters vectorcaches/ into its folder.
                 NotificationCenter.default.post(name: .openStandaloneFile, object: url)
             }
         }

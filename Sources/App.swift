@@ -248,10 +248,12 @@ struct TypstEditApp: App {
                     print("[DEBUG] TypstEditApp onAppear: assigning editorController to appDelegate")
                     appDelegate.editorController = editorController
                 }
-                .onOpenURL { url in
-                    print("[DEBUG] TypstEditApp: onOpenURL triggered for \(url.lastPathComponent)")
-                    NotificationCenter.default.post(name: .openProjectAndFile, object: url)
-                }
+                // NOTE: opened URLs are handled by ContentView's `.onOpenURL`
+                // (`handleOpenURL`), which routes folders to project mode and single
+                // files to standalone mode. Do NOT add another `.onOpenURL` here —
+                // multiple registrations all fire, and the previous project-and-file
+                // broadcast made every double-clicked file index its parent folder
+                // (creating a vectorcaches/ next to it) even in standalone mode.
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)

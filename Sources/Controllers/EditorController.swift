@@ -646,7 +646,10 @@ class EditorController: NSObject, ObservableObject {
             markupList: attr(orange),
             markupQuote: attr(green, italic: true),
             markupLink: attr(teal),
-            operators: attr(orange)
+            operators: attr(orange),
+            // Dimmed structural punctuation: Markdown `#` heading markers, fence
+            // backticks, list/escape characters.
+            punctuation: attr(gray)
         )
         _customTheme = theme
         _customThemeIsDark = isDark

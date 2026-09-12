@@ -3,7 +3,8 @@
 (atx_heading (inline) @text.title)
 (setext_heading (paragraph) @text.title)
 
-;; Heading markers (dim the leading ### / underlines)
+;; Heading markers — styled exactly like the heading text they introduce
+;; (@text.title), not dimmed punctuation.
 [
   (atx_h1_marker)
   (atx_h2_marker)
@@ -13,7 +14,7 @@
   (atx_h6_marker)
   (setext_h1_underline)
   (setext_h2_underline)
-] @punctuation.special
+] @text.title
 
 ;; Code blocks
 ;; Capture code_fence_content directly — see note in tree-sitter-note/highlights.scm.
