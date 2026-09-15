@@ -164,7 +164,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
     }
 
     @MainActor
-    func completionWindowApplyCompletion(
+   func completionWindowApplyCompletion(
         item: any CodeSuggestionEntry,
         textView: TextViewController,
         cursorPosition: CursorPosition?
@@ -176,40 +176,37 @@ class AICompletionProvider: CodeSuggestionDelegate {
         let nsText = text as NSString
         let label = Self.cleanedInsertionText(item.label)
 
-        // Merge instead of insert: suggestions frequently repeat what the user
-        // already typed ("The quick brown" → "The quick brown fox …"). Replace
-        // only the overlapping tail of the current line, inserting just the
-        // remainder, so applying can never duplicate existing text.
+        // Merge instead of insert: find the overlapping tail of the current line,
+        // and replace that overlapping portion with the FULL suggestion label.
         var lineStart = utf16Offset
         while lineStart > 0 {
             let ch = nsText.character(at: lineStart - 1)
             if ch == 0x0A || ch == 0x0D { break }
             lineStart -= 1
         }
+        
         let typedPrefix = nsText.substring(with: NSRange(location: lineStart, length: utf16Offset - lineStart))
-        let (replaceCount, insertion) = Self.mergeInsertion(label: label, typedPrefix: typedPrefix)
+        let replaceCount = Self.overlapLength(label: label, typedPrefix: typedPrefix)
 
+        // Target the overlap range, but insert the ENTIRE label.
         let replacementRange = NSRange(location: utf16Offset - replaceCount, length: replaceCount)
-        textView.textView.insertText(insertion, replacementRange: replacementRange)
+        textView.textView.insertText(label, replacementRange: replacementRange)
     }
 
     /// Finds the longest suffix of `typedPrefix` that prefixes `label`.
-    /// Returns how many UTF-16 units before the cursor to replace and the text
-    /// to insert there (the unmatched remainder of `label`).
-    static func mergeInsertion(label: String, typedPrefix: String) -> (replaceCount: Int, insertion: String) {
-        var overlap = ""
+    /// Returns how many UTF-16 units before the cursor to replace.
+    static func overlapLength(label: String, typedPrefix: String) -> Int {
         let maxK = min(typedPrefix.count, label.count, 2000)
         if maxK > 0 {
             for candidate in stride(from: maxK, through: 1, by: -1) {
                 let suffix = typedPrefix.suffix(candidate)
                 if suffix == label.prefix(candidate) {
-                    overlap = String(suffix)
-                    break
+                    // Return the UTF-16 length of the overlap to safely use with NSRange
+                    return (String(suffix) as NSString).length
                 }
             }
         }
-        let insertion = String(label.dropFirst(overlap.count))
-        return ((overlap as NSString).length, insertion)
+        return 0
     }
 
     /// Normalizes model output into insertable text: unwraps a fenced code
