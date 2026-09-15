@@ -316,8 +316,7 @@ class EditorController: NSObject, ObservableObject {
                 let isCmdOptV = flags == [.command, .option]
 
                 if isCmdV || isCmdShiftV || isCmdOptShiftV || isCmdOptV {
-                    // ONLY intercept if the code editor is actively focused
-                    // (We don't want to hijack pastes in the Find panel or Rename alerts)
+                    // Code editor focused → paste with the app's conversion logic.
                     if let textView = self.textViewController?.textView,
                        NSApp.keyWindow?.firstResponder == textView {
 
@@ -329,6 +328,16 @@ class EditorController: NSObject, ObservableObject {
                             self.pasteSelection()
                         }
                         return nil // Consume the event so macOS doesn't double-paste
+                    }
+
+                    // Any OTHER focused text view — form field editors (Insert Link,
+                    // rename alerts, find panel, …). Consume the event and perform
+                    // exactly ONE native paste. Without this, the Edit ▸ Paste menu
+                    // accelerator (forwarded here) AND the field editor's own Cmd+V
+                    // key handling each pasted, duplicating the text in every form.
+                    if NSApp.keyWindow?.firstResponder is NSTextView {
+                        NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+                        return nil
                     }
                 }
             }
