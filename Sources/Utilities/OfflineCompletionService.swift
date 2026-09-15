@@ -58,13 +58,16 @@ class OfflineCompletionService {
     ]
     
     private init() {}
-    
-    func provideCompletion(text: String, cursorIndex: Int) -> [String] {
+
+    /// - Parameter manualTrigger: `true` when the user explicitly invoked
+    ///   completions (Escape / Ctrl+Space). Manual invocation on an empty or
+    ///   plain word still offers the Typst function list instead of nothing.
+    func provideCompletion(text: String, cursorIndex: Int, manualTrigger: Bool = false) -> [String] {
         let prefix = getWordPrefix(text: text, cursorIndex: cursorIndex)
         print("[OfflineCompletion] Prefix found: '\(prefix)' at index \(cursorIndex)")
-        
+
         var suggestions: [String] = []
-        
+
         // Context Check: Are we after #set or #show?
         let prevWord = getPreviousWord(text: text, cursorIndex: cursorIndex - prefix.count)
         if prevWord == "#set" || prevWord == "#show" {
@@ -73,17 +76,17 @@ class OfflineCompletionService {
             suggestions.append(contentsOf: matches.map { $0 + "(" })
             if !suggestions.isEmpty { return suggestions }
         }
-        
+
         // Context Check: Are we inside an argument list?
         if let enclosingFunc = getEnclosingFunction(text: text, cursorIndex: cursorIndex) {
             let term = prefix.lowercased()
             var paramSuggestions: [String] = []
-            
+
             // Try specific function parameters first
             if let specificParams = functionParameters[enclosingFunc] {
                 paramSuggestions.append(contentsOf: specificParams.filter { $0.hasPrefix(term) })
             }
-            
+
             // Fallback to common properties if prefix matches
             let commonMatches = commonProperties.filter { $0.hasPrefix(term) }
             for match in commonMatches {
@@ -91,50 +94,71 @@ class OfflineCompletionService {
                     paramSuggestions.append(match)
                 }
             }
-            
+
             if !paramSuggestions.isEmpty {
                 return paramSuggestions.map { $0 + ": " }
             }
         }
 
-        if prefix.isEmpty { return [] }
-        
-        // 1. Typst Functions (Triggered by #)
+        // Typst Functions (normally triggered by #, but a manual trigger also
+        // completes a bare word and offers the full list on an empty prefix).
         if prefix.starts(with: "#") {
             let term = String(prefix.dropFirst()).lowercased()
-            let matches = typstFunctions.filter { $0.hasPrefix(term) }
-            
-            // Keywords that should NOT have parenthesis
-            let keywords = ["set", "show", "let", "import", "include", "as", "from", "return", "auto", "none"]
-            
-            // Functions that should be auto-closed ()
-            let parameterless = ["pagebreak", "parbreak", "colbreak", "linebreak"]
-            
-            suggestions.append(contentsOf: matches.map { match in
-                if keywords.contains(match) {
-                    return "#" + match
-                } else if parameterless.contains(match) {
-                    return "#" + match + "()"
-                } else {
-                    return "#" + match + "("
+            suggestions.append(contentsOf: functionCompletions(matching: term, includeMarker: true))
+        } else if manualTrigger {
+            if prefix.isEmpty {
+                // Explicit invocation with nothing typed: offer everything.
+                suggestions.append(contentsOf: functionCompletions(matching: "", includeMarker: true))
+            } else {
+                let matches = typstFunctions.filter { $0.hasPrefix(prefix.lowercased()) }
+                if !matches.isEmpty {
+                    suggestions.append(contentsOf: matches.map { "#" + $0 })
                 }
-            })
+            }
         }
-        
-        // 2. Grammar: Sentence Capitalization
+
+        if suggestions.isEmpty && prefix.isEmpty { return [] }
+
+        // Grammar: Sentence Capitalization
         if suggestions.isEmpty, let first = prefix.first, first.isLowercase {
             let startOfWordIndex = cursorIndex - prefix.count
             if isStartOfSentence(text: text, index: startOfWordIndex) {
                 suggestions.append(prefix.capitalized)
             }
         }
-        
+
         return suggestions
+    }
+
+    /// Maps function names to insertable completions. Keywords stay bare,
+    /// parameterless functions get `()`, everything else gets `(`.
+    private func functionCompletions(matching term: String, includeMarker: Bool) -> [String] {
+        let matches = typstFunctions.filter { $0.hasPrefix(term) }
+
+        // Keywords that should NOT have parenthesis
+        let keywords = ["set", "show", "let", "import", "include", "as", "from", "return", "auto", "none"]
+
+        // Functions that should be auto-closed ()
+        let parameterless = ["pagebreak", "parbreak", "colbreak", "linebreak"]
+
+        let marker = includeMarker ? "#" : ""
+        return matches.map { match in
+            if keywords.contains(match) {
+                return marker + match
+            } else if parameterless.contains(match) {
+                return marker + match + "()"
+            } else {
+                return marker + match + "("
+            }
+        }
     }
     
     private func getPreviousWord(text: String, cursorIndex: Int) -> String {
         var curr = cursorIndex
         let nsText = text as NSString
+        // Clamp like getEnclosingFunction: substring() throws on out-of-bounds
+        // indices, and callers may hand us one past the end.
+        curr = min(max(curr, 0), nsText.length)
         // Skip current whitespace
         while curr > 0 {
             let charStr = nsText.substring(with: NSRange(location: curr - 1, length: 1))
@@ -150,7 +174,11 @@ class OfflineCompletionService {
         var curr = cursorIndex
         let nsText = text as NSString
         var openParens = 0
-        
+
+        // Clamp: callers may hand us an index past the end (e.g. a cursor at
+        // the very end of the document), and substring() would throw.
+        curr = min(max(curr, 0), nsText.length)
+
         while curr > 0 {
             curr -= 1
             let charStr = nsText.substring(with: NSRange(location: curr, length: 1))
@@ -202,6 +230,7 @@ class OfflineCompletionService {
         // Scan backwards from index
         var curr = index
         let nsText = text as NSString
+        curr = min(max(curr, 0), nsText.length)
         
         while curr > 0 {
             curr -= 1

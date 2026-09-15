@@ -139,28 +139,20 @@ public final class SuggestionController: NSWindowController {
 
     // MARK: - Cursors Updated
 
+    /// Notifies the suggestion window that the cursor moved. The window is
+    /// dismissed if it can't follow the cursor — it is never (re)opened from
+    /// here; opening is exclusively a manual-trigger action.
     func cursorsUpdated(
         textView: TextViewController,
         delegate: CodeSuggestionDelegate,
-        position: CursorPosition,
-        presentIfNot: Bool = false,
-        asPopover: Bool = false
+        position: CursorPosition
     ) {
-        if !asPopover && popover != nil {
+        if popover != nil {
             close()
         }
 
         model.cursorsUpdated(textView: textView, delegate: delegate, position: position) {
             close()
-
-            if presentIfNot {
-                self.showCompletions(
-                    textView: textView,
-                    delegate: delegate,
-                    cursorPosition: position,
-                    asPopover: asPopover
-                )
-            }
         }
     }
 

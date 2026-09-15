@@ -9,8 +9,9 @@ import AppKit
 import CodeEditTextView
 import TextStory
 
-/// Triggers the suggestion window when trigger characters are typed.
-/// Designed to be called in the ``TextViewDelegate``'s didReplaceCharacters method.
+/// Tracks text edits and cursor moves so the suggestion window can dismiss
+/// itself when the caret moves. Designed to be called in the
+/// ``TextViewDelegate``'s didReplaceCharacters method.
 ///
 /// Was originally a `TextFilter` model, however those are called before text is changed and cursors are updated.
 /// The suggestion model expects up-to-date cursor positions as well as complete text contents. This being
@@ -19,39 +20,23 @@ final class SuggestionTriggerCharacterModel {
     weak var controller: TextViewController?
     private var lastPosition: NSRange?
 
-    var triggerCharacters: Set<String>? {
-        controller?.configuration.peripherals.codeSuggestionTriggerCharacters
-    }
-
     func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
-        guard let controller, let completionDelegate = controller.completionDelegate, let triggerCharacters else {
-            return
-        }
-
         let mutation = TextMutation(
             string: string,
             range: range,
             limit: textView.textStorage.length
         )
-        guard mutation.delta >= 0,
-              let lastChar = mutation.string.last else {
+
+        // Track the caret position for `selectionUpdated`, but never open the
+        // suggestion window from typing. Completions are manual-only (Escape /
+        // Ctrl+Space): any key while the window is open dismisses it, so popping
+        // it up per keystroke just made it flicker open/closed while typing.
+        guard mutation.delta >= 0 else {
             lastPosition = nil
             return
         }
 
-        guard triggerCharacters.contains(String(lastChar)) || lastChar.isNumber || lastChar.isLetter else {
-            lastPosition = nil
-            return
-        }
-
-        let range = NSRange(location: mutation.postApplyRange.max, length: 0)
-        lastPosition = range
-        SuggestionController.shared.cursorsUpdated(
-            textView: controller,
-            delegate: completionDelegate,
-            position: CursorPosition(range: range),
-            presentIfNot: true
-        )
+        lastPosition = NSRange(location: mutation.postApplyRange.max, length: 0)
     }
 
     func selectionUpdated(_ position: CursorPosition) {

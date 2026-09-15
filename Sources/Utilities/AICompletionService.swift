@@ -222,7 +222,10 @@ class AICompletionService: ObservableObject {
             finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalResult : extracted
         }
 
-        let sanitizedResult = sanitizeMarkdownToTypst(finalResult)
+        // Completion requests return code to insert at the caret, not markdown
+        // prose — running the Markdown→Typst sanitizer over it mangles the very
+        // syntax it should insert (e.g. `#page` becomes `\#page`).
+        let sanitizedResult = purpose == .completion ? finalResult : sanitizeMarkdownToTypst(finalResult)
 
         print("RAW AI RESULT: '\(rawResult)'")
         print("SANITIZED RESULT: '\(sanitizedResult)'")

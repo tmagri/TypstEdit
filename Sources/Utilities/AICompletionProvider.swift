@@ -39,7 +39,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
     ) async -> (windowPosition: CursorPosition, items: [any CodeSuggestionEntry])? {
         let settings = AISettingsManager.shared
         guard settings.isEnabled || settings.intellisenseEnabled else { return nil }
-        
+
         let pos = cursorPosition.start.line != -1 ? cursorPosition : (textView.cursorPositions.first ?? cursorPosition)
         let text = textView.text
         let index = cursorIndex(from: pos.start, in: text)
@@ -49,7 +49,9 @@ class AICompletionProvider: CodeSuggestionDelegate {
         
         // 1. Manual Intellisense (Immediate)
         if settings.intellisenseEnabled {
-            let suggestions = OfflineCompletionService.shared.provideCompletion(text: text, cursorIndex: index)
+            // Every request that reaches us is an explicit user invocation
+            // (Escape / Ctrl+Space) — typing never opens the suggestion window.
+            let suggestions = OfflineCompletionService.shared.provideCompletion(text: text, cursorIndex: index, manualTrigger: true)
             let items = suggestions.map { suggestion in
                 AICompletionItem(
                     label: suggestion,
@@ -86,9 +88,10 @@ class AICompletionProvider: CodeSuggestionDelegate {
                         let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
                         if Task.isCancelled { return }
                         
-                        if !completionCode.isEmpty {
+                        let cleanedCode = Self.cleanedInsertionText(completionCode)
+                        if !cleanedCode.isEmpty {
                             let aiItem = AICompletionItem(
-                                label: completionCode,
+                                label: cleanedCode,
                                 detail: "AI",
                                 documentation: "AI Generated Suggestion"
                             )
@@ -127,9 +130,10 @@ class AICompletionProvider: CodeSuggestionDelegate {
                     let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
                     try Task.checkCancellation()
                     
-                    if !completionCode.isEmpty {
+                    let cleanedCode = Self.cleanedInsertionText(completionCode)
+                    if !cleanedCode.isEmpty {
                         let aiItem = AICompletionItem(
-                            label: completionCode,
+                            label: cleanedCode,
                             detail: "AI",
                             documentation: "AI Generated Suggestion"
                         )
@@ -147,7 +151,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
         if !allItems.isEmpty {
             return (windowPosition: pos, items: allItems)
         }
-        
+
         return nil
     }
 
@@ -168,13 +172,69 @@ class AICompletionProvider: CodeSuggestionDelegate {
         let text = textView.text
         let currentPos = cursorPosition?.start ?? textView.cursorPositions.first?.start ?? .init(line: 1, column: 1)
         let utf16Offset = cursorUTF16Offset(from: currentPos, in: text)
-        
-        // Calculate the word prefix to replace (in UTF-16 units)
-        let prefix = getWordPrefix(text: text, utf16Offset: utf16Offset)
-        let prefixUTF16Len = (prefix as NSString).length
-        let replacementRange = NSRange(location: utf16Offset - prefixUTF16Len, length: prefixUTF16Len)
-        
-        textView.textView.insertText(item.label, replacementRange: replacementRange)
+
+        let nsText = text as NSString
+        let label = Self.cleanedInsertionText(item.label)
+
+        // Merge instead of insert: suggestions frequently repeat what the user
+        // already typed ("The quick brown" → "The quick brown fox …"). Replace
+        // only the overlapping tail of the current line, inserting just the
+        // remainder, so applying can never duplicate existing text.
+        var lineStart = utf16Offset
+        while lineStart > 0 {
+            let ch = nsText.character(at: lineStart - 1)
+            if ch == 0x0A || ch == 0x0D { break }
+            lineStart -= 1
+        }
+        let typedPrefix = nsText.substring(with: NSRange(location: lineStart, length: utf16Offset - lineStart))
+        let (replaceCount, insertion) = Self.mergeInsertion(label: label, typedPrefix: typedPrefix)
+
+        let replacementRange = NSRange(location: utf16Offset - replaceCount, length: replaceCount)
+        textView.textView.insertText(insertion, replacementRange: replacementRange)
+    }
+
+    /// Finds the longest suffix of `typedPrefix` that prefixes `label`.
+    /// Returns how many UTF-16 units before the cursor to replace and the text
+    /// to insert there (the unmatched remainder of `label`).
+    static func mergeInsertion(label: String, typedPrefix: String) -> (replaceCount: Int, insertion: String) {
+        var overlap = ""
+        let maxK = min(typedPrefix.count, label.count, 2000)
+        if maxK > 0 {
+            for candidate in stride(from: maxK, through: 1, by: -1) {
+                let suffix = typedPrefix.suffix(candidate)
+                if suffix == label.prefix(candidate) {
+                    overlap = String(suffix)
+                    break
+                }
+            }
+        }
+        let insertion = String(label.dropFirst(overlap.count))
+        return ((overlap as NSString).length, insertion)
+    }
+
+    /// Normalizes model output into insertable text: unwraps a fenced code
+    /// block and drops everything from a cursor marker onward (that part
+    /// belongs after the caret, and inserting it would duplicate text).
+    static func cleanedInsertionText(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if text.hasPrefix("```") {
+            let withoutOpeningFence = text.dropFirst(3)
+            if let firstNewline = withoutOpeningFence.firstIndex(of: "\n") {
+                let body = withoutOpeningFence[withoutOpeningFence.index(after: firstNewline)...]
+                if let closingFence = body.range(of: "```", options: .backwards) {
+                    text = String(body[..<closingFence.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+        }
+
+        for marker in ["<CURSOR>", "<cursor>", "<|cursor|>"] where text.range(of: marker) != nil {
+            if let range = text.range(of: marker) {
+                text = String(text[..<range.lowerBound])
+            }
+        }
+
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     // Helper to extract word prefix using UTF-16 offset

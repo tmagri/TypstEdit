@@ -125,6 +125,9 @@ struct AISettingsView: View {
                         .font(.body.weight(.regular))
                     Toggle("Enable AI Completion", isOn: $settings.isEnabled)
                         .font(.body.weight(.regular))
+                    Text("Intellisense never interrupts typing — trigger it explicitly with ⌃Space or Escape while the cursor is in the editor. Tab accepts the highlighted suggestion; any other key dismisses it. Works in .typ and .note documents.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 if settings.isEnabled {
