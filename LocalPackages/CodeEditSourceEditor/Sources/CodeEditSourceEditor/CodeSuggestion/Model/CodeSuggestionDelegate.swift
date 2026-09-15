@@ -7,6 +7,7 @@
 
 @MainActor
 public protocol CodeSuggestionDelegate: AnyObject {
+    var isContinuousCompletionEnabled: Bool { get }
     func completionTriggerCharacters() -> Set<String>
 
     func completionSuggestionsRequested(
@@ -33,6 +34,7 @@ public protocol CodeSuggestionDelegate: AnyObject {
 }
 
 public extension CodeSuggestionDelegate {
+    var isContinuousCompletionEnabled: Bool { false }
     func completionTriggerCharacters() -> Set<String> { [] }
     func completionWindowDidClose() { }
     func completionWindowDidSelect(item: CodeSuggestionEntry) { }

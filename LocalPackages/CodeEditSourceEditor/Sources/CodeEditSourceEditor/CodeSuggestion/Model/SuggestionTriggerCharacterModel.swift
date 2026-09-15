@@ -1,24 +1,16 @@
-//
-//  SuggestionTriggerCharacterModel.swift
-//  CodeEditSourceEditor
-//
-//  Created by Khan Winter on 8/25/25.
-//
-
 import AppKit
 import CodeEditTextView
 import TextStory
+import Combine
 
-/// Tracks text edits and cursor moves so the suggestion window can dismiss
-/// itself when the caret moves. Designed to be called in the
-/// ``TextViewDelegate``'s didReplaceCharacters method.
-///
-/// Was originally a `TextFilter` model, however those are called before text is changed and cursors are updated.
-/// The suggestion model expects up-to-date cursor positions as well as complete text contents. This being
-/// essentially a textview delegate ensures both of those promises are upheld.
+@MainActor
 final class SuggestionTriggerCharacterModel {
     weak var controller: TextViewController?
     private var lastPosition: NSRange?
+    
+    // Add a Combine publisher/timer for debouncing keystrokes
+    private var debounceTimer: AnyCancellable?
+    let debounceInterval: TimeInterval = 0.25
 
     func textView(_ textView: TextView, didReplaceContentsIn range: NSRange, with string: String) {
         let mutation = TextMutation(
@@ -27,16 +19,44 @@ final class SuggestionTriggerCharacterModel {
             limit: textView.textStorage.length
         )
 
-        // Track the caret position for `selectionUpdated`, but never open the
-        // suggestion window from typing. Completions are manual-only (Escape /
-        // Ctrl+Space): any key while the window is open dismisses it, so popping
-        // it up per keystroke just made it flicker open/closed while typing.
         guard mutation.delta >= 0 else {
             lastPosition = nil
+            debounceTimer?.cancel()
             return
         }
 
         lastPosition = NSRange(location: mutation.postApplyRange.max, length: 0)
+        
+        // Cancel any existing timer
+        debounceTimer?.cancel()
+        
+        // Grab the controller and delegate
+        guard let controller = controller, let completionDelegate = controller.completionDelegate else { return }
+        
+        // Check the delegate for the continuous completion setting
+        guard completionDelegate.isContinuousCompletionEnabled else { return }
+        
+        // Only auto-trigger on actual text insertion, not pure cursor moves
+        if !string.isEmpty {
+            debounceTimer = Just(())
+                .delay(for: .seconds(debounceInterval), scheduler: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.triggerAutoCompletion()
+                }
+        }
+    }
+
+    private func triggerAutoCompletion() {
+        guard let controller, let completionDelegate = controller.completionDelegate,
+              let position = controller.cursorPositions.first else {
+            return
+        }
+        
+        SuggestionController.shared.cursorsUpdated(
+            textView: controller,
+            delegate: completionDelegate,
+            position: position
+        )
     }
 
     func selectionUpdated(_ position: CursorPosition) {
@@ -45,6 +65,7 @@ final class SuggestionTriggerCharacterModel {
         }
 
         if lastPosition != position.range {
+            debounceTimer?.cancel() // Cancel typing debounces if the user clicked elsewhere
             SuggestionController.shared.cursorsUpdated(
                 textView: controller,
                 delegate: completionDelegate,

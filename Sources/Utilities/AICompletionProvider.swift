@@ -18,6 +18,11 @@ struct AICompletionItem: CodeSuggestionEntry {
 class AICompletionProvider: CodeSuggestionDelegate {
     
     weak var controller: EditorController?
+
+    // Read the setting from your app's settings manager
+    var isContinuousCompletionEnabled: Bool {
+        AISettingsManager.shared.isContinuousCompletionEnabled
+    }
     
     init(controller: EditorController? = nil) {
         self.controller = controller
@@ -27,9 +32,17 @@ class AICompletionProvider: CodeSuggestionDelegate {
     private var debounceTask: Task<Void, Never>?
     
     func completionTriggerCharacters() -> Set<String> {
-        // Restricted to explicit Typst markers to prevent hijacking the Return key during normal typing.
-        let triggers = ".#@"
-        return Set(triggers.map { String($0) })
+        // Restricted to explicit Typst markers
+        var triggers = Set([".", "#", "@"])
+        
+        let settings = AISettingsManager.shared
+        // If continuous completion is enabled, trigger on any letter
+        if settings.isEnabled && settings.isContinuousCompletionEnabled {
+            let alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            triggers.formUnion(alphabet.map { String($0) })
+        }
+        
+        return triggers
     }
 
     @MainActor

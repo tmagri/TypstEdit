@@ -123,7 +123,7 @@ class AISettingsManager: ObservableObject {
     @AppStorage("customApiKey") var customApiKey: String = ""
 
     // MARK: - General AI Settings
-
+    @AppStorage("aiContinuousCompletion") var isContinuousCompletionEnabled: Bool = false 
     @AppStorage("aiForceCodeOutput") var forceCodeOutput: Bool = false
     @AppStorage("aiMaxContextWindow") var maxContextWindow: Int = 4096
     @AppStorage("aiIncludeProjectContext") var includeProjectContext: Bool = true
