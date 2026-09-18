@@ -185,6 +185,17 @@ public struct SourceEditor: NSViewControllerRepresentable {
             ?? NSRange(location: storageLength, length: 0)
         let clampedLocation = max(0, min(previousRange.location, (bindingText as NSString).length))
 
+        // Anchor the viewport across the resync. A full-document replace relayouts the
+        // view from scratch; without this the scroll origin can land wherever the fresh
+        // layout leaves it (often the top), visibly jumping the viewport during editing.
+        // When the caret was on-screen before the resync, restore the exact viewport;
+        // otherwise scroll the caret into view as before.
+        let previousOrigin = controller.scrollView?.contentView.bounds.origin
+        let caretWasVisible: Bool = {
+            guard let rect = textView.layoutManager.rectForOffset(clampedLocation) else { return false }
+            return textView.visibleRect.contains(rect)
+        }()
+
         if storageLength == 0 {
             textView.setText(bindingText)
         } else {
@@ -200,7 +211,12 @@ public struct SourceEditor: NSViewControllerRepresentable {
         textView.updateFrameIfNeeded()
         textView.layoutManager.layoutLines()
         textView.needsDisplay = true
-        textView.scrollSelectionToVisible()
+        if caretWasVisible, let previousOrigin, let scrollView = controller.scrollView {
+            scrollView.scroll(scrollView.contentView, to: previousOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        } else {
+            textView.scrollSelectionToVisible()
+        }
     }
 
     private func updateControllerWithState(_ state: SourceEditorState, controller: TextViewController) {

@@ -153,6 +153,14 @@ class EditorController: NSObject, ObservableObject {
     
     var selectedRange: NSRange {
         get {
+            // Prefer the LIVE text view's selection. `editorState.cursorPositions` is a
+            // published mirror that can transiently lag the view (or briefly hold a
+            // range-only entry while a line awaits layout in large documents); every
+            // caller of this getter writes into the view, so the view's own caret is
+            // the only authoritative source.
+            if let tvRange = textViewController?.textView.selectedRange(), tvRange.location != NSNotFound {
+                return tvRange
+            }
             if let pos = editorState.cursorPositions?.first {
                 // Clamp to the current string length. NSRange uses UTF-16 code units, so measure
                 // with NSString.length. This prevents out-of-range ranges (and the resulting
@@ -172,6 +180,16 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func insertText(_ text: String, replacementRange: NSRange? = nil, newCursorRange: NSRange? = nil) {
+        // Repair any view/model divergence BEFORE deriving the replacement range. The
+        // range below is used both as a model offset (`Range(range, in: sourceCode)`)
+        // and as a view offset (`textView.replaceCharacters`), which is only sound when
+        // the two match. With divergence, the old flow either took the full-setText
+        // path here or let a surgical write land at a stale offset — the latter being
+        // the "edit lands on the wrong line / caret jumps" bug. reconcileTextViewIfNeeded
+        // rebuilds via setText (re-running setUpHighlighter), so highlighter integrity
+        // is preserved, and is a no-op when already in sync.
+        reconcileTextViewIfNeeded()
+
         let range = replacementRange ?? selectedRange
 
         guard let stringRange = Range(range, in: sourceCode) else { 
@@ -260,6 +278,17 @@ class EditorController: NSObject, ObservableObject {
             ?? NSRange(location: (sourceCode as NSString).length, length: 0)
         let clamped = max(0, min(previousRange.location, (sourceCode as NSString).length))
 
+        // Anchor the viewport across the rebuild. A full setText relayouts from scratch;
+        // without this, the scroll origin can end up wherever the fresh layout leaves it
+        // (often the top of the document) — the "editing resets the view to the top" bug.
+        // If the caret was on-screen before the resync, restore the exact viewport; only
+        // fall back to scrolling the caret into view when it was off-screen.
+        let previousOrigin = tvc.scrollView?.contentView.bounds.origin
+        let caretWasVisible: Bool = {
+            guard let rect = textView.layoutManager.rectForOffset(clamped) else { return false }
+            return textView.visibleRect.contains(rect)
+        }()
+
         // Always use the view controller's setText so the highlighter is torn down and
         // rebuilt against the new text storage. The previous replaceCharacters(0..<len)
         // approach left the tree-sitter parse tree / StyledRangeContainer in a stale state
@@ -272,7 +301,12 @@ class EditorController: NSObject, ObservableObject {
         textView.updateFrameIfNeeded()
         textView.layoutManager.layoutLines()
         textView.needsDisplay = true
-        textView.scrollSelectionToVisible()
+        if caretWasVisible, let previousOrigin, let scrollView = tvc.scrollView {
+            scrollView.scroll(scrollView.contentView, to: previousOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        } else {
+            textView.scrollSelectionToVisible()
+        }
     }
 
 
@@ -982,7 +1016,7 @@ class EditorController: NSObject, ObservableObject {
     // A single physical Cmd+V can trigger more than one paste entry point (the keyDown
     // monitor, the SwiftUI menu, and the text view's responder-chain `paste:` via
     // `interpretKeyEvents`), all of which now funnel into `performPaste`. Duplicates of
-    // the same pasteboard changeCount arriving within 250ms are dropped unless it is a
+    // the same pasteboard changeCount arriving within 500ms are dropped unless it is a
     // genuine key repeat.
     private var lastPaste: (changeCount: Int, time: CFAbsoluteTime, event: NSEvent?)?
 
@@ -1036,14 +1070,17 @@ class EditorController: NSObject, ObservableObject {
             // Drop racing duplicate invocations of the same physical paste. A single physical
             // Cmd+V can fire across the local keyDown monitor, the SwiftUI menu shortcut, and
             // the responder-chain `paste:`. Dropping invocations of the identical pasteboard
-            // changeCount within 250ms reliably drops all duplicate routes while permitting
+            // changeCount within 500ms reliably drops all duplicate routes while permitting
             // genuine key repeats (where event.isARepeat is true on a subsequent repeat event).
+            // The window is generous because in large documents the duplicate route can be
+            // delayed well past 250ms by main-thread work (tree-sitter highlighting, preview
+            // relayout) — which is exactly when the "pastes twice" symptom resurfaced.
             let currentEvent = NSApp.currentEvent
             let changeCount = pasteboard.changeCount
             let now = CFAbsoluteTimeGetCurrent()
             if let last = lastPaste,
                last.changeCount == changeCount,
-               now - last.time < 0.25 {
+               now - last.time < 0.5 {
                 let isNewRepeatEvent = currentEvent != nil && currentEvent !== last.event && currentEvent?.isARepeat == true
                 if !isNewRepeatEvent {
                     return true

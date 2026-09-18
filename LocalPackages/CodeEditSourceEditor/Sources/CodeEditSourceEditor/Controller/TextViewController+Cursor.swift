@@ -56,6 +56,13 @@ extension TextViewController {
         var positions: [CursorPosition] = []
         for selectedRange in textView.selectionManager.textSelections {
             guard let linePosition = textView.layoutManager.textLineForOffset(selectedRange.range.location) else {
+                // The caret's line is not laid out yet (layout is lazy, so this is
+                // routine in large documents or after heavy invalidation). Dropping
+                // the selection here published an empty/partial cursor state and left
+                // the last known caret stale. Keep the true UTF-16 range; the
+                // line/column info is filled in by `resolveCursorPosition` once the
+                // line is laid out.
+                positions.append(CursorPosition(range: selectedRange.range))
                 continue
             }
             let start = CursorPosition.Position(
