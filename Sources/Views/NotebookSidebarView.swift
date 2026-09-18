@@ -12,6 +12,7 @@ struct NotebookSidebarView: View {
     @State private var showNewPageAlert = false
     @State private var newPageName = ""
     @State private var selectedNotebookForNewPage: Notebook?
+    @State private var imageCleanupTarget: ImageCleanupTarget?
     
     var body: some View {
         VStack(spacing: 0) {
@@ -108,7 +109,7 @@ struct NotebookSidebarView: View {
                                 NotebookPageRow(page: page, selectedFile: $selectedFile)
                                     .environmentObject(themeManager)
                             }
-                            
+
                             Button(action: {
                                 selectedNotebookForNewPage = notebook
                                 showNewPageAlert = true
@@ -128,6 +129,8 @@ struct NotebookSidebarView: View {
                             NotebookRow(notebook: notebook, manager: notebookManager, onAddNote: {
                                 selectedNotebookForNewPage = notebook
                                 showNewPageAlert = true
+                            }, onCleanupUnusedImages: {
+                                imageCleanupTarget = ImageCleanupTarget(url: notebook.url)
                             })
                             .environmentObject(themeManager)
                             .listRowSeparator(.hidden)
@@ -143,6 +146,9 @@ struct NotebookSidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.sidebarBackground.ignoresSafeArea())
+        .sheet(item: $imageCleanupTarget) { target in
+            ImageCleanupView(root: target.url)
+        }
         .alert("New Notebook", isPresented: $showNewNotebookAlert) {
             TextField("Notebook Name", text: $newNotebookName)
             Button("Cancel", role: .cancel) { newNotebookName = "" }
@@ -209,6 +215,7 @@ struct NotebookRow: View {
     let notebook: Notebook
     let manager: NotebookManager
     var onAddNote: () -> Void
+    var onCleanupUnusedImages: () -> Void = {}
     @EnvironmentObject var themeManager: ThemeManager
     @State private var showDeleteAlert = false
     @State private var showRenameAlert = false
@@ -250,9 +257,13 @@ struct NotebookRow: View {
             Button("Open as Project") {
                 NotificationCenter.default.post(name: .openProjectFolder, object: notebook.url)
             }
-            
+
+            Button("Cleanup Unused Images…") {
+                onCleanupUnusedImages()
+            }
+
             Divider()
-            
+
             Button("Export Notebook to Zip") {
                 let panel = NSSavePanel()
                 panel.allowedContentTypes = [UTType.zip]

@@ -264,6 +264,7 @@ struct SidebarView: View {
     @ObservedObject private var ragManager = RAGManager.shared
 
     @State private var sidebarMode: Int = 0 // 0: Projects, 1: Notebooks
+    @State private var imageCleanupTarget: ImageCleanupTarget?
 
 
     var body: some View {
@@ -366,6 +367,13 @@ struct SidebarView: View {
                                 window.zoom(nil)
                             }
                         }
+                        .contextMenu {
+                            Button("Cleanup Unused Images…") {
+                                if let folder = model.currentFolder {
+                                    imageCleanupTarget = ImageCleanupTarget(url: folder)
+                                }
+                            }
+                        }
                         if ragManager.isIndexing {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(ragManager.indexStatus)
@@ -387,7 +395,8 @@ struct SidebarView: View {
                 
                 // 👉 RESTORED: The actual file list!
                 List(model.rootNodes, children: \.children) { node in
-                    SidebarRow(node: node, selectedFile: $selectedFile, editorController: editorController)
+                    SidebarRow(node: node, selectedFile: $selectedFile, editorController: editorController,
+                               onCleanupFolder: { imageCleanupTarget = ImageCleanupTarget(url: $0) })
                         .environmentObject(model)
                         .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
                         .listRowSeparator(.hidden)
@@ -416,6 +425,9 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.sidebarBackground.ignoresSafeArea())
+        .sheet(item: $imageCleanupTarget) { target in
+            ImageCleanupView(root: target.url)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .typstErrorsUpdated)) { notification in
             if let errors = notification.object as? [TypstError] {
                 compiler.errors = errors
@@ -456,6 +468,7 @@ struct SidebarRow: View {
     let node: FileNode
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
+    var onCleanupFolder: (URL) -> Void = { _ in }
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var fileSystemModel: FileSystemModel
     
@@ -500,13 +513,21 @@ struct SidebarRow: View {
             Button("Reveal in Finder") {
                 NSWorkspace.shared.selectFile(node.url.path, inFileViewerRootedAtPath: "")
             }
-            
+
             Button("Open in External Program") {
                 NSWorkspace.shared.open(node.url)
             }
-            
+
+            if node.isDirectory {
+                Divider()
+
+                Button("Cleanup Unused Images…") {
+                    onCleanupFolder(node.url)
+                }
+            }
+
             Divider()
-            
+
             Button("Delete", role: .destructive) {
                 showDeleteAlert = true
             }

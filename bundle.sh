@@ -16,12 +16,38 @@ echo "Building version $VERSION ($ARCH-only) with configuration: $CONFIG..."
 swift build -c "$CONFIG" --arch "$ARCH"
 
 # Find the executable specifically in the requested configuration folder.
-# Pin to the target arch directory to avoid picking up stale artifacts from
-# other arches (e.g. leftovers from bundle_universal.sh).
-EXECUTABLE=".build/$ARCH-apple-macosx/$CONFIG/$APP_NAME"
+# SwiftPM's output location depends on the build system in use: the classic
+# llbuild layout is .build/$ARCH-apple-macosx/$CONFIG/, while the newer
+# swift-build layout writes .build/out/Products/{Debug,Release}/. Prefer the
+# NEWEST candidate so a stale binary left behind by the other layout can
+# never get packaged (this once shipped an old app that was missing freshly
+# added features even though `swift build` had compiled them).
+case "$CONFIG" in
+    release) EXEC_CONFIG="Release" ;;
+    debug)   EXEC_CONFIG="Debug" ;;
+    *)       EXEC_CONFIG="$CONFIG" ;;
+esac
 
-if [ ! -f "$EXECUTABLE" ]; then
-    echo "Error: Executable $APP_NAME not found at $EXECUTABLE for configuration $CONFIG"
+CANDIDATES=(
+    ".build/out/Products/$EXEC_CONFIG/$APP_NAME"
+    ".build/out/$ARCH-apple-macosx/$CONFIG/$APP_NAME"
+    ".build/$ARCH-apple-macosx/$CONFIG/$APP_NAME"
+)
+
+EXECUTABLE=""
+EXEC_TIME=0
+for candidate in "${CANDIDATES[@]}"; do
+    if [ -f "$candidate" ]; then
+        mtime=$(stat -f "%m" "$candidate")
+        if [ "$mtime" -gt "$EXEC_TIME" ]; then
+            EXEC_TIME="$mtime"
+            EXECUTABLE="$candidate"
+        fi
+    fi
+done
+
+if [ -z "$EXECUTABLE" ]; then
+    echo "Error: Executable $APP_NAME not found for configuration $CONFIG (searched: ${CANDIDATES[*]})"
     exit 1
 fi
 
