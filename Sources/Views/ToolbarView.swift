@@ -142,6 +142,8 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "text.quote", tooltip: "Block Quote (Cmd+Shift+.)", isActive: controller.isQuoteActive, action: controller.toggleQuote)
                          }
                          HStack(spacing: 2) {
+                             ToolbarButton(icon: "chevron.up", tooltip: "Promote Heading", action: controller.promoteHeadingSelection)
+                             ToolbarButton(icon: "chevron.down", tooltip: "Demote Heading", action: controller.demoteHeadingSelection)
                              ToolbarButton(icon: "curlybraces", tooltip: "Code Block (Cmd+Shift+C)", isActive: controller.isCodeBlockActive, action: controller.toggleCodeBlock)
                              ToolbarButton(icon: "chevron.left.forwardslash.chevron.right", tooltip: "Inline Code (Cmd+`)", isActive: controller.isCodeActive, action: controller.toggleCode)
                          }

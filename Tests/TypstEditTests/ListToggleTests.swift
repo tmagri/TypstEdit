@@ -280,4 +280,40 @@ final class ListToggleTests: XCTestCase {
         )
         XCTAssertEqual(result, "- Hello world")
     }
+
+    func testPromotePlainTextLeavesParagraphUntouched() {
+        let result = EditorController.transformHeadingLevel(
+            text: "Hello world\n",
+            delta: 1,
+            isMarkdown: false
+        )
+        XCTAssertEqual(result, "Hello world\n")
+    }
+
+    func testDemoteExistingHeadingRemovesOneMarker() {
+        let result = EditorController.transformHeadingLevel(
+            text: "== Section\n",
+            delta: -1,
+            isMarkdown: false
+        )
+        XCTAssertEqual(result, "= Section\n")
+    }
+
+    func testPromoteExistingHeadingAddsAnotherMarker() {
+        let result = EditorController.transformHeadingLevel(
+            text: "= Section\n",
+            delta: 1,
+            isMarkdown: false
+        )
+        XCTAssertEqual(result, "== Section\n")
+    }
+
+    func testOnlyHeadingLinesChangeInMixedSelection() {
+        let result = EditorController.transformHeadingLevel(
+            text: "= Section\nPlain text\n== Subsection\n",
+            delta: 1,
+            isMarkdown: false
+        )
+        XCTAssertEqual(result, "== Section\nPlain text\n=== Subsection\n")
+    }
 }

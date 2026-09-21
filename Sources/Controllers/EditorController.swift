@@ -17,6 +17,12 @@ import CodeEditLanguages
 import CodeEditTextView
 import Combine
 
+enum FormattingRegex {
+    static let typstLength = try! NSRegularExpression(pattern: "^-?(\\d+(\\.\\d+)?)(pt|mm|cm|in|%|em|fr)$")
+    static let allList = try! NSRegularExpression(pattern: #"^([-*]|\+|\d+\.|/)\s+"#)
+    static let whitespace = try! NSRegularExpression(pattern: #"^\s+"#)
+}
+
 @MainActor
 class EditorController: NSObject, ObservableObject {
     enum SupportedFileType {
@@ -1791,8 +1797,7 @@ class EditorController: NSObject, ObservableObject {
         
         // Regex for Typst length: optional number, followed by unit
         // Typst also supports things like 10pt + 50% but we'll stick to basic validation for now.
-        let pattern = "^-?(\\d+(\\.\\d+)?)(pt|mm|cm|in|%|em|fr)$"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return false }
+                let regex = FormattingRegex.typstLength
         let range = NSRange(location: 0, length: trimmed.utf16.count)
         return regex.firstMatch(in: trimmed, options: [], range: range) != nil
     }
@@ -2187,11 +2192,15 @@ class EditorController: NSObject, ObservableObject {
     enum ListType {
         case bullet, number, description
         
-        var targetPattern: String {
+                private static let bulletRegex = try! NSRegularExpression(pattern: #"^([-*])\s+"#)
+        private static let numberRegex = try! NSRegularExpression(pattern: #"^(?:\+|\d+\.)\s+"#)
+        private static let descriptionRegex = try! NSRegularExpression(pattern: #"^/\s+"#)
+
+        var targetRegex: NSRegularExpression {
             switch self {
-            case .bullet: return #"^([-*])\s+"#
-            case .number: return #"^(?:\+|\d+\.)\s+"#
-            case .description: return #"^/\s+"#
+            case .bullet: return Self.bulletRegex
+            case .number: return Self.numberRegex
+            case .description: return Self.descriptionRegex
             }
         }
         
@@ -2219,15 +2228,73 @@ class EditorController: NSObject, ObservableObject {
     /// Pure text transformation for toggling list mode on a block of text.
     /// Handles multiline selection, single-line with content, and list type conversion.
     /// Returns the original text unchanged if no effective lines are found.
+    /// Pure text transformation for promoting or demoting Markdown/Typst headings.
+    /// Handles multiline selection and single-line with content.
+    nonisolated static func transformHeadingLevel(
+        text: String,
+        delta: Int,
+        isMarkdown: Bool
+    ) -> String {
+        guard delta != 0, !text.isEmpty else { return text }
+
+        // 1. Cache the regular expressions so they are only compiled once
+        struct RegexCache {
+            static let markdown = try! NSRegularExpression(pattern: #"^(\s*)(#+)(\s*)(.*)$"#, options: [])
+            static let typst = try! NSRegularExpression(pattern: #"^(\s*)(=+)(\s*)(.*)$"#, options: [])
+        }
+        
+        let marker = isMarkdown ? "#" : "="
+        let headingRegex = isMarkdown ? RegexCache.markdown : RegexCache.typst
+        
+        let trailingNewline = text.hasSuffix("\n")
+        var lines = text.components(separatedBy: .newlines)
+        if trailingNewline { lines.removeLast() }
+
+        var transformed: [String] = []
+        
+        for line in lines {
+            let nsLine = line as NSString
+            let fullRange = NSRange(location: 0, length: nsLine.length)
+            
+            if let match = headingRegex.firstMatch(in: line, options: [], range: fullRange) {
+                let leadingWhitespace = nsLine.substring(with: match.range(at: 1))
+                let existingMarker = nsLine.substring(with: match.range(at: 2))
+                let spacing = nsLine.substring(with: match.range(at: 3))
+                let content = nsLine.substring(with: match.range(at: 4))
+
+                let currentLevel = existingMarker.count
+                let nextLevel = currentLevel + delta
+
+                if nextLevel <= 0 {
+                    // Demoted below level 1: remove heading markers and spacing
+                    transformed.append(leadingWhitespace + content)
+                } else {
+                    // Adjust marker count
+                    let markerText = String(repeating: marker, count: nextLevel)
+                    transformed.append(leadingWhitespace + markerText + spacing + content)
+                }
+            } else {
+                // Line doesn't match a heading. 
+                // Note: If you want to promote normal text to level 1, add logic here.
+                transformed.append(line)
+            }
+        }
+
+        var replacement = transformed.joined(separator: "\n")
+        if trailingNewline { replacement += "\n" }
+        
+        return replacement
+    }
+
     nonisolated static func transformListToggle(
         text: String,
         type: ListType,
         isMarkdown: Bool
     ) -> String {
         let targetPrefix = type.defaultPrefix(isMarkdown: isMarkdown)
-        let targetRegex = try! NSRegularExpression(pattern: type.targetPattern, options: [])
-        let allListRegex = try! NSRegularExpression(pattern: #"^([-*]|\+|\d+\.|/)\s+"#, options: [])
-        let wsRegex = try! NSRegularExpression(pattern: #"^\s+"#, options: [])
+                let targetRegex = type.targetRegex
+        let allListRegex = FormattingRegex.allList
+        let wsRegex = FormattingRegex.whitespace
 
         let hadTrailingNewline = text.hasSuffix("\n")
         var lineStrings = text.components(separatedBy: .newlines)
@@ -2318,9 +2385,9 @@ class EditorController: NSObject, ObservableObject {
         guard Range(range, in: sourceCode) != nil else { return }
 
         let targetPrefix = type.defaultPrefix(isMarkdown: isMarkdownFile)
-        let targetRegex = try! NSRegularExpression(pattern: type.targetPattern, options: [])
-        let allListRegex = try! NSRegularExpression(pattern: #"^([-*]|\+|\d+\.|/)\s+"#, options: [])
-        let wsRegex = try! NSRegularExpression(pattern: #"^\s+"#, options: [])
+                let targetRegex = type.targetRegex
+        let allListRegex = FormattingRegex.allList
+        let wsRegex = FormattingRegex.whitespace
 
         let nsText = sourceCode as NSString
         let lineRange = nsText.lineRange(for: range)
@@ -2771,6 +2838,26 @@ class EditorController: NSObject, ObservableObject {
         updateFormattingState()
     }
     
+    func promoteHeadingSelection() {
+        let range = selectedRange
+        let nsText = sourceCode as NSString
+        let lineRange = nsText.lineRange(for: range)
+        let lineContent = nsText.substring(with: lineRange)
+        let replacement = Self.transformHeadingLevel(text: lineContent, delta: 1, isMarkdown: isMarkdownFile)
+        insertText(replacement, replacementRange: lineRange)
+        updateFormattingState()
+    }
+
+    func demoteHeadingSelection() {
+        let range = selectedRange
+        let nsText = sourceCode as NSString
+        let lineRange = nsText.lineRange(for: range)
+        let lineContent = nsText.substring(with: lineRange)
+        let replacement = Self.transformHeadingLevel(text: lineContent, delta: -1, isMarkdown: isMarkdownFile)
+        insertText(replacement, replacementRange: lineRange)
+        updateFormattingState()
+    }
+
     func setTitle() {
         let range = selectedRange
         let nsText = sourceCode as NSString
@@ -3910,6 +3997,16 @@ class EditorController: NSObject, ObservableObject {
         pasteConvertItem.target = self
         pasteConvertItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
         baseMenu.addItem(pasteConvertItem)
+
+        baseMenu.addItem(NSMenuItem.separator())
+
+        let promoteHeadingItem = NSMenuItem(title: "Promote Heading", action: #selector(contextMenuPromoteHeading(_:)), keyEquivalent: "")
+        promoteHeadingItem.target = self
+        baseMenu.addItem(promoteHeadingItem)
+
+        let demoteHeadingItem = NSMenuItem(title: "Demote Heading", action: #selector(contextMenuDemoteHeading(_:)), keyEquivalent: "")
+        demoteHeadingItem.target = self
+        baseMenu.addItem(demoteHeadingItem)
         
         // AI Refine / Grammar — only when the user has selected text.
         if selectedRange.length > 0 {
@@ -4004,6 +4101,14 @@ class EditorController: NSObject, ObservableObject {
 
     @objc func contextMenuPasteForceTypst(_ sender: NSMenuItem) {
         pasteForceConvertToTypst()
+    }
+
+    @objc func contextMenuPromoteHeading(_ sender: NSMenuItem) {
+        promoteHeadingSelection()
+    }
+
+    @objc func contextMenuDemoteHeading(_ sender: NSMenuItem) {
+        demoteHeadingSelection()
     }
     
     @objc func applyStaticFix(_ sender: NSMenuItem) {

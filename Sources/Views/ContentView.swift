@@ -1291,6 +1291,8 @@ struct ContentView: View {
         case "delete": editorController.deleteSelection()
         case "goToLine": editorController.showGoToLineAlert = true
         case "selectAll": editorController.selectAll()
+        case "promoteHeading": editorController.promoteHeadingSelection()
+        case "demoteHeading": editorController.demoteHeadingSelection()
         
         // Formatting
         case "toggleBold": editorController.toggleBold()

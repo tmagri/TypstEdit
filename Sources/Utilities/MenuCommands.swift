@@ -65,6 +65,11 @@ struct AppMenuCommands: Commands {
                 }
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
+
+            Button("Open Notes") {
+                ensureWindowAndPost(name: NSNotification.Name("openNotebooks"), object: nil)
+            }
+            .keyboardShortcut("n", modifiers: [.command, .option])
             
             Button("Import LyX File...") {
                 ensureWindowAndExecute {
@@ -170,6 +175,16 @@ struct AppMenuCommands: Commands {
         
         // Replaces the system Select All / text-editing group; also carries formatting shortcuts
         CommandGroup(replacing: .textEditing) {
+            Button("Promote Heading") {
+                NotificationCenter.default.post(name: .menuCommand, object: "promoteHeading")
+            }
+            .keyboardShortcut("[", modifiers: [.command, .shift])
+
+            Button("Demote Heading") {
+                NotificationCenter.default.post(name: .menuCommand, object: "demoteHeading")
+            }
+            .keyboardShortcut("]", modifiers: [.command, .shift])
+
             Button("Search and Replace") {
                 editorController.showFindPanel()
             }
