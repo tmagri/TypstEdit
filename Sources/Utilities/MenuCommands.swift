@@ -103,8 +103,20 @@ struct AppMenuCommands: Commands {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportSVG")
                 }
                 .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
+
+                Divider()
+
+                Button("Markdown") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "exportAsMarkdown")
+                }
+                .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
             }
-            
+
+            Button("Share as Markdown...") {
+                NotificationCenter.default.post(name: .menuCommand, object: "shareAsMarkdown")
+            }
+            .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
+
             Divider()
             
             Button("Backup Project") {
@@ -151,6 +163,12 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "copy")
             }
             .keyboardShortcut("c", modifiers: .command)
+
+            Button("Copy and Convert as Markdown") {
+                NotificationCenter.default.post(name: .menuCommand, object: "copyAsMarkdown")
+            }
+            .keyboardShortcut("c", modifiers: [.command, .option, .shift])
+            .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
             
             Button("Paste") {
                 NotificationCenter.default.post(name: .menuCommand, object: "paste")

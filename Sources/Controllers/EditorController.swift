@@ -1007,7 +1007,26 @@ class EditorController: NSObject, ObservableObject {
             NSPasteboard.general.setString(text, forType: .string)
         }
     }
-    
+
+    /// Converts the current document (or selection, if any) to Markdown and puts it
+    /// on the system clipboard. Works for both Typst (.typ) and Markdown (.md/.note)
+    /// files.
+    func copyAsMarkdown() {
+        let alreadyMarkdown = isMarkdownFile
+        let range = selectedRange
+        // Use selection if non-empty, otherwise convert the full document.
+        let rawText: String
+        if range.length > 0, let r = Range(range, in: sourceCode) {
+            rawText = String(sourceCode[r])
+        } else {
+            rawText = sourceCode
+        }
+        let markdown = TypstToMarkdownConverter.convert(rawText, isAlreadyMarkdown: alreadyMarkdown)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(markdown, forType: .string)
+        showStatus("Copied as Markdown")
+    }
+
     func pasteSelection() {
         if forwardActionIfNotFirstResponder(#selector(NSText.paste(_:))) { return }
         if let textView = textViewController?.textView {

@@ -1270,6 +1270,64 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - Markdown Export / Share
+
+    /// Presents a Save panel and writes the converted Markdown to disk.
+    @MainActor
+    func handleExportAsMarkdown() {
+        let alreadyMarkdown = editorController.isMarkdownFile
+        let markdown = TypstToMarkdownConverter.convert(editorController.sourceCode,
+                                                        isAlreadyMarkdown: alreadyMarkdown)
+
+        let panel = NSSavePanel()
+        // UTType.markdown requires macOS 27; construct from extension for compatibility.
+        if let mdType = UTType(filenameExtension: "md") {
+            panel.allowedContentTypes = [mdType]
+        }
+        let baseName = selectedFile?.deletingPathExtension().lastPathComponent ?? "document"
+        panel.nameFieldStringValue = "\(baseName).md"
+        panel.title = "Export as Markdown"
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+
+        do {
+            try markdown.write(to: dest, atomically: true, encoding: .utf8)
+            NSWorkspace.shared.open(dest)
+            if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) {
+                fileSystem.loadFiles()
+            }
+        } catch {
+            editorController.lastExportError = "Failed to save Markdown: \(error.localizedDescription)"
+            editorController.showExportErrorAlert = true
+        }
+    }
+
+    /// Converts the document to Markdown and opens the macOS share sheet.
+    @MainActor
+    func handleShareAsMarkdown() {
+        let alreadyMarkdown = editorController.isMarkdownFile
+        let markdown = TypstToMarkdownConverter.convert(editorController.sourceCode,
+                                                        isAlreadyMarkdown: alreadyMarkdown)
+
+        // Write to a temporary file so we can share a URL (richer than a raw string).
+        let tmpDir = FileManager.default.temporaryDirectory
+        let baseName = selectedFile?.deletingPathExtension().lastPathComponent ?? "document"
+        let tmpURL = tmpDir.appendingPathComponent("\(baseName).md")
+        do {
+            try markdown.write(to: tmpURL, atomically: true, encoding: .utf8)
+        } catch {
+            editorController.lastExportError = "Could not prepare Markdown for sharing: \(error.localizedDescription)"
+            editorController.showExportErrorAlert = true
+            return
+        }
+
+        let picker = NSSharingServicePicker(items: [tmpURL])
+        // Anchor the picker to the key window's content view.
+        if let contentView = NSApp.keyWindow?.contentView {
+            let anchorRect = NSRect(x: contentView.bounds.midX, y: contentView.bounds.midY, width: 1, height: 1)
+            picker.show(relativeTo: anchorRect, of: contentView, preferredEdge: .minY)
+        }
+    }
+
     @MainActor
     func handleMenuCommand(_ command: String) {
         switch command {
@@ -1347,6 +1405,12 @@ struct ContentView: View {
         case "refreshNotebooks":
             NotebookManager.shared.loadNotebooks()
         case "restoreBackup": showRestoreBackupSheet()
+
+        // Markdown export / share
+        case "exportAsMarkdown": handleExportAsMarkdown()
+        case "shareAsMarkdown":  handleShareAsMarkdown()
+        case "copyAsMarkdown":   editorController.copyAsMarkdown()
+
         default: break
         }
     }
