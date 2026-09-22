@@ -1183,20 +1183,55 @@ class TypstCompiler: ObservableObject {
 
     // --- Export Functions ---
     
+    nonisolated static func exportDestinationURL(for format: String, requested: URL) -> URL {
+        let normalizedFormat = format.lowercased()
+        let validImageFormats = Set(["png", "svg"])
+        guard validImageFormats.contains(normalizedFormat) else {
+            return requested
+        }
+
+        let templateName = "{0p}"
+        let baseName = requested.deletingPathExtension().lastPathComponent
+        if baseName.contains("{p}") || baseName.contains("{0p}") {
+            return requested
+        }
+
+        let directory = requested.deletingLastPathComponent()
+        let pagePatternURL = directory.appendingPathComponent("\(baseName)-\(templateName).\(normalizedFormat)")
+        return pagePatternURL
+    }
+
+    nonisolated static func firstGeneratedExportURL(for templateURL: URL) -> URL? {
+        let directory = templateURL.deletingLastPathComponent()
+        let templateName = templateURL.deletingPathExtension().lastPathComponent
+        let extensionName = templateURL.pathExtension.lowercased()
+        let prefix = templateName
+            .replacingOccurrences(of: "{0p}", with: "")
+            .replacingOccurrences(of: "{p}", with: "")
+
+        guard let fileEnumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+
+        let matches = fileEnumerator.compactMap { $0 as? URL }
+            .filter { $0.pathExtension.lowercased() == extensionName }
+            .filter { $0.deletingPathExtension().lastPathComponent.hasPrefix(prefix + "-") || $0.deletingPathExtension().lastPathComponent == prefix }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        return matches.first
+    }
+    
     func export(sourceURL: URL, outputURL: URL, format: String, projectRoot: URL? = nil) async -> (success: Bool, error: String?) {
         guard let typstPath = resolveTypstPath() else {
             return (false, "Error: 'typst' executable not found.")
         }
         
-        // If it's a multi-page document and the format is PNG/SVG, 
-        // Typst expects a template like "output-{0p}.png" if we don't want it to fail.
-        // However, we'll let the user provide the name via the NSSavePanel.
-        // If they don't provide a {p} template, Typst will fail for multi-page docs.
+        let effectiveOutputURL = Self.exportDestinationURL(for: format, requested: outputURL)
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: typstPath)
         
-        var arguments = ["compile", sourceURL.path, outputURL.path, "--format", format]
+        var arguments = ["compile", sourceURL.path, effectiveOutputURL.path, "--format", format]
         
         // Pass root if available
         if let root = projectRoot {
@@ -1224,7 +1259,7 @@ class TypstCompiler: ObservableObject {
                 return (false, output.isEmpty ? "Unknown Typst error (exit code \(process.terminationStatus))" : output)
             }
             
-            print("[TYPST-EXPORT-SUCCESS]: \(outputURL.lastPathComponent)")
+            print("[TYPST-EXPORT-SUCCESS]: \(effectiveOutputURL.lastPathComponent)")
             return (true, nil)
         } catch {
             print("[TYPST-EXPORT] Failed to run: \(error)")
@@ -1281,7 +1316,8 @@ class TypstCompiler: ObservableObject {
         }
         
         let effectiveRoot = preferredDirectory
-        var arguments = ["compile", sourceURL.path, outputURL.path, "--format", format]
+        let effectiveOutputURL = Self.exportDestinationURL(for: format, requested: outputURL)
+        var arguments = ["compile", sourceURL.path, effectiveOutputURL.path, "--format", format]
         arguments.append(contentsOf: ["--root", effectiveRoot.path])
         
         var cleanFallbackAttempts: [Int: Int] = [:]

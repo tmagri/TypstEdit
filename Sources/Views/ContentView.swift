@@ -1066,6 +1066,7 @@ struct ContentView: View {
         panel.allowedContentTypes = [UTType(filenameExtension: format)!]
         panel.nameFieldStringValue = suggestedName
         if panel.runModal() == .OK, let dest = panel.url {
+            let exportDestination = TypstCompiler.exportDestinationURL(for: format, requested: dest)
             Task {
                 let ext = url.pathExtension.lowercased()
                 let isNoteOrMd = (ext == "note" || ext == "md")
@@ -1117,24 +1118,26 @@ struct ContentView: View {
                     let result = await compiler.exportFormatted(content: editorController.sourceCode,
                                                                fileExtension: ext,
                                                                originalFileURL: url,
-                                                               outputURL: dest,
+                                                               outputURL: exportDestination,
                                                                format: format,
                                                                projectRoot: editorController.projectRootURL)
                     await MainActor.run {
                         if result.success {
-                            NSWorkspace.shared.open(dest)
-                            if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
+                            let openedURL = TypstCompiler.firstGeneratedExportURL(for: exportDestination) ?? exportDestination
+                            NSWorkspace.shared.open(openedURL)
+                            if let root = editorController.projectRootURL, openedURL.path.hasPrefix(root.path) { fileSystem.loadFiles() }
                         } else {
                             editorController.lastExportError = result.error ?? "Unknown error"
                             editorController.showExportErrorAlert = true
                         }
                     }
                 } else {
-                    let result = await compiler.export(sourceURL: url, outputURL: dest, format: format, projectRoot: editorController.projectRootURL)
+                    let result = await compiler.export(sourceURL: url, outputURL: exportDestination, format: format, projectRoot: editorController.projectRootURL)
                     await MainActor.run {
                         if result.success {
-                            NSWorkspace.shared.open(dest)
-                            if let root = editorController.projectRootURL, dest.path.hasPrefix(root.path) { fileSystem.loadFiles() }
+                            let openedURL = TypstCompiler.firstGeneratedExportURL(for: exportDestination) ?? exportDestination
+                            NSWorkspace.shared.open(openedURL)
+                            if let root = editorController.projectRootURL, openedURL.path.hasPrefix(root.path) { fileSystem.loadFiles() }
                         } else {
                             editorController.lastExportError = result.error ?? "Unknown error"
                             editorController.showExportErrorAlert = true
