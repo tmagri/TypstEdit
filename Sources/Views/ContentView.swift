@@ -1304,6 +1304,29 @@ struct ContentView: View {
         }
     }
 
+    @MainActor
+    func handleShareAsPDF() {
+        Task {
+            let pdfURL = await editorController.generateCleanPDF(
+                compiler: compiler,
+                fileURL: selectedFile,
+                fallbackPreviewURL: currentPDFURL ?? compiler.currentShadowPDFURL
+            ) ?? currentPDFURL ?? compiler.currentShadowPDFURL
+
+            guard let pdfURL else {
+                editorController.lastExportError = "Could not prepare PDF for sharing."
+                editorController.showExportErrorAlert = true
+                return
+            }
+
+            let picker = NSSharingServicePicker(items: [pdfURL])
+            if let contentView = NSApp.keyWindow?.contentView {
+                let anchorRect = NSRect(x: contentView.bounds.midX, y: contentView.bounds.midY, width: 1, height: 1)
+                picker.show(relativeTo: anchorRect, of: contentView, preferredEdge: .minY)
+            }
+        }
+    }
+
     /// Converts the document to Markdown and opens the macOS share sheet.
     @MainActor
     func handleShareAsMarkdown() {
@@ -1411,6 +1434,7 @@ struct ContentView: View {
 
         // Markdown export / share
         case "exportAsMarkdown": handleExportAsMarkdown()
+        case "shareAsPDF":       handleShareAsPDF()
         case "shareAsMarkdown":  handleShareAsMarkdown()
         case "copyAsMarkdown":   editorController.copyAsMarkdown()
 

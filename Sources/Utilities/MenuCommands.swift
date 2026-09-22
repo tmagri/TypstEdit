@@ -112,10 +112,17 @@ struct AppMenuCommands: Commands {
                 .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
             }
 
-            Button("Share as Markdown...") {
-                NotificationCenter.default.post(name: .menuCommand, object: "shareAsMarkdown")
+            Menu("Share As") {
+                Button("PDF...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "shareAsPDF")
+                }
+                .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
+
+                Button("Markdown...") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "shareAsMarkdown")
+                }
+                .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
             }
-            .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
 
             Divider()
             
