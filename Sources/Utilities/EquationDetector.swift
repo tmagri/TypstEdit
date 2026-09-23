@@ -1,5 +1,9 @@
 import Foundation
 
+enum EquationRegex {
+    static let equation = try! NSRegularExpression(pattern: #"(?<!\\)\$(.*?)(?<!\\)\$"#, options: [.dotMatchesLineSeparators])
+}
+
 struct EquationDetector {
     /// Finds the range of an equation block delimited by `$` or `$$` surrounding the given index.
     /// Returns the range including the delimiters.
@@ -11,11 +15,9 @@ struct EquationDetector {
         let safeIndex = max(0, min(index, length))
 
         // Pattern: matches $...$ while ignoring escaped \$. The lazy quantifier
-        // keeps matching linear, and the cached regex avoids recompiling on every
-        // keystroke / cursor move.
-        guard let regex = cachedRegex(#"(?<!\\)\$(.*?)(?<!\\)\$"#, options: [.dotMatchesLineSeparators]) else {
-            return nil
-        }
+        // keeps matching linear, and the precompiled regex avoids recompiling or
+        // cache lookups on every keystroke / cursor move.
+        let regex = EquationRegex.equation
 
         // Window the search around the cursor so a document with many stray '$'
         // signs stays cheap. Mirrors FormatDetector's approach.
@@ -39,21 +41,6 @@ struct EquationDetector {
         }
 
         return nil
-    }
-
-    // MARK: - Regex cache & windowing
-    // This detector runs on every cursor move, and compiling an
-    // NSRegularExpression is far more expensive than running it. Cache the
-    // compiled expression keyed by pattern + options (mirrors FormatDetector).
-    // NSCache is thread-safe and evicts automatically under memory pressure.
-    nonisolated(unsafe) private static let regexCache = NSCache<NSString, NSRegularExpression>()
-
-    private static func cachedRegex(_ pattern: String, options: NSRegularExpression.Options = []) -> NSRegularExpression? {
-        let key = "\(pattern)|\(options.rawValue)" as NSString
-        if let existing = regexCache.object(forKey: key) { return existing }
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return nil }
-        regexCache.setObject(regex, forKey: key)
-        return regex
     }
 
     private static func getSearchRange(around index: Int, in length: Int, windowSize: Int = 5000) -> NSRange {

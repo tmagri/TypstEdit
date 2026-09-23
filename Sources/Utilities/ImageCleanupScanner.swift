@@ -1,5 +1,10 @@
 import Foundation
 
+enum ImageCleanupRegex {
+    static let typst = try! NSRegularExpression(pattern: #"\bimage\s*\(\s*"([^"]+)""#)
+    static let markdown = try! NSRegularExpression(pattern: #"!\[[^\]]*\]\(\s*<?([^)>]+?)>?\s*\)"#)
+}
+
 /// An image file on disk that no scanned document references.
 struct UnusedImage: Identifiable, Hashable {
     let url: URL
@@ -131,17 +136,13 @@ enum ImageCleanupScanner {
 
         // \b stops `image(` from matching inside identifiers like `myimage(`
         // while still matching both `#image(` and bare `image(`.
-        if let typst = try? NSRegularExpression(pattern: #"\bimage\s*\(\s*"([^"]+)""#) {
-            for match in typst.matches(in: text, options: [], range: fullRange) {
-                references.insert(nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces))
-            }
+        for match in ImageCleanupRegex.typst.matches(in: text, options: [], range: fullRange) {
+            references.insert(nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces))
         }
 
         // Markdown, including the angle-bracket form used for paths with spaces.
-        if let markdown = try? NSRegularExpression(pattern: #"!\[[^\]]*\]\(\s*<?([^)>]+?)>?\s*\)"#) {
-            for match in markdown.matches(in: text, options: [], range: fullRange) {
-                references.insert(nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces))
-            }
+        for match in ImageCleanupRegex.markdown.matches(in: text, options: [], range: fullRange) {
+            references.insert(nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces))
         }
 
         return references

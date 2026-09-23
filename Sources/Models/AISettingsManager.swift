@@ -131,6 +131,43 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiCacheEmbeddingsToDisk") var cacheEmbeddingsToDisk: Bool = true
     @AppStorage("aiTimeoutSeconds") var timeoutSeconds: Double = 120.0
 
+    // MARK: - Autocomplete Context Scope
+    enum CompletionContextScope: String, CaseIterable, Identifiable {
+        case currentLine = "Current Line (Fastest)"
+        case surroundingLines = "Surrounding Lines (±5 lines)"
+        case fullDocument = "Full Document"
+
+        var id: String { rawValue }
+
+        var description: String {
+            switch self {
+            case .currentLine:
+                return "Passes only the active line/sentence. Fastest response and minimal prompt overhead — ideal for local models (Ollama/LM Studio)."
+            case .surroundingLines:
+                return "Passes a small window of 5 lines above and below the cursor for balanced local context."
+            case .fullDocument:
+                return "Passes the entire document to the model. Higher prefill latency on local models."
+            }
+        }
+    }
+
+    // MARK: - Autocomplete Tuning (Optimized for fast inline suggestions & slow local models)
+    @AppStorage("aiCompletionContextScope") var completionContextScopeRaw: String = CompletionContextScope.currentLine.rawValue
+    @AppStorage("aiCompletionMaxTokens") var completionMaxTokens: Int = 32
+    @AppStorage("aiCompletionTimeoutSeconds") var completionTimeoutSeconds: Double = 4.0
+    @AppStorage("aiCompletionDebounceMs") var completionDebounceMs: Double = 800.0
+
+    var completionContextScope: CompletionContextScope {
+        get { CompletionContextScope(rawValue: completionContextScopeRaw) ?? .currentLine }
+        set { completionContextScopeRaw = newValue.rawValue }
+    }
+
+    /// Resolved debounce interval for autocomplete (in nanoseconds).
+    var effectiveCompletionDebounceNanoseconds: UInt64 {
+        let ms = max(100.0, completionDebounceMs)
+        return UInt64(ms * 1_000_000)
+    }
+
     // MARK: - Source Accessors
 
     func source(for task: ModelTask) -> ModelSource {

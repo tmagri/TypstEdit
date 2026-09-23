@@ -208,10 +208,11 @@ extension TextViewController {
         let modifierFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         switch event.type {
         case .keyDown:
-            // Non-intrusive suggestions: only plain Tab accepts the completion.
-            // Any other key (arrows, return, escape, letters, Shift+Tab, etc.)
-            // dismisses the suggestion window and falls through to normal text
-            // editing so the user never feels "trapped" in the completion list.
+            // Non-intrusive suggestions:
+            // - Plain Tab accepts the completion.
+            // - Option+Up / Option+Down (or Option+[/], or Ctrl+N/P) cycles through suggestions.
+            // - Plain arrow keys dismiss the suggestion window and move the cursor normally in the document.
+            // - Any other key dismisses the suggestion window and falls through to normal text editing.
             if SuggestionController.shared.isVisible {
                 let isPlainTab = event.keyCode == 48 && !modifierFlags.contains(.shift)
                 if isPlainTab {
@@ -221,6 +222,25 @@ extension TextViewController {
                         controller.applySelectedItem()
                     }
                     return nil
+                }
+
+                // Check for cycling suggestions via Option+Up/Down, Option+[/], or Ctrl+N/P
+                if modifierFlags.contains(.option) {
+                    if event.keyCode == 126 || event.keyCode == 33 { // Up Arrow or '['
+                        SuggestionController.shared.moveSelectionUp()
+                        return nil
+                    } else if event.keyCode == 125 || event.keyCode == 30 { // Down Arrow or ']'
+                        SuggestionController.shared.moveSelectionDown()
+                        return nil
+                    }
+                } else if modifierFlags.contains(.control) {
+                    if event.keyCode == 35 { // 'P'
+                        SuggestionController.shared.moveSelectionUp()
+                        return nil
+                    } else if event.keyCode == 45 { // 'N'
+                        SuggestionController.shared.moveSelectionDown()
+                        return nil
+                    }
                 }
 
                 // Dismiss the suggestion window and let the key reach the editor.

@@ -1,5 +1,32 @@
 import Foundation
 
+// MARK: - Precompiled Regexes
+
+enum LyxRegex {
+    static let leadingWhitespace = try! NSRegularExpression(pattern: #"^\s+"#)
+    static let dashes = try! NSRegularExpression(pattern: "-+", options: [.caseInsensitive])
+    static let beginInset = try! NSRegularExpression(pattern: ".*\\\\begin_inset ", options: [.caseInsensitive])
+    static let comment = try! NSRegularExpression(pattern: "%.*", options: [.caseInsensitive])
+    static let rotateboxImage = try! NSRegularExpression(pattern: "\\\\rotatebox\\{90\\}\\{\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}\\s?\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let rotatebox = try! NSRegularExpression(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let includegraphics = try! NSRegularExpression(pattern: "\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let beginTitlepage = try! NSRegularExpression(pattern: "\\\\begin\\{titlepage\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let endTitlepage = try! NSRegularExpression(pattern: "\\\\end\\{titlepage\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let textbf = try! NSRegularExpression(pattern: "\\\\textbf\\{([^}]+)\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let textit = try! NSRegularExpression(pattern: "\\\\textit\\{([^}]+)\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let vspace = try! NSRegularExpression(pattern: "\\\\vspace\\*?\\{[^}]+\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let labelOpts = try! NSRegularExpression(pattern: "\\\\label\\{([^}]+)\\}", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let pdfpagewidth = try! NSRegularExpression(pattern: "\\\\pdfpagewidth=([0-9]+[a-z]+)", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let pdfpageheight = try! NSRegularExpression(pattern: "\\\\pdfpageheight=([0-9]+[a-z]+)", options: [.caseInsensitive, .dotMatchesLineSeparators])
+    static let label = try! NSRegularExpression(pattern: "\\\\label\\{([^}]+)\\}", options: [.caseInsensitive])
+    static let beginArray = try! NSRegularExpression(pattern: "\\\\begin\\{array\\}\\{[^}]*\\}", options: [.caseInsensitive])
+    static let mathrm = try! NSRegularExpression(pattern: "\\\\mathrm\\s*\\{([^}]+)\\}", options: [.caseInsensitive])
+    static let text = try! NSRegularExpression(pattern: "\\\\text\\s*\\{([^}]+)\\}", options: [.caseInsensitive])
+    static let textrm = try! NSRegularExpression(pattern: "\\\\textrm\\s*\\{([^}]+)\\}", options: [.caseInsensitive])
+    static let mathTextit = try! NSRegularExpression(pattern: "\\\\textit\\s*\\{([^}]+)\\}", options: [.caseInsensitive])
+    static let mathTextbf = try! NSRegularExpression(pattern: "\\\\textbf\\s*\\{([^}]+)\\}", options: [.caseInsensitive])
+}
+
 // MARK: - String Extensions for Helper Logic
 
 extension String {
@@ -7,14 +34,18 @@ extension String {
         return allSatisfy { $0.isWhitespace }
     }
     
-    func replacingRegex(pattern: String, with template: String, options: NSRegularExpression.Options = [.caseInsensitive]) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return self }
+    func replacingRegex(_ regex: NSRegularExpression, with template: String) -> String {
         let range = NSRange(location: 0, length: self.utf16.count)
         return regex.stringByReplacingMatches(in: self, options: [], range: range, withTemplate: template)
     }
+
+    func replacingRegex(pattern: String, with template: String, options: NSRegularExpression.Options = [.caseInsensitive]) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return self }
+        return replacingRegex(regex, with: template)
+    }
     
     func trimLeading() -> String {
-        return self.replacingOccurrences(of: "^\\s+", with: "", options: .regularExpression)
+        return replacingRegex(LyxRegex.leadingWhitespace, with: "")
     }
     
     func escapedForString() -> String {
@@ -25,7 +56,7 @@ extension String {
     func sanitizedLabel() -> String {
         let invalidCharSet = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._:").inverted
         let cleaned = self.components(separatedBy: invalidCharSet).joined(separator: "-")
-        return cleaned.replacingRegex(pattern: "-+", with: "-").trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return cleaned.replacingRegex(LyxRegex.dashes, with: "-").trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 }
 
@@ -349,7 +380,7 @@ class LyxToTypstConverter {
             }
             
             // Handle the inset
-            let insetPart = line.replacingRegex(pattern: ".*\\\\begin_inset ", with: "")
+            let insetPart = line.replacingRegex(LyxRegex.beginInset, with: "")
             parseInset(type: insetPart)
             return
         }
@@ -467,10 +498,7 @@ class LyxToTypstConverter {
         var content = rawContent
         
         // Pre-strip comments
-        content = content.replacingRegex(pattern: "%.*", with: "")
-        
-        // Commands with body - Handle multi-line dot matches
-        let opts: NSRegularExpression.Options = [.caseInsensitive, .dotMatchesLineSeparators]
+        content = content.replacingRegex(LyxRegex.comment, with: "")
         
         // Special Figure Loop to handle multiple figures in one ERT block
         while content.contains("\\begin{figure}") {
@@ -499,11 +527,11 @@ class LyxToTypstConverter {
             
             // Process the content inside the figure block
             // 1. Specific match for the most common case: rotatebox{90}{\includegraphics{...}}
-            figBlock = figBlock.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}\\s?\\}", with: "#rotate(-90deg, reflow: true)[#image(\"$2\")]", options: opts)
+            figBlock = figBlock.replacingRegex(LyxRegex.rotateboxImage, with: "#rotate(-90deg, reflow: true)[#image(\"$2\")]")
             
             // 2. Individual replacements if they didn't match the combined one
-            figBlock = figBlock.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", with: "#rotate(-90deg, reflow: true)[$1]", options: opts)
-            figBlock = figBlock.replacingRegex(pattern: "\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}", with: "#image(\"$2\")", options: opts)
+            figBlock = figBlock.replacingRegex(LyxRegex.rotatebox, with: "#rotate(-90deg, reflow: true)[$1]")
+            figBlock = figBlock.replacingRegex(LyxRegex.includegraphics, with: "#image(\"$2\")")
             figBlock = figBlock.replacingOccurrences(of: "\\centering", with: "#set align(center)\n")
             
             // 3. Last resort brace mapping
@@ -516,27 +544,27 @@ class LyxToTypstConverter {
         }
 
         // Remaining Commands
-        content = content.replacingRegex(pattern: "\\\\begin\\{titlepage\\}", with: "", options: opts)
-        content = content.replacingRegex(pattern: "\\\\end\\{titlepage\\}", with: "#pagebreak() \n #set text(size: \(baseFontSize)) \n #set align(left) \n", options: opts)
+        content = content.replacingRegex(LyxRegex.beginTitlepage, with: "")
+        content = content.replacingRegex(LyxRegex.endTitlepage, with: "#pagebreak() \n #set text(size: \(baseFontSize)) \n #set align(left) \n")
         content = content.replacingOccurrences(of: "\\centering", with: "#set align(center)\n")
-        content = content.replacingRegex(pattern: "\\\\rotatebox\\{90\\}\\{([^}]*)\\}", with: "#rotate(-90deg, reflow: true)[$1]", options: opts)
+        content = content.replacingRegex(LyxRegex.rotatebox, with: "#rotate(-90deg, reflow: true)[$1]")
         content = content.replacingOccurrences(of: "\\Huge", with: "#set text(size: 24pt)\n")
         content = content.replacingOccurrences(of: "\\Large", with: "#set text(size: 18pt)\n")
         content = content.replacingOccurrences(of: "\\scshape", with: "#set text(features: (\"smcp\",))\n")
         content = content.replacingOccurrences(of: "\\today", with: "#datetime.today().display()")
-        content = content.replacingRegex(pattern: "\\\\textbf\\{([^}]+)\\}", with: "*$1*", options: opts)
-        content = content.replacingRegex(pattern: "\\\\textit\\{([^}]+)\\}", with: "_$1_", options: opts)
-        content = content.replacingRegex(pattern: "\\\\vspace\\*?\\{[^}]+\\}", with: "#v(2em)", options: opts)
+        content = content.replacingRegex(LyxRegex.textbf, with: "*$1*")
+        content = content.replacingRegex(LyxRegex.textit, with: "_$1_")
+        content = content.replacingRegex(LyxRegex.vspace, with: "#v(2em)")
         content = content.replacingOccurrences(of: "\\vfill", with: "#v(1fr)")
         content = content.replacingOccurrences(of: "\\\\", with: " \n") 
         content = content.replacingOccurrences(of: "~", with: " ") 
-        content = content.replacingRegex(pattern: "\\\\includegraphics(\\[[^\\]]*\\])?\\{([^}]+)\\}", with: "#image(\"$2\")", options: opts)
-        content = content.replacingRegex(pattern: "\\\\label\\{([^}]+)\\}", with: " <$1>", options: opts)
+        content = content.replacingRegex(LyxRegex.includegraphics, with: "#image(\"$2\")")
+        content = content.replacingRegex(LyxRegex.labelOpts, with: " <$1>")
         
         if content.contains("a3paper") { content = content.replacingOccurrences(of: "\\newgeometry{a3paper}", with: "#set page(paper: \"a3\")") }
         content = content.replacingOccurrences(of: "\\restoregeometry", with: "#set page(paper: \"a4\")")
-        content = content.replacingRegex(pattern: "\\\\pdfpagewidth=([0-9]+[a-z]+)", with: "#set page(width: $1)", options: opts)
-        content = content.replacingRegex(pattern: "\\\\pdfpageheight=([0-9]+[a-z]+)", with: "#set page(height: $1)", options: opts)
+        content = content.replacingRegex(LyxRegex.pdfpagewidth, with: "#set page(width: $1)")
+        content = content.replacingRegex(LyxRegex.pdfpageheight, with: "#set page(height: $1)")
         content = content.replacingOccurrences(of: "\\newpage", with: "#pagebreak()")
         content = content.replacingOccurrences(of: "\\thispagestyle{empty}", with: "") 
 
@@ -1048,11 +1076,11 @@ class LyxToTypstConverter {
         
         // Handle Labels: \label{eq:1} -> <eq:1>
         // We do this early so { } don't get messed up
-        m = m.replacingRegex(pattern: "\\\\label\\{([^}]+)\\}", with: " <$1> ")
+        m = m.replacingRegex(LyxRegex.label, with: " <$1> ")
 
         // Handle Array/Matrix -> mat(...)
         // 1. Replace \begin{array}{...} with mat(
-        m = m.replacingRegex(pattern: "\\\\begin\\{array\\}\\{[^}]*\\}", with: " mat(")
+        m = m.replacingRegex(LyxRegex.beginArray, with: " mat(")
         // 2. Replace \end{array} with )
         m = m.replacingOccurrences(of: "\\end{array}", with: ")")
         
@@ -1072,11 +1100,11 @@ class LyxToTypstConverter {
         m = m.replacingOccurrences(of: "\\right", with: "")
         
         // Common Replacements
-        m = m.replacingRegex(pattern: "\\\\mathrm\\s*\\{([^}]+)\\}", with: " upright(\"$1\") ")
-        m = m.replacingRegex(pattern: "\\\\text\\s*\\{([^}]+)\\}", with: " \"$1\" ")
-        m = m.replacingRegex(pattern: "\\\\textrm\\s*\\{([^}]+)\\}", with: " \"$1\" ")
-        m = m.replacingRegex(pattern: "\\\\textit\\s*\\{([^}]+)\\}", with: " italic(\"$1\") ")
-        m = m.replacingRegex(pattern: "\\\\textbf\\s*\\{([^}]+)\\}", with: " bold(\"$1\") ")
+        m = m.replacingRegex(LyxRegex.mathrm, with: " upright(\"$1\") ")
+        m = m.replacingRegex(LyxRegex.text, with: " \"$1\" ")
+        m = m.replacingRegex(LyxRegex.textrm, with: " \"$1\" ")
+        m = m.replacingRegex(LyxRegex.mathTextit, with: " italic(\"$1\") ")
+        m = m.replacingRegex(LyxRegex.mathTextbf, with: " bold(\"$1\") ")
         
         // Handle fractions manually to support nested braces
         while let range = m.range(of: "\\frac") {
@@ -1141,8 +1169,8 @@ class LyxToTypstConverter {
         
         let greek = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "rho", "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega"]
         for g in greek {
-            m = m.replacingOccurrences(of: "\\\\\(g)", with: " \(g) ", options: .regularExpression)
-            m = m.replacingOccurrences(of: "\\\\\(g.capitalized)", with: " \(g.capitalized) ", options: .regularExpression)
+            m = m.replacingOccurrences(of: "\\\(g)", with: " \(g) ")
+            m = m.replacingOccurrences(of: "\\\(g.capitalized)", with: " \(g.capitalized) ")
         }
         
         // Quote multiletter identifiers

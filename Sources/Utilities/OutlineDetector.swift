@@ -8,6 +8,15 @@ struct OutlineInfo {
     let indent: Bool?
 }
 
+enum OutlineRegex {
+    static let command = try! NSRegularExpression(pattern: #"#outline\s*\("#)
+    static let titleBracket = try! NSRegularExpression(pattern: #"title:\s*\[([^\]]*)\]"#)
+    static let titleQuote = try! NSRegularExpression(pattern: #"title:\s*"([^"]*)""#)
+    static let target = try! NSRegularExpression(pattern: #"target:\s*([a-zA-Z0-9.]+)"#)
+    static let depth = try! NSRegularExpression(pattern: #"depth:\s*(\d+)"#)
+    static let indent = try! NSRegularExpression(pattern: #"indent:\s*(true|false)"#)
+}
+
 struct OutlineDetector {
     /// Finds the range of #outline surrounds the index.
     static func findOutlineRange(in text: String, at index: Int) -> NSRange? {
@@ -18,10 +27,7 @@ struct OutlineDetector {
         // depth counter. The previous nested-group regex suffered catastrophic
         // backtracking (ReDoS) when the closing ")" was absent — e.g. while typing
         // "#outline(" — which froze the main thread.
-        let pattern = #"#outline\s*\("#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
+        let matches = OutlineRegex.command.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         // Safety check: Clamp index
         let safeIndex = max(0, min(index, length))
 
@@ -61,14 +67,17 @@ struct OutlineDetector {
         // Extract content inside parentheses
         if let startParen = snippet.firstIndex(of: "("), let endParen = snippet.lastIndex(of: ")") {
             let inner = String(snippet[snippet.index(after: startParen)..<endParen])
+            let innerUtf16Count = inner.utf16.count
             
             // Extract title: [...] or title: "..."
-            if let titleMatch = inner.range(of: #"title:\s*\[([^\]]*)\]"#, options: .regularExpression) {
+            if let match = OutlineRegex.titleBracket.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let titleMatch = Range(match.range, in: inner) {
                 let matchStr = inner[titleMatch]
                 if let firstBracket = matchStr.firstIndex(of: "["), let lastBracket = matchStr.lastIndex(of: "]") {
                     title = String(matchStr[matchStr.index(after: firstBracket)..<lastBracket])
                 }
-            } else if let titleMatch = inner.range(of: #"title:\s*"([^"]*)""#, options: .regularExpression) {
+            } else if let match = OutlineRegex.titleQuote.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+                      let titleMatch = Range(match.range, in: inner) {
                 let matchStr = inner[titleMatch]
                 if let firstQuote = matchStr.firstIndex(of: "\""), let lastQuote = matchStr.lastIndex(of: "\"") {
                     title = String(matchStr[matchStr.index(after: firstQuote)..<lastQuote])
@@ -77,7 +86,8 @@ struct OutlineDetector {
             
             // Extract target: ...
             // We'll simplify this to look for common targets
-            if let targetMatch = inner.range(of: #"target:\s*([a-zA-Z0-9.]+)"#, options: .regularExpression) {
+            if let match = OutlineRegex.target.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let targetMatch = Range(match.range, in: inner) {
                 let matchStr = inner[targetMatch]
                 if let colon = matchStr.firstIndex(of: ":") {
                     let val = matchStr[inner.index(after: colon)...].trimmingCharacters(in: .whitespaces)
@@ -96,7 +106,8 @@ struct OutlineDetector {
             }
             
             // Extract depth: ...
-            if let depthMatch = inner.range(of: #"depth:\s*(\d+)"#, options: .regularExpression) {
+            if let match = OutlineRegex.depth.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let depthMatch = Range(match.range, in: inner) {
                 let matchStr = inner[depthMatch]
                 if let colon = matchStr.firstIndex(of: ":") {
                     let val = matchStr[inner.index(after: colon)...].trimmingCharacters(in: .whitespaces)
@@ -105,7 +116,8 @@ struct OutlineDetector {
             }
             
             // Extract indent: true/false/none
-            if let indentMatch = inner.range(of: #"indent:\s*(true|false)"#, options: .regularExpression) {
+            if let match = OutlineRegex.indent.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let indentMatch = Range(match.range, in: inner) {
                 indent = inner[indentMatch].contains("true")
             }
         }

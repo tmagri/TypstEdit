@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 struct TableInfo {
     let range: NSRange
@@ -11,6 +12,16 @@ struct TableInfo {
     let headerCells: [String]?
 }
 
+enum TableRegex {
+    static let command = try! NSRegularExpression(pattern: #"#table\s*\("#)
+    static let startCommand = try! NSRegularExpression(pattern: #"^#table\s*\("#)
+    static let columns = try! NSRegularExpression(pattern: #"columns:\s*(\d+)"#)
+    static let tupleColumns = try! NSRegularExpression(pattern: #"columns:\s*(\(.*?\)|\d+\w*)"#, options: [.dotMatchesLineSeparators])
+    static let inset = try! NSRegularExpression(pattern: #"inset:\s*([^,)]+)"#)
+    static let align = try! NSRegularExpression(pattern: #"align:\s*([^,)]+)"#)
+    static let identifier = try! NSRegularExpression(pattern: #"^[a-zA-Z0-9_-]+$"#)
+}
+
 struct TableDetector {
     /// Finds the range of a #table(...) block surrounding the given index.
     static func findTableRange(in text: String, at index: Int) -> NSRange? {
@@ -19,11 +30,7 @@ struct TableDetector {
         
         // Very basic approach: find #table( and then find matching closing parenthesis
         // This won't handle nested parentheses perfectly but it's a start.
-        
-        let pattern = #"#table\s*\("#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-        
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
+        let matches = TableRegex.command.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         
         // Safety check: Clamp index
         let safeIndex = max(0, min(index, length))
@@ -54,19 +61,18 @@ struct TableDetector {
     static func parseTable(in text: String, at index: Int) -> TableInfo? {
         guard let range = findTableRange(in: text, at: index) else { return nil }
         let tableCode = (text as NSString).substring(with: range)
+        let tableUtf16Length = tableCode.utf16.count
         
         // Extract columns
         var cols = 1
         var colsStr: String? = nil
-        let colRegex = try? NSRegularExpression(pattern: #"columns:\s*(\d+)"#, options: [])
-        let tupleRegex = try? NSRegularExpression(pattern: #"columns:\s*(\(.*?\)|\d+\w*)"#, options: [.dotMatchesLineSeparators])
         
-        if let match = colRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
+        if let match = TableRegex.columns.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableUtf16Length)) {
             if let colStr = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) }) {
                 cols = Int(colStr) ?? 1
                 colsStr = colStr
             }
-        } else if let match = tupleRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
+        } else if let match = TableRegex.tupleColumns.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableUtf16Length)) {
             if let tupleContent = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) }) {
                 colsStr = tupleContent
                 if tupleContent.hasPrefix("(") {
@@ -80,20 +86,18 @@ struct TableDetector {
         
         // Extract inset
         var inset: String? = nil
-        let insetRegex = try? NSRegularExpression(pattern: #"inset:\s*([^,)]+)"#, options: [])
-        if let match = insetRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
+        if let match = TableRegex.inset.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableUtf16Length)) {
             inset = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) })?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
         // Extract align
         var align: String? = nil
-        let alignRegex = try? NSRegularExpression(pattern: #"align:\s*([^,)]+)"#, options: [])
-        if let match = alignRegex?.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count)) {
+        if let match = TableRegex.align.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableUtf16Length)) {
             align = Range(match.range(at: 1), in: tableCode).map({ String(tableCode[$0]) })?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         
         // Let's strip the #table(...) wrapper
-        let startMatch = try? NSRegularExpression(pattern: #"^#table\s*\("#).firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableCode.count))
+        let startMatch = TableRegex.startCommand.firstMatch(in: tableCode, options: [], range: NSRange(location: 0, length: tableUtf16Length))
         let innerStart = startMatch?.range.length ?? 0
         let innerCode = String(tableCode.dropFirst(innerStart).dropLast(1))
         
@@ -165,8 +169,7 @@ struct TableDetector {
                 // Found a top-level colon. Is it a named arg?
                 // Check if what precedes it is a valid identifier (alphanumeric + _ or -)
                 let prefix = segment.prefix(i).trimmingCharacters(in: .whitespaces)
-                let identifierPattern = #"^[a-zA-Z0-9_-]+$"#
-                if let _ = prefix.range(of: identifierPattern, options: .regularExpression) {
+                if TableRegex.identifier.firstMatch(in: prefix, options: [], range: NSRange(0..<prefix.utf16.count)) != nil {
                     return true
                 }
             }

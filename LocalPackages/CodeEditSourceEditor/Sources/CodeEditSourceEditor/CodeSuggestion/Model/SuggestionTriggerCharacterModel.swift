@@ -51,12 +51,20 @@ final class SuggestionTriggerCharacterModel {
               let position = controller.cursorPositions.first else {
             return
         }
-        
-        SuggestionController.shared.cursorsUpdated(
-            textView: controller,
-            delegate: completionDelegate,
-            position: position
-        )
+
+        if SuggestionController.shared.isVisible {
+            SuggestionController.shared.cursorsUpdated(
+                textView: controller,
+                delegate: completionDelegate,
+                position: position
+            )
+        } else {
+            SuggestionController.shared.showCompletions(
+                textView: controller,
+                delegate: completionDelegate,
+                cursorPosition: position
+            )
+        }
     }
 
     func selectionUpdated(_ position: CursorPosition) {

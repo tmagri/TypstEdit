@@ -7,6 +7,10 @@ struct TypstFix: Identifiable, Equatable {
     let range: NSRange? // If nil, use the error range effectively
 }
 
+enum SuggestionRegex {
+    static let unknownVariable = try! NSRegularExpression(pattern: #"(?<=unknown variable: )[a-zA-Z0-9_\-]+"#)
+}
+
 struct TypstSuggestionEngine {
     static let shared = TypstSuggestionEngine()
     
@@ -45,7 +49,8 @@ struct TypstSuggestionEngine {
             // Use original message for extraction to preserve case
             let originalMsg = error.message
             // Matches "unknown variable: <name>" and ignores trailing punctuation (like '.')
-            if let range = originalMsg.range(of: "(?<=unknown variable: )[a-zA-Z0-9_\\-]+", options: .regularExpression) {
+            if let match = SuggestionRegex.unknownVariable.firstMatch(in: originalMsg, options: [], range: NSRange(0..<originalMsg.utf16.count)),
+               let range = Range(match.range, in: originalMsg) {
                 let varName = String(originalMsg[range])
                 
                 // Use regex replacement to match whole words only

@@ -8,6 +8,15 @@ struct BibliographyInfo {
     let style: String?
 }
 
+enum BibliographyRegex {
+    static let command = try! NSRegularExpression(pattern: #"#bibliography\s*\("#)
+    static let sourcesNamed = try! NSRegularExpression(pattern: #"^(?:\s*sources:\s*)?([ "']?[^,]*[ "']?)"#)
+    static let sourcesBracket = try! NSRegularExpression(pattern: #"^\[([^\]]*)\]"#)
+    static let title = try! NSRegularExpression(pattern: #"title:\s*"([^"]*)""#)
+    static let full = try! NSRegularExpression(pattern: #"full:\s*(true|false)"#)
+    static let style = try! NSRegularExpression(pattern: #"style:\s*"([^"]*)""#)
+}
+
 struct BibliographyDetector {
     /// Finds the range of #bibliography surrounds the index.
     static func findBibliographyRange(in text: String, at index: Int) -> NSRange? {
@@ -18,10 +27,7 @@ struct BibliographyDetector {
         // a depth counter. The previous nested-group regex suffered catastrophic
         // backtracking (ReDoS) when the closing ")" was absent — e.g. while typing
         // "#bibliography(" — which froze the main thread.
-        let pattern = #"#bibliography\s*\("#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-
-        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: length))
+        let matches = BibliographyRegex.command.matches(in: text, options: [], range: NSRange(location: 0, length: length))
         // Safety check: Clamp index
         let safeIndex = max(0, min(index, length))
 
@@ -65,19 +71,23 @@ struct BibliographyDetector {
         // Extract content inside parentheses
         if let startParen = snippet.firstIndex(of: "("), let endParen = snippet.lastIndex(of: ")") {
             let inner = String(snippet[snippet.index(after: startParen)..<endParen])
+            let innerUtf16Count = inner.utf16.count
             
             // Regex for sources (first string or sources: "...")
-            if let sourcesMatch = inner.range(of: #"^(?:\s*sources:\s*)?([ "']?[^,]*[ "']?)"#, options: .regularExpression) {
-                sources = inner[sourcesMatch].trimmingCharacters(in: .whitespaces)
+            if let match = BibliographyRegex.sourcesNamed.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let sourcesMatch = Range(match.range, in: inner) {
+                sources = String(inner[sourcesMatch]).trimmingCharacters(in: .whitespaces)
                 // Clean quotes
                 sources = sources.trimmingCharacters(in: CharacterSet(charactersIn: "\" '"))
-            } else if let sourcesMatch = inner.range(of: #"^\[([^\]]*)\]"#, options: .regularExpression) {
+            } else if let match = BibliographyRegex.sourcesBracket.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+                      let sourcesMatch = Range(match.range, in: inner) {
                 // Bracketed sources? Typst usually uses strings or arrays of strings.
-                sources = inner[sourcesMatch].trimmingCharacters(in: .whitespaces)
+                sources = String(inner[sourcesMatch]).trimmingCharacters(in: .whitespaces)
             }
             
             // Extract title: "..."
-            if let titleMatch = inner.range(of: #"title:\s*"([^"]*)""#, options: .regularExpression) {
+            if let match = BibliographyRegex.title.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let titleMatch = Range(match.range, in: inner) {
                 let matchStr = inner[titleMatch]
                 if let firstQuote = matchStr.firstIndex(of: "\""), let lastQuote = matchStr.lastIndex(of: "\"") {
                     title = String(matchStr[matchStr.index(after: firstQuote)..<lastQuote])
@@ -85,12 +95,14 @@ struct BibliographyDetector {
             }
             
             // Extract full: true/false
-            if let fullMatch = inner.range(of: #"full:\s*(true|false)"#, options: .regularExpression) {
+            if let match = BibliographyRegex.full.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let fullMatch = Range(match.range, in: inner) {
                 full = inner[fullMatch].contains("true")
             }
             
             // Extract style: "..."
-            if let styleMatch = inner.range(of: #"style:\s*"([^"]*)""#, options: .regularExpression) {
+            if let match = BibliographyRegex.style.firstMatch(in: inner, options: [], range: NSRange(0..<innerUtf16Count)),
+               let styleMatch = Range(match.range, in: inner) {
                 let matchStr = inner[styleMatch]
                 if let firstQuote = matchStr.firstIndex(of: "\""), let lastQuote = matchStr.lastIndex(of: "\"") {
                     style = String(matchStr[matchStr.index(after: firstQuote)..<lastQuote])

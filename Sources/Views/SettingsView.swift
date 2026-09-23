@@ -121,11 +121,13 @@ struct AISettingsView: View {
         ScrollView {
             Form {
                 Section {
-                    Toggle("Enable Manual Intellisense", isOn: $settings.intellisenseEnabled)
+                    Toggle("Enable Manual & Offline Intellisense", isOn: $settings.intellisenseEnabled)
                         .font(.body.weight(.regular))
                     Toggle("Enable AI Completion", isOn: $settings.isEnabled)
                         .font(.body.weight(.regular))
-                    Text("Intellisense never interrupts typing — trigger it explicitly with ⌃Space or Escape while the cursor is in the editor. Tab accepts the highlighted suggestion; any other key dismisses it. Works in .typ and .note documents.")
+                    Toggle("Auto-suggest As You Type", isOn: $settings.isContinuousCompletionEnabled)
+                        .font(.body.weight(.regular))
+                    Text("When 'Auto-suggest As You Type' is enabled, suggestions appear automatically as you write. Press Tab to accept the top suggestion. Use ⌥↓ / ⌥↑ (or ⌥] / ⌥[) to navigate through suggestions without interrupting document cursor navigation. Plain arrow keys dismiss suggestions and move the text cursor normally. You can also trigger suggestions at any time using ⌃Space or Escape.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -170,9 +172,75 @@ struct AISettingsView: View {
 
                         completionSourceFields
 
-                        Text("Uses a separate, cheaper/faster model for inline autocomplete. Leave the model blank to fall back to the generation model.")
+                        Text("Uses a separate, cheaper/faster model for inline autocomplete. For local models, compact models like 'qwen2.5-coder:1.5b' or '0.5b' generate suggestions 5-10x faster than large models.")
                             .font(.caption)
                             .foregroundColor(.secondary)
+
+                        Divider().padding(.vertical, 2)
+
+                        Text("Performance & Latency Tuning").fontWeight(.semibold)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Context Scope:").fontWeight(.regular)
+                                Picker("", selection: Binding(
+                                    get: { settings.completionContextScope },
+                                    set: { settings.completionContextScope = $0 }
+                                )) {
+                                    ForEach(AISettingsManager.CompletionContextScope.allCases) { scope in
+                                        Text(scope.rawValue).tag(scope)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .frame(width: 220)
+                            }
+                            Text(settings.completionContextScope.description)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Thinking Pause (Debounce):")
+                                    .fontWeight(.regular)
+                                Slider(value: $settings.completionDebounceMs, in: 200...2000, step: 50)
+                                Text("\(Int(settings.completionDebounceMs))ms")
+                                    .monospacedDigit()
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+                            Text("How long to wait after you stop typing before querying the model. Increase for slower local models to prevent CPU/GPU overload while actively writing.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Suggestion Timeout:")
+                                    .fontWeight(.regular)
+                                Slider(value: $settings.completionTimeoutSeconds, in: 1...15, step: 0.5)
+                                Text(String(format: "%.1fs", settings.completionTimeoutSeconds))
+                                    .monospacedDigit()
+                                    .frame(width: 45, alignment: .trailing)
+                            }
+                            Text("Maximum duration to wait for an AI completion before silently aborting so the editor never lags.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("Max Suggestion Length:")
+                                    .fontWeight(.regular)
+                                TextField("32", value: $settings.completionMaxTokens, formatter: NumberFormatter())
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 60)
+                                Text("tokens")
+                                    .foregroundColor(.secondary)
+                            }
+                            Text("Fewer tokens (e.g. 16–48) generate exponentially faster on local hardware.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
 
                         testButton(for: .completion)
                     }

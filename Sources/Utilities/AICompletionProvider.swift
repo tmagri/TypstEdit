@@ -32,12 +32,12 @@ class AICompletionProvider: CodeSuggestionDelegate {
     private var debounceTask: Task<Void, Never>?
     
     func completionTriggerCharacters() -> Set<String> {
-        // Restricted to explicit Typst markers
-        var triggers = Set([".", "#", "@"])
+        // Trigger on explicit Typst markers
+        var triggers = Set([".", "#", "@", ":", "=", "/"])
         
         let settings = AISettingsManager.shared
         // If continuous completion is enabled, trigger on any letter
-        if settings.isEnabled && settings.isContinuousCompletionEnabled {
+        if (settings.isEnabled || settings.intellisenseEnabled) && settings.isContinuousCompletionEnabled {
             let alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
             triggers.formUnion(alphabet.map { String($0) })
         }
@@ -60,87 +60,65 @@ class AICompletionProvider: CodeSuggestionDelegate {
         
         var allItems: [any CodeSuggestionEntry] = []
         
-        // 1. Manual Intellisense (Immediate)
+        // 1. Offline Intellisense (Immediate, 0ms latency)
         if settings.intellisenseEnabled {
-            // Every request that reaches us is an explicit user invocation
-            // (Escape / Ctrl+Space) — typing never opens the suggestion window.
-            let suggestions = OfflineCompletionService.shared.provideCompletion(text: text, cursorIndex: index, manualTrigger: true)
+            let suggestions = OfflineCompletionService.shared.provideCompletion(
+                text: text,
+                cursorIndex: index,
+                manualTrigger: prefix.isEmpty
+            )
             let items = suggestions.map { suggestion in
                 AICompletionItem(
                     label: suggestion,
                     detail: "Offline",
-                    documentation: "Manual / Autocorrect Suggestion",
+                    documentation: "Typst Syntax / Suggestion",
                     image: Image(systemName: "text.book.closed")
                 )
             }
             allItems.append(contentsOf: items)
         }
         
-        // 2. AI Completion (Async)
+        // 2. AI Completion (Async in background, never blocking the editor)
         if settings.isEnabled {
-            // Cancel any pending request
+            // Cancel any in-flight AI task immediately when new keystroke arrives
             debounceTask?.cancel()
+            debounceTask = nil
             
             let url = controller?.currentFileURL
             let errors = controller?.errors ?? []
             
-            if !allItems.isEmpty {
-                // We already have local Intellisense results.
-                // Return them immediately so the UI is snappy, and fetch AI in the background.
-                debounceTask = Task {
-                    do {
-                        try await Task.sleep(nanoseconds: 700 * 1_000_000)
-                        if Task.isCancelled { return }
-                        let context = await AIContextManager.shared.generateContext(
-                            userPrompt: String(prefix.suffix(100)),
-                            text: text,
-                            cursorIndex: index,
-                            fileURL: url,
-                            errors: errors
-                        )
-                        let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
-                        if Task.isCancelled { return }
-                        
-                        let cleanedCode = Self.cleanedInsertionText(completionCode)
-                        if !cleanedCode.isEmpty {
-                            let aiItem = AICompletionItem(
-                                label: cleanedCode,
-                                detail: "AI",
-                                documentation: "AI Generated Suggestion"
-                            )
-                            await MainActor.run {
-                                guard let model = SuggestionController.shared.model as SuggestionViewModel?,
-                                      model.activeTextView === textView else { return }
-                                
-                                let currentIndex = cursorIndex(from: textView.cursorPositions.first?.start ?? pos.start, in: textView.text)
-                                let currentPrefix = getWordPrefix(text: textView.text, cursorIndex: currentIndex)
-                                
-                                if currentPrefix.hasPrefix(prefix) || prefix.hasPrefix(currentPrefix) {
-                                    if !model.items.contains(where: { $0.label == aiItem.label }) {
-                                        model.items.append(aiItem)
-                                        print("[AICompletionProvider] AI result added to suggestions")
-                                    }
-                                }
-                            }
-                        }
-                    } catch { }
-                }
-            } else {
-                // No local results. Await the AI so we don't return an empty array prematurely,
-                // which would prevent the completion window from showing.
+            // Dispatch background AI task with configurable "stop to think" pause
+            // and a configurable timeout (default 4.0s for local models, fully customizable in Settings)
+            let debounceNanos = settings.effectiveCompletionDebounceNanoseconds
+            let timeoutSeconds = max(1.0, settings.completionTimeoutSeconds)
+            let timeoutNanos = UInt64(timeoutSeconds * 1_000_000_000)
+
+            debounceTask = Task {
                 do {
-                    try await Task.sleep(nanoseconds: 700 * 1_000_000)
+                    // Stop to think pause: wait configured idle time before sending request
+                    try await Task.sleep(nanoseconds: debounceNanos)
                     try Task.checkCancellation()
                     
-                    let context = await AIContextManager.shared.generateContext(
-                        userPrompt: String(prefix.suffix(100)),
+                    let context = AIContextManager.shared.generateCompletionContext(
                         text: text,
                         cursorIndex: index,
-                        fileURL: url,
-                        errors: errors
+                        scope: settings.completionContextScope
                     )
+                    try Task.checkCancellation()
                     
-                    let completionCode = try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
+                    // Strict timeout on network request: abort if model is unresponsive
+                    let completionCode = try await withThrowingTaskGroup(of: String.self) { group in
+                        group.addTask {
+                            return try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
+                        }
+                        group.addTask {
+                            try await Task.sleep(nanoseconds: timeoutNanos)
+                            throw CancellationError()
+                        }
+                        let result = try await group.next()!
+                        group.cancelAll()
+                        return result
+                    }
                     try Task.checkCancellation()
                     
                     let cleanedCode = Self.cleanedInsertionText(completionCode)
@@ -150,17 +128,42 @@ class AICompletionProvider: CodeSuggestionDelegate {
                             detail: "AI",
                             documentation: "AI Generated Suggestion"
                         )
-                        allItems.append(aiItem)
-                        print("[AICompletionProvider] AI result fetched successfully")
+                        await MainActor.run {
+                            guard let model = SuggestionController.shared.model as SuggestionViewModel? else { return }
+                            guard model.activeTextView === textView || SuggestionController.shared.window?.isVisible != true else { return }
+                            
+                            let currentIndex = cursorIndex(from: textView.cursorPositions.first?.start ?? pos.start, in: textView.text)
+                            let currentPrefix = getWordPrefix(text: textView.text, cursorIndex: currentIndex)
+                            
+                            // Ensure the user hasn't typed something completely different
+                            if currentPrefix.hasPrefix(prefix) || prefix.hasPrefix(currentPrefix) {
+                                if SuggestionController.shared.window?.isVisible == true {
+                                    if !model.items.contains(where: { $0.label == aiItem.label }) {
+                                        model.items.append(aiItem)
+                                        print("[AICompletionProvider] AI suggestion appended to existing list")
+                                    }
+                                } else {
+                                    // If the suggestion window wasn't open yet (e.g. offline intellisense had no results for this word),
+                                    // open it now so the user can see and accept the AI suggestion!
+                                    SuggestionController.shared.showCompletions(
+                                        items: [aiItem],
+                                        textView: textView,
+                                        cursorPosition: pos
+                                    )
+                                    print("[AICompletionProvider] AI suggestion opened new completion window")
+                                }
+                            }
+                        }
                     }
                 } catch is CancellationError {
-                    // Ignored
+                    // Task cancelled or timed out cleanly
                 } catch {
-                    print("AI Completion task error: \(error)")
+                    print("[AICompletionProvider] Completion error: \(error)")
                 }
             }
         }
         
+        // Return local offline suggestions immediately so the window pops up with 0ms UI lag
         if !allItems.isEmpty {
             return (windowPosition: pos, items: allItems)
         }
@@ -173,11 +176,46 @@ class AICompletionProvider: CodeSuggestionDelegate {
         textView: TextViewController,
         cursorPosition: CursorPosition
     ) -> [any CodeSuggestionEntry]? {
+        let settings = AISettingsManager.shared
+        guard settings.isEnabled || settings.intellisenseEnabled else { return nil }
+
+        let text = textView.text
+        let index = cursorIndex(from: cursorPosition.start, in: text)
+        let prefix = getWordPrefix(text: text, cursorIndex: index)
+
+        // Cancel previous pending AI query on cursor move
+        debounceTask?.cancel()
+
+        if settings.intellisenseEnabled {
+            let suggestions = OfflineCompletionService.shared.provideCompletion(
+                text: text,
+                cursorIndex: index,
+                manualTrigger: prefix.isEmpty
+            )
+            if !suggestions.isEmpty {
+                return suggestions.map { suggestion in
+                    AICompletionItem(
+                        label: suggestion,
+                        detail: "Offline",
+                        documentation: "Typst Syntax / Suggestion",
+                        image: Image(systemName: "text.book.closed")
+                    )
+                }
+            }
+        }
+
         return nil
     }
 
     @MainActor
-   func completionWindowApplyCompletion(
+    func completionWindowDidClose() {
+        // Immediately abort any background AI task when the completion popup is closed
+        debounceTask?.cancel()
+        debounceTask = nil
+    }
+
+    @MainActor
+    func completionWindowApplyCompletion(
         item: any CodeSuggestionEntry,
         textView: TextViewController,
         cursorPosition: CursorPosition?
@@ -189,19 +227,26 @@ class AICompletionProvider: CodeSuggestionDelegate {
         let nsText = text as NSString
         let label = Self.cleanedInsertionText(item.label)
 
-        // Merge instead of insert: find the overlapping tail of the current line,
-        // and replace that overlapping portion with the FULL suggestion label.
-        var lineStart = utf16Offset
-        while lineStart > 0 {
-            let ch = nsText.character(at: lineStart - 1)
-            if ch == 0x0A || ch == 0x0D { break }
-            lineStart -= 1
-        }
+        // Find the typed word prefix at cursor (including any leading '#')
+        let typedPrefix = getWordPrefix(text: text, utf16Offset: utf16Offset)
         
-        let typedPrefix = nsText.substring(with: NSRange(location: lineStart, length: utf16Offset - lineStart))
-        let replaceCount = Self.overlapLength(label: label, typedPrefix: typedPrefix)
+        let replaceCount: Int
+        if !typedPrefix.isEmpty && label.hasPrefix(typedPrefix) {
+            // Perfect prefix match (e.g. typed "#al", picked "#align(" -> replace "#al" with "#align(")
+            replaceCount = (typedPrefix as NSString).length
+        } else {
+            // Suffix overlap match (e.g. for AI completions or partial matches)
+            var lineStart = utf16Offset
+            while lineStart > 0 {
+                let ch = nsText.character(at: lineStart - 1)
+                if ch == 0x0A || ch == 0x0D { break }
+                lineStart -= 1
+            }
+            let linePrefix = nsText.substring(with: NSRange(location: lineStart, length: utf16Offset - lineStart))
+            replaceCount = Self.overlapLength(label: label, typedPrefix: linePrefix)
+        }
 
-        // Target the overlap range, but insert the ENTIRE label.
+        // Target the overlap range, and insert the ENTIRE label so it cleanly merges without duplication
         let replacementRange = NSRange(location: utf16Offset - replaceCount, length: replaceCount)
         textView.textView.insertText(label, replacementRange: replacementRange)
     }
@@ -222,29 +267,91 @@ class AICompletionProvider: CodeSuggestionDelegate {
         return 0
     }
 
-    /// Normalizes model output into insertable text: unwraps a fenced code
-    /// block and drops everything from a cursor marker onward (that part
-    /// belongs after the caret, and inserting it would duplicate text).
+    /// Normalizes model output into insertable text.
+    /// Handles code fences, thinking tags, <CURSOR> markers, and conversational preambles
+    /// that smaller or cheaper local models often generate.
     static func cleanedInsertionText(_ raw: String) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // 1. Strip reasoning / thinking tags (DeepSeek R1, Qwen reasoning models, etc.)
+        for tag in ["think", "thought"] {
+            if let start = text.range(of: "<\(tag)>", options: .caseInsensitive) {
+                if let end = text.range(of: "</\(tag)>", options: .caseInsensitive) {
+                    text.removeSubrange(start.lowerBound..<end.upperBound)
+                    text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    // Output was cut off while still in thinking phase
+                    return ""
+                }
+            }
+        }
+
+        // 2. Unwrap markdown code blocks (```typst ... ```)
         if text.hasPrefix("```") {
             let withoutOpeningFence = text.dropFirst(3)
             if let firstNewline = withoutOpeningFence.firstIndex(of: "\n") {
                 let body = withoutOpeningFence[withoutOpeningFence.index(after: firstNewline)...]
                 if let closingFence = body.range(of: "```", options: .backwards) {
-                    text = String(body[..<closingFence.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    text = String(body[..<closingFence.lowerBound])
+                } else {
+                    text = String(body)
+                }
+            } else {
+                let content = withoutOpeningFence.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let closing = content.range(of: "```") {
+                    text = String(content[..<closing.lowerBound])
                 }
             }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        for marker in ["<CURSOR>", "<cursor>", "<|cursor|>"] where text.range(of: marker) != nil {
-            if let range = text.range(of: marker) {
-                text = String(text[..<range.lowerBound])
+        // 3. Robust <CURSOR> marker handling:
+        // Cheap models may echo "<CURSOR>new_code", "prefix<CURSOR>new_code",
+        // or "<CURSOR>new_code<CURSOR>".
+        // Never trim before <CURSOR> if that would erase the generated completion!
+        let markers = ["<CURSOR>", "<cursor>", "<|cursor|>", "[CURSOR]"]
+        for marker in markers {
+            if let firstRange = text.range(of: marker) {
+                let afterMarker = text[firstRange.upperBound...]
+                if let secondRange = afterMarker.range(of: marker) {
+                    // Content between two markers: <CURSOR>code<CURSOR>
+                    text = String(afterMarker[..<secondRange.lowerBound])
+                } else if !afterMarker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Content was emitted after the marker: <CURSOR>code or prefix<CURSOR>code
+                    text = String(afterMarker)
+                } else {
+                    // Marker was at the end: code<CURSOR>
+                    text = String(text[..<firstRange.lowerBound])
+                }
+                break
             }
         }
 
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 4. Strip common conversational preambles from small models
+        let lines = text.components(separatedBy: .newlines)
+        var filteredLines: [String] = []
+        var skippingPreamble = true
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if skippingPreamble {
+                let lower = trimmed.lowercased()
+                if lower.hasPrefix("here is") ||
+                   lower.hasPrefix("here's") ||
+                   lower.hasPrefix("sure") ||
+                   lower.hasPrefix("certainly") ||
+                   lower.hasPrefix("completion:") ||
+                   lower.hasPrefix("output:") ||
+                   lower.hasPrefix("result:") ||
+                   lower.hasPrefix("typst:") {
+                    continue
+                }
+                skippingPreamble = false
+            }
+            filteredLines.append(line)
+        }
+        text = filteredLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return text
     }
     
     // Helper to extract word prefix using UTF-16 offset

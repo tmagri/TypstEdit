@@ -1,6 +1,27 @@
 import Foundation
 import Combine
 
+// MARK: - Precompiled Regexes
+
+enum CompilerRegex {
+    static let stroke = try! NSRegularExpression(pattern: "((?:bottom|top|left|right)\\s*:\\s*[0-9.]+\\s*pt)(?!\\s*\\+)", options: [.caseInsensitive])
+    static let luma = try! NSRegularExpression(pattern: "luma\\(\\s*([0-9.]+)\\s*(%?)\\s*\\)", options: [.caseInsensitive])
+    static let black = try! NSRegularExpression(pattern: "(:\\s*\\b)(black|rgb\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)|rgb\\(\"#000000\"\\))(\\b|\\))", options: [.caseInsensitive])
+    static let diagnosticLocation = try! NSRegularExpression(pattern: ":\\d+:\\d+")
+    static let markdownConverterFunc = try! NSRegularExpression(pattern: #"^#([A-Za-z][A-Za-z0-9_]*)[\[(]"#)
+    static let mathBlock = try! NSRegularExpression(pattern: "\\$\\$?([^\\$]+)\\$\\$?")
+    static let trailSupSub = try! NSRegularExpression(pattern: "([\\^_])\\s*$")
+    static let trailOp = try! NSRegularExpression(pattern: "([+\\-*\\/=<>]|\\\\times|\\\\cdot)\\s*$")
+    static let loneCaret = try! NSRegularExpression(pattern: "(?<![\\\\\\$])\\^\\s*$")
+    static let bareHash = try! NSRegularExpression(pattern: "(?<!\\\\)#\\s*$")
+    static let codeSpan = try! NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)")
+    static let mathRegion = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
+    static let operatorRe = try! NSRegularExpression(pattern: "(?<!\\\\)[@#$<>]")
+    static let webImage = try! NSRegularExpression(pattern: #"#image\(\s*"([^"]*)""#)
+    static let relativeImport = try! NSRegularExpression(pattern: #"(\b(?:import|include)\s+")([^/@.][^"]*)(")"#)
+    static let relativeImage = try! NSRegularExpression(pattern: #"(#image\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#)
+}
+
 struct TypstError: Identifiable, Equatable {
     enum Severity: Equatable {
         case error
@@ -283,53 +304,45 @@ class TypstCompiler: ObservableObject {
             }
             if isDarkMode {
                 // 1. Inject the color into partial strokes safely
-                let strokePattern = "((?:bottom|top|left|right)\\s*:\\s*[0-9.]+\\s*pt)(?!\\s*\\+)"
-                if let strokeRegex = try? NSRegularExpression(pattern: strokePattern, options: [.caseInsensitive]) {
-                    finalSource = strokeRegex.stringByReplacingMatches(
-                        in: finalSource,
-                        options: [],
-                        range: NSRange(0..<finalSource.utf16.count),
-                        withTemplate: "$1 + rgb(\"#d1d1d1\")"
-                    )
-                }
+                finalSource = CompilerRegex.stroke.stringByReplacingMatches(
+                    in: finalSource,
+                    options: [],
+                    range: NSRange(0..<finalSource.utf16.count),
+                    withTemplate: "$1 + rgb(\"#d1d1d1\")"
+                )
                 
                 // 2. Automatically invert luma() for dark mode (e.g., luma(220) -> luma(35))
-                let lumaPattern = "luma\\(\\s*([0-9.]+)\\s*(%?)\\s*\\)"
-                if let lumaRegex = try? NSRegularExpression(pattern: lumaPattern, options: [.caseInsensitive]) {
-                    let nsString = NSMutableString(string: finalSource)
-                    let matches = lumaRegex.matches(in: finalSource, options: [], range: NSRange(0..<finalSource.utf16.count))
+                let nsString = NSMutableString(string: finalSource)
+                let matches = CompilerRegex.luma.matches(in: finalSource, options: [], range: NSRange(0..<finalSource.utf16.count))
+                
+                // Iterate in reverse so replacing text doesn't shift the ranges of earlier matches
+                for match in matches.reversed() {
+                    let valString = nsString.substring(with: match.range(at: 1))
+                    let isPercent = match.range(at: 2).length > 0
                     
-                    // Iterate in reverse so replacing text doesn't shift the ranges of earlier matches
-                    for match in matches.reversed() {
-                        let valString = nsString.substring(with: match.range(at: 1))
-                        let isPercent = match.range(at: 2).length > 0
+                    if let val = Double(valString) {
+                        // If it's a percentage use 100 - x, otherwise use 255 - x
+                        let invertedVal = isPercent ? max(0, 100.0 - val) : max(0, 255.0 - val)
                         
-                        if let val = Double(valString) {
-                            // If it's a percentage use 100 - x, otherwise use 255 - x
-                            let invertedVal = isPercent ? max(0, 100.0 - val) : max(0, 255.0 - val)
-                            
-                            // Format cleanly without trailing decimals if it's a whole number
-                            let formattedVal = invertedVal.truncatingRemainder(dividingBy: 1) == 0 ?
-                                               String(format: "%.0f", invertedVal) :
-                                               String(format: "%.1f", invertedVal)
-                            
-                            let replacement = "luma(\(formattedVal)\(isPercent ? "%" : ""))"
-                            nsString.replaceCharacters(in: match.range, with: replacement)
-                        }
+                        // Format cleanly without trailing decimals if it's a whole number
+                        let formattedVal = invertedVal.truncatingRemainder(dividingBy: 1) == 0 ?
+                                           String(format: "%.0f", invertedVal) :
+                                           String(format: "%.1f", invertedVal)
+                        
+                        let replacement = "luma(\(formattedVal)\(isPercent ? "%" : ""))"
+                        nsString.replaceCharacters(in: match.range, with: replacement)
                     }
-                    finalSource = nsString as String
                 }
+                finalSource = nsString as String
+
                 // 3. Catch explicit black colors used in parameters and invert them
                 // Matches "fill: black" or "stroke: rgb(0,0,0)" but ignores the word "black" in regular text
-                let blackPattern = "(:\\s*\\b)(black|rgb\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)|rgb\\(\"#000000\"\\))(\\b|\\))"
-                if let blackRegex = try? NSRegularExpression(pattern: blackPattern, options: [.caseInsensitive]) {
-                    finalSource = blackRegex.stringByReplacingMatches(
-                        in: finalSource,
-                        options: [],
-                        range: NSRange(0..<finalSource.utf16.count),
-                        withTemplate: "$1rgb(\"#d1d1d1\")"
-                    )
-                }
+                finalSource = CompilerRegex.black.stringByReplacingMatches(
+                    in: finalSource,
+                    options: [],
+                    range: NSRange(0..<finalSource.utf16.count),
+                    withTemplate: "$1rgb(\"#d1d1d1\")"
+                )
 
                 // 4. Append the preamble
                 injectedPreamble += darkModePreamble
@@ -510,8 +523,9 @@ class TypstCompiler: ObservableObject {
         }
 
         if pendingDiagnosticLine != nil {
-            if let range = line.range(of: ":\\d+:\\d+", options: .regularExpression) {
-                recordDiagnosticLocation(String(line[range]))
+            if let match = CompilerRegex.diagnosticLocation.firstMatch(in: line, options: [], range: NSRange(0..<line.utf16.count)) {
+                let matchStr = (line as NSString).substring(with: match.range)
+                recordDiagnosticLocation(matchStr)
                 pendingDiagnosticLine = nil
             } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
                 pendingDiagnosticLine = nil
@@ -677,9 +691,9 @@ class TypstCompiler: ObservableObject {
         for line in lines {
             if line.starts(with: "error: ") {
                 currentErrorMsg = String(line.dropFirst("error: ".count))
-            } else if currentErrorMsg != nil, let range = line.range(of: ":\\d+:\\d+", options: .regularExpression) {
-                let match = String(line[range]) // ":10:5"
-                let parts = match.split(separator: ":")
+            } else if currentErrorMsg != nil, let match = CompilerRegex.diagnosticLocation.firstMatch(in: line, options: [], range: NSRange(0..<line.utf16.count)) {
+                let matchStr = (line as NSString).substring(with: match.range) // ":10:5"
+                let parts = matchStr.split(separator: ":")
                 if parts.count >= 1, let lineNum = Int(parts[0]) {
                     if !rawLines.contains(lineNum) {
                         rawLines.append(lineNum)
@@ -812,10 +826,8 @@ class TypstCompiler: ObservableObject {
             "link", "image", "table", "strike", "figure", "align", "line",
             "footnote", "super", "sub", "underline", "highlight", "raw",
         ]
-        let pattern = #"^#([A-Za-z][A-Za-z0-9_]*)[\[(]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return false }
         let nsLine = line as NSString
-        guard let match = regex.firstMatch(in: line, options: [], range: NSRange(0..<nsLine.length)) else {
+        guard let match = CompilerRegex.markdownConverterFunc.firstMatch(in: line, options: [], range: NSRange(0..<nsLine.length)) else {
             return false
         }
         let name = nsLine.substring(with: match.range(at: 1))
@@ -924,70 +936,60 @@ class TypstCompiler: ObservableObject {
             }
 
             // Fix dangling ^ or _ or binary operators inside math blocks: $...$ or $$...$$
-            if let mathRegex = try? NSRegularExpression(pattern: "\\$\\$?([^\\$]+)\\$\\$?", options: []) {
-                let nsLine = line as NSString
-                let matches = mathRegex.matches(in: line, options: [], range: NSRange(0..<nsLine.length))
-                var fixedLine = line
-                for m in matches.reversed() {
-                    // Never "fix" content inside inline code spans (`` `$x +$` `` is
-                    // the user's code, not broken math).
-                    if codeRanges.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) {
-                        continue
-                    }
-                    let mathContent = nsLine.substring(with: m.range(at: 1))
-                    var fixedMath = mathContent
-                    
-                    // Replace trailing ^ or _ before end of math: e.g. "k=1^" -> "k=1^{}"
-                    if let trailSupSub = try? NSRegularExpression(pattern: "([\\^_])\\s*$", options: []) {
-                        fixedMath = trailSupSub.stringByReplacingMatches(in: fixedMath, options: [], range: NSRange(0..<fixedMath.utf16.count), withTemplate: "$1{}")
-                    }
-                    
-                    // Replace trailing binary/relational operators before end of math: e.g. "x + " -> "x + \"\""
-                    if let trailOp = try? NSRegularExpression(pattern: "([+\\-*\\/=<>]|\\\\times|\\\\cdot)\\s*$", options: []) {
-                        fixedMath = trailOp.stringByReplacingMatches(in: fixedMath, options: [], range: NSRange(0..<fixedMath.utf16.count), withTemplate: "$1 \"\"")
-                    }
-                    
-                    // Replace trailing lone backslash
-                    if fixedMath.hasSuffix("\\") && !fixedMath.hasSuffix("\\\\") {
-                        fixedMath.removeLast()
-                    }
-                    
-                    // Check balanced delimiters inside this math block: ( ), [ ], { }
-                    var parenCount = 0
-                    var bracketCount = 0
-                    var braceCount = 0
-                    for c in fixedMath {
-                        if c == "(" { parenCount += 1 }
-                        else if c == ")" { parenCount = max(0, parenCount - 1) }
-                        else if c == "[" { bracketCount += 1 }
-                        else if c == "]" { bracketCount = max(0, bracketCount - 1) }
-                        else if c == "{" { braceCount += 1 }
-                        else if c == "}" { braceCount = max(0, braceCount - 1) }
-                    }
-                    if braceCount > 0 { fixedMath.append(String(repeating: "}", count: braceCount)) }
-                    if bracketCount > 0 { fixedMath.append(String(repeating: "]", count: bracketCount)) }
-                    if parenCount > 0 { fixedMath.append(String(repeating: ")", count: parenCount)) }
-                    
-                    if fixedMath != mathContent {
-                        let fullMatchRange = m.range
-                        let delimiter = (nsLine.substring(with: fullMatchRange).hasPrefix("$$")) ? "$$" : "$"
-                        let replacement = "\(delimiter)\(fixedMath)\(delimiter)"
-                        fixedLine = (fixedLine as NSString).replacingCharacters(in: fullMatchRange, with: replacement)
-                    }
+            let nsLine = line as NSString
+            let matches = CompilerRegex.mathBlock.matches(in: line, options: [], range: NSRange(0..<nsLine.length))
+            var fixedLine = line
+            for m in matches.reversed() {
+                // Never "fix" content inside inline code spans (`` `$x +$` `` is
+                // the user's code, not broken math).
+                if codeRanges.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) {
+                    continue
                 }
-                line = fixedLine
+                let mathContent = nsLine.substring(with: m.range(at: 1))
+                var fixedMath = mathContent
+                
+                // Replace trailing ^ or _ before end of math: e.g. "k=1^" -> "k=1^{}"
+                fixedMath = CompilerRegex.trailSupSub.stringByReplacingMatches(in: fixedMath, options: [], range: NSRange(0..<fixedMath.utf16.count), withTemplate: "$1{}")
+                
+                // Replace trailing binary/relational operators before end of math: e.g. "x + " -> "x + \"\""
+                fixedMath = CompilerRegex.trailOp.stringByReplacingMatches(in: fixedMath, options: [], range: NSRange(0..<fixedMath.utf16.count), withTemplate: "$1 \"\"")
+                
+                // Replace trailing lone backslash
+                if fixedMath.hasSuffix("\\") && !fixedMath.hasSuffix("\\\\") {
+                    fixedMath.removeLast()
+                }
+                
+                // Check balanced delimiters inside this math block: ( ), [ ], { }
+                var parenCount = 0
+                var bracketCount = 0
+                var braceCount = 0
+                for c in fixedMath {
+                    if c == "(" { parenCount += 1 }
+                    else if c == ")" { parenCount = max(0, parenCount - 1) }
+                    else if c == "[" { bracketCount += 1 }
+                    else if c == "]" { bracketCount = max(0, bracketCount - 1) }
+                    else if c == "{" { braceCount += 1 }
+                    else if c == "}" { braceCount = max(0, braceCount - 1) }
+                }
+                if braceCount > 0 { fixedMath.append(String(repeating: "}", count: braceCount)) }
+                if bracketCount > 0 { fixedMath.append(String(repeating: "]", count: bracketCount)) }
+                if parenCount > 0 { fixedMath.append(String(repeating: ")", count: parenCount)) }
+                
+                if fixedMath != mathContent {
+                    let fullMatchRange = m.range
+                    let delimiter = (nsLine.substring(with: fullMatchRange).hasPrefix("$$")) ? "$$" : "$"
+                    let replacement = "\(delimiter)\(fixedMath)\(delimiter)"
+                    fixedLine = (fixedLine as NSString).replacingCharacters(in: fullMatchRange, with: replacement)
+                }
             }
+            line = fixedLine
             
             // Content mode fixes:
             // Escape lone trailing ^ at end of line (outside math):
-            if let loneCaret = try? NSRegularExpression(pattern: "(?<![\\\\\\$])\\^\\s*$", options: []) {
-                line = loneCaret.stringByReplacingMatches(in: line, options: [], range: NSRange(0..<line.utf16.count), withTemplate: "\\\\^")
-            }
+            line = CompilerRegex.loneCaret.stringByReplacingMatches(in: line, options: [], range: NSRange(0..<line.utf16.count), withTemplate: "\\\\^")
             
             // Bare trailing # at end of line:
-            if let bareHash = try? NSRegularExpression(pattern: "(?<!\\\\)#\\s*$", options: []) {
-                line = bareHash.stringByReplacingMatches(in: line, options: [], range: NSRange(0..<line.utf16.count), withTemplate: "\\\\#")
-            }
+            line = CompilerRegex.bareHash.stringByReplacingMatches(in: line, options: [], range: NSRange(0..<line.utf16.count), withTemplate: "\\\\#")
             
             lines[i] = line
         }
@@ -999,10 +1001,8 @@ class TypstCompiler: ObservableObject {
     /// matching-backtick-run rule as the sanitizer and `delimitImproperOperators`.
     nonisolated static func inlineCodeRanges(in line: String) -> [NSRange] {
         let ns = line as NSString
-        guard ns.length > 0,
-              let re = try? NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)", options: [])
-        else { return [] }
-        return re.matches(in: line, options: [], range: NSRange(0..<ns.length)).map { $0.range }
+        guard ns.length > 0 else { return [] }
+        return CompilerRegex.codeSpan.matches(in: line, options: [], range: NSRange(0..<ns.length)).map { $0.range }
     }
 
     /// Returns a copy of `line` where every character inside `ranges` is replaced by a
@@ -1057,16 +1057,12 @@ class TypstCompiler: ObservableObject {
         }
         // Inline / fenced code spans with matching backtick runs (same pattern the
         // sanitizer uses).
-        if let codeRe = try? NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)", options: []) {
-            codeRe.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
-                if let m = m { blank(m.range) }
-            }
+        CompilerRegex.codeSpan.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
+            if let m = m { blank(m.range) }
         }
         // Math regions: $$…$$, $…$, \[…\], \(…\).
-        if let mathRe = try? NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)", options: []) {
-            mathRe.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
-                if let m = m { blank(m.range) }
-            }
+        CompilerRegex.mathRegion.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
+            if let m = m { blank(m.range) }
         }
         let maskedString = NSString(characters: masked, length: length) as String
 
@@ -1124,11 +1120,8 @@ class TypstCompiler: ObservableObject {
         }
 
         // 4. Enumerate every unescaped operator and classify it against its context.
-        guard let opRe = try? NSRegularExpression(pattern: "(?<!\\\\)[@#$<>]", options: []) else {
-            return (source, [])
-        }
         var improper: [(loc: Int, op: Character)] = []
-        for m in opRe.matches(in: maskedString, options: [], range: NSRange(0..<length)) {
+        for m in CompilerRegex.operatorRe.matches(in: maskedString, options: [], range: NSRange(0..<length)) {
             let loc = m.range.location
             guard loc < length else { continue }
             let u = masked[loc]
@@ -1487,10 +1480,7 @@ class TypstCompiler: ObservableObject {
     // MARK: - Web Image Resolver
     
     private func resolveWebImages(in text: String, projectRoot: URL?) async -> String {
-        let pattern = #"#image\(\s*"([^"]*)""#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
-        
-        let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
+        let matches = CompilerRegex.webImage.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
         var urlsToFetch: Set<String> = []
         
         let nsText = text as NSString
@@ -1539,15 +1529,12 @@ class TypstCompiler: ObservableObject {
 
         // Rewrite relative #import / #include paths
         // Skips paths starting with / (absolute), @ (typst package), or . (already relative to parent)
-        let importPattern = #"(\b(?:import|include)\s+")([^/@.][^"]*)(")"#
-        if let regex = try? NSRegularExpression(pattern: importPattern, options: []) {
-             processed = regex.stringByReplacingMatches(
-                in: processed,
-                options: [],
-                range: NSRange(0..<processed.count),
-                withTemplate: "$1../$2$3"
-             )
-        }
+        processed = CompilerRegex.relativeImport.stringByReplacingMatches(
+            in: processed,
+            options: [],
+            range: NSRange(0..<processed.utf16.count),
+            withTemplate: "$1../$2$3"
+        )
 
         // Rewrite relative #image("filename") paths.
         // Only matches bare relative filenames — skips:
@@ -1556,15 +1543,12 @@ class TypstCompiler: ObservableObject {
         //   ../    (already adjusted)
         //   http   (web URL)
         // The negative lookahead (?!\.\./) ensures we don't double-prefix.
-        let imagePattern = #"(#image\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#
-        if let regex = try? NSRegularExpression(pattern: imagePattern, options: []) {
-            processed = regex.stringByReplacingMatches(
-                in: processed,
-                options: [],
-                range: NSRange(0..<processed.count),
-                withTemplate: "$1../$2$3"
-            )
-        }
+        processed = CompilerRegex.relativeImage.stringByReplacingMatches(
+            in: processed,
+            options: [],
+            range: NSRange(0..<processed.utf16.count),
+            withTemplate: "$1../$2$3"
+        )
 
         return processed
     }

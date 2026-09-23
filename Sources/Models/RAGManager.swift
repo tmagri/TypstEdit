@@ -4,6 +4,11 @@ import Accelerate
 import CryptoKit
 import CSQLite
 import vector
+// MARK: - Precompiled Regexes
+
+enum RAGRegex {
+    static let xmlTags = try! NSRegularExpression(pattern: "<[^>]+>")
+}
 
 // MARK: - Core Data Models
 struct DocumentChunk: Codable {
@@ -646,7 +651,7 @@ class RAGManager: ObservableObject {
                 let currentPath = path.isEmpty ? key : "\(path) > \(key)"
                 
                 if let str = value as? String, str.count >= 50 {
-                    let cleanText = str.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                    let cleanText = RAGRegex.xmlTags.stringByReplacingMatches(in: str, options: [], range: NSRange(0..<str.utf16.count), withTemplate: "")
                     let chunk = "Source: \(fileName) | Path: \(currentPath)\nContext: \(localMetadata)\nContent: \(cleanText)"
                     chunks.append(chunk)
                 } else if let nestedDict = value as? [String: Any] {
@@ -661,7 +666,7 @@ class RAGManager: ObservableObject {
                 chunks.append(contentsOf: extractSemanticChunks(from: value, path: currentPath, parentMetadata: parentMetadata, fileName: fileName))
             }
         } else if let str = json as? String, str.count >= 50 {
-            let cleanText = str.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            let cleanText = RAGRegex.xmlTags.stringByReplacingMatches(in: str, options: [], range: NSRange(0..<str.utf16.count), withTemplate: "")
             let chunk = "Source: \(fileName) | Path: \(path)\nContext: \(parentMetadata)\nContent: \(cleanText)"
             chunks.append(chunk)
         }

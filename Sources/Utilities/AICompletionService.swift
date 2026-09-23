@@ -1,5 +1,89 @@
 import Foundation
 
+// MARK: - Precompiled Regexes
+
+enum AICompletionRegex {
+    static let thinkTag = try! NSRegularExpression(pattern: "<think>[\\s\\S]*?<\\/think>", options: [.caseInsensitive])
+    static let thoughtTag = try! NSRegularExpression(pattern: "<thought>[\\s\\S]*?<\\/thought>", options: [.caseInsensitive])
+    static let extractCode = try! NSRegularExpression(pattern: "```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```")
+    
+    // Masking
+    static let codeBlock = try! NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)")
+    static let mathBlock = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
+    
+    // Autolinks & HTML tags
+    static let autolink = try! NSRegularExpression(pattern: "<(https?://[^>\\s]+)>")
+    static let htmlPAlign = try! NSRegularExpression(pattern: "(?is)\\s*<p\\s+align=[\"']([^\"']+)[\"']>\\s*(.*?)\\s*</p>\\s*")
+    static let htmlP = try! NSRegularExpression(pattern: "(?is)\\s*<p>\\s*(.*?)\\s*</p>\\s*")
+    static let htmlDt = try! NSRegularExpression(pattern: "(?is)\\s*<dt>(.*?)</dt>\\s*")
+    static let htmlDd = try! NSRegularExpression(pattern: "(?is)\\s*<dd>(.*?)</dd>\\s*")
+    static let htmlDl = try! NSRegularExpression(pattern: "(?i)\\s*</?dl>\\s*")
+    static let htmlStrong = try! NSRegularExpression(pattern: "(?is)<(strong|b)>(.*?)</\\1>")
+    static let htmlEm = try! NSRegularExpression(pattern: "(?is)<(em|i)>(.*?)</\\1>")
+    static let htmlDel = try! NSRegularExpression(pattern: "(?is)<del>(.*?)</del>")
+    static let htmlSup = try! NSRegularExpression(pattern: "(?is)<sup>(.*?)</sup>")
+    static let htmlSub = try! NSRegularExpression(pattern: "(?is)<sub>(.*?)</sub>")
+    static let htmlU = try! NSRegularExpression(pattern: "(?is)<u>(.*?)</u>")
+    static let htmlMark = try! NSRegularExpression(pattern: "(?is)<mark>(.*?)</mark>")
+    static let htmlBr = try! NSRegularExpression(pattern: "(?i)<br\\s*/?>")
+    static let htmlLink = try! NSRegularExpression(pattern: "(?is)<a\\s+(?:[^>]*?\\s+)?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>")
+    static let htmlImg = try! NSRegularExpression(pattern: "(?i)<img\\s+([^>]+)>")
+    static let imgSrc = try! NSRegularExpression(pattern: "(?i)src=[\"']([^\"']+)[\"']")
+    static let imgAlt = try! NSRegularExpression(pattern: "(?i)alt=[\"']([^\"']*)[\"']")
+    static let imgWidth = try! NSRegularExpression(pattern: "(?i)width=[\"']([^\"']+)[\"']")
+    static let imgHeight = try! NSRegularExpression(pattern: "(?i)height=[\"']([^\"']+)[\"']")
+    static let escapeHtmlTags = try! NSRegularExpression(pattern: "(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>")
+    
+    // Footnotes & Headings & Lists
+    static let fnDef = try! NSRegularExpression(pattern: "(?m)^\\[\\^([^\\]]+)\\]:[ \\t]*(.*?)(?=\\n\\[\\^|\n\\z|\\z)", options: [.dotMatchesLineSeparators])
+    static let fnRef = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
+    static let fnInline = try! NSRegularExpression(pattern: "(?<!!)\\^\\[([^\\]]+)\\]")
+    static let heading = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)(#+)[ \\t]+")
+    static let docDot = try! NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+")
+    static let taskListChecked = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[[xX]\\][ \\t]+")
+    static let taskListUnchecked = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[ \\][ \\t]+")
+    static let unorderedList = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)[*+][ \\t]+")
+    static let orderedList = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)\\d+\\.[ \\t]+")
+    
+    // Formatting
+    static let strike = try! NSRegularExpression(pattern: "(?s)~~(.+?)~~")
+    static let boldItalicAsterisk = try! NSRegularExpression(pattern: "\\*\\*\\*(.+?)\\*\\*\\*")
+    static let boldItalicUnderscore = try! NSRegularExpression(pattern: "___(.+?)___")
+    static let boldAsymmetric1 = try! NSRegularExpression(pattern: "(?<!\\*)\\*\\*\\*([^*\\n]+)\\*\\*(?!\\*)")
+    static let boldAsymmetric2 = try! NSRegularExpression(pattern: "(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)")
+    static let technicalUnderscore = try! NSRegularExpression(pattern: "(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])")
+    static let underscoreBeforeAsterisk = try! NSRegularExpression(pattern: "_(?=\\\\?\\*(?!\\*))")
+    static let boldAsterisk = try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
+    static let boldUnderscore = try! NSRegularExpression(pattern: "__(.+?)__")
+    
+    // Links and Images
+    static let refDef = try! NSRegularExpression(pattern: "(?m)^[ \\t]*\\[([^\\]]+)\\]:[ \\t]+([^ \\t\\n]+)(?:[ \\t]+[\"'(].*?[\"')])?[ \\t]*$")
+    static let refImg = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\[([^\\]]*)\\]")
+    static let refLink = try! NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\[([^\\]]*)\\]")
+    static let inlineImg = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)")
+    static let inlineLink = try! NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)")
+    static let bareVideo = try! NSRegularExpression(pattern: #"(?m)^[ \t]*(https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch|embed|v|shorts|live)|youtu\.be/|vimeo\.com/)[^\s]+)[ \t]*$"#, options: [.caseInsensitive])
+    
+    // Typst and Cleanups
+    static let markdownAbbr = try! NSRegularExpression(pattern: "(?m)^\\*\\[([^\\]]+)\\]:")
+    static let horizontalRule = try! NSRegularExpression(pattern: "(?m)^[-*_]{3,}[ \\t]*$")
+    static let entityRarr = try! NSRegularExpression(pattern: "(?i)&rarr;")
+    static let entityLarr = try! NSRegularExpression(pattern: "(?i)&larr;")
+    static let strayBacktick = try! NSRegularExpression(pattern: "(?<!\\\\)`")
+    static let literalDollar = try! NSRegularExpression(pattern: "(?<!\\\\)\\$")
+    static let literalHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[)")
+    static let literalAt = try! NSRegularExpression(pattern: "(?<!\\\\)@")
+    static let hybridDollarDigit = try! NSRegularExpression(pattern: "(?<!\\\\)\\$(?=\\d)")
+    static let hybridAt = try! NSRegularExpression(pattern: "(?<!\\\\)(?<=[a-zA-Z0-9])@|(?<!\\\\)@(?=\\s)")
+    static let hybridHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!import\\b|include\\b|let\\b|set\\b|show\\b|return\\b|if\\b|else\\b|for\\b|while\\b|context\\b)([A-Za-z][A-Za-z0-9_]*)(?=[,!?;:]|\\.\\s|\\.$)")
+    static let stringLiteral = try! NSRegularExpression(pattern: "\"[^\"]*\"")
+    
+    // Markdown table & video IDs
+    static let markdownTable = try! NSRegularExpression(pattern: "(?m)^[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(?:\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*\\n(?:[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n?)*")
+    static let youtubeID = try! NSRegularExpression(pattern: #"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"#, options: [.caseInsensitive])
+    static let vimeoID = try! NSRegularExpression(pattern: #"(?:player\.)?vimeo\.com/(?:video/)?(\d{6,})"#, options: [.caseInsensitive])
+}
+
 enum AIError: LocalizedError {
     case invalidURL
     case noData
@@ -41,26 +125,31 @@ class AICompletionService: ObservableObject {
 
     private func stripThinkingTags(from text: String) -> String {
         var cleanText = text
-        let patterns = [
-            "<think>[\\s\\S]*?<\\/think>",
-            "<thought>[\\s\\S]*?<\\/thought>"
-        ]
+        let regexes = [AICompletionRegex.thinkTag, AICompletionRegex.thoughtTag]
 
-        for pattern in patterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-                let range = NSRange(cleanText.startIndex..<cleanText.endIndex, in: cleanText)
-                cleanText = regex.stringByReplacingMatches(in: cleanText, options: [], range: range, withTemplate: "")
-            }
+        for regex in regexes {
+            let range = NSRange(cleanText.startIndex..<cleanText.endIndex, in: cleanText)
+            cleanText = regex.stringByReplacingMatches(in: cleanText, options: [], range: range, withTemplate: "")
         }
 
         return cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int = 128, purpose: AIRequestPurpose = .chat) async throws -> String {
+    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int? = nil, purpose: AIRequestPurpose = .chat) async throws -> String {
         isFetching = true
         defer { isFetching = false }
 
         let settings = AISettingsManager.shared
+
+        // Determine appropriate token ceiling: autocomplete only needs a few tokens
+        let effectiveMaxTokens: Int
+        if let explicitTokens = maxTokens {
+            effectiveMaxTokens = explicitTokens
+        } else if purpose == .completion {
+            effectiveMaxTokens = settings.completionMaxTokens
+        } else {
+            effectiveMaxTokens = 128
+        }
 
         // Resolve the full model context for this task (source, model, endpoint, key).
         let ctx = settings.modelContext(for: purpose.modelTask)
@@ -107,7 +196,7 @@ class AICompletionService: ObservableObject {
                     ]
                 ],
                 "generationConfig": [
-                    "maxOutputTokens": maxTokens,
+                    "maxOutputTokens": effectiveMaxTokens,
                     "temperature": 0.2
                 ]
             ]
@@ -117,7 +206,7 @@ class AICompletionService: ObservableObject {
         else if ctx.isAnthropic {
             let body: [String: Any] = [
                 "model": ctx.model,
-                "max_tokens": maxTokens,
+                "max_tokens": effectiveMaxTokens,
                 "system": systemPrompt,
                 "messages": [
                     ["role": "user", "content": prompt]
@@ -135,7 +224,7 @@ class AICompletionService: ObservableObject {
             let body: [String: Any] = [
                 "model": ctx.model,
                 "messages": messages,
-                "max_tokens": maxTokens,
+                "max_tokens": effectiveMaxTokens,
                 "temperature": 0.2, // Deterministic
                 "stream": false
             ]
@@ -239,14 +328,8 @@ class AICompletionService: ObservableObject {
     }
 
     private func extractCode(from text: String) -> String {
-        // Look for content between ``` and ```
-        let pattern = "```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-            return text
-        }
-
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        if let match = regex.firstMatch(in: text, options: [], range: nsRange),
+        if let match = AICompletionRegex.extractCode.firstMatch(in: text, options: [], range: nsRange),
            let range = Range(match.range(at: 1), in: text) {
             return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -265,202 +348,179 @@ class AICompletionService: ObservableObject {
         // --- 1. MASK CODE BLOCKS ---
         // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
         var codeBlocks: [String] = []
-        do {
-            // Matches any number of opening backticks, lazy content, and the exact same number of closing backticks.
-            let codeRegex = try NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)", options: [])
-            let matches = codeRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
-            for match in matches { codeBlocks.append(processed.substring(with: match.range)) }
-            for (i, match) in matches.enumerated().reversed() {
-                // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
-                processed.replaceCharacters(in: match.range, with: "MASKEDCODEBLOCK\(i)ENDMASK")
-            }
-        } catch { print("Code block mask regex failed: \(error)") }
+        let codeMatches = AICompletionRegex.codeBlock.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
+        for match in codeMatches { codeBlocks.append(processed.substring(with: match.range)) }
+        for (i, match) in codeMatches.enumerated().reversed() {
+            // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
+            processed.replaceCharacters(in: match.range, with: "MASKEDCODEBLOCK\(i)ENDMASK")
+        }
 
         // --- 2. MASK MATH BLOCKS ---
         // Protect real equations so we can safely escape currency dollars later
         var mathBlocks: [String] = []
-        do {
-            // Strict matching: $$...$$ | $...$ (no newlines) | \[...\] | \(...\)
-            let mathPattern = "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)"
-            let mathRegex = try NSRegularExpression(pattern: mathPattern, options: [])
-            let matches = mathRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
-            for match in matches { mathBlocks.append(processed.substring(with: match.range)) }
-            for (i, match) in matches.enumerated().reversed() {
-                // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
-                processed.replaceCharacters(in: match.range, with: "MASKEDMATHBLOCK\(i)ENDMASK")
-            }
-        } catch { print("Math block mask regex failed: \(error)") }
+        let mathMatches = AICompletionRegex.mathBlock.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
+        for match in mathMatches { mathBlocks.append(processed.substring(with: match.range)) }
+        for (i, match) in mathMatches.enumerated().reversed() {
+            // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
+            processed.replaceCharacters(in: match.range, with: "MASKEDMATHBLOCK\(i)ENDMASK")
+        }
 
-        // Helper to safely apply regex replacements so one failure doesn't crash the pipeline
-        func applyRegex(_ pattern: String, template: String) {
-            do {
-                let regex = try NSRegularExpression(pattern: pattern, options: [])
-                regex.replaceMatches(in: processed, options: [], range: NSRange(location: 0, length: processed.length), withTemplate: template)
-            } catch { print("Regex failed: \(pattern) - \(error)") }
+        // Helper to safely apply precompiled regex replacements
+        func applyRegex(_ regex: NSRegularExpression, template: String) {
+            regex.replaceMatches(in: processed, options: [], range: NSRange(location: 0, length: processed.length), withTemplate: template)
         }
 
         // 3. Autolinks (Process before HTML tags to prevent crossfire).
         // Angle-bracket autolinks to known video hosts become clickable thumbnail embeds.
-        if let autoRegex = try? NSRegularExpression(pattern: "<(https?://[^>\\s]+)>", options: []) {
-            let matches = autoRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let url = processed.substring(with: match.range(at: 1))
-                let host = url.lowercased()
-                let replacement: String
-                if host.contains("youtube.com") || host.contains("youtu.be") {
-                    replacement = Self.videoEmbed(for: url, alt: "YouTube video")
-                } else if host.contains("vimeo.com") {
-                    replacement = Self.videoEmbed(for: url, alt: "Vimeo video")
-                } else {
-                    replacement = "#link(\"\(url)\")"
-                }
-                processed.replaceCharacters(in: match.range, with: replacement)
+        let autoMatches = AICompletionRegex.autolink.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in autoMatches.reversed() {
+            let url = processed.substring(with: match.range(at: 1))
+            let host = url.lowercased()
+            let replacement: String
+            if host.contains("youtube.com") || host.contains("youtu.be") {
+                replacement = Self.videoEmbed(for: url, alt: "YouTube video")
+            } else if host.contains("vimeo.com") {
+                replacement = Self.videoEmbed(for: url, alt: "Vimeo video")
+            } else {
+                replacement = "#link(\"\(url)\")"
             }
+            processed.replaceCharacters(in: match.range, with: replacement)
         }
 
         // 3.5 Common HTML tags to Typst
-        applyRegex("(?is)\\s*<p\\s+align=[\"']([^\"']+)[\"']>\\s*(.*?)\\s*</p>\\s*", template: "\n#align($1)[\n$2\n]\n")
-        applyRegex("(?is)\\s*<p>\\s*(.*?)\\s*</p>\\s*", template: "\n$1\n")
-        applyRegex("(?is)\\s*<dt>(.*?)</dt>\\s*", template: "\n/ $1: ")
-        applyRegex("(?is)\\s*<dd>(.*?)</dd>\\s*", template: " $1\n")
-        applyRegex("(?i)\\s*</?dl>\\s*", template: "\n")
-        applyRegex("(?is)<(strong|b)>(.*?)</\\1>", template: "*$2*")
-        applyRegex("(?is)<(em|i)>(.*?)</\\1>", template: "_$2_")
-        applyRegex("(?is)<del>(.*?)</del>", template: "#strike[$1]")
-        applyRegex("(?is)<sup>(.*?)</sup>", template: "#super[$1]")
-        applyRegex("(?is)<sub>(.*?)</sub>", template: "#sub[$1]")
-        applyRegex("(?is)<u>(.*?)</u>", template: "#underline[$1]")
-        applyRegex("(?is)<mark>(.*?)</mark>", template: "#highlight[$1]")
-        applyRegex("(?i)<br\\s*/?>", template: "\\\\")
+        applyRegex(AICompletionRegex.htmlPAlign, template: "\n#align($1)[\n$2\n]\n")
+        applyRegex(AICompletionRegex.htmlP, template: "\n$1\n")
+        applyRegex(AICompletionRegex.htmlDt, template: "\n/ $1: ")
+        applyRegex(AICompletionRegex.htmlDd, template: " $1\n")
+        applyRegex(AICompletionRegex.htmlDl, template: "\n")
+        applyRegex(AICompletionRegex.htmlStrong, template: "*$2*")
+        applyRegex(AICompletionRegex.htmlEm, template: "_$2_")
+        applyRegex(AICompletionRegex.htmlDel, template: "#strike[$1]")
+        applyRegex(AICompletionRegex.htmlSup, template: "#super[$1]")
+        applyRegex(AICompletionRegex.htmlSub, template: "#sub[$1]")
+        applyRegex(AICompletionRegex.htmlU, template: "#underline[$1]")
+        applyRegex(AICompletionRegex.htmlMark, template: "#highlight[$1]")
+        applyRegex(AICompletionRegex.htmlBr, template: "\\\\")
 
         // 3.6 HTML Links and Images
-        applyRegex("(?is)<a\\s+(?:[^>]*?\\s+)?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", template: "#link(\"$1\")[$2]")
-        if let htmlImgRegex = try? NSRegularExpression(pattern: "(?i)<img\\s+([^>]+)>", options: []) {
-            let matches = htmlImgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let attributes = processed.substring(with: match.range(at: 1))
-                var src = ""
-                var alt = ""
-                var width = ""
-                var height = ""
+        applyRegex(AICompletionRegex.htmlLink, template: "#link(\"$1\")[$2]")
+        let htmlImgMatches = AICompletionRegex.htmlImg.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in htmlImgMatches.reversed() {
+            let attributes = processed.substring(with: match.range(at: 1))
+            var src = ""
+            var alt = ""
+            var width = ""
+            var height = ""
 
-                if let srcMatch = try? NSRegularExpression(pattern: "(?i)src=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
-                    src = (attributes as NSString).substring(with: srcMatch.range(at: 1))
-                }
-                if let altMatch = try? NSRegularExpression(pattern: "(?i)alt=[\"']([^\"']*)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
-                    alt = (attributes as NSString).substring(with: altMatch.range(at: 1))
-                }
-                if let widthMatch = try? NSRegularExpression(pattern: "(?i)width=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
-                    width = (attributes as NSString).substring(with: widthMatch.range(at: 1))
-                }
-                if let heightMatch = try? NSRegularExpression(pattern: "(?i)height=[\"']([^\"']+)[\"']").firstMatch(in: attributes, options: [], range: NSRange(0..<attributes.utf16.count)) {
-                    height = (attributes as NSString).substring(with: heightMatch.range(at: 1))
-                }
+            let attrRange = NSRange(0..<attributes.utf16.count)
+            if let srcMatch = AICompletionRegex.imgSrc.firstMatch(in: attributes, options: [], range: attrRange) {
+                src = (attributes as NSString).substring(with: srcMatch.range(at: 1))
+            }
+            if let altMatch = AICompletionRegex.imgAlt.firstMatch(in: attributes, options: [], range: attrRange) {
+                alt = (attributes as NSString).substring(with: altMatch.range(at: 1))
+            }
+            if let widthMatch = AICompletionRegex.imgWidth.firstMatch(in: attributes, options: [], range: attrRange) {
+                width = (attributes as NSString).substring(with: widthMatch.range(at: 1))
+            }
+            if let heightMatch = AICompletionRegex.imgHeight.firstMatch(in: attributes, options: [], range: attrRange) {
+                height = (attributes as NSString).substring(with: heightMatch.range(at: 1))
+            }
 
-                if !src.isEmpty {
-                    let formattedSrc = src.lowercased().hasPrefix("http") || src.hasPrefix("/") || src.hasPrefix("data:") ? src : "/\(src)"
-                    var params: [String] = ["\"\(formattedSrc)\""]
-                    if !alt.isEmpty { params.append("alt: \"\(alt)\"") }
+            if !src.isEmpty {
+                let formattedSrc = src.lowercased().hasPrefix("http") || src.hasPrefix("/") || src.hasPrefix("data:") ? src : "/\(src)"
+                var params: [String] = ["\"\(formattedSrc)\""]
+                if !alt.isEmpty { params.append("alt: \"\(alt)\"") }
 
-                    // HTML width and height are typically in pixels. In Typst, we can append 'pt' if they are pure numbers.
-                    if !width.isEmpty {
-                        if width.allSatisfy({ $0.isNumber }) {
-                            params.append("width: \(width)pt")
-                        } else {
-                            params.append("width: \(width)")
-                        }
-                    }
-                    if !height.isEmpty {
-                        if height.allSatisfy({ $0.isNumber }) {
-                            params.append("height: \(height)pt")
-                        } else {
-                            params.append("height: \(height)")
-                        }
-                    }
-
-                    let ext = (src as NSString).pathExtension.lowercased()
-                    let isWeb = src.lowercased().hasPrefix("http")
-                    let supportedExts = ["png", "jpg", "jpeg", "gif", "svg"]
-
-                    let replacement: String
-                    if !isWeb && !ext.isEmpty && !supportedExts.contains(ext) {
-                        // Fallback to a link if format is entirely unsupported by Typst (like .icns)
-                        let displayAlt = alt.trimmingCharacters(in: .whitespaces).isEmpty ? "Image" : alt
-                        replacement = "#link(\"\(src)\")[🖼️ \(displayAlt)]"
+                // HTML width and height are typically in pixels. In Typst, we can append 'pt' if they are pure numbers.
+                if !width.isEmpty {
+                    if width.allSatisfy({ $0.isNumber }) {
+                        params.append("width: \(width)pt")
                     } else {
-                        replacement = "#image(\(params.joined(separator: ", ")))"
+                        params.append("width: \(width)")
                     }
-                    processed.replaceCharacters(in: match.range, with: replacement)
                 }
+                if !height.isEmpty {
+                    if height.allSatisfy({ $0.isNumber }) {
+                        params.append("height: \(height)pt")
+                    } else {
+                        params.append("height: \(height)")
+                    }
+                }
+
+                let ext = (src as NSString).pathExtension.lowercased()
+                let isWeb = src.lowercased().hasPrefix("http")
+                let supportedExts = ["png", "jpg", "jpeg", "gif", "svg"]
+
+                let replacement: String
+                if !isWeb && !ext.isEmpty && !supportedExts.contains(ext) {
+                    // Fallback to a link if format is entirely unsupported by Typst (like .icns)
+                    let displayAlt = alt.trimmingCharacters(in: .whitespaces).isEmpty ? "Image" : alt
+                    replacement = "#link(\"\(src)\")[🖼️ \(displayAlt)]"
+                } else {
+                    replacement = "#image(\(params.joined(separator: ", ")))"
+                }
+                processed.replaceCharacters(in: match.range, with: replacement)
             }
         }
 
         // 4. Escape remaining HTML tags to prevent Typst label parsing crashes
         // Swallow optional preceding backslash to prevent double-escaping into an unclosed label
         // We use a negative lookahead `(?!(?:[a-z0-9_-]+)>)` to ensure we do NOT escape valid Typst labels `<label>`.
-        applyRegex("(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>", template: "\\\\<$1\\\\>")
+        applyRegex(AICompletionRegex.escapeHtmlTags, template: "\\\\<$1\\\\>")
 
         // 5. Markdown Footnotes -> Typst #footnote[]
         var footnotes: [String: String] = [:]
         // Extract reference footnote definitions: [^id]: text
         // This regex matches `[^id]:` at the start of a line, then lazily captures text until it sees
         // either the next `\n[^something]:` or the end of the string.
-        if let fnDefRegex = try? NSRegularExpression(pattern: "(?m)^\\[\\^([^\\]]+)\\]:[ \\t]*(.*?)(?=\\n\\[\\^|\n\\z|\\z)", options: [.dotMatchesLineSeparators]) {
-            let matches = fnDefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let id = processed.substring(with: match.range(at: 1))
-                let text = processed.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-                footnotes[id] = text
-                processed.replaceCharacters(in: match.range, with: "")
-            }
+        let fnDefMatches = AICompletionRegex.fnDef.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in fnDefMatches.reversed() {
+            let id = processed.substring(with: match.range(at: 1))
+            let text = processed.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+            footnotes[id] = text
+            processed.replaceCharacters(in: match.range, with: "")
         }
 
         // Replace footnote references: [^id]
-        if let fnRefRegex = try? NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]", options: []) {
-            let matches = fnRefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let id = processed.substring(with: match.range(at: 1))
-                if let text = footnotes[id] {
-                    processed.replaceCharacters(in: match.range, with: "#footnote[\(text)]")
-                } else {
-                    // Escape it if no definition found so it doesn't break Typst math
-                    processed.replaceCharacters(in: match.range, with: "\\\\[\\\\^\(id)\\\\]")
-                }
+        let fnRefMatches = AICompletionRegex.fnRef.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in fnRefMatches.reversed() {
+            let id = processed.substring(with: match.range(at: 1))
+            if let text = footnotes[id] {
+                processed.replaceCharacters(in: match.range, with: "#footnote[\(text)]")
+            } else {
+                // Escape it if no definition found so it doesn't break Typst math
+                processed.replaceCharacters(in: match.range, with: "\\\\[\\\\^\(id)\\\\]")
             }
         }
 
         // Inline footnotes: ^[text]
-        applyRegex("(?<!!)\\^\\[([^\\]]+)\\]", template: "#footnote[$1]")
+        applyRegex(AICompletionRegex.fnInline, template: "#footnote[$1]")
 
         // 6. Headings (H1 - H6) -> Typst (=)
-        if let headingRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)(#+)[ \\t]+", options: []) {
-            let headingMatches = headingRegex.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
-            for match in headingMatches.reversed() {
-                let prefix = processed.substring(with: match.range(at: 1))
-                let hashCount = match.range(at: 2).length
-                let equals = String(repeating: "=", count: hashCount)
-                processed.replaceCharacters(in: match.range, with: "\(prefix)\(equals) ")
-            }
+        let headingMatches = AICompletionRegex.heading.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
+        for match in headingMatches.reversed() {
+            let prefix = processed.substring(with: match.range(at: 1))
+            let hashCount = match.range(at: 2).length
+            let equals = String(repeating: "=", count: hashCount)
+            processed.replaceCharacters(in: match.range, with: "\(prefix)\(equals) ")
         }
 
         // 6.5 Translate literal documentation space characters (⋅ or ·) to actual spaces
-        if let dotRegex = try? NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+", options: []) {
-            while let match = dotRegex.firstMatch(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length)) {
-                let matchedString = processed.substring(with: match.range)
-                let replaced = matchedString.replacingOccurrences(of: "⋅", with: " ").replacingOccurrences(of: "·", with: " ")
-                processed.replaceCharacters(in: match.range, with: replaced)
-            }
+        while let match = AICompletionRegex.docDot.firstMatch(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length)) {
+            let matchedString = processed.substring(with: match.range)
+            let replaced = matchedString.replacingOccurrences(of: "⋅", with: " ").replacingOccurrences(of: "·", with: " ")
+            processed.replaceCharacters(in: match.range, with: replaced)
         }
 
         // 7. Task Lists -> Typst native Checkboxes
-        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[[xX]\\][ \\t]+", template: "$1- ☑ ")
-        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[ \\][ \\t]+", template: "$1- ☐ ")
+        applyRegex(AICompletionRegex.taskListChecked, template: "$1- ☑ ")
+        applyRegex(AICompletionRegex.taskListUnchecked, template: "$1- ☐ ")
 
         // 8. Unordered Lists -> Typst (-)
-        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)[*+][ \\t]+", template: "$1- ")
+        applyRegex(AICompletionRegex.unorderedList, template: "$1- ")
 
         // 9. Ordered Lists `1. ` -> Typst auto-numbering (`+ `)
-        applyRegex("(?m)^([ \\t]*(?:>[ \\t]*)?)\\d+\\.[ \\t]+", template: "$1+ ")
+        applyRegex(AICompletionRegex.orderedList, template: "$1+ ")
 
         // (Tables are converted AFTER inline formatting — see step 13.3 below — so that
         // links, bold, etc. inside cells are converted to Typst before the cell delimiters
@@ -468,125 +528,110 @@ class AICompletionService: ObservableObject {
         // Markdown link syntax.)
 
         // 10. Strikethrough -> #strike[text]
-        applyRegex("(?s)~~(.+?)~~", template: "#strike[$1]")
+        applyRegex(AICompletionRegex.strike, template: "#strike[$1]")
 
         // 10.4 Bold-Italic (Markdown *** or ___) -> Typst _*
-        applyRegex("\\*\\*\\*(.+?)\\*\\*\\*", template: "_*$1*_")
-        applyRegex("___(.+?)___", template: "_*$1*_")
+        applyRegex(AICompletionRegex.boldItalicAsterisk, template: "_*$1*_")
+        applyRegex(AICompletionRegex.boldItalicUnderscore, template: "_*$1*_")
 
         // 10.5 Fix asymmetrical bold markers
-        applyRegex("(?<!\\*)\\*\\*\\*([^*\\n]+)\\*\\*(?!\\*)", template: "**$1**")
-        applyRegex("(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)", template: "**$1**")
+        applyRegex(AICompletionRegex.boldAsymmetric1, template: "**$1**")
+        applyRegex(AICompletionRegex.boldAsymmetric2, template: "**$1**")
 
         // 10.6 Escape underscores in technical terms/filenames
         // In Hybrid mode (.note), Typst handles my_variable perfectly natively, and `_underscores_` is native italic.
         // If we escape underscores, we break valid Typst syntax.
         if !isHybrid {
-            applyRegex("(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])", template: "\\\\_")
-            applyRegex("_(?=\\\\?\\*(?!\\*))", template: "\\\\_")
+            applyRegex(AICompletionRegex.technicalUnderscore, template: "\\\\_")
+            applyRegex(AICompletionRegex.underscoreBeforeAsterisk, template: "\\\\_")
         }
 
         // 11. Bold (Markdown ** or __) -> Typst *
-        applyRegex("\\*\\*(.+?)\\*\\*", template: "*$1*")
-        applyRegex("__(.+?)__", template: "*$1*")
+        applyRegex(AICompletionRegex.boldAsterisk, template: "*$1*")
+        applyRegex(AICompletionRegex.boldUnderscore, template: "*$1*")
 
         // 12. Reference-Style Links & Images (Pass 1: Extract Definitions)
         var referenceLinks: [String: String] = [:]
-        if let refDefRegex = try? NSRegularExpression(pattern: "(?m)^[ \\t]*\\[([^\\]]+)\\]:[ \\t]+([^ \\t\\n]+)(?:[ \\t]+[\"'(].*?[\"')])?[ \\t]*$", options: []) {
-            let matches = refDefRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let id = processed.substring(with: match.range(at: 1)).lowercased()
-                let url = processed.substring(with: match.range(at: 2))
-                referenceLinks[id] = url
-                processed.replaceCharacters(in: match.range, with: "")
-            }
+        let refDefMatches = AICompletionRegex.refDef.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in refDefMatches.reversed() {
+            let id = processed.substring(with: match.range(at: 1)).lowercased()
+            let url = processed.substring(with: match.range(at: 2))
+            referenceLinks[id] = url
+            processed.replaceCharacters(in: match.range, with: "")
         }
 
         // 12.5 Reference-Style Images (Pass 2)
-        if let refImgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\[([^\\]]*)\\]", options: []) {
-            let matches = refImgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let alt = processed.substring(with: match.range(at: 1))
-                var id = processed.substring(with: match.range(at: 2)).lowercased()
-                if id.isEmpty { id = alt.lowercased() }
+        let refImgMatches = AICompletionRegex.refImg.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in refImgMatches.reversed() {
+            let alt = processed.substring(with: match.range(at: 1))
+            var id = processed.substring(with: match.range(at: 2)).lowercased()
+            if id.isEmpty { id = alt.lowercased() }
 
-                if let url = referenceLinks[id] {
-                    let formattedUrl = url.lowercased().hasPrefix("http") || url.hasPrefix("/") || url.hasPrefix("data:") ? url : "/\(url)"
-                    let replacement = "#image(\"\(formattedUrl)\", alt: \"\(alt)\")"
-                    processed.replaceCharacters(in: match.range, with: replacement)
-                }
+            if let url = referenceLinks[id] {
+                let formattedUrl = url.lowercased().hasPrefix("http") || url.hasPrefix("/") || url.hasPrefix("data:") ? url : "/\(url)"
+                let replacement = "#image(\"\(formattedUrl)\", alt: \"\(alt)\")"
+                processed.replaceCharacters(in: match.range, with: replacement)
             }
         }
 
         // 12.6 Reference-Style Links (Pass 2)
-        if let refLinkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\[([^\\]]*)\\]", options: []) {
-            let matches = refLinkRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let text = processed.substring(with: match.range(at: 1))
-                var id = processed.substring(with: match.range(at: 2)).lowercased()
-                if id.isEmpty { id = text.lowercased() }
+        let refLinkMatches = AICompletionRegex.refLink.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in refLinkMatches.reversed() {
+            let text = processed.substring(with: match.range(at: 1))
+            var id = processed.substring(with: match.range(at: 2)).lowercased()
+            if id.isEmpty { id = text.lowercased() }
 
-                if let url = referenceLinks[id] {
-                    processed.replaceCharacters(in: match.range, with: "#link(\"\(url)\")[\(text)]")
-                }
+            if let url = referenceLinks[id] {
+                processed.replaceCharacters(in: match.range, with: "#link(\"\(url)\")[\(text)]")
             }
         }
 
         // 13. Inline Images
-        if let imgRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
-            let matches = imgRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let altText = processed.substring(with: match.range(at: 1))
-                let urlText = processed.substring(with: match.range(at: 2))
+        let imgMatches = AICompletionRegex.inlineImg.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in imgMatches.reversed() {
+            let altText = processed.substring(with: match.range(at: 1))
+            let urlText = processed.substring(with: match.range(at: 2))
 
-                let formattedUrl = urlText.lowercased().hasPrefix("http") || urlText.hasPrefix("/") || urlText.hasPrefix("data:") ? urlText : "/\(urlText)"
-                let replacement = "#image(\"\(formattedUrl)\", alt: \"\(altText)\")"
-                processed.replaceCharacters(in: match.range, with: replacement)
-            }
+            let formattedUrl = urlText.lowercased().hasPrefix("http") || urlText.hasPrefix("/") || urlText.hasPrefix("data:") ? urlText : "/\(urlText)"
+            let replacement = "#image(\"\(formattedUrl)\", alt: \"\(altText)\")"
+            processed.replaceCharacters(in: match.range, with: replacement)
         }
 
         // 13.1 Inline Links (with special handling for video URLs)
         // For links pointing to known video hosts (YouTube, Vimeo, etc.), auto-embed the
         // thumbnail image as a clickable link to the video, so a single Markdown link like
         // `[Title](https://youtube.com/watch?v=...)` produces a full embed preview.
-        if let linkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: []) {
-            let matches = linkRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let linkText = processed.substring(with: match.range(at: 1))
-                let rawUrl  = processed.substring(with: match.range(at: 2))
+        let linkMatches = AICompletionRegex.inlineLink.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in linkMatches.reversed() {
+            let linkText = processed.substring(with: match.range(at: 1))
+            let rawUrl  = processed.substring(with: match.range(at: 2))
 
-                let replacement: String
-                if let ytID = Self.extractYouTubeID(from: rawUrl) {
-                    // If the link body is already an image (e.g. `[![alt](thumb)](url)` was
-                    // converted in step 13), keep that image as the clickable thumbnail and
-                    // don't try to inject a second one.
-                    if linkText.contains("#image(") {
-                        replacement = "#link(\"\(rawUrl)\")[\(linkText)]"
-                    } else {
-                        let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
-                        let alt = Self.escapeTypstString(linkText)
-                        replacement = "#link(\"\(rawUrl)\")[#image(\"\(thumb)\", alt: \"\(alt)\")]"
-                    }
-                } else {
+            let replacement: String
+            if let ytID = Self.extractYouTubeID(from: rawUrl) {
+                // If the link body is already an image (e.g. `[![alt](thumb)](url)` was
+                // converted in step 13), keep that image as the clickable thumbnail and
+                // don't try to inject a second one.
+                if linkText.contains("#image(") {
                     replacement = "#link(\"\(rawUrl)\")[\(linkText)]"
+                } else {
+                    let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
+                    let alt = Self.escapeTypstString(linkText)
+                    replacement = "#link(\"\(rawUrl)\")[#image(\"\(thumb)\", alt: \"\(alt)\")]"
                 }
-                processed.replaceCharacters(in: match.range, with: replacement)
+            } else {
+                replacement = "#link(\"\(rawUrl)\")[\(linkText)]"
             }
+            processed.replaceCharacters(in: match.range, with: replacement)
         }
 
         // 13.2 Bare video URLs on their own line become clickable thumbnail embeds too,
         // so pasting a YouTube/Vimeo URL in body text is enough to render a preview.
         // (Angle-bracket autolinks are already handled in step 3 above.)
-        if let bareRegex = try? NSRegularExpression(
-            pattern: #"(?m)^[ \t]*(https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch|embed|v|shorts|live)|youtu\.be/|vimeo\.com/)[^\s]+)[ \t]*$"#,
-            options: [.caseInsensitive]
-        ) {
-            let matches = bareRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let url = processed.substring(with: match.range(at: 1))
-                let alt = url.lowercased().contains("vimeo") ? "Vimeo video" : "YouTube video"
-                processed.replaceCharacters(in: match.range, with: Self.videoEmbed(for: url, alt: alt))
-            }
+        let bareMatches = AICompletionRegex.bareVideo.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in bareMatches.reversed() {
+            let url = processed.substring(with: match.range(at: 1))
+            let alt = url.lowercased().contains("vimeo") ? "Vimeo video" : "YouTube video"
+            processed.replaceCharacters(in: match.range, with: Self.videoEmbed(for: url, alt: alt))
         }
 
         // 13.3 Tables — converted AFTER inline formatting so cells already contain Typst
@@ -595,19 +640,19 @@ class AICompletionService: ObservableObject {
         processed.setString(convertMarkdownTablesToTypst(processed as String))
 
         // 13.5 Escape Markdown abbreviation definitions
-        applyRegex("(?m)^\\*\\[([^\\]]+)\\]:", template: "\\\\*[$1]:")
+        applyRegex(AICompletionRegex.markdownAbbr, template: "\\\\*[$1]:")
 
         // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
-        applyRegex("(?m)^[-*_]{3,}[ \\t]*$", template: "#line(length: 100%)")
+        applyRegex(AICompletionRegex.horizontalRule, template: "#line(length: 100%)")
 
         // 14b. Common HTML Entities
-        applyRegex("(?i)&rarr;", template: "->")
-        applyRegex("(?i)&larr;", template: "<-")
+        applyRegex(AICompletionRegex.entityRarr, template: "->")
+        applyRegex(AICompletionRegex.entityLarr, template: "<-")
 
         // 14e. Escape Stray Backticks (Always)
         // A stray backtick ALWAYS crashes Typst as an unclosed raw block.
         // Valid code blocks are already masked, so any remaining backticks are stray.
-        applyRegex("(?<!\\\\)`", template: "\\\\`")
+        applyRegex(AICompletionRegex.strayBacktick, template: "\\\\`")
 
         // In pure Markdown mode (e.g. AI completions or .md files), we escape Typst's special characters
         // so they render as literal text. In hybrid mode (.note), we apply smart escaping to prevent
@@ -615,24 +660,24 @@ class AICompletionService: ObservableObject {
         // leaving native Typst functions (e.g. #title, $math$, @ref) alone.
         if !isHybrid {
             // 14. Escape Literal Dollars (Currency)
-            applyRegex("(?<!\\\\)\\$", template: "\\\\$")
+            applyRegex(AICompletionRegex.literalDollar, template: "\\\\$")
 
             // 14c. Escape Literal Hash
-            applyRegex("(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[)", template: "\\\\#")
+            applyRegex(AICompletionRegex.literalHash, template: "\\\\#")
 
             // 14g. Escape Literal At-Signs (@)
-            applyRegex("(?<!\\\\)@", template: "\\\\@")
+            applyRegex(AICompletionRegex.literalAt, template: "\\\\@")
         } else {
             // HYBRID MODE SMART ESCAPING
             // Escape dollars if followed by a digit (e.g. $1600) to prevent unclosed math block errors,
             // but leave other dollars alone so Typst math ($E=mc^2$) still works.
-            applyRegex("(?<!\\\\)\\$(?=\\d)", template: "\\\\$")
+            applyRegex(AICompletionRegex.hybridDollarDigit, template: "\\\\$")
 
             // Escape @ if it's preceded by a letter/number (e.g. email addresses like user@email.com)
             // or followed by a space. Typst references (like @fig1) usually have a space before them and letters after.
             // The `(?<!\\)` guards keep this idempotent with `TypstCompiler.delimitImproperOperators`,
             // which already backslash-escapes these same cases (and warns the user) for `.note` files.
-            applyRegex("(?<!\\\\)(?<=[a-zA-Z0-9])@|(?<!\\\\)@(?=\\s)", template: "\\\\@")
+            applyRegex(AICompletionRegex.hybridAt, template: "\\\\@")
 
             // Smart `#` escaping: in `.note` files we leave most `#`-prefixed Typst alone
             // (so `#let`, `#score(...)`, `#emph[...]` all work). But pasted Markdown often
@@ -641,20 +686,18 @@ class AICompletionService: ObservableObject {
             // so escape the `#` to render it as literal text instead of erroring on an
             // unknown variable. Real Typst continuations (`#word(`, `#word[`, `#word.`)
             // are explicitly preserved by the negative lookahead.
-            applyRegex("(?<!\\\\)#(?!import\\b|include\\b|let\\b|set\\b|show\\b|return\\b|if\\b|else\\b|for\\b|while\\b|context\\b)([A-Za-z][A-Za-z0-9_]*)(?=[,!?;:]|\\.\\s|\\.$)", template: "\\\\#$1")
+            applyRegex(AICompletionRegex.hybridHash, template: "\\\\#$1")
         }
 
         // 14f. Un-escape characters inside Typst string parameters
-        if let stringRegex = try? NSRegularExpression(pattern: "\"[^\"]*\"", options: []) {
-            let matches = stringRegex.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let matchedString = processed.substring(with: match.range)
-                let unescaped = matchedString.replacingOccurrences(of: "\\_", with: "_")
-                                             .replacingOccurrences(of: "\\*", with: "*")
-                                             .replacingOccurrences(of: "\\#", with: "#")
-                                             .replacingOccurrences(of: "\\`", with: "`")
-                processed.replaceCharacters(in: match.range, with: unescaped)
-            }
+        let strMatches = AICompletionRegex.stringLiteral.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
+        for match in strMatches.reversed() {
+            let matchedString = processed.substring(with: match.range)
+            let unescaped = matchedString.replacingOccurrences(of: "\\_", with: "_")
+                                         .replacingOccurrences(of: "\\*", with: "*")
+                                         .replacingOccurrences(of: "\\#", with: "#")
+                                         .replacingOccurrences(of: "\\`", with: "`")
+            processed.replaceCharacters(in: match.range, with: unescaped)
         }
 
         var resultString = processed as String
@@ -687,10 +730,7 @@ class AICompletionService: ObservableObject {
     nonisolated private func convertMarkdownTablesToTypst(_ text: String) -> String {
         // Matches a table block including potential hard-wrapped lines (matches until a blank line).
         // Supports tables both with and without outer pipes.
-        let pattern = "(?m)^[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(?:\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*\\n(?:[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n?)*"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
-
-        let matches = regex.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
+        let matches = AICompletionRegex.markdownTable.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
         let processed = NSMutableString(string: text)
 
         for match in matches.reversed() {
@@ -854,20 +894,16 @@ class AICompletionService: ObservableObject {
     nonisolated static func extractYouTubeID(from url: String) -> String? {
         // Normalise HTML entities so `&amp;v=` works the same as `&v=`.
         let cleaned = url.replacingOccurrences(of: "&amp;", with: "&")
-        let pattern = #"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
         let nsText = cleaned as NSString
-        guard let match = regex.firstMatch(in: cleaned, options: [], range: NSRange(0..<nsText.length)) else { return nil }
+        guard let match = AICompletionRegex.youtubeID.firstMatch(in: cleaned, options: [], range: NSRange(0..<nsText.length)) else { return nil }
         return nsText.substring(with: match.range(at: 1))
     }
 
     /// Extracts the numeric video ID from a Vimeo URL (`vimeo.com/123456`,
     /// `player.vimeo.com/video/123456`). Returns nil otherwise.
     nonisolated static func extractVimeoID(from url: String) -> String? {
-        let pattern = #"(?:player\.)?vimeo\.com/(?:video/)?(\d{6,})"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
         let nsText = url as NSString
-        guard let match = regex.firstMatch(in: url, options: [], range: NSRange(0..<nsText.length)) else { return nil }
+        guard let match = AICompletionRegex.vimeoID.firstMatch(in: url, options: [], range: NSRange(0..<nsText.length)) else { return nil }
         return nsText.substring(with: match.range(at: 1))
     }
 

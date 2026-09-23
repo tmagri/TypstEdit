@@ -1,5 +1,9 @@
 import Foundation
 
+enum ContextRegex {
+    static let label = try! NSRegularExpression(pattern: "<[a-zA-Z0-9_-]+>")
+}
+
 @MainActor
 class AIContextManager {
     static let shared = AIContextManager()
@@ -46,6 +50,100 @@ class AIContextManager {
         return context
     }
     
+    /// Generates a fast, scoped prompt specifically for inline autocomplete.
+    /// Does not perform workspace semantic searches (RAG) to ensure sub-millisecond prep.
+    func generateCompletionContext(
+        text: String,
+        cursorIndex: Int,
+        scope: AISettingsManager.CompletionContextScope
+    ) -> String {
+        let safeIndex = min(max(0, cursorIndex), text.count)
+        let cursorIdx = text.index(text.startIndex, offsetBy: safeIndex)
+        
+        let prefix: String
+        let suffix: String
+        
+        switch scope {
+        case .currentLine:
+            // Find start of current line
+            var lineStart = cursorIdx
+            while lineStart > text.startIndex {
+                let prev = text.index(before: lineStart)
+                if text[prev] == "\n" || text[prev] == "\r" {
+                    break
+                }
+                lineStart = prev
+            }
+            // Find end of current line
+            var lineEnd = cursorIdx
+            while lineEnd < text.endIndex {
+                if text[lineEnd] == "\n" || text[lineEnd] == "\r" {
+                    break
+                }
+                lineEnd = text.index(after: lineEnd)
+            }
+            
+            var linePrefix = String(text[lineStart..<cursorIdx])
+            var lineSuffix = String(text[cursorIdx..<lineEnd])
+            
+            // If the line is an unusually long paragraph, focus on the sentence / last ~300 chars
+            if linePrefix.count > 300 {
+                linePrefix = String(linePrefix.suffix(300))
+            }
+            if lineSuffix.count > 150 {
+                lineSuffix = String(lineSuffix.prefix(150))
+            }
+            
+            prefix = linePrefix
+            suffix = lineSuffix
+            
+        case .surroundingLines:
+            // Window of up to 5 lines before
+            var windowStart = cursorIdx
+            var linesBefore = 0
+            while windowStart > text.startIndex && linesBefore < 5 {
+                let prev = text.index(before: windowStart)
+                if text[prev] == "\n" {
+                    linesBefore += 1
+                }
+                windowStart = prev
+            }
+            if linesBefore == 5 && windowStart < cursorIdx && text[windowStart] == "\n" {
+                windowStart = text.index(after: windowStart)
+            }
+            
+            // Window of up to 5 lines after
+            var windowEnd = cursorIdx
+            var linesAfter = 0
+            while windowEnd < text.endIndex && linesAfter < 5 {
+                if text[windowEnd] == "\n" {
+                    linesAfter += 1
+                }
+                windowEnd = text.index(after: windowEnd)
+            }
+            
+            prefix = String(text[windowStart..<cursorIdx])
+            suffix = String(text[cursorIdx..<windowEnd])
+            
+        case .fullDocument:
+            prefix = String(text[..<cursorIdx])
+            suffix = String(text[cursorIdx...])
+        }
+        
+        if suffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return """
+            Continue the following Typst code immediately after the text. Output ONLY the continuation characters or words to insert at the end. Do not repeat the prefix, do not include markdown fences, and do not provide explanations:
+            \(prefix)
+            """
+        } else {
+            return """
+            Complete the Typst code between Prefix and Suffix. Output ONLY the code to insert between them without repeating prefix or suffix:
+            Prefix: \(prefix)
+            Suffix: \(suffix)
+            """
+        }
+    }
+    
     /// Scans for headings and labels in the text
     private func scanSymbols(in text: String) -> [String] {
         var symbols: [String] = []
@@ -58,7 +156,8 @@ class AIContextManager {
                 symbols.append("Heading: \(trimmed)")
             }
             // Labels: <mylabel>
-            if let labelRange = trimmed.range(of: "<[a-zA-Z0-9_-]+>", options: .regularExpression) {
+            if let match = ContextRegex.label.firstMatch(in: trimmed, options: [], range: NSRange(0..<trimmed.utf16.count)),
+               let labelRange = Range(match.range, in: trimmed) {
                 symbols.append("Label: \(trimmed[labelRange])")
             }
             // Variables/Functions: #let x = ...

@@ -100,6 +100,27 @@ public final class SuggestionController: NSWindowController {
         }
     }
 
+    public func showCompletions(
+        items: [any CodeSuggestionEntry],
+        textView: TextViewController,
+        cursorPosition: CursorPosition
+    ) {
+        guard let parentWindow = textView.view.window,
+              let resolvedPos = textView.resolveCursorPosition(cursorPosition),
+              let cursorRect = textView.textView.layoutManager.rectForOffset(resolvedPos.range.location),
+              let screenRect = textView.view.window?.convertToScreen(textView.textView.convert(cursorRect, to: nil))
+        else { return }
+        
+        self.model.items = items
+        self.model.activeTextView = textView
+        self.showWindow(attachedTo: parentWindow)
+        self.constrainWindowToScreenEdges(cursorRect: screenRect, font: textView.font)
+        if let controller = self.contentViewController as? SuggestionViewController {
+            controller.styleView(using: textView)
+            controller.tableView.reloadData()
+        }
+    }
+
     /// Opens the window as a child of another window.
     public func showWindow(attachedTo parentWindow: NSWindow) {
         guard let window = window else { return }

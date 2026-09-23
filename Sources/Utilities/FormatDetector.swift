@@ -1,14 +1,38 @@
 import Foundation
 
+enum FormatRegex {
+    static let mdBold = try! NSRegularExpression(pattern: #"(?s)\*\*(.*?)\*\*|__(.*?)__"#)
+    static let typstBold = try! NSRegularExpression(pattern: #"(?s)(?<!\*)\*(?!\s|\*)(.*?)(?<!\s|\*)\*(?!\*)"#)
+    static let typstItalic = try! NSRegularExpression(pattern: #"(?s)(?<![a-zA-Z0-9_])_(?!\s|_)(.*?)(?<!\s|_)_(?![a-zA-Z0-9_])"#)
+    static let mdItalic = try! NSRegularExpression(pattern: #"(?s)(?<!\*)\*(?!\s|\*)(.*?)(?<!\s|\*)\*(?!\*)"#)
+    static let underlineTypst = try! NSRegularExpression(pattern: #"#underline(?:\s*\([^)]*\))?\s*[\[(]"#)
+    static let highlightTypst = try! NSRegularExpression(pattern: #"#highlight(?:\s*\([^)]*\))?\s*[\[(]"#)
+    static let highlightEqual = try! NSRegularExpression(pattern: #"(?s)==(.*?)=="#)
+    static let textColor = try! NSRegularExpression(pattern: #"#text\s*\(\s*fill\s*:\s*(?:[a-zA-Z0-9]+|rgb\([^)]+\))\s*\)\s*[\[(]"#)
+    static let strikeTypst = try! NSRegularExpression(pattern: #"#strike(?:\s*\([^)]*\))?\s*[\[(]"#)
+    static let strikeTilde = try! NSRegularExpression(pattern: #"(?s)~~(.*?)~~"#)
+    static let subscriptTypst = try! NSRegularExpression(pattern: #"#sub(?:\s*\([^)]*\))?\s*[\[(]"#)
+    static let superscriptTypst = try! NSRegularExpression(pattern: #"#super(?:\s*\([^)]*\))?\s*[\[(]"#)
+    static let footnoteTypst = try! NSRegularExpression(pattern: #"#footnote(?:\s*\([^)]*\))?\s*[\[(]"#)
+    static let tag = try! NSRegularExpression(pattern: #"(?<!\\)<([a-zA-Z0-9_-]+)>"#)
+    static let titleTypst = try! NSRegularExpression(pattern: #"#title(?:\s*\([^)]*\))?\s*[\[(]"#)
+    static let footnoteNumbering = try! NSRegularExpression(pattern: #"numbering:\s*"([^"]*)""#)
+    static let quoteAttrQuote = try! NSRegularExpression(pattern: "attribution:\\s*\"([^\"]*)\"")
+    static let quoteAttrBracket = try! NSRegularExpression(pattern: "attribution:\\s*\\[(.*?)\\]")
+    static let figureCaption = try! NSRegularExpression(pattern: #"caption:\s*(?:\[(.*?)\]|"(.*?)")"#, options: [.dotMatchesLineSeparators])
+    static let figureKind = try! NSRegularExpression(pattern: #"kind:\s*"([^"]*)""#)
+    static let figureSupplement = try! NSRegularExpression(pattern: #"supplement:\s*(?:\[(.*?)\]|"(.*?)")"#, options: [.dotMatchesLineSeparators])
+    static let figureLabel = try! NSRegularExpression(pattern: #"<([^>]+)>"#)
+}
+
 struct FormatDetector {
    /// Finds the range of bold text surrounding the index.
     static func findBoldRange(in text: String, at index: Int, isMarkdown: Bool) -> NSRange? {
         if isMarkdown {
-            if let mdRange = findRegexRange(in: text, at: index, pattern: #"(?s)\*\*(.*?)\*\*|__(.*?)__"#) { return mdRange }
+            if let mdRange = findRegexRange(in: text, at: index, regex: FormatRegex.mdBold) { return mdRange }
         } else {
             // Typst Bold: *text*
-            let typstPattern = #"(?s)(?<!\*)\*(?!\s|\*)(.*?)(?<!\s|\*)\*(?!\*)"#
-            if let typstRange = findRegexRange(in: text, at: index, pattern: typstPattern) { return typstRange }
+            if let typstRange = findRegexRange(in: text, at: index, regex: FormatRegex.typstBold) { return typstRange }
             return findSymmetricRange(in: text, at: index, marker: "*")
         }
         return nil
@@ -18,15 +42,13 @@ struct FormatDetector {
     static func findItalicRange(in text: String, at index: Int, isMarkdown: Bool) -> NSRange? {
         // Typst & Markdown Shared Italic: _text_
         // - (?<![a-zA-Z0-9_]) and (?![a-zA-Z0-9_]) ignore snake_case_variables and double underscores.
-        let typstPattern = #"(?s)(?<![a-zA-Z0-9_])_(?!\s|_)(.*?)(?<!\s|_)_(?![a-zA-Z0-9_])"#
-        if let typstRange = findRegexRange(in: text, at: index, pattern: typstPattern) {
+        if let typstRange = findRegexRange(in: text, at: index, regex: FormatRegex.typstItalic) {
             return typstRange
         }
         
         // Markdown Exclusive Italic: *text* // (Only activated if the document is strictly a Markdown file)
         if isMarkdown {
-            let mdPattern = #"(?s)(?<!\*)\*(?!\s|\*)(.*?)(?<!\s|\*)\*(?!\*)"#
-            if let mdRange = findRegexRange(in: text, at: index, pattern: mdPattern) {
+            if let mdRange = findRegexRange(in: text, at: index, regex: FormatRegex.mdItalic) {
                 return mdRange
             }
         }
@@ -36,57 +58,57 @@ struct FormatDetector {
     
     /// Finds the range of underline (#underline[...] or <u>...</u>) surrounding the index.
     static func findUnderlineRange(in text: String, at index: Int) -> NSRange? {
-        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#underline(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        if let typst = findBracketedRange(in: text, at: index, regex: FormatRegex.underlineTypst) { return typst }
         return findHTMLTagRange(in: text, at: index, tag: "u")
     }
     
     /// Finds the range of highlight (#highlight[...] or <mark>...</mark> or ==...==) surrounding the index.
     static func findHighlightRange(in text: String, at index: Int) -> NSRange? {
-        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#highlight(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        if let typst = findBracketedRange(in: text, at: index, regex: FormatRegex.highlightTypst) { return typst }
         if let mark = findHTMLTagRange(in: text, at: index, tag: "mark") { return mark }
-        return findRegexRange(in: text, at: index, pattern: #"(?s)==(.*?)=="#)
+        return findRegexRange(in: text, at: index, regex: FormatRegex.highlightEqual)
     }
     
     /// Finds the range of a text color block (#text(fill: ...)[...]) surrounding the index.
     static func findTextColorRange(in text: String, at index: Int) -> NSRange? {
         // Matches standard colors like "red" or hex colors like "rgb(\"#ff0000\")"
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#text\s*\(\s*fill\s*:\s*(?:[a-zA-Z0-9]+|rgb\([^)]+\))\s*\)\s*[\[(]"#)
+        return findBracketedRange(in: text, at: index, regex: FormatRegex.textColor)
     }
     
     /// Finds the range of strikethrough (#strike[...] or ~~...~~) surrounding the index.
     static func findStrikeRange(in text: String, at index: Int) -> NSRange? {
-        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#strike(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
-        return findRegexRange(in: text, at: index, pattern: #"(?s)~~(.*?)~~"#)
+        if let typst = findBracketedRange(in: text, at: index, regex: FormatRegex.strikeTypst) { return typst }
+        return findRegexRange(in: text, at: index, regex: FormatRegex.strikeTilde)
     }
 
     /// Finds the range of subscript (#sub[...] or <sub>...</sub>) surrounding the index.
     static func findSubscriptRange(in text: String, at index: Int) -> NSRange? {
-        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#sub(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        if let typst = findBracketedRange(in: text, at: index, regex: FormatRegex.subscriptTypst) { return typst }
         return findHTMLTagRange(in: text, at: index, tag: "sub")
     }
 
     /// Finds the range of superscript (#sup[...] or <sup>...</sup>) surrounding the index.
     static func findSuperscriptRange(in text: String, at index: Int) -> NSRange? {
-        if let typst = findBracketedRange(in: text, at: index, prefixPattern: #"#super(?:\s*\([^)]*\))?\s*[\[(]"#) { return typst }
+        if let typst = findBracketedRange(in: text, at: index, regex: FormatRegex.superscriptTypst) { return typst }
         return findHTMLTagRange(in: text, at: index, tag: "sup")
     }
 
     /// Finds the range of a footnote surrounding the index.
     static func findFootnoteRange(in text: String, at index: Int) -> NSRange? {
         // Find `#footnote[...`
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#footnote(?:\s*\([^)]*\))?\s*[\[(]"#)
+        return findBracketedRange(in: text, at: index, regex: FormatRegex.footnoteTypst)
     }
     
     /// Finds the range of a tag/label (`<label>`) surrounding the index.
     static func findTagRange(in text: String, at index: Int) -> NSRange? {
         // Tag label cannot have spaces: letters, numbers, dash, underscore
         // Negative lookbehind `(?<!\\)` prevents matching escaped tags `\<tag>`
-        return findRegexRange(in: text, at: index, pattern: #"(?<!\\)<([a-zA-Z0-9_-]+)>"#)
+        return findRegexRange(in: text, at: index, regex: FormatRegex.tag)
     }
 
     /// Finds the range of title (#title[...]) surrounding the index.
     static func findTitleRange(in text: String, at index: Int) -> NSRange? {
-        return findBracketedRange(in: text, at: index, prefixPattern: #"#title(?:\s*\([^)]*\))?\s*[\[(]"#)
+        return findBracketedRange(in: text, at: index, regex: FormatRegex.titleTypst)
     }
     
     private static func getSearchRange(around index: Int, in length: Int, windowSize: Int = 5000) -> NSRange {
@@ -110,11 +132,10 @@ struct FormatDetector {
         return regex
     }
 
-    private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
+    private static func findBracketedRange(in text: String, at index: Int, regex: NSRegularExpression) -> NSRange? {
         let nsText = text as NSString
         let length = nsText.length
         let safeIndex = max(0, min(index, length))
-        guard let regex = cachedRegex(prefixPattern) else { return nil }
         
         let searchRange = getSearchRange(around: safeIndex, in: length, windowSize: 5000)
         let matches = regex.matches(in: text, options: [], range: searchRange)
@@ -134,6 +155,11 @@ struct FormatDetector {
             }
         }
         return nil
+    }
+
+    private static func findBracketedRange(in text: String, at index: Int, prefixPattern: String) -> NSRange? {
+        guard let regex = cachedRegex(prefixPattern) else { return nil }
+        return findBracketedRange(in: text, at: index, regex: regex)
     }
     
     /// Detects the heading level (0-6) of the line at the given index.
@@ -448,11 +474,11 @@ struct FormatDetector {
         // Extract numbering: "..." from ()
         if let parenStart = snippet.firstIndex(of: "("), let parenEnd = snippet.firstIndex(of: ")") {
             let params = String(snippet[snippet.index(after: parenStart)..<parenEnd])
-            let numberingPattern = #"numbering:\s*"([^"]*)""#
-            if let numberingMatch = params.range(of: numberingPattern, options: .regularExpression) {
-                let match = params[numberingMatch]
-                if let firstQuote = match.firstIndex(of: "\""), let lastQuote = match.lastIndex(of: "\"") {
-                    numbering = String(match[match.index(after: firstQuote)..<lastQuote])
+            if let match = FormatRegex.footnoteNumbering.firstMatch(in: params, options: [], range: NSRange(0..<params.utf16.count)),
+               let numberingMatch = Range(match.range, in: params) {
+                let m = params[numberingMatch]
+                if let firstQuote = m.firstIndex(of: "\""), let lastQuote = m.lastIndex(of: "\"") {
+                    numbering = String(m[m.index(after: firstQuote)..<lastQuote])
                 }
             }
         }
@@ -486,20 +512,17 @@ struct FormatDetector {
             let params = String(quoteStr[quoteStr.index(after: parenStart)..<parenEnd])
             
             // Attribution: "..."
-            let attrQuotePattern = "attribution:\\s*\"([^\"]*)\""
-            if let attrRange = params.range(of: attrQuotePattern, options: .regularExpression) {
-                let match = params[attrRange]
-                if let firstQuote = match.firstIndex(of: "\""), let lastQuote = match.lastIndex(of: "\"") {
-                    attribution = String(match[match.index(after: firstQuote)..<lastQuote])
+            if let match = FormatRegex.quoteAttrQuote.firstMatch(in: params, options: [], range: NSRange(0..<params.utf16.count)),
+               let attrRange = Range(match.range, in: params) {
+                let m = params[attrRange]
+                if let firstQuote = m.firstIndex(of: "\""), let lastQuote = m.lastIndex(of: "\"") {
+                    attribution = String(m[m.index(after: firstQuote)..<lastQuote])
                 }
-            } else {
-                // Attribution: [...]
-                let attrBracketPattern = "attribution:\\s*\\[(.*?)\\]"
-                if let attrRange = params.range(of: attrBracketPattern, options: .regularExpression) {
-                    let match = params[attrRange]
-                    if let firstBracket = match.firstIndex(of: "["), let lastBracket = match.lastIndex(of: "]") {
-                        attribution = String(match[match.index(after: firstBracket)..<lastBracket])
-                    }
+            } else if let match = FormatRegex.quoteAttrBracket.firstMatch(in: params, options: [], range: NSRange(0..<params.utf16.count)),
+                      let attrRange = Range(match.range, in: params) {
+                let m = params[attrRange]
+                if let firstBracket = m.firstIndex(of: "["), let lastBracket = m.lastIndex(of: "]") {
+                    attribution = String(m[m.index(after: firstBracket)..<lastBracket])
                 }
             }
             
@@ -563,42 +586,31 @@ struct FormatDetector {
         // Extract metadata from () params
         if let parenStart = snippet.firstIndex(of: "("), let parenEnd = snippet.lastIndex(of: ")") {
             let params = String(snippet[snippet.index(after: parenStart)..<parenEnd])
+            let paramsUtf16Count = params.utf16.count
             
             // Caption: [...] or "..."
-            let captionPattern = #"caption:\s*(?:\[(.*?)\]|"(.*?)")"#
-            if let regex = try? NSRegularExpression(pattern: captionPattern, options: [.dotMatchesLineSeparators]) {
-                if let match = regex.firstMatch(in: params, options: [], range: NSRange(location: 0, length: params.count)) {
-                    if let r1 = Range(match.range(at: 1), in: params) { caption = String(params[r1]) }
-                    else if let r2 = Range(match.range(at: 2), in: params) { caption = String(params[r2]) }
-                }
+            if let match = FormatRegex.figureCaption.firstMatch(in: params, options: [], range: NSRange(location: 0, length: paramsUtf16Count)) {
+                if let r1 = Range(match.range(at: 1), in: params) { caption = String(params[r1]) }
+                else if let r2 = Range(match.range(at: 2), in: params) { caption = String(params[r2]) }
             }
             
             // Kind: "..."
-            let kindPattern = #"kind:\s*"([^"]*)""#
-            if let regex = try? NSRegularExpression(pattern: kindPattern, options: []) {
-                if let match = regex.firstMatch(in: params, options: [], range: NSRange(location: 0, length: params.count)) {
-                    if let r = Range(match.range(at: 1), in: params) { kind = String(params[r]) }
-                }
+            if let match = FormatRegex.figureKind.firstMatch(in: params, options: [], range: NSRange(location: 0, length: paramsUtf16Count)) {
+                if let r = Range(match.range(at: 1), in: params) { kind = String(params[r]) }
             }
             
             // Supplement: [...] or "..."
-            let supplementPattern = #"supplement:\s*(?:\[(.*?)\]|"(.*?)")"#
-            if let regex = try? NSRegularExpression(pattern: supplementPattern, options: [.dotMatchesLineSeparators]) {
-                if let match = regex.firstMatch(in: params, options: [], range: NSRange(location: 0, length: params.count)) {
-                    if let r1 = Range(match.range(at: 1), in: params) { supplement = String(params[r1]) }
-                    else if let r2 = Range(match.range(at: 2), in: params) { supplement = String(params[r2]) }
-                }
+            if let match = FormatRegex.figureSupplement.firstMatch(in: params, options: [], range: NSRange(location: 0, length: paramsUtf16Count)) {
+                if let r1 = Range(match.range(at: 1), in: params) { supplement = String(params[r1]) }
+                else if let r2 = Range(match.range(at: 2), in: params) { supplement = String(params[r2]) }
             }
         }
         
         // Extract label: either label: <tag> inside or <tag> outside
-        let labelPattern = #"<([^>]+)>"#
-        if let regex = try? NSRegularExpression(pattern: labelPattern, options: []) {
-            let matches = regex.matches(in: snippet, options: [], range: NSRange(location: 0, length: snippet.count))
-            if let lastMatch = matches.last {
-                if let r = Range(lastMatch.range(at: 1), in: snippet) {
-                    label = String(snippet[r])
-                }
+        let matches = FormatRegex.figureLabel.matches(in: snippet, options: [], range: NSRange(location: 0, length: snippet.utf16.count))
+        if let lastMatch = matches.last {
+            if let r = Range(lastMatch.range(at: 1), in: snippet) {
+                label = String(snippet[r])
             }
         }
         
@@ -771,11 +783,9 @@ struct FormatDetector {
         return results
     }
 
-    private static func findRegexRange(in text: String, at index: Int, pattern: String, windowSize: Int = 2000) -> NSRange? {
+    private static func findRegexRange(in text: String, at index: Int, regex: NSRegularExpression, windowSize: Int = 2000) -> NSRange? {
         let nsText = text as NSString
         let safeIndex = max(0, min(index, nsText.length))
-        guard let regex = cachedRegex(pattern) else { return nil }
-        
         let searchRange = getSearchRange(around: safeIndex, in: nsText.length, windowSize: windowSize)
         let matches = regex.matches(in: text, options: [], range: searchRange)
         for match in matches {
@@ -785,6 +795,11 @@ struct FormatDetector {
             }
         }
         return nil
+    }
+
+    private static func findRegexRange(in text: String, at index: Int, pattern: String, windowSize: Int = 2000) -> NSRange? {
+        guard let regex = cachedRegex(pattern) else { return nil }
+        return findRegexRange(in: text, at: index, regex: regex, windowSize: windowSize)
     }
     
     static func findHTMLTagRange(in text: String, at index: Int, tag: String) -> NSRange? {

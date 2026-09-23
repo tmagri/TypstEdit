@@ -100,21 +100,11 @@ class OfflineCompletionService {
             }
         }
 
-        // Typst Functions (normally triggered by #, but a manual trigger also
-        // completes a bare word and offers the full list on an empty prefix).
+        // Typst Functions: ONLY appear when '#' has been entered!
+        // We do NOT suggest # functions on bare text or empty prefixes.
         if prefix.starts(with: "#") {
             let term = String(prefix.dropFirst()).lowercased()
             suggestions.append(contentsOf: functionCompletions(matching: term, includeMarker: true))
-        } else if manualTrigger {
-            if prefix.isEmpty {
-                // Explicit invocation with nothing typed: offer everything.
-                suggestions.append(contentsOf: functionCompletions(matching: "", includeMarker: true))
-            } else {
-                let matches = typstFunctions.filter { $0.hasPrefix(prefix.lowercased()) }
-                if !matches.isEmpty {
-                    suggestions.append(contentsOf: matches.map { "#" + $0 })
-                }
-            }
         }
 
         if suggestions.isEmpty && prefix.isEmpty { return [] }

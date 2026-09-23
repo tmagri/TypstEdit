@@ -9,6 +9,28 @@ import Foundation
 // For .md / .note files the content is already Markdown and this converter is a
 // near-passthrough (it just strips any stray Typst-only syntax).
 
+enum TypstToMarkdownRegex {
+    static let numberedList = try! NSRegularExpression(pattern: "^[0-9]+\\. ")
+    static let displayMath = try! NSRegularExpression(pattern: #"\$\s+([^$]+?)\s+\$"#)
+    static let inlineMath = try! NSRegularExpression(pattern: #"\$([^$\n]+?)\$"#)
+    static let bold = try! NSRegularExpression(pattern: #"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)"#)
+    static let underline = try! NSRegularExpression(pattern: #"#underline\[([^\]]*)\]"#)
+    static let strike = try! NSRegularExpression(pattern: #"#strike\[([^\]]*)\]"#)
+    static let highlight = try! NSRegularExpression(pattern: #"#highlight\[([^\]]*)\]"#)
+    static let superscript = try! NSRegularExpression(pattern: #"#super\[([^\]]*)\]"#)
+    static let `subscript` = try! NSRegularExpression(pattern: #"#sub\[([^\]]*)\]"#)
+    static let linkWithText = try! NSRegularExpression(pattern: #"#link\("([^"]+)"\)\[([^\]]*)\]"#)
+    static let linkBare = try! NSRegularExpression(pattern: #"#link\("([^"]+)"\)"#)
+    static let labelRef = try! NSRegularExpression(pattern: #"@([A-Za-z0-9_:.-]+)"#)
+    static let footnote = try! NSRegularExpression(pattern: #"#footnote\[([^\]]*)\]"#)
+    static let vSpace = try! NSRegularExpression(pattern: #"#v\([^)]*\)"#)
+    static let customFuncArgsBody = try! NSRegularExpression(pattern: #"#[A-Za-z0-9_.-]+\([^)]*\)\[([^\]]*)\]"#)
+    static let customFuncBody = try! NSRegularExpression(pattern: #"#[A-Za-z0-9_.-]+\[([^\]]*)\]"#)
+    static let customFuncArgsOnly = try! NSRegularExpression(pattern: #"#[A-Za-z0-9_.-]+\([^)]*\)"#)
+    static let nonBreakingSpace = try! NSRegularExpression(pattern: #"(\w)~(\w)"#)
+    static let consecutiveNewlines = try! NSRegularExpression(pattern: "\n\n\n+")
+}
+
 struct TypstToMarkdownConverter {
 
     // MARK: - Public entry point
@@ -168,7 +190,7 @@ struct TypstToMarkdownConverter {
             }
 
             // --- Numbered list: 1. item (already Markdown-compatible) ---
-            if let _ = trimmed.range(of: "^[0-9]+\\. ", options: .regularExpression) {
+            if TypstToMarkdownRegex.numberedList.firstMatch(in: trimmed, options: [], range: NSRange(0..<trimmed.utf16.count)) != nil {
                 output.append(convertInline(trimmed))
                 i += 1
                 continue
@@ -245,8 +267,13 @@ struct TypstToMarkdownConverter {
             i += 1
         }
 
-        return output.joined(separator: "\n")
-            .replacingOccurrences(of: "\n\n\n+", with: "\n\n", options: .regularExpression)
+        let rawResult = output.joined(separator: "\n")
+        return TypstToMarkdownRegex.consecutiveNewlines.stringByReplacingMatches(
+            in: rawResult,
+            options: [],
+            range: NSRange(0..<rawResult.utf16.count),
+            withTemplate: "\n\n"
+        )
     }
 
     // MARK: - Inline transforms
@@ -261,56 +288,56 @@ struct TypstToMarkdownConverter {
         }
 
         // Display math on a single line:  $ ... $
-        s = replacePattern(s, pattern: #"\$\s+([^$]+?)\s+\$"#) { m in "$$\(m[1])$$" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.displayMath) { m in "$$\(m[1])$$" }
 
         // Inline math: $expr$
-        s = replacePattern(s, pattern: #"\$([^$\n]+?)\$"#) { m in "$\(m[1])$" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.inlineMath) { m in "$\(m[1])$" }
 
         // Bold: *text*  (Typst) → **text** (Markdown)
-        s = replacePattern(s, pattern: #"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)"#) { m in "**\(m[1])**" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.bold) { m in "**\(m[1])**" }
 
         // Underline: #underline[text] → text
-        s = replacePattern(s, pattern: #"#underline\[([^\]]*)\]"#) { m in m[1] }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.underline) { m in m[1] }
 
         // Strikethrough: #strike[text] → ~~text~~
-        s = replacePattern(s, pattern: #"#strike\[([^\]]*)\]"#) { m in "~~\(m[1])~~" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.strike) { m in "~~\(m[1])~~" }
 
         // Highlight: #highlight[text] → ==text==
-        s = replacePattern(s, pattern: #"#highlight\[([^\]]*)\]"#) { m in "==\(m[1])==" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.highlight) { m in "==\(m[1])==" }
 
         // Superscript: #super[text] → <sup>text</sup>
-        s = replacePattern(s, pattern: #"#super\[([^\]]*)\]"#) { m in "<sup>\(m[1])</sup>" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.superscript) { m in "<sup>\(m[1])</sup>" }
 
         // Subscript: #sub[text] → <sub>text</sub>
-        s = replacePattern(s, pattern: #"#sub\[([^\]]*)\]"#) { m in "<sub>\(m[1])</sub>" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.subscript) { m in "<sub>\(m[1])</sub>" }
 
         // Links: #link("url")[text] → [text](url)
-        s = replacePattern(s, pattern: #"#link\("([^"]+)"\)\[([^\]]*)\]"#) { m in "[\(m[2])](\(m[1]))" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.linkWithText) { m in "[\(m[2])](\(m[1]))" }
         
         // #link("url") with no label → <url>
-        s = replacePattern(s, pattern: #"#link\("([^"]+)"\)"#) { m in "<\(m[1])>" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.linkBare) { m in "<\(m[1])>" }
 
         // Refs: @label → *(ref: label)*
-        s = replacePattern(s, pattern: #"@([A-Za-z0-9_:.-]+)"#) { m in "*[\(m[1])]*" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.labelRef) { m in "*[\(m[1])]*" }
 
         // Footnote: #footnote[text] → (text)
-        s = replacePattern(s, pattern: #"#footnote\[([^\]]*)\]"#) { m in " (\(m[1]))" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.footnote) { m in " (\(m[1]))" }
 
         // Vertical space: #v(1em) -> <br>
-        s = replacePattern(s, pattern: #"#v\([^)]*\)"#) { _ in "<br>" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.vSpace) { _ in "<br>" }
 
         // Generic #func(args)[content] fallback — preserve content, strip function wrapper
-        s = replacePattern(s, pattern: #"#[A-Za-z0-9_.-]+\([^)]*\)\[([^\]]*)\]"#) { m in m[1] }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.customFuncArgsBody) { m in m[1] }
 
         // Generic #func[content] fallback — preserve content, strip function wrapper
-        s = replacePattern(s, pattern: #"#[A-Za-z0-9_.-]+\[([^\]]*)\]"#) { m in m[1] }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.customFuncBody) { m in m[1] }
 
         // Generic #func(args) fallback — remove completely unsupported standalone functions 
         // (Must run after specific ones like #link are processed)
-        s = replacePattern(s, pattern: #"#[A-Za-z0-9_.-]+\([^)]*\)"#) { _ in "" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.customFuncArgsOnly) { _ in "" }
 
         // Typst non-breaking space: ~  →  regular space
-        s = replacePattern(s, pattern: #"(\w)~(\w)"#) { m in "\(m[1]) \(m[2])" }
+        s = replacePattern(s, regex: TypstToMarkdownRegex.nonBreakingSpace) { m in "\(m[1]) \(m[2])" }
 
         return s
     }
@@ -495,11 +522,9 @@ struct TypstToMarkdownConverter {
 
     private static func replacePattern(
         _ s: String,
-        pattern: String,
-        options: NSRegularExpression.Options = [],
+        regex: NSRegularExpression,
         replacement: ([String]) -> String
     ) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return s }
         let nsString = s as NSString
         let fullRange = NSRange(location: 0, length: nsString.length)
         var result = s

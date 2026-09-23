@@ -664,11 +664,8 @@ struct LayoutEditorView: View {
         if trimmed.isEmpty { return false }
         if ["auto", "none"].contains(trimmed) { return true }
         
-        // Pattern: number followed by unit (pt, mm, cm, in, %, em, fr)
-        let pattern = #"^-?\d+(\.\d+)?(pt|mm|cm|in|%|em|fr)$"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
         let range = NSRange(location: 0, length: trimmed.utf16.count)
-        return regex.firstMatch(in: trimmed, range: range) != nil
+        return FormattingRegex.typstLength.firstMatch(in: trimmed, range: range) != nil
     }
     
     func insertTextLayout() {

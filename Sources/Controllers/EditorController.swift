@@ -21,6 +21,23 @@ enum FormattingRegex {
     static let typstLength = try! NSRegularExpression(pattern: "^-?(\\d+(\\.\\d+)?)(pt|mm|cm|in|%|em|fr)$")
     static let allList = try! NSRegularExpression(pattern: #"^([-*]|\+|\d+\.|/)\s+"#)
     static let whitespace = try! NSRegularExpression(pattern: #"^\s+"#)
+    static let heading = try! NSRegularExpression(pattern: #"^(=+|#+)\s"#)
+    static let markerOnly = try! NSRegularExpression(pattern: #"^(=+|#+)\s*$"#)
+    static let title = try! NSRegularExpression(pattern: #"^#title\s*\[(.*?)\]\s*$"#)
+    static let textColor = try! NSRegularExpression(pattern: "(#text\\s*\\(\\s*fill\\s*:\\s*)(?:[a-zA-Z0-9]+|rgb\\([^)]+\\))(\\s*\\)\\s*\\[)")
+    static let unwrapUnderline = try! NSRegularExpression(pattern: #"^#underline\s*[\[\(]"#)
+    static let unwrapHighlight = try! NSRegularExpression(pattern: #"^#highlight\s*[\[\(]"#)
+    static let unwrapStrike = try! NSRegularExpression(pattern: #"^#strike\s*[\[\(]"#)
+    static let unwrapSub = try! NSRegularExpression(pattern: #"^#sub\s*[\[\(]"#)
+    static let unwrapSuper = try! NSRegularExpression(pattern: #"^#super\s*[\[\(]"#)
+    static let unwrapTextColor = try! NSRegularExpression(pattern: #"^#text\s*\(\s*fill\s*:\s*(?:[a-zA-Z0-9]+|rgb\([^)]+\))\s*\)\s*[\[(]"#)
+    static let linkURL = try! NSRegularExpression(pattern: "(?<=\"|')[^\"']+(?=\"|')")
+    static let linkText = try! NSRegularExpression(pattern: "(?<=\\[)[^\\]]+(?=\\])")
+    static let autoformatHeading = try! NSRegularExpression(pattern: "^(#{1,6})( )")
+    static let autoformatImage = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)")
+    static let autoformatLink = try! NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)")
+    static let autoformatBold = try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
+    static let brackets = try! NSRegularExpression(pattern: "\\[|\\]")
 }
 
 @MainActor
@@ -1544,7 +1561,8 @@ class EditorController: NSObject, ObservableObject {
                 if let oldCols = tableEditInitialCols != 0 ? tableEditInitialCols : nil {
                     let oldIndex = r * oldCols + c
                     if r < tableEditInitialRows && c < oldCols && oldIndex < currentTableCells.count {
-                        let content = currentTableCells[oldIndex].replacingOccurrences(of: "\\[|\\]", with: "", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let raw = currentTableCells[oldIndex]
+                        let content = FormattingRegex.brackets.stringByReplacingMatches(in: raw, options: [], range: NSRange(0..<raw.utf16.count), withTemplate: "").trimmingCharacters(in: .whitespacesAndNewlines)
                         cellsToInsert.append(content.isEmpty ? " " : content)
                     } else {
                         cellsToInsert.append(" ")
@@ -2319,8 +2337,7 @@ class EditorController: NSObject, ObservableObject {
         var lineStrings = text.components(separatedBy: .newlines)
         if hadTrailingNewline { lineStrings.removeLast() }
 
-        let headingPattern = #"^(=+|#+)\s"#
-        guard let headingRegex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return text }
+        let headingRegex = FormattingRegex.heading
 
         struct LineInfo {
             let headingPrefix: String
@@ -2787,10 +2804,8 @@ class EditorController: NSObject, ObservableObject {
         let isSingleLineRepresentation = (lineRange.length > 0)
         
         let markerChar = isMarkdownFile ? "#" : "="
-        let markerOnlyPattern = #"^(=+|#+)\s*$"#
-        let headingPattern = #"^(=+|#+)\s"#
         
-        let isMarkerOnly = (lineContent.range(of: markerOnlyPattern, options: .regularExpression) != nil)
+        let isMarkerOnly = FormattingRegex.markerOnly.firstMatch(in: lineContent, options: [], range: NSRange(0..<lineContent.utf16.count)) != nil
         let isEmptyLine = lineContent.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
         
         if isSingleLineRepresentation && (isEmptyLine || isMarkerOnly) {
@@ -2814,7 +2829,7 @@ class EditorController: NSObject, ObservableObject {
         var lines = lineContent.components(separatedBy: CharacterSet.newlines)
         if hadTrailingNewline { lines.removeLast() }
         
-        guard let regex = try? NSRegularExpression(pattern: headingPattern, options: []) else { return }
+        let regex = FormattingRegex.heading
         
         var newLines: [String] = []
         
@@ -2834,9 +2849,7 @@ class EditorController: NSObject, ObservableObject {
             }
             
             // Remove title if existing
-            let titlePattern = #"^#title\s*\[(.*?)\]\s*$"#
-            if let titleRegex = try? NSRegularExpression(pattern: titlePattern, options: []),
-               let match = titleRegex.firstMatch(in: content, options: [], range: NSRange(location: 0, length: content.utf16.count)) {
+            if let match = FormattingRegex.title.firstMatch(in: content, options: [], range: NSRange(location: 0, length: content.utf16.count)) {
                 if let r = Range(match.range(at: 1), in: content) {
                     content = String(content[r])
                 }
@@ -2907,9 +2920,7 @@ class EditorController: NSObject, ObservableObject {
         }
         
         // If it's a heading, strip the marker
-        let headingPattern = #"^(=+|#+)\s"#
-        if let regex = try? NSRegularExpression(pattern: headingPattern, options: []),
-           let match = regex.firstMatch(in: content, options: [], range: NSRange(location: 0, length: content.utf16.count)) {
+        if let match = FormattingRegex.heading.firstMatch(in: content, options: [], range: NSRange(location: 0, length: content.utf16.count)) {
             content = String(content.dropFirst(match.range.length))
         }
         
@@ -2968,7 +2979,7 @@ class EditorController: NSObject, ObservableObject {
             if snippet.hasPrefix("<u>") {
                 unwrapFormatting(range: underlineRange, prefixLen: 3, suffixLen: 4)
             } else {
-                unwrapBracketedFormatting(range: underlineRange, prefixPattern: #"^#underline\s*[\[\(]"#)
+                unwrapBracketedFormatting(range: underlineRange, prefixRegex: FormattingRegex.unwrapUnderline)
             }
         } else {
             if isMarkdownFile {
@@ -2989,7 +3000,7 @@ class EditorController: NSObject, ObservableObject {
             } else if snippet.hasPrefix("==") {
                 unwrapFormatting(range: highlightRange, prefixLen: 2, suffixLen: 2)
             } else {
-                unwrapBracketedFormatting(range: highlightRange, prefixPattern: #"^#highlight\s*[\[\(]"#)
+                unwrapBracketedFormatting(range: highlightRange, prefixRegex: FormattingRegex.unwrapHighlight)
             }
         } else {
             if isMarkdownFile {
@@ -3009,7 +3020,7 @@ class EditorController: NSObject, ObservableObject {
             if snippet.hasPrefix("~~") {
                 unwrapFormatting(range: strikeRange, prefixLen: 2, suffixLen: 2)
             } else {
-                unwrapBracketedFormatting(range: strikeRange, prefixPattern: #"^#strike\s*[\[\(]"#)
+                unwrapBracketedFormatting(range: strikeRange, prefixRegex: FormattingRegex.unwrapStrike)
             }
             showStatus("Removed Strikethrough")
         } else {
@@ -3030,7 +3041,7 @@ class EditorController: NSObject, ObservableObject {
             if snippet.hasPrefix("<sub>") {
                 unwrapFormatting(range: subRange, prefixLen: 5, suffixLen: 6)
             } else {
-                unwrapBracketedFormatting(range: subRange, prefixPattern: #"^#sub\s*[\[\(]"#)
+                unwrapBracketedFormatting(range: subRange, prefixRegex: FormattingRegex.unwrapSub)
             }
         } else {
             if isMarkdownFile {
@@ -3049,7 +3060,7 @@ class EditorController: NSObject, ObservableObject {
             if snippet.hasPrefix("<sup>") {
                 unwrapFormatting(range: supRange, prefixLen: 5, suffixLen: 6)
             } else {
-                unwrapBracketedFormatting(range: supRange, prefixPattern: #"^#super\s*[\[\(]"#)
+                unwrapBracketedFormatting(range: supRange, prefixRegex: FormattingRegex.unwrapSuper)
             }
         } else {
             if isMarkdownFile {
@@ -3061,12 +3072,12 @@ class EditorController: NSObject, ObservableObject {
         updateFormattingState()
     }
     
-    private func unwrapBracketedFormatting(range: NSRange, prefixPattern: String) {
+    private func unwrapBracketedFormatting(range: NSRange, prefixRegex: NSRegularExpression) {
         let text = sourceCode as NSString
         let snippet = text.substring(with: range)
         
-        if let openerRange = snippet.range(of: prefixPattern, options: String.CompareOptions.regularExpression) {
-            let prefixLen = snippet.distance(from: snippet.startIndex, to: openerRange.upperBound)
+        if let openerMatch = prefixRegex.firstMatch(in: snippet, options: [], range: NSRange(0..<snippet.utf16.count)) {
+            let prefixLen = openerMatch.range.length
             unwrapFormatting(range: range, prefixLen: prefixLen, suffixLen: 1)
         } else {
             // Fallback: search for first [ or (
@@ -3336,15 +3347,14 @@ class EditorController: NSObject, ObservableObject {
             let snippet = nsText.substring(with: colorRange)
             
             // Regex captures the prefix (group 1) and the suffix (group 2), discarding the old color
-            if let regex = try? NSRegularExpression(pattern: "(#text\\s*\\(\\s*fill\\s*:\\s*)(?:[a-zA-Z0-9]+|rgb\\([^)]+\\))(\\s*\\)\\s*\\[)") {
-                let newSnippet = regex.stringByReplacingMatches(
-                    in: snippet,
-                    range: NSRange(location: 0, length: snippet.utf16.count),
-                    withTemplate: "$1\(color)$2"
-                )
-                insertText(newSnippet, replacementRange: colorRange)
-                showStatus("Changed Text Color")
-            }
+            let regex = FormattingRegex.textColor
+            let newSnippet = regex.stringByReplacingMatches(
+                in: snippet,
+                range: NSRange(location: 0, length: snippet.utf16.count),
+                withTemplate: "$1\(color)$2"
+            )
+            insertText(newSnippet, replacementRange: colorRange)
+            showStatus("Changed Text Color")
         } else {
             // Apply new color wrapper
             wrapSelection(prefix: "#text(fill: \(color))[", suffix: "]")
@@ -3359,7 +3369,7 @@ class EditorController: NSObject, ObservableObject {
             // Unwrap the #text(fill: ...)[...] block completely
             unwrapBracketedFormatting(
                 range: colorRange, 
-                prefixPattern: #"^#text\s*\(\s*fill\s*:\s*(?:[a-zA-Z0-9]+|rgb\([^)]+\))\s*\)\s*[\[(]"#
+                prefixRegex: FormattingRegex.unwrapTextColor
             )
             showStatus("Removed Text Color")
             updateFormattingState()
@@ -3370,10 +3380,10 @@ class EditorController: NSObject, ObservableObject {
 
     /// Pre-compiled patterns for `handleMarkdownAutoformat`. This runs on every text
     /// change, so compiling the expressions inline was a measurable per-keystroke cost.
-    private static let autoformatHeadingRegex = try? NSRegularExpression(pattern: "^(#{1,6})( )", options: [])
-    private static let autoformatImageRegex = try? NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: [])
-    private static let autoformatLinkRegex = try? NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)", options: [])
-    private static let autoformatBoldRegex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*", options: [])
+    private static let autoformatHeadingRegex: NSRegularExpression? = FormattingRegex.autoformatHeading
+    private static let autoformatImageRegex: NSRegularExpression? = FormattingRegex.autoformatImage
+    private static let autoformatLinkRegex: NSRegularExpression? = FormattingRegex.autoformatLink
+    private static let autoformatBoldRegex: NSRegularExpression? = FormattingRegex.autoformatBold
 
     /// Detects Markdown syntax on the current line in a `.typ` file and
     /// auto-replaces it with the equivalent Typst syntax in real-time.
@@ -3593,15 +3603,16 @@ class EditorController: NSObject, ObservableObject {
             self.currentLinkRange = linkRange
             let linkSnippet = nsText.substring(with: linkRange)
             
-            // Basic parsing of #link("url")[text]
-            if let urlRange = linkSnippet.range(of: "(?<=\"|')[^\"']+(?=\"|')", options: String.CompareOptions.regularExpression) {
-                self.currentLinkURL = String(linkSnippet[urlRange])
+            if let match = FormattingRegex.linkURL.firstMatch(in: linkSnippet, options: [], range: NSRange(0..<linkSnippet.utf16.count)),
+               let r = Range(match.range, in: linkSnippet) {
+                self.currentLinkURL = String(linkSnippet[r])
             } else {
                 self.currentLinkURL = ""
             }
             
-            if let textRange = linkSnippet.range(of: "(?<=\\[)[^\\]]+(?=\\])", options: String.CompareOptions.regularExpression) {
-                self.currentLinkText = String(linkSnippet[textRange])
+            if let match = FormattingRegex.linkText.firstMatch(in: linkSnippet, options: [], range: NSRange(0..<linkSnippet.utf16.count)),
+               let r = Range(match.range, in: linkSnippet) {
+                self.currentLinkText = String(linkSnippet[r])
             } else {
                 self.currentLinkText = ""
             }

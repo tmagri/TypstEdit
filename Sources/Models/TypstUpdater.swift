@@ -2,6 +2,10 @@ import Foundation
 import Combine
 import SwiftUI
 
+enum UpdaterRegex {
+    static let version = try! NSRegularExpression(pattern: #"\b\d+\.\d+(\.\d+)?\b"#)
+}
+
 @MainActor
 class TypstUpdater: ObservableObject {
     static let shared = TypstUpdater()
@@ -132,8 +136,7 @@ class TypstUpdater: ObservableObject {
                     return
                 }
                 // typst --version prints e.g. "typst 0.12.0 (737895d7)"
-                if let regex = try? NSRegularExpression(pattern: #"\b\d+\.\d+(\.\d+)?\b"#),
-                   let match = regex.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
+                if let match = UpdaterRegex.version.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)),
                    let range = Range(match.range, in: output) {
                     continuation.resume(returning: String(output[range]))
                 } else {

@@ -136,10 +136,59 @@ class SuggestionViewController: NSViewController {
             windowController?.close()
             return nil
 
+        case 126: // Up Arrow
+            if modifierFlags.contains(.option) {
+                moveSelectionUp()
+                return nil
+            }
+            // Plain Up Arrow or other modifiers: dismiss suggestion list and let cursor move
+            windowController?.close()
+            return event
+
+        case 125: // Down Arrow
+            if modifierFlags.contains(.option) {
+                moveSelectionDown()
+                return nil
+            }
+            // Plain Down Arrow or other modifiers: dismiss suggestion list and let cursor move
+            windowController?.close()
+            return event
+
+        case 45: // 'N' with Control (Emacs next line)
+            if modifierFlags.contains(.control) {
+                moveSelectionDown()
+                return nil
+            }
+            windowController?.close()
+            return event
+
+        case 35: // 'P' with Control (Emacs previous line)
+            if modifierFlags.contains(.control) {
+                moveSelectionUp()
+                return nil
+            }
+            windowController?.close()
+            return event
+
+        case 30: // ']' with Option
+            if modifierFlags.contains(.option) {
+                moveSelectionDown()
+                return nil
+            }
+            windowController?.close()
+            return event
+
+        case 33: // '[' with Option
+            if modifierFlags.contains(.option) {
+                moveSelectionUp()
+                return nil
+            }
+            windowController?.close()
+            return event
+
         default:
-            // Any other key (arrows, return, letters, etc.):
-            // dismiss the suggestion window and pass the event through to the
-            // editor so the user can continue typing/editing without interruption.
+            // Any other key: dismiss the suggestion window and pass the event through
+            // to the editor so the user can continue typing/editing without interruption.
             windowController?.close()
             return event
         }
