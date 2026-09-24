@@ -303,7 +303,25 @@ internal final class TypstParser {
             finalArgs.append(trailingContent)
         }
 
-        return .functionCall(name: identifier, args: finalArgs)
+        var result: TypstAST = .functionCall(name: identifier, args: finalArgs)
+        var currentName = identifier
+
+        // Handle chained method calls like `#counter(page).update(1)`
+        while !isAtEnd, peek() == "." {
+            _ = advance() // consume '.'
+            let method = parseIdentifier()
+            currentName += ".\(method)"
+            
+            if match("(") {
+                let methodArgs = try parseArguments()
+                if peek() == ")" { _ = advance() }
+                result = .functionCall(name: currentName, args: methodArgs)
+            } else {
+                result = .variableAccess(identifier: currentName)
+            }
+        }
+
+        return result
     }
 
     private func parseConditionExpression() throws -> TypstAST {
@@ -870,6 +888,10 @@ public final class Evaluator {
             return resolvedValue
 
         case .functionCall(let name, let args):
+            // Silently drop Typst state-management functions from Markdown output
+            if name.hasPrefix("counter") || name.hasPrefix("state") {
+                return nil
+            }
             let resolvedArgs = args.compactMap { try? evaluate(node: $0) }.compactMap { $0 }
             return .functionCall(name: name, args: resolvedArgs)
         }
