@@ -47,9 +47,10 @@ public extension TextStoring {
 
 public extension TextStoring {
     func inverseMutation(for mutation: TextMutation) -> TextMutation {
-        guard let originalString = substring(from: mutation.range) else {
-            fatalError("Range invalid for string")
-        }
+        let safeLocation = max(0, min(mutation.range.location, length))
+        let safeLength = max(0, min(mutation.range.length, length - safeLocation))
+        let safeRange = NSRange(location: safeLocation, length: safeLength)
+        let originalString = substring(from: safeRange) ?? ""
 
         let delta = mutation.inverseDelta
         let newRange = mutation.inverseRange

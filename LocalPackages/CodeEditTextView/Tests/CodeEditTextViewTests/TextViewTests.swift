@@ -78,4 +78,40 @@ struct TextViewTests {
 
         #expect(textView.string == "Hello World")
     }
+
+    @Test("Undo after suggestion replacement")
+    func undoAfterSuggestionReplacement() {
+        let textView = TextView(string: "")
+        textView.selectionManager.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.insertText("#", replacementRange: NSRange(location: NSNotFound, length: 0))
+        textView.insertText("a", replacementRange: NSRange(location: NSNotFound, length: 0))
+        textView.insertText("l", replacementRange: NSRange(location: NSNotFound, length: 0))
+        #expect(textView.string == "#al")
+
+        let label = "#align(center)[\n  \n]"
+        let replacementRange = NSRange(location: 0, length: 3)
+
+        textView.undoManager?.beginUndoGrouping()
+        textView.insertText(label, replacementRange: replacementRange)
+        textView.undoManager?.endUndoGrouping()
+        #expect(textView.string == label)
+
+        textView.undo(nil)
+        #expect(textView.string == "#al")
+
+        textView.redo(nil)
+        #expect(textView.string == label)
+    }
+
+    @Test("Out of bounds mutation range does not fatalError on undo")
+    func outOfBoundsMutationDoesNotCrash() {
+        let textView = TextView(string: "Short")
+        // Deliberately register an invalid/stale out-of-bounds mutation
+        textView.undoManager?.beginUndoGrouping()
+        textView.insertText("Extra", replacementRange: NSRange(location: 0, length: 50))
+        textView.undoManager?.endUndoGrouping()
+
+        // Should not crash with fatalError or NSRangeException
+        textView.undo(nil)
+    }
 }

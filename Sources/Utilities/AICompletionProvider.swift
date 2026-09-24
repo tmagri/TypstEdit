@@ -221,10 +221,20 @@ class AICompletionProvider: CodeSuggestionDelegate {
         cursorPosition: CursorPosition?
     ) {
         let text = textView.text
-        let currentPos = cursorPosition?.start ?? textView.cursorPositions.first?.start ?? .init(line: 1, column: 1)
-        let utf16Offset = cursorUTF16Offset(from: currentPos, in: text)
-
         let nsText = text as NSString
+
+        // 1. Authoritative cursor offset in UTF-16: prefer live selection range over line/column math
+        let liveSelection = textView.textView.selectedRange()
+        let utf16Offset: Int
+        if liveSelection.location != NSNotFound && liveSelection.location <= nsText.length {
+            utf16Offset = liveSelection.location
+        } else if let range = cursorPosition?.range, range.location != NSNotFound && range.location <= nsText.length {
+            utf16Offset = range.location
+        } else {
+            let currentPos = cursorPosition?.start ?? textView.cursorPositions.first?.start ?? .init(line: 1, column: 1)
+            utf16Offset = max(0, min(cursorUTF16Offset(from: currentPos, in: text), nsText.length))
+        }
+
         let label = Self.cleanedInsertionText(item.label)
 
         // Find the typed word prefix at cursor (including any leading '#')
@@ -246,9 +256,21 @@ class AICompletionProvider: CodeSuggestionDelegate {
             replaceCount = Self.overlapLength(label: label, typedPrefix: linePrefix)
         }
 
-        // Target the overlap range, and insert the ENTIRE label so it cleanly merges without duplication
-        let replacementRange = NSRange(location: utf16Offset - replaceCount, length: replaceCount)
+        // Strictly clamp the replacement range within current document bounds
+        let startLoc = max(0, min(utf16Offset - replaceCount, nsText.length))
+        let length = max(0, min(replaceCount, nsText.length - startLoc))
+        let replacementRange = NSRange(location: startLoc, length: length)
+
+        // Wrap in an explicit undo group so the suggestion insertion is treated as a clean,
+        // atomic undo action instead of conjoining with previous typed keystrokes.
+        // Also suppress markdown auto-format and wrap side-effects from the bridge callback
+        // during the insertion — re-entrant mutations corrupt the undo stack and crash on undo.
+        let undoManager = textView.textView.undoManager
+        undoManager?.beginUndoGrouping()
+        controller?.isApplyingProgrammaticChange = true
         textView.textView.insertText(label, replacementRange: replacementRange)
+        controller?.isApplyingProgrammaticChange = false
+        undoManager?.endUndoGrouping()
     }
 
     /// Finds the longest suffix of `typedPrefix` that prefixes `label`.

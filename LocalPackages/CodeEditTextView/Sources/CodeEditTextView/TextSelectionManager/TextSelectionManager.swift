@@ -74,9 +74,13 @@ public class TextSelectionManager: NSObject {
     /// Set the selected ranges to a single range. Overrides any existing selections.
     /// - Parameter range: The range to set.
     public func setSelectedRange(_ range: NSRange) {
+        let docLen = textStorage?.length ?? 0
+        let loc = max(0, min(range.location, docLen))
+        let len = max(0, min(range.length, docLen - loc))
+        let safeRange = NSRange(location: loc, length: len)
         textSelections.forEach { $0.view?.removeFromSuperview() }
-        let selection = TextSelection(range: range)
-        selection.suggestedXPos = layoutManager?.rectForOffset(range.location)?.minX
+        let selection = TextSelection(range: safeRange)
+        selection.suggestedXPos = layoutManager?.rectForOffset(safeRange.location)?.minX
         textSelections = [selection]
         updateSelectionViews()
         NotificationCenter.default.post(Notification(name: Self.selectionChangedNotification, object: self))

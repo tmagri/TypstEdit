@@ -9,7 +9,11 @@ import Foundation
 
 extension TextSelectionManager {
     public func didReplaceCharacters(in range: NSRange, replacementLength: Int) {
-        let delta = replacementLength == 0 ? -range.length : replacementLength
+        // Correct net delta: how much the document length changed at/after `range`.
+        // Old code used bare `replacementLength` when replacementLength > 0, which
+        // was wrong for replacement edits (range.length > 0 AND replacementLength > 0)
+        // because it ignored the characters being removed, pushing the cursor past EOF.
+        let delta = replacementLength - range.length
         for textSelection in self.textSelections {
             if textSelection.range.location > range.max {
                 textSelection.range.location = max(0, textSelection.range.location + delta)
@@ -26,6 +30,14 @@ extension TextSelectionManager {
             } else {
                 textSelection.range.length = 0
             }
+        }
+
+        // Clamp all selections to valid document bounds (safety net for any edge case).
+        let docLen = textStorage?.length ?? 0
+        for textSelection in self.textSelections {
+            let loc = max(0, min(textSelection.range.location, docLen))
+            let len = max(0, min(textSelection.range.length, docLen - loc))
+            textSelection.range = NSRange(location: loc, length: len)
         }
 
         // Clean up duplicate selection ranges

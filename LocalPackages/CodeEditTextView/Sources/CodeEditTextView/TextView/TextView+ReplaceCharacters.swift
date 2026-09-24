@@ -29,7 +29,13 @@ extension TextView {
         }
 
         // Can't insert an empty string into an empty range. One must be not empty
-        for range in ranges.sorted(by: { $0.location > $1.location }) where valid(range: range, string: string) {
+        for rawRange in ranges.sorted(by: { $0.location > $1.location }) {
+            let docLen = textStorage.length
+            let safeLocation = max(0, min(rawRange.location, docLen))
+            let safeLength = max(0, min(rawRange.length, docLen - safeLocation))
+            let range = NSRange(location: safeLocation, length: safeLength)
+
+            guard valid(range: range, string: string) else { continue }
             delegate?.textView(self, willReplaceContentsIn: range, with: string)
 
             _undoManager?.registerMutation(
@@ -54,23 +60,26 @@ extension TextView {
 
         if !skipUpdateSelection {
             selectionManager.notifyAfterEdit()
+
+            // `scrollSelectionToVisible` is a little expensive to call every time. Instead we just check if the first
+            // selection is entirely visible. `.contains` checks that all points in the rect are inside.
+            // NOTE: This MUST stay inside !skipUpdateSelection — when skipUpdateSelection=true the selection has not
+            // been updated yet (CEUndoManager will do it after all mutations in the group finish), so reading
+            // selection.range.location here would use a stale/out-of-bounds offset and crash.
+            if let selection = selectionManager.textSelections.first {
+                var rect = selection.boundingRect
+                if (rect == .zero || rect.width <= 0 || rect.height <= 0),
+                   let computed = layoutManager.rectForOffset(selection.range.location) {
+                    rect = computed
+                }
+                if rect.width <= 0 { rect.size.width = 2.0 }
+                if rect.height <= 0 { rect.size.height = layoutManager.estimateLineHeight() }
+                if !visibleRect.contains(rect) {
+                    scrollSelectionToVisible()
+                }
+            }
         }
         NotificationCenter.default.post(name: Self.textDidChangeNotification, object: self)
-
-        // `scrollSelectionToVisible` is a little expensive to call every time. Instead we just check if the first
-        // selection is entirely visible. `.contains` checks that all points in the rect are inside. 
-        if let selection = selectionManager.textSelections.first {
-            var rect = selection.boundingRect
-            if (rect == .zero || rect.width <= 0 || rect.height <= 0),
-               let computed = layoutManager.rectForOffset(selection.range.location) {
-                rect = computed
-            }
-            if rect.width <= 0 { rect.size.width = 2.0 }
-            if rect.height <= 0 { rect.size.height = layoutManager.estimateLineHeight() }
-            if !visibleRect.contains(rect) {
-                scrollSelectionToVisible()
-            }
-        }
     }
 
     /// Replace the characters in a range with a new string.

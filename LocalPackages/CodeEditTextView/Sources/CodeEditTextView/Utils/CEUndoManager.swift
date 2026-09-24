@@ -80,8 +80,12 @@ public class CEUndoManager: UndoManager {
         NotificationCenter.default.post(name: .NSUndoManagerWillUndoChange, object: self)
         textView.textStorage.beginEditing()
         for mutation in item.mutations.reversed() {
+            let docLen = textView.textStorage.length
+            let loc = max(0, min(mutation.inverse.range.location, docLen))
+            let len = max(0, min(mutation.inverse.range.length, docLen - loc))
+            let safeRange = NSRange(location: loc, length: len)
             textView.replaceCharacters(
-                in: mutation.inverse.range,
+                in: safeRange,
                 with: mutation.inverse.string,
                 skipUpdateSelection: true
             )
@@ -112,8 +116,12 @@ public class CEUndoManager: UndoManager {
         textView.selectionManager.removeCursors()
         textView.textStorage.beginEditing()
         for mutation in item.mutations {
+            let docLen = textView.textStorage.length
+            let loc = max(0, min(mutation.mutation.range.location, docLen))
+            let len = max(0, min(mutation.mutation.range.length, docLen - loc))
+            let safeRange = NSRange(location: loc, length: len)
             textView.replaceCharacters(
-                in: mutation.mutation.range,
+                in: safeRange,
                 with: mutation.mutation.string,
                 skipUpdateSelection: true
             )
@@ -132,19 +140,29 @@ public class CEUndoManager: UndoManager {
     /// should be one continuous range. This merges those ranges into a set of disjoint ranges before updating the
     /// selection manager.
     private func updateSelectionsForMutations(mutations: [TextMutation]) {
+        guard let textView, let textStorage = textView.textStorage else { return }
+        let docLen = textStorage.length
         if mutations.reduce(0, { $0 + $1.range.length }) == 0 {
             if let minimumMutation = mutations.min(by: { $0.range.location < $1.range.location }) {
                 // If the mutations are only deleting text (no replacement), we just place the cursor at the last range,
                 // since all the ranges are the same but the other method will return no ranges (empty range).
-                textView?.selectionManager.setSelectedRange(
-                    NSRange(location: minimumMutation.range.location, length: 0)
+                let loc = max(0, min(minimumMutation.range.location, docLen))
+                textView.selectionManager.setSelectedRange(
+                    NSRange(location: loc, length: 0)
                 )
             }
         } else {
             let mergedRanges = mutations.reduce(into: IndexSet(), { set, mutation in
-                set.insert(range: mutation.range)
+                let loc = max(0, min(mutation.range.location, docLen))
+                let len = max(0, min(mutation.range.length, docLen - loc))
+                set.insert(range: NSRange(location: loc, length: len))
             })
-            textView?.selectionManager.setSelectedRanges(mergedRanges.rangeView.map { NSRange($0) })
+            let ranges = mergedRanges.rangeView.map { NSRange($0) }
+            if ranges.isEmpty {
+                textView.selectionManager.setSelectedRange(NSRange(location: docLen, length: 0))
+            } else {
+                textView.selectionManager.setSelectedRanges(ranges)
+            }
         }
     }
 

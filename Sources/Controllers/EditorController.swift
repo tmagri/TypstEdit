@@ -993,7 +993,9 @@ class EditorController: NSObject, ObservableObject {
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.undo()
-        reconcileTextViewIfNeeded()
+        if let tv = textViewController?.textView {
+            sourceCode = tv.string
+        }
     }
 
     func redo() {
@@ -1001,7 +1003,9 @@ class EditorController: NSObject, ObservableObject {
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.redo()
-        reconcileTextViewIfNeeded()
+        if let tv = textViewController?.textView {
+            sourceCode = tv.string
+        }
     }
     
     func cutSelection() {
@@ -4199,10 +4203,12 @@ class SourceEditorBridge: TextViewCoordinator {
             if ctrl.sourceCode != controller.text {
                  ctrl.sourceCode = controller.text
             }
-            // Skip side effects while we are the ones driving the text view. These would otherwise
-            // re-enter `insertText` (markdown autoformat) and thrash layout (wrap re-apply) mid-edit,
-            // which desyncs `sourceCode` from the displayed text.
-            guard !ctrl.isApplyingProgrammaticChange else { return }
+            // Skip side effects while we are the ones driving the text view, or during undo/redo operations.
+            // These would otherwise re-enter `insertText` (markdown autoformat) and thrash layout (wrap re-apply)
+            // mid-edit, which corrupts text state or causes re-entrant crashes.
+            guard !ctrl.isApplyingProgrammaticChange,
+                  !(controller.textView.undoManager?.isUndoing ?? false),
+                  !(controller.textView.undoManager?.isRedoing ?? false) else { return }
             // Aggressively re-apply wrapping settings
             ctrl.updateTextViewWrapping()
             
