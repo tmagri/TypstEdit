@@ -967,8 +967,15 @@ public final class MarkdownRenderer {
             case "underline":
                 return "<u>\(extractPayload(args: args))</u>"
             case "footnote":
-                return " (\(extractPayload(args: args)))"
-            case "align", "text", "box", "block", "pad", "rect", "stack", "center", "quote":
+                // Standard Markdown inline footnote extension
+                return "^[\(extractPayload(args: args))]"
+            case "quote":
+                let payload = extractPayload(args: args)
+                let quoted = payload.components(separatedBy: .newlines)
+                                    .map { "> \($0)" }
+                                    .joined(separator: "\n")
+                return "\n\(quoted)\n\n"
+            case "align", "text", "box", "block", "pad", "rect", "stack", "center":
                 return extractPayload(args: args)
             default:
                 let renderedArgs = args.map { render(node: $0) }.joined(separator: ", ")
@@ -996,8 +1003,66 @@ public final class MarkdownRenderer {
                             columnCount = num
                         }
                     }
+                } else if noSpaces.hasPrefix("table.header(") {
+                    // Extract the arguments inside table.header(...)
+                    var inner = trimmed
+                    inner.removeFirst("table.header(".count)
+                    if inner.hasSuffix(")") { inner.removeLast() }
+                    
+                    var currentCell = ""
+                    var nesting = 0
+                    var inString = false
+                    
+                    for char in inner {
+                        if inString {
+                            if char == "\"" { inString = false }
+                            else { currentCell.append(char) }
+                            continue
+                        }
+                        
+                        if char == "\"" {
+                            inString = true
+                            continue
+                        }
+                        
+                        if char == "[" {
+                            nesting += 1
+                            if nesting > 1 { currentCell.append(char) }
+                        } else if char == "]" {
+                            nesting -= 1
+                            if nesting > 0 { currentCell.append(char) }
+                            else {
+                                cells.append(.text(currentCell.trimmingCharacters(in: .whitespacesAndNewlines)))
+                                currentCell = ""
+                            }
+                        } else if char == "," && nesting == 0 {
+                            let cellText = currentCell.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !cellText.isEmpty {
+                                cells.append(.text(cellText))
+                            }
+                            currentCell = ""
+                        } else {
+                            if nesting > 0 {
+                                currentCell.append(char)
+                            } else if !char.isWhitespace || !currentCell.isEmpty {
+                                currentCell.append(char)
+                            }
+                        }
+                    }
+                    
+                    let finalCellText = currentCell.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !finalCellText.isEmpty {
+                        cells.append(.text(finalCellText))
+                    }
                 } else if noSpaces.contains(":") && !trimmed.hasPrefix("\"") && !trimmed.hasPrefix("'") {
                     continue
+                } else {
+                    cells.append(arg)
+                }
+            case .functionCall(let name, let subArgs):
+                // Catch any headers that actually evaluated as AST nodes
+                if name == "table.header" {
+                    cells.append(contentsOf: subArgs)
                 } else {
                     cells.append(arg)
                 }
