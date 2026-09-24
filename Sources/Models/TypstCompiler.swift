@@ -47,6 +47,8 @@ class TypstCompiler: ObservableObject {
     @Published var isCompiling: Bool = false
     @Published var errors: [TypstError] = []
 
+    public var fileLoader: ((String) -> String?)? = nil
+
     // Backing stores that feed the published `errors` list.
     // `typstErrors`   – real compilation errors reported by the `typst` binary.
     // `typstWarnings` – `warning:` diagnostics reported by the `typst` binary
@@ -352,9 +354,7 @@ class TypstCompiler: ObservableObject {
             // Download web images and inject local paths before saving
             finalSource = await resolveWebImages(in: finalSource, projectRoot: projectRoot)
             
-            if projectTempDir != workingDirectory {
-                finalSource = self.rewriteRelativeImports(in: finalSource)
-            }
+            finalSource = await self.rewriteRelativeImports(in: finalSource, sourceDirectory: workingDirectory, tempDirectory: projectTempDir)
             
             let finalSourceToWrite = finalSource
             try await Task.detached {
@@ -1294,9 +1294,7 @@ class TypstCompiler: ObservableObject {
         
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
         
-        if tempDir != preferredDirectory {
-            finalContent = self.rewriteRelativeImports(in: finalContent)
-        }
+        finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory, tempDirectory: tempDir)
         
         do {
             try finalContent.write(to: sourceURL, atomically: true, encoding: .utf8)
@@ -1410,9 +1408,7 @@ class TypstCompiler: ObservableObject {
         
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
         
-        if let pref = preferredDirectory, tempDir != pref {
-            finalContent = self.rewriteRelativeImports(in: finalContent)
-        }
+        finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory ?? tempDir, tempDirectory: tempDir)
         
         do {
             try finalContent.write(to: sourceURL, atomically: true, encoding: .utf8)
@@ -1521,14 +1517,84 @@ class TypstCompiler: ObservableObject {
     
     // MARK: - Relative Import Rewriter
     
-    /// Rewrites relative `#import`, `#include`, and `#image` paths by prepending `../`
-    /// This is necessary because we compile from the `temp/` subdirectory, so relative
-    /// paths need to go up one level to resolve against the original source location.
-    private func rewriteRelativeImports(in content: String) -> String {
+    /// Rewrites relative `#import`, `#include`, and `#image` paths so they remain valid
+    /// when the shadow source is written into a temporary folder. If the original source
+    /// is nested under a subdirectory, we compute the path relative to the temp directory
+    /// rather than blindly prepending `../`.
+    func rewriteRelativeImports(in content: String, sourceDirectory: URL?, tempDirectory: URL?) async -> String {
+        // Preserve the old behavior when no source context is available.
+        guard let sourceDirectory, let tempDirectory else {
+            return await rewriteRelativeImports(in: content)
+        }
+
+        let relativePrefix = (tempDirectory == sourceDirectory) ? "" : relativePath(from: tempDirectory, to: sourceDirectory)
+        let prefixForImports = relativePrefix.isEmpty || relativePrefix == "." ? "" : relativePrefix + "/"
+
         var processed = content
 
-        // Rewrite relative #import / #include paths
-        // Skips paths starting with / (absolute), @ (typst package), or . (already relative to parent)
+        let importMatches = CompilerRegex.relativeImport.matches(
+            in: processed,
+            options: [],
+            range: NSRange(0..<processed.utf16.count)
+        ).reversed()
+
+        for match in importMatches {
+            let prefix = (processed as NSString).substring(with: match.range(at: 1))
+            let rawPath = (processed as NSString).substring(with: match.range(at: 2))
+            let suffix = (processed as NSString).substring(with: match.range(at: 3))
+            
+            var rewrittenPath = resolveRelativeImportPath(rawPath, relativePrefix: prefixForImports)
+            
+            if (rawPath.hasSuffix(".note") || rawPath.hasSuffix(".md")), let loader = self.fileLoader {
+                let filename = (rawPath as NSString).lastPathComponent
+                if let fileContent = loader(filename) {
+                    let isHybrid = rawPath.hasSuffix(".note")
+                    let textToProcess = isHybrid ? Self.autoFixBrokenNoteSyntax(fileContent) : fileContent
+                    let aiService = AICompletionService.shared
+                    var converted = await Task.detached {
+                        let input = isHybrid ? Self.delimitImproperOperators(textToProcess).output : textToProcess
+                        return aiService.sanitizeMarkdownToTypst(input, isHybrid: isHybrid)
+                    }.value
+                    
+                    if isHybrid {
+                        converted = notePreamble + converted
+                    }
+                    
+                    let newFilename = filename.replacingOccurrences(of: ".note", with: ".typ").replacingOccurrences(of: ".md", with: ".typ")
+                    let tempFileURL = tempDirectory.appendingPathComponent(newFilename)
+                    try? converted.write(to: tempFileURL, atomically: true, encoding: .utf8)
+                    
+                    // We point the import directly to the newly compiled .typ file in the temp directory!
+                    rewrittenPath = newFilename
+                }
+            }
+
+            let rewritten = prefix + rewrittenPath + suffix
+            let fullRange = Range(match.range, in: processed)!
+            processed.replaceSubrange(fullRange, with: rewritten)
+        }
+
+        let imageMatches = CompilerRegex.relativeImage.matches(
+            in: processed,
+            options: [],
+            range: NSRange(0..<processed.utf16.count)
+        ).reversed()
+
+        for match in imageMatches {
+            let prefix = (processed as NSString).substring(with: match.range(at: 1))
+            let rawPath = (processed as NSString).substring(with: match.range(at: 2))
+            let suffix = (processed as NSString).substring(with: match.range(at: 3))
+            let rewritten = prefix + resolveRelativeImportPath(rawPath, relativePrefix: prefixForImports) + suffix
+            let fullRange = Range(match.range, in: processed)!
+            processed.replaceSubrange(fullRange, with: rewritten)
+        }
+
+        return processed
+    }
+
+    private func rewriteRelativeImports(in content: String) async -> String {
+        var processed = content
+
         processed = CompilerRegex.relativeImport.stringByReplacingMatches(
             in: processed,
             options: [],
@@ -1536,13 +1602,6 @@ class TypstCompiler: ObservableObject {
             withTemplate: "$1../$2$3"
         )
 
-        // Rewrite relative #image("filename") paths.
-        // Only matches bare relative filenames — skips:
-        //   /...   (absolute)
-        //   ~...   (home-relative)
-        //   ../    (already adjusted)
-        //   http   (web URL)
-        // The negative lookahead (?!\.\./) ensures we don't double-prefix.
         processed = CompilerRegex.relativeImage.stringByReplacingMatches(
             in: processed,
             options: [],
@@ -1551,6 +1610,30 @@ class TypstCompiler: ObservableObject {
         )
 
         return processed
+    }
+
+    private func relativePath(from tempDirectory: URL, to sourceDirectory: URL) -> String {
+        let from = tempDirectory.standardizedFileURL.pathComponents
+        let to = sourceDirectory.standardizedFileURL.pathComponents
+
+        var common = 0
+        let count = min(from.count, to.count)
+        while common < count, from[common] == to[common] {
+            common += 1
+        }
+
+        let upCount = max(0, from.count - common)
+        let downComponents = Array(to.dropFirst(common))
+        let upComponents = Array(repeating: "..", count: upCount)
+        let combined = upComponents + downComponents
+        return combined.joined(separator: "/")
+    }
+
+    private func resolveRelativeImportPath(_ rawPath: String, relativePrefix: String) -> String {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return rawPath }
+        if relativePrefix.isEmpty { return trimmed }
+        return relativePrefix + trimmed
     }
 } // End of TypstCompiler class
 

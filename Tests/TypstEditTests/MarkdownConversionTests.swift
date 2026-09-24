@@ -8,6 +8,71 @@ final class MarkdownConversionTests: XCTestCase {
         AICompletionService.shared.sanitizeMarkdownToTypst(text, isHybrid: isHybrid)
     }
 
+    // MARK: - Typst AST / variable evaluation
+
+    func testTypstLetVariableEvaluation() {
+        let input = "#let name = \"Typst\"\n#name"
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertEqual(output, "Typst")
+    }
+
+    func testTypstImportAndConditionalEvaluation() {
+        let input = """
+#import "lib.typ"
+#let enabled = true
+#if enabled {
+  Hello
+} else {
+  No
+}
+"""
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertTrue(output.contains("Hello"), "Expected the true branch to render")
+        XCTAssertFalse(output.contains("No"), "Expected the false branch to be excluded")
+    }
+
+    func testTypstImportUsesFileLoaderForNestedNoteVariables() {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let noteURL = tempDir.appendingPathComponent("Troy.note")
+        let noteContent = """
+        #let sensitive = (
+          testator: "Troy"
+        )
+        """
+        try? noteContent.write(to: noteURL, atomically: true, encoding: .utf8)
+
+        let input = """
+        #import "Troy.note"
+        #sensitive.testator
+        """
+
+        let output = TypstToMarkdownConverter.convert(
+            input,
+            isAlreadyMarkdown: false,
+            fileLoader: { filename in
+                let url = tempDir.appendingPathComponent(filename)
+                return try? String(contentsOf: url, encoding: .utf8)
+            }
+        )
+
+        XCTAssertTrue(output.contains("Troy"), "Expected imported note variables to resolve via the file loader")
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    func testRelativeImportRewriterUsesSourceDirectory() {
+        let compiler = TypstCompiler()
+        let content = "#import \"lib.typ\"\n#image(\"hero.png\")"
+        let sourceDir = URL(fileURLWithPath: "/Users/example/project/subfolder")
+        let tempDir = URL(fileURLWithPath: "/Users/example/project/temp")
+
+        let rewritten = compiler.rewriteRelativeImports(in: content, sourceDirectory: sourceDir, tempDirectory: tempDir)
+
+        XCTAssertTrue(rewritten.contains("#import \"../subfolder/lib.typ\""), "Relative imports should be resolved from the source file directory")
+        XCTAssertTrue(rewritten.contains("#image(\"../subfolder/hero.png\")"), "Relative images should be resolved from the source file directory")
+    }
+
     // MARK: - Video Links
 
     func testYouTubeNestedImageLink() {

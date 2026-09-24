@@ -1275,12 +1275,28 @@ struct ContentView: View {
     
     // MARK: - Markdown Export / Share
 
+    private func markdownExportFileLoader() -> ((String) -> String?)? {
+        let baseDirectory = selectedFile?.deletingLastPathComponent()
+            ?? editorController.currentFileURL?.deletingLastPathComponent()
+            ?? fileSystem.currentFolder
+            ?? editorController.projectRootURL
+        guard let baseDirectory else { return nil }
+
+        return { filename in
+            let fileURL = baseDirectory.appendingPathComponent(filename)
+            return try? String(contentsOf: fileURL, encoding: .utf8)
+        }
+    }
+
     /// Presents a Save panel and writes the converted Markdown to disk.
     @MainActor
     func handleExportAsMarkdown() {
         let alreadyMarkdown = editorController.isMarkdownFile
-        let markdown = TypstToMarkdownConverter.convert(editorController.sourceCode,
-                                                        isAlreadyMarkdown: alreadyMarkdown)
+        let markdown = TypstToMarkdownConverter.convert(
+            editorController.sourceCode,
+            isAlreadyMarkdown: alreadyMarkdown,
+            fileLoader: markdownExportFileLoader()
+        )
 
         let panel = NSSavePanel()
         // UTType.markdown requires macOS 27; construct from extension for compatibility.
@@ -1331,8 +1347,11 @@ struct ContentView: View {
     @MainActor
     func handleShareAsMarkdown() {
         let alreadyMarkdown = editorController.isMarkdownFile
-        let markdown = TypstToMarkdownConverter.convert(editorController.sourceCode,
-                                                        isAlreadyMarkdown: alreadyMarkdown)
+        let markdown = TypstToMarkdownConverter.convert(
+            editorController.sourceCode,
+            isAlreadyMarkdown: alreadyMarkdown,
+            fileLoader: markdownExportFileLoader()
+        )
 
         // Write to a temporary file so we can share a URL (richer than a raw string).
         let tmpDir = FileManager.default.temporaryDirectory

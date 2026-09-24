@@ -1,554 +1,1041 @@
 import Foundation
 
-// MARK: - TypstToMarkdownConverter
-//
-// Converts a Typst (.typ) source string into a reasonable Markdown approximation.
-// The conversion is intentionally conservative: constructs not recognised are kept
-// as-is so the output stays readable rather than corrupted.
-//
-// For .md / .note files the content is already Markdown and this converter is a
-// near-passthrough (it just strips any stray Typst-only syntax).
+/// The public entry point used by the app and tests.
+public struct TypstToMarkdownConverter {
+    public var fileLoader: ((String) -> String?)?
 
-enum TypstToMarkdownRegex {
-    static let numberedList = try! NSRegularExpression(pattern: "^[0-9]+\\. ")
-    static let displayMath = try! NSRegularExpression(pattern: #"\$\s+([^$]+?)\s+\$"#)
-    static let inlineMath = try! NSRegularExpression(pattern: #"\$([^$\n]+?)\$"#)
-    static let bold = try! NSRegularExpression(pattern: #"(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)"#)
-    static let underline = try! NSRegularExpression(pattern: #"#underline\[([^\]]*)\]"#)
-    static let strike = try! NSRegularExpression(pattern: #"#strike\[([^\]]*)\]"#)
-    static let highlight = try! NSRegularExpression(pattern: #"#highlight\[([^\]]*)\]"#)
-    static let superscript = try! NSRegularExpression(pattern: #"#super\[([^\]]*)\]"#)
-    static let `subscript` = try! NSRegularExpression(pattern: #"#sub\[([^\]]*)\]"#)
-    static let linkWithText = try! NSRegularExpression(pattern: #"#link\("([^"]+)"\)\[([^\]]*)\]"#)
-    static let linkBare = try! NSRegularExpression(pattern: #"#link\("([^"]+)"\)"#)
-    static let labelRef = try! NSRegularExpression(pattern: #"@([A-Za-z0-9_:.-]+)"#)
-    static let footnote = try! NSRegularExpression(pattern: #"#footnote\[([^\]]*)\]"#)
-    static let vSpace = try! NSRegularExpression(pattern: #"#v\([^)]*\)"#)
-    static let customFuncArgsBody = try! NSRegularExpression(pattern: #"#[A-Za-z0-9_.-]+\([^)]*\)\[([^\]]*)\]"#)
-    static let customFuncBody = try! NSRegularExpression(pattern: #"#[A-Za-z0-9_.-]+\[([^\]]*)\]"#)
-    static let customFuncArgsOnly = try! NSRegularExpression(pattern: #"#[A-Za-z0-9_.-]+\([^)]*\)"#)
-    static let nonBreakingSpace = try! NSRegularExpression(pattern: #"(\w)~(\w)"#)
-    static let consecutiveNewlines = try! NSRegularExpression(pattern: "\n\n\n+")
+    public init(fileLoader: ((String) -> String?)? = nil) {
+        self.fileLoader = fileLoader
+    }
+
+    public static func convert(_ source: String, isAlreadyMarkdown: Bool = false, fileLoader: ((String) -> String?)? = nil) -> String {
+        if isAlreadyMarkdown {
+            return source
+        }
+
+        do {
+            let compiler = TypstASTCompiler(fileLoader: fileLoader)
+            return try compiler.compile(source: source)
+        } catch {
+            return source
+        }
+    }
+
+    public func convert(source: String) throws -> String {
+        let compiler = TypstASTCompiler(fileLoader: fileLoader)
+        return try compiler.compile(source: source)
+    }
 }
 
-struct TypstToMarkdownConverter {
+/// Errors that can occur during the parsing phase.
+public enum ParserError: Error {
+    case expectedEquals
+    case expectedValue
+}
 
-    // MARK: - Public entry point
+/// Errors that can occur during the evaluation/compilation phase.
+public enum CompilerError: Error {
+    case undefinedVariable(String)
+    case unimplemented(String)
+}
 
-    /// Convert `typstSource` to a Markdown string.
-    /// - Parameter isAlreadyMarkdown: Pass `true` for `.md` / `.note` files — the
-    ///   converter will skip Typst-specific transforms and only do minimal cleanup.
-    static func convert(_ typstSource: String, isAlreadyMarkdown: Bool = false) -> String {
-        if isAlreadyMarkdown {
-            return minimalMarkdownCleanup(typstSource)
-        }
-        return convertTypstToMarkdown(typstSource)
+/// Represents the raw syntax tree produced by the parser.
+/// Includes structural markup and programming logic like #let, variable access, and calls.
+public indirect enum TypstAST {
+    case document([TypstAST])
+    case text(String)
+    case heading(level: Int, content: [TypstAST])
+    case bold(content: [TypstAST])
+    case italic(content: [TypstAST])
+    case letBinding(identifier: String, value: TypstAST)
+    case setRule(identifier: String, args: [TypstAST])
+    case variableAccess(identifier: String)
+    case boolLiteral(Bool)
+    case functionCall(name: String, args: [TypstAST])
+    case contentBlock([TypstAST])
+    case ifStmt(condition: TypstAST, thenBranch: [TypstAST], elseBranch: [TypstAST]?)
+    case math(String)
+
+    // Advanced scripting nodes
+    case importStmt(String)
+    case showRule(String)
+    case codeBlock(String)
+}
+
+/// Represents the evaluated syntax tree after all #let and variable substitutions are resolved.
+public indirect enum ResolvedDocumentAST {
+    case document([ResolvedDocumentAST])
+    case text(String)
+    case heading(level: Int, content: [ResolvedDocumentAST])
+    case bold(content: [ResolvedDocumentAST])
+    case italic(content: [ResolvedDocumentAST])
+    case functionCall(name: String, args: [ResolvedDocumentAST])
+    case contentBlock([ResolvedDocumentAST])
+    case math(String)
+}
+
+/// Lexes and parses a Typst source string into a TypstAST.
+internal final class TypstParser {
+    private let input: String
+    private var currentIndex: String.Index
+
+    init(input: String) {
+        self.input = input
+        self.currentIndex = input.startIndex
     }
 
-    // MARK: - Full Typst → Markdown pipeline
-
-    private static func convertTypstToMarkdown(_ source: String) -> String {
-        // Work line by line for block-level transforms, then do inline transforms.
-        let lines = source.components(separatedBy: "\n")
-        var output: [String] = []
-        var i = 0
-
-        func isDirective(_ text: String) -> Bool {
-            text.hasPrefix("#set ") || text.hasPrefix("#show ") ||
-            text.hasPrefix("#import ") || text.hasPrefix("#include ") ||
-            text.hasPrefix("#let ")
-        }
-
-        // Consume the preamble (#set / #show rules, #import, #let) silently.
-        while i < lines.count {
-            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
-            if isDirective(trimmed) {
-                var depth = 0
-                repeat {
-                    if i < lines.count {
-                        let currentLine = lines[i]
-                        depth += currentLine.reduce(0) {
-                            if $1 == "{" || $1 == "(" || $1 == "[" { return $0 + 1 }
-                            if $1 == "}" || $1 == ")" || $1 == "]" { return $0 - 1 }
-                            return $0
-                        }
-                    }
-                    i += 1
-                } while i < lines.count && depth > 0
-                continue
-            }
-            if trimmed.hasPrefix("//") || trimmed.isEmpty {
-                i += 1
-                continue
-            }
-            break
-        }
-
-        // Process the body
-        while i < lines.count {
-            let raw = lines[i]
-            let trimmed = raw.trimmingCharacters(in: .whitespaces)
-
-            // --- Skip pure Typst directives (including multi-line #let) ---
-            if isDirective(trimmed) {
-                var depth = 0
-                repeat {
-                    if i < lines.count {
-                        let currentLine = lines[i]
-                        depth += currentLine.reduce(0) {
-                            if $1 == "{" || $1 == "(" || $1 == "[" { return $0 + 1 }
-                            if $1 == "}" || $1 == ")" || $1 == "]" { return $0 - 1 }
-                            return $0
-                        }
-                    }
-                    i += 1
-                } while i < lines.count && depth > 0
-                continue
-            }
-
-            if trimmed.hasPrefix("// ") || trimmed == "//" {
-                i += 1
-                continue
-            }
-
-            // --- Fenced code blocks (``` ... ```) — pass through verbatim ---
-            if trimmed.hasPrefix("```") {
-                output.append(raw)
-                i += 1
-                while i < lines.count {
-                    output.append(lines[i])
-                    if lines[i].trimmingCharacters(in: .whitespaces).hasPrefix("```")
-                        && lines[i].trimmingCharacters(in: .whitespaces) != trimmed {
-                        i += 1
-                        break
-                    }
-                    i += 1
-                }
-                continue
-            }
-
-            // --- Display math ($ ... $ spanning multiple lines) ---
-            if trimmed == "$" || (trimmed.hasPrefix("$") && !trimmed.hasPrefix("$[") && trimmed.count == 1) {
-                output.append("$$")
-                i += 1
-                while i < lines.count {
-                    let ml = lines[i].trimmingCharacters(in: .whitespaces)
-                    if ml == "$" {
-                        output.append("$$")
-                        i += 1
-                        break
-                    }
-                    output.append(lines[i])
-                    i += 1
-                }
-                continue
-            }
-
-            // --- Headings: = H1, == H2, === H3, etc. ---
-            if let (level, text) = parseHeading(trimmed) {
-                let hashes = String(repeating: "#", count: level)
-                output.append("\(hashes) \(convertInline(text))")
-                i += 1
-                continue
-            }
-
-            // --- #pagebreak() → horizontal rule ---
-            if trimmed == "#pagebreak()" || trimmed == "#pagebreak(weak: true)" {
-                output.append("---")
-                i += 1
-                continue
-            }
-
-            // --- #line(length: ...) horizontal rule ---
-            if trimmed.hasPrefix("#line(") {
-                output.append("---")
-                i += 1
-                continue
-            }
-
-            // --- Vertical Space: #v(...) → <br> ---
-            if trimmed.hasPrefix("#v(") {
-                output.append("<br>")
-                i += 1
-                continue
-            }
-
-            // --- Bullet list item ---
-            if trimmed.hasPrefix("- ") {
-                let content = String(trimmed.dropFirst(2))
-                output.append("- \(convertInline(content))")
-                i += 1
-                continue
-            }
-
-            // --- Numbered list: + item ---
-            if trimmed.hasPrefix("+ ") {
-                let content = String(trimmed.dropFirst(2))
-                output.append("1. \(convertInline(content))")
-                i += 1
-                continue
-            }
-
-            // --- Numbered list: 1. item (already Markdown-compatible) ---
-            if TypstToMarkdownRegex.numberedList.firstMatch(in: trimmed, options: [], range: NSRange(0..<trimmed.utf16.count)) != nil {
-                output.append(convertInline(trimmed))
-                i += 1
-                continue
-            }
-
-            // --- Block quote ---
-            if trimmed.hasPrefix("#quote[") || trimmed.hasPrefix("> ") {
-                let inner = trimmed.hasPrefix("#quote[")
-                    ? String(trimmed.dropFirst(7).dropLast(trimmed.hasSuffix("]") ? 1 : 0))
-                    : String(trimmed.dropFirst(2))
-                output.append("> \(convertInline(inner))")
-                i += 1
-                continue
-            }
-
-            // --- #table(...), #grid(...), or #figure(...) versions — multi-line block ---
-            let isTableBlock = trimmed.hasPrefix("#table(") || trimmed.hasPrefix("#grid(") ||
-                               trimmed.hasPrefix("#figure(table(") || trimmed.hasPrefix("#figure(grid(")
-            if isTableBlock {
-                // Collect all lines of the block by tracking parenthesis depth.
-                var blockLines: [String] = [trimmed]
-                var depth = trimmed.reduce(0) { $0 + ($1 == "(" ? 1 : $1 == ")" ? -1 : 0) }
-                i += 1
-                while i < lines.count && depth > 0 {
-                    let bl = lines[i].trimmingCharacters(in: .whitespaces)
-                    depth += bl.reduce(0) { $0 + ($1 == "(" ? 1 : $1 == ")" ? -1 : 0) }
-                    blockLines.append(bl)
-                    i += 1
-                }
-                let block = blockLines.joined(separator: " ")
-                if let mdTable = parseTable(block) {
-                    output.append("")
-                    output.append(contentsOf: mdTable)
-                    output.append("")
-                }
-                continue
-            }
-
-            // --- #figure(...) — extract image path & caption ---
-            if trimmed.hasPrefix("#figure(") {
-                if let mdFigure = parseFigure(trimmed) {
-                    output.append(mdFigure)
-                }
-                i += 1
-                // consume multi-line figure bodies
-                if !trimmed.hasSuffix(")") {
-                    while i < lines.count {
-                        let fl = lines[i].trimmingCharacters(in: .whitespaces)
-                        i += 1
-                        if fl.hasSuffix(")") { break }
-                    }
-                }
-                continue
-            }
-
-            // --- #image("path") standalone ---
-            if trimmed.hasPrefix("#image(") {
-                if let path = extractStringArg(from: trimmed, after: "#image(") {
-                    output.append("![](\(path))")
-                }
-                i += 1
-                continue
-            }
-
-            // --- Empty line ---
-            if trimmed.isEmpty {
-                output.append("")
-                i += 1
-                continue
-            }
-
-            // --- Regular paragraph — apply inline transforms ---
-            output.append(convertInline(raw))
-            i += 1
-        }
-
-        let rawResult = output.joined(separator: "\n")
-        return TypstToMarkdownRegex.consecutiveNewlines.stringByReplacingMatches(
-            in: rawResult,
-            options: [],
-            range: NSRange(0..<rawResult.utf16.count),
-            withTemplate: "\n\n"
-        )
+    private var isAtEnd: Bool {
+        currentIndex >= input.endIndex
     }
 
-    // MARK: - Inline transforms
+    private func peek() -> Character? {
+        guard !isAtEnd else { return nil }
+        return input[currentIndex]
+    }
 
-    /// Convert Typst inline markup within a single paragraph/line to Markdown.
-    static func convertInline(_ text: String) -> String {
-        var s = text
+    private func advance() -> Character {
+        let character = input[currentIndex]
+        currentIndex = input.index(after: currentIndex)
+        return character
+    }
 
-        // Strip Typst line comments
-        if let range = s.range(of: " //") {
-            s = String(s[s.startIndex..<range.lowerBound])
+    private func match(_ prefix: String) -> Bool {
+        guard input[currentIndex...].hasPrefix(prefix) else { return false }
+        currentIndex = input.index(currentIndex, offsetBy: prefix.count)
+        return true
+    }
+
+    private func skipWhitespace() {
+        while !isAtEnd {
+            if let character = peek(), character.isWhitespace {
+                _ = advance()
+            } else if match("//") {
+                // Consume line comments entirely so they don't break parsing
+                while !isAtEnd, peek() != "\n" {
+                    _ = advance()
+                }
+            } else {
+                break
+            }
+        }
+    }
+
+    func parse() throws -> TypstAST {
+        var nodes: [TypstAST] = []
+        while !isAtEnd {
+            if isAtEnd { break }
+            
+            let startIndex = currentIndex
+            if let node = try parseNext() {
+                nodes.append(node)
+            }
+            
+            // Prevent infinite loop if stopping characters (e.g., ], }, )) are left unconsumed
+            if currentIndex == startIndex {
+                nodes.append(.text(String(advance())))
+            }
+        }
+        return .document(nodes)
+    }
+
+    private func parseNext() throws -> TypstAST? {
+        guard let character = peek() else { return nil }
+
+        if character == "\\" {
+            _ = advance() // Consume backslash
+            if !isAtEnd { return .text(String(advance())) }
+            return .text("\\")
+        } else if character == "`" {
+            return try parseCode()
+        } else if character == "#" {
+            return try parseHashExpression()
+        } else if character == "=" {
+            return try parseHeading()
+        } else if character == "*" {
+            return try parseBold()
+        } else if character == "$" {
+            return try parseMath()
+        } else {
+            return try parseText()
+        }
+    }
+
+    private func parseHashExpression() throws -> TypstAST {
+        _ = advance()
+
+        if match("import") || match("include") {
+            var stmt = ""
+            var nesting = 0
+            while !isAtEnd {
+                guard let current = peek() else { break }
+                if (current == "\n" || current == "\r") && nesting == 0 { break }
+                if current == "(" || current == "[" || current == "{" { nesting += 1 }
+                if current == ")" || current == "]" || current == "}" { nesting = max(0, nesting - 1) }
+                stmt.append(advance())
+            }
+            return .importStmt(stmt.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
-        // Display math on a single line:  $ ... $
-        s = replacePattern(s, regex: TypstToMarkdownRegex.displayMath) { m in "$$\(m[1])$$" }
+        if match("show") {
+            var stmt = ""
+            var nesting = 0
+            while !isAtEnd {
+                guard let current = peek() else { break }
+                if (current == "\n" || current == "\r") && nesting == 0 { break }
+                if current == "(" || current == "[" || current == "{" { nesting += 1 }
+                if current == ")" || current == "]" || current == "}" { nesting = max(0, nesting - 1) }
+                stmt.append(advance())
+            }
+            return .showRule(stmt.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
 
-        // Inline math: $expr$
-        s = replacePattern(s, regex: TypstToMarkdownRegex.inlineMath) { m in "$\(m[1])$" }
+        if match("if") {
+            let condition = try parseConditionExpression()
+            let thenBranch = try parseBranch()
+            skipWhitespace()
 
-        // Bold: *text*  (Typst) → **text** (Markdown)
-        s = replacePattern(s, regex: TypstToMarkdownRegex.bold) { m in "**\(m[1])**" }
+            var elseBranch: [TypstAST]? = nil
+            if match("else") {
+                skipWhitespace()
+                if match("if") {
+                    let nestedIf = try parseHashExpression()
+                    elseBranch = [nestedIf]
+                } else {
+                    elseBranch = try parseBranch()
+                }
+            }
 
-        // Underline: #underline[text] → text
-        s = replacePattern(s, regex: TypstToMarkdownRegex.underline) { m in m[1] }
+            return .ifStmt(condition: condition, thenBranch: thenBranch, elseBranch: elseBranch)
+        }
 
-        // Strikethrough: #strike[text] → ~~text~~
-        s = replacePattern(s, regex: TypstToMarkdownRegex.strike) { m in "~~\(m[1])~~" }
+        if match("let") {
+            skipWhitespace()
+            let identifier = parseIdentifier()
+            skipWhitespace()
 
-        // Highlight: #highlight[text] → ==text==
-        s = replacePattern(s, regex: TypstToMarkdownRegex.highlight) { m in "==\(m[1])==" }
+            if peek() == "(" {
+                var nesting = 0
+                while !isAtEnd {
+                    let current = advance()
+                    if current == "(" { nesting += 1 }
+                    else if current == ")" {
+                        nesting -= 1
+                        if nesting == 0 { break }
+                    }
+                }
+            }
 
-        // Superscript: #super[text] → <sup>text</sup>
-        s = replacePattern(s, regex: TypstToMarkdownRegex.superscript) { m in "<sup>\(m[1])</sup>" }
+            skipWhitespace()
+            guard match("=") else {
+                throw ParserError.expectedEquals
+            }
 
-        // Subscript: #sub[text] → <sub>text</sub>
-        s = replacePattern(s, regex: TypstToMarkdownRegex.subscript) { m in "<sub>\(m[1])</sub>" }
+            skipWhitespace()
 
-        // Links: #link("url")[text] → [text](url)
-        s = replacePattern(s, regex: TypstToMarkdownRegex.linkWithText) { m in "[\(m[2])](\(m[1]))" }
+            if peek() == "{" {
+                var block = ""
+                var nesting = 0
+                while !isAtEnd {
+                    let current = advance()
+                    block.append(current)
+                    if current == "{" { nesting += 1 }
+                    else if current == "}" {
+                        nesting -= 1
+                        if nesting == 0 { break }
+                    }
+                }
+                return .letBinding(identifier: identifier, value: .codeBlock(block))
+            }
+
+            if peek() == "[" {
+                let content = try parseBranch()
+                return .letBinding(identifier: identifier, value: .contentBlock(content))
+            }
+
+            guard let valueNode = try parseNext() else {
+                throw ParserError.expectedValue
+            }
+
+            return .letBinding(identifier: identifier, value: valueNode)
+        }
+
+        if match("set") {
+            skipWhitespace()
+            let identifier = parseIdentifier()
+            skipWhitespace()
+
+            var args: [TypstAST] = []
+            if match("(") {
+                args = try parseArguments()
+                skipWhitespace()
+                if peek() == ")" { _ = advance() }
+            }
+            return .setRule(identifier: identifier, args: args)
+        }
+
+        let identifier = parseIdentifier()
+        skipWhitespace()
+
+        guard match("(") else {
+            if identifier == "true" { return .boolLiteral(true) }
+            if identifier == "false" { return .boolLiteral(false) }
+            return .variableAccess(identifier: identifier)
+        }
+
+        let args = try parseArguments()
+        skipWhitespace()
+        if peek() == ")" {
+            _ = advance()
+        }
+
+        skipWhitespace()
+        var finalArgs = args
+        if peek() == "[" {
+            let trailingContent = try parseArgument()
+            finalArgs.append(trailingContent)
+        }
+
+        return .functionCall(name: identifier, args: finalArgs)
+    }
+
+    private func parseConditionExpression() throws -> TypstAST {
+        skipWhitespace()
+        var condition = ""
+        var nesting = 0
+        var inString = false
+
+        while let current = peek() {
+            if inString {
+                condition.append(advance())
+                if current == "\"" { inString = false }
+                continue
+            }
+
+            if current == "\"" {
+                inString = true
+                condition.append(advance())
+                continue
+            }
+
+            if current == "(" || current == "[" || current == "{" {
+                nesting += 1
+                condition.append(advance())
+                continue
+            }
+
+            if current == ")" || current == "]" || current == "}" {
+                if nesting > 0 {
+                    nesting -= 1
+                    condition.append(advance())
+                    continue
+                }
+                break
+            }
+
+            if nesting == 0 && (current == "{" || current == "[") {
+                break
+            }
+
+            if nesting == 0 && current.isWhitespace {
+                let remaining = String(input[currentIndex...]).trimmingCharacters(in: .whitespaces)
+                if remaining.hasPrefix("{") || remaining.hasPrefix("[") {
+                    break
+                }
+            }
+            condition.append(advance())
+        }
+
+        let trimmed = condition.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "true" { return .boolLiteral(true) }
+        if trimmed == "false" { return .boolLiteral(false) }
+        return .variableAccess(identifier: trimmed)
+    }
+    
+    private func parseBranch() throws -> [TypstAST] {
+        skipWhitespace()
+        if peek() == "{" {
+            return try parseBracedBlock()
+        } else if peek() == "[" {
+            _ = advance() // consume '['
+            var content = ""
+            var nesting = 0
+            
+            while let character = peek() {
+                if character == "[" {
+                    nesting += 1
+                    content.append(advance())
+                } else if character == "]" {
+                    if nesting == 0 {
+                        _ = advance()
+                        break
+                    }
+                    nesting -= 1
+                    content.append(advance())
+                } else {
+                    content.append(advance())
+                }
+            }
+            
+            let innerParser = TypstParser(input: content)
+            let ast = try innerParser.parse()
+            if case .document(let children) = ast {
+                return children
+            }
+            return [ast]
+        }
         
-        // #link("url") with no label → <url>
-        s = replacePattern(s, regex: TypstToMarkdownRegex.linkBare) { m in "<\(m[1])>" }
-
-        // Refs: @label → *(ref: label)*
-        s = replacePattern(s, regex: TypstToMarkdownRegex.labelRef) { m in "*[\(m[1])]*" }
-
-        // Footnote: #footnote[text] → (text)
-        s = replacePattern(s, regex: TypstToMarkdownRegex.footnote) { m in " (\(m[1]))" }
-
-        // Vertical space: #v(1em) -> <br>
-        s = replacePattern(s, regex: TypstToMarkdownRegex.vSpace) { _ in "<br>" }
-
-        // Generic #func(args)[content] fallback — preserve content, strip function wrapper
-        s = replacePattern(s, regex: TypstToMarkdownRegex.customFuncArgsBody) { m in m[1] }
-
-        // Generic #func[content] fallback — preserve content, strip function wrapper
-        s = replacePattern(s, regex: TypstToMarkdownRegex.customFuncBody) { m in m[1] }
-
-        // Generic #func(args) fallback — remove completely unsupported standalone functions 
-        // (Must run after specific ones like #link are processed)
-        s = replacePattern(s, regex: TypstToMarkdownRegex.customFuncArgsOnly) { _ in "" }
-
-        // Typst non-breaking space: ~  →  regular space
-        s = replacePattern(s, regex: TypstToMarkdownRegex.nonBreakingSpace) { m in "\(m[1]) \(m[2])" }
-
-        return s
-    }
-
-    // MARK: - Heading parser
-
-    private static func parseHeading(_ trimmed: String) -> (Int, String)? {
-        guard trimmed.hasPrefix("=") else { return nil }
-        var level = 0
-        var idx = trimmed.startIndex
-        while idx < trimmed.endIndex && trimmed[idx] == "=" {
-            level += 1
-            idx = trimmed.index(after: idx)
+        let startIndex = currentIndex
+        if let node = try parseNext() {
+            return [node]
         }
-        guard level > 0, level <= 6, idx < trimmed.endIndex, trimmed[idx] == " " else { return nil }
-        let text = String(trimmed[trimmed.index(after: idx)...])
-        return (level, text)
+        if currentIndex == startIndex {
+            _ = advance()
+        }
+        return []
     }
 
-    // MARK: - Figure parser
+    private func parseBracedBlock() throws -> [TypstAST] {
+        skipWhitespace()
+        guard peek() == "{" else { return [] }
+        _ = advance()
 
-    private static func parseFigure(_ line: String) -> String? {
-        if let imagePath = extractStringArg(from: line, after: "image(") {
-            var caption = ""
-            if let capRange = line.range(of: "caption: [") {
-                let after = line[capRange.upperBound...]
-                if let endBracket = after.firstIndex(of: "]") {
-                    caption = String(after[after.startIndex..<endBracket])
+        var nodes: [TypstAST] = []
+        while !isAtEnd {
+            skipWhitespace()
+            if peek() == "}" {
+                _ = advance()
+                break
+            }
+            
+            let startIndex = currentIndex
+            if let node = try parseNext() {
+                nodes.append(node)
+            }
+            
+            // Prevent infinite loop if stopping characters (e.g., ], }, )) are left unconsumed
+            if currentIndex == startIndex {
+                nodes.append(.text(String(advance())))
+            }
+        }
+        return nodes
+    }
+
+    private func parseArguments() throws -> [TypstAST] {
+        var args: [TypstAST] = []
+        skipWhitespace()
+
+        while !isAtEnd {
+            if peek() == ")" {
+                break
+            }
+
+            let argument = try parseArgument()
+            
+            // Allow structural arguments (like content blocks) OR non-empty text strings
+            switch argument {
+            case .text(let value):
+                if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    args.append(argument)
+                }
+            default:
+                args.append(argument)
+            }
+
+            skipWhitespace()
+            if peek() == "," {
+                _ = advance()
+                skipWhitespace()
+                continue
+            }
+
+            if peek() == ")" {
+                break
+            }
+        }
+
+        return args
+    }
+
+    private func parseArgument() throws -> TypstAST {
+        skipWhitespace()
+        
+        if peek() == "[" {
+            _ = advance() // consume '['
+            var content = ""
+            var nesting = 0
+            
+            while let character = peek() {
+                if character == "[" {
+                    nesting += 1
+                    content.append(advance())
+                } else if character == "]" {
+                    if nesting == 0 {
+                        _ = advance()
+                        break
+                    }
+                    nesting -= 1
+                    content.append(advance())
+                } else {
+                    content.append(advance())
                 }
             }
-            return "![\(caption)](\(imagePath))"
+            
+            let innerParser = TypstParser(input: content)
+            let ast = try innerParser.parse()
+            if case .document(let children) = ast {
+                return .contentBlock(children)
+            }
+            return .contentBlock([ast])
+        }
+
+        var content = ""
+        var nesting = 0
+        var inString = false
+
+        while let character = peek() {
+            if inString {
+                content.append(advance())
+                if character == "\"" {
+                    inString = false
+                }
+                continue
+            }
+
+            switch character {
+            case "\"":
+                inString = true
+                content.append(advance())
+            case "(", "{":
+                nesting += 1
+                content.append(advance())
+            case "[": // In case of a stray nested bracket during string capture
+                nesting += 1
+                content.append(advance())
+            case ")", "}", "]":
+                if nesting > 0 {
+                    nesting -= 1
+                    content.append(advance())
+                } else {
+                    return .text(content.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            case ",":
+                if nesting == 0 {
+                    return .text(content.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+                content.append(advance())
+            default:
+                content.append(advance())
+            }
+        }
+
+        return .text(content.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func parseHeading() throws -> TypstAST {
+        var level = 0
+        while peek() == "=" {
+            _ = advance()
+            level += 1
+        }
+
+        // Only skip spaces and tabs, preserving newlines
+        while let character = peek(), character == " " || character == "\t" {
+            _ = advance()
+        }
+
+        var content: [TypstAST] = []
+        while !isAtEnd, peek() != "\n", peek() != "\r" {
+            if peek() == "#" {
+                content.append(try parseHashExpression())
+            } else if peek() == "*" {
+                content.append(try parseBold())
+            } else {
+                var text = ""
+                while let character = peek(), character != "\n", character != "\r", character != "#", character != "*" {
+                    if input[currentIndex...].hasPrefix("//") {
+                        while !isAtEnd, peek() != "\n" { _ = advance() }
+                        break
+                    }
+                    text.append(advance())
+                }
+                if !text.isEmpty {
+                    content.append(.text(text))
+                }
+            }
+        }
+
+        if peek() == "\r" { _ = advance() }
+        if peek() == "\n" { _ = advance() }
+
+        return .heading(level: level, content: content)
+    }
+
+    private func parseBold() throws -> TypstAST {
+        _ = advance()
+
+        var content: [TypstAST] = []
+        while !isAtEnd, peek() != "*" {
+            if peek() == "#" {
+                content.append(try parseHashExpression())
+            } else {
+                var text = ""
+                while let character = peek(), character != "*", character != "#" {
+                    if input[currentIndex...].hasPrefix("//") {
+                        while !isAtEnd, peek() != "\n" { _ = advance() }
+                        continue
+                    }
+                    text.append(advance())
+                }
+                if !text.isEmpty {
+                    content.append(.text(text))
+                }
+            }
+        }
+
+        if peek() == "*" {
+            _ = advance()
+        }
+
+        return .bold(content: content)
+    }
+
+    private func parseCode() throws -> TypstAST {
+        var content = String(advance())
+        let isBlock = input[currentIndex...].hasPrefix("``")
+        
+        if isBlock {
+            content.append(advance())
+            content.append(advance())
+        }
+
+        while !isAtEnd {
+            let current = advance()
+            content.append(current)
+
+            if current == "`" {
+                if isBlock {
+                    if input[currentIndex...].hasPrefix("``") {
+                        content.append(advance())
+                        content.append(advance())
+                        break
+                    }
+                } else {
+                    break
+                }
+            }
+        }
+        // Markdown natively understands backticks, so we just return it as pure text!
+        return .text(content)
+    }
+
+    private func parseMath() throws -> TypstAST {    var content = String(advance()) // consume first '$'
+        let isDisplay = peek() == "$"
+        if isDisplay {
+            content.append(advance()) // consume second '$'
+        }
+
+        while !isAtEnd {
+            let current = advance()
+            content.append(current)
+
+            if current == "$" {
+                if isDisplay {
+                    if peek() == "$" {
+                        content.append(advance())
+                        break
+                    }
+                } else {
+                    break
+                }
+            }
+        }
+        return .math(content)
+    }
+
+    private func parseText() throws -> TypstAST {
+        var text = ""
+
+        if peek() == "\"" {
+            _ = advance()
+            while let character = peek(), character != "\"" {
+                text.append(advance())
+            }
+            if peek() == "\"" {
+                _ = advance()
+            }
+            return .text(text)
+        }
+
+        while let character = peek(),
+              character != "#",
+              character != "=",
+              character != "*",
+              character != "$",
+              character != "}",
+              character != "]",
+              character != ")" {
+            
+            // Consume line comments natively so they aren't parsed as text
+            if input[currentIndex...].hasPrefix("//") {
+                while !isAtEnd, peek() != "\n" {
+                    _ = advance()
+                }
+                continue
+            }
+            
+            text.append(advance())
+        }
+
+        return .text(text)
+    }
+
+    private func parseIdentifier() -> String {
+        var identifier = ""
+        // Allow dots in identifiers to support module/dictionary-style variable names like troy.note or troy.typ
+        while let character = peek(), character.isLetter || character.isNumber || character == "_" || character == "-" || character == "." {
+            identifier.append(advance())
+        }
+        return identifier
+    }
+}
+
+/// Acts as the symbol table for variable scoping.
+public final class TypstEnvironment {
+    private var scopes: [[String: ResolvedDocumentAST]] = [[:]]
+
+    public init() {}
+
+    public func pushScope() {
+        scopes.append([:])
+    }
+
+    public func popScope() {
+        guard scopes.count > 1 else {
+            fatalError("Cannot pop the global scope.")
+        }
+        scopes.removeLast()
+    }
+
+    public func define(identifier: String, value: ResolvedDocumentAST) {
+        scopes[scopes.count - 1][identifier] = value
+    }
+
+    public func lookup(identifier: String) -> ResolvedDocumentAST? {
+        for scope in scopes.reversed() {
+            if let value = scope[identifier] {
+                return value
+            }
         }
         return nil
     }
 
-    // MARK: - Table / Grid parser
+    public func exportVariables() -> [String: ResolvedDocumentAST] {
+        var result = [String: ResolvedDocumentAST]()
+        for scope in scopes {
+            for (key, value) in scope {
+                result[key] = value
+            }
+        }
+        return result
+    }
+}
 
-    private static func parseTable(_ block: String) -> [String]? {
-        var src = block
-        if src.hasPrefix("#figure(") {
-            if let targetRange = src.range(of: "table(") ?? src.range(of: "grid(") {
-                let fromTarget = String(src[targetRange.lowerBound...])
-                src = "#" + fromTarget
-                var depth = 0
-                var endIdx = src.endIndex
-                for idx in src.indices {
-                    let ch = src[idx]
-                    if ch == "(" { depth += 1 }
-                    else if ch == ")" {
-                        depth -= 1
-                        if depth == 0 {
-                            endIdx = src.index(after: idx)
-                            break
+/// Traverses the raw TypstAST, executes logic, and produces a resolved document tree.
+public final class Evaluator {
+    private let environment: TypstEnvironment
+    private let fileLoader: ((String) -> String?)?
+
+    public init(environment: TypstEnvironment, fileLoader: ((String) -> String?)? = nil) {
+        self.environment = environment
+        self.fileLoader = fileLoader
+    }
+
+    public func evaluate(node: TypstAST) throws -> ResolvedDocumentAST? {
+        switch node {
+        case .document(let children):
+            var resolvedChildren: [ResolvedDocumentAST] = []
+            for child in children {
+                if let resolved = try? evaluate(node: child) {
+                    resolvedChildren.append(resolved)
+                }
+            }
+            return .document(resolvedChildren)
+
+        case .text(let content):
+            return .text(content)
+
+        case .heading(let level, let content):
+            let resolvedContent = content.compactMap { try? evaluate(node: $0) }.compactMap { $0 }
+            return .heading(level: level, content: resolvedContent)
+
+        case .bold(let content):
+            let resolvedContent = content.compactMap { try? evaluate(node: $0) }.compactMap { $0 }
+            return .bold(content: resolvedContent)
+
+        case .italic(let content):
+            let resolvedContent = content.compactMap { try? evaluate(node: $0) }.compactMap { $0 }
+            return .italic(content: resolvedContent)
+
+        case .letBinding(let identifier, let valueAST):
+            guard let resolvedValue = try evaluate(node: valueAST) else {
+                return nil
+            }
+            environment.define(identifier: identifier, value: resolvedValue)
+            return nil
+
+        case .boolLiteral(let value):
+            return .text(value ? "true" : "false")
+
+        case .setRule:
+            // Markdown has no page/text settings, safely ignore
+            return nil
+
+        case .importStmt(let stmt):
+            let tokens = stmt.split(whereSeparator: { $0.isWhitespace }).map { String($0) }
+            guard !tokens.isEmpty else { return nil }
+            
+            let filename = tokens[0].replacingOccurrences(of: "\"", with: "")
+            let alias = (tokens.count >= 3 && tokens[1] == "as") ? tokens[2] : nil
+            
+            if let loader = self.fileLoader, let content = loader(filename) {
+                let subParser = TypstParser(input: content)
+                if let subAst = try? subParser.parse() {
+                    let subEnv = TypstEnvironment()
+                    let subEvaluator = Evaluator(environment: subEnv, fileLoader: loader)
+                    _ = try? subEvaluator.evaluate(node: subAst)
+                    
+                    let exported = subEnv.exportVariables()
+                    
+                    if let a = alias {
+                        for (k, v) in exported {
+                            environment.define(identifier: "\(a).\(k)", value: v)
+                        }
+                    } else {
+                        for (k, v) in exported {
+                            environment.define(identifier: k, value: v)
                         }
                     }
                 }
-                src = String(src[src.startIndex..<endIdx])
             }
-        }
+            return nil
 
-        var columnCount = 0
-        if let colRange = src.range(of: "columns:") {
-            let after = src[colRange.upperBound...].trimmingCharacters(in: .whitespaces)
-            if after.hasPrefix("(") {
-                if let close = after.firstIndex(of: ")") {
-                    let inner = String(after[after.index(after: after.startIndex)..<close])
-                    columnCount = inner.components(separatedBy: ",").count
+        case .showRule, .codeBlock:
+            // Advanced scripting concepts safely ignored in Markdown translation
+            return nil
+
+        case .ifStmt(let condition, let thenBranch, let elseBranch):
+            let conditionValue = try evaluate(node: condition)
+            let isTrue: Bool
+
+            switch conditionValue {
+            case .some(.text(let text)):
+                isTrue = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true"
+            case .some(.functionCall(let name, _)):
+                isTrue = name == "true"
+            case .some(.document(let children)):
+                isTrue = !children.isEmpty
+            default:
+                isTrue = false
+            }
+
+            let selectedBranch = isTrue ? thenBranch : (elseBranch ?? [])
+            var resolved: [ResolvedDocumentAST] = []
+            for child in selectedBranch {
+                if let value = try evaluate(node: child) {
+                    resolved.append(value)
                 }
-            } else if let numEnd = after.firstIndex(where: { !$0.isNumber }) {
-                columnCount = Int(String(after[after.startIndex..<numEnd])) ?? 0
-            } else {
-                columnCount = Int(after.trimmingCharacters(in: CharacterSet(charactersIn: ",) "))) ?? 0
             }
-        }
+            return .document(resolved)
 
-        var cells: [String] = []
-        var headerCells: [String]? = nil
+        case .math(let equation):
+            return .math(equation)
 
-        // table.header doesn't exist for grid, but checking for it is safe.
-        if let headerRange = src.range(of: "table.header") {
-            let afterHeader = src[headerRange.upperBound...]
-            let hCells = extractBracketCells(from: String(afterHeader), stopAt: ",\n", maxUntilNonBracket: true)
-            if !hCells.isEmpty {
-                headerCells = hCells
-                if columnCount == 0 { columnCount = hCells.count }
+        case .contentBlock(let content):
+            let resolvedContent = content.compactMap { try? evaluate(node: $0) }.compactMap { $0 }
+            return .contentBlock(resolvedContent)
+
+        case .variableAccess(let identifier):
+            guard let resolvedValue = environment.lookup(identifier: identifier) else {
+                // Graceful fallback: Treat unknown variables natively as plain text instead of crashing!
+                return .text(identifier)
             }
+            return resolvedValue
+
+        case .functionCall(let name, let args):
+            let resolvedArgs = args.compactMap { try? evaluate(node: $0) }.compactMap { $0 }
+            return .functionCall(name: name, args: resolvedArgs)
         }
-
-        cells = extractBracketCells(from: src, stopAt: nil, maxUntilNonBracket: false)
-
-        if let hc = headerCells, !cells.isEmpty {
-            let skip = min(hc.count, cells.count)
-            cells = Array(cells.dropFirst(skip))
-        }
-
-        if columnCount == 0 {
-            guard !cells.isEmpty else { return nil }
-            columnCount = max(1, Int(Double(cells.count).squareRoot()))
-        }
-
-        var rows: [String] = []
-
-        func makeRow(_ rowCells: [String]) -> String {
-            let padded = (0..<columnCount).map { rowCells.indices.contains($0) ? convertInline(rowCells[$0]) : "" }
-            return "| " + padded.joined(separator: " | ") + " |"
-        }
-
-        let separator = "| " + Array(repeating: "---", count: columnCount).joined(separator: " | ") + " |"
-
-        if let hc = headerCells {
-            rows.append(makeRow(hc))
-            rows.append(separator)
-        }
-
-        var cellIdx = 0
-        while cellIdx < cells.count {
-            let slice = Array(cells[cellIdx..<min(cellIdx + columnCount, cells.count)])
-            if headerCells == nil && rows.isEmpty {
-                // If it's a grid with no defined header, the first row acts as the Markdown table header anyway
-                rows.append(makeRow(slice))
-                rows.append(separator)
-            } else {
-                rows.append(makeRow(slice))
-            }
-            cellIdx += columnCount
-        }
-
-        return rows.isEmpty ? nil : rows
     }
+}
 
-    private static func extractBracketCells(
-        from src: String,
-        stopAt _: String?,
-        maxUntilNonBracket: Bool
-    ) -> [String] {
-        var cells: [String] = []
-        var i = src.startIndex
-        while i < src.endIndex {
-            let ch = src[i]
-            if ch == "[" {
-                var depth = 1
-                var j = src.index(after: i)
-                while j < src.endIndex && depth > 0 {
-                    if src[j] == "[" { depth += 1 }
-                    else if src[j] == "]" { depth -= 1 }
-                    if depth > 0 { j = src.index(after: j) }
+/// Blindly serializes a resolved AST into Markdown, translating known Typst functions natively.
+public final class MarkdownRenderer {
+    public init() {}
+
+    public func render(node: ResolvedDocumentAST) -> String {
+        switch node {
+        case .document(let children):
+            return children.map { render(node: $0) }.joined()
+
+        case .text(let content):
+            return content
+
+        case .heading(let level, let content):
+            let prefix = String(repeating: "#", count: level)
+            let renderedContent = content.map { render(node: $0) }.joined()
+            return "\(prefix) \(renderedContent)\n"
+
+        case .bold(let content):
+            let renderedContent = content.map { render(node: $0) }.joined()
+            return "**\(renderedContent)**"
+
+        case .italic(let content):
+            let renderedContent = content.map { render(node: $0) }.joined()
+            return "*\(renderedContent)*"
+            
+        case .math(let equation):
+            return equation
+
+        case .contentBlock(let content):
+            return content.map { render(node: $0) }.joined()
+
+        case .functionCall(let name, let args):
+            switch name {
+            case "table", "grid":
+                return renderTable(args: args)
+            case "v":
+                return "\n\n"
+            case "pagebreak", "line":
+                return "\n---\n\n"
+            case "outline":
+                return "\n[TOC]\n\n"
+            case "link":
+                guard !args.isEmpty else { return "" }
+                var url = render(node: args[0]).replacingOccurrences(of: "\"", with: "")
+                if args.count > 1 {
+                    let label = render(node: args[1])
+                    return "[\(label)](\(url))"
                 }
-                let inner = String(src[src.index(after: i)..<j])
-                cells.append(inner)
-                i = src.index(after: j)
-            } else if maxUntilNonBracket && !ch.isWhitespace && ch != "," {
-                break
-            } else {
-                i = src.index(after: i)
+                return "<\(url)>"
+            case "image":
+                return renderImage(args: args)
+            case "align", "text", "box", "block", "pad", "rect", "stack", "center", "quote":
+                // For formatting wrappers, we just extract their inner text content payloads
+                let contentArgs = args.filter {
+                    if case .contentBlock = $0 { return true }
+                    return false
+                }
+                if !contentArgs.isEmpty {
+                    return contentArgs.map { render(node: $0) }.joined()
+                }
+                // Fallback: exclude args that look like key-value configurations
+                let positionalArgs = args.filter {
+                    if case .text(let t) = $0, t.contains(":") { return false }
+                    return true
+                }
+                return positionalArgs.map { render(node: $0) }.joined(separator: " ")
+            default:
+                let renderedArgs = args.map { render(node: $0) }.joined(separator: ", ")
+                return "#\(name)(\(renderedArgs))"
             }
         }
-        return cells
     }
-
-    // MARK: - Helpers
-
-    private static func extractStringArg(from s: String, after prefix: String) -> String? {
-        guard let start = s.range(of: prefix) else { return nil }
-        let rest = s[start.upperBound...]
-        guard let q1 = rest.firstIndex(of: "\"") else { return nil }
-        let afterQ1 = rest.index(after: q1)
-        guard let q2 = rest[afterQ1...].firstIndex(of: "\"") else { return nil }
-        return String(rest[afterQ1..<q2])
-    }
-
-    private static func minimalMarkdownCleanup(_ source: String) -> String {
-        var lines = source.components(separatedBy: "\n")
-        lines = lines.filter { line in
-            let t = line.trimmingCharacters(in: .whitespaces)
-            return !(t.hasPrefix("#set ") || t.hasPrefix("#show ") || t.hasPrefix("#import ") || t.hasPrefix("#let "))
-        }
-        lines = lines.map { convertInline($0) }
-        return lines.joined(separator: "\n")
-    }
-
-    // MARK: - Regex helper
-
-    private static func replacePattern(
-        _ s: String,
-        regex: NSRegularExpression,
-        replacement: ([String]) -> String
-    ) -> String {
-        let nsString = s as NSString
-        let fullRange = NSRange(location: 0, length: nsString.length)
-        var result = s
-        var offset = 0
-
-        let matches = regex.matches(in: s, options: [], range: fullRange)
-        for match in matches {
-            var groups: [String] = []
-            for g in 0..<match.numberOfRanges {
-                let r = match.range(at: g)
-                if r.location != NSNotFound,
-                   let swiftRange = Range(r, in: s) {
-                    groups.append(String(s[swiftRange]))
+    
+    private func renderTable(args: [ResolvedDocumentAST]) -> String {
+        var columnCount = 1
+        var cells: [ResolvedDocumentAST] = []
+        
+        for arg in args {
+            switch arg {
+            case .text(let str):
+                let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                let noSpaces = trimmed.replacingOccurrences(of: " ", with: "")
+                
+                if noSpaces.hasPrefix("columns:") {
+                    if trimmed.contains("(") {
+                        columnCount = trimmed.filter { $0 == "," }.count + 1
+                    } else {
+                        let valStr = noSpaces.replacingOccurrences(of: "columns:", with: "")
+                        if let num = Int(valStr) {
+                            columnCount = num
+                        }
+                    }
+                } else if noSpaces.contains(":") && !trimmed.hasPrefix("\"") && !trimmed.hasPrefix("'") {
+                    continue
                 } else {
-                    groups.append("")
+                    cells.append(arg)
+                }
+            default:
+                cells.append(arg)
+            }
+        }
+        
+        guard !cells.isEmpty else { return "" }
+        
+        var markdown = ""
+        var row: [String] = []
+        var isHeader = true
+        
+        for (index, cellAST) in cells.enumerated() {
+            var cellStr = render(node: cellAST)
+            cellStr = cellStr.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+            row.append(cellStr)
+            
+            if row.count == columnCount || index == cells.count - 1 {
+                while row.count < columnCount {
+                    row.append("")
+                }
+                
+                markdown += "| " + row.joined(separator: " | ") + " |\n"
+                
+                if isHeader {
+                    let separator = Array(repeating: "---", count: columnCount).joined(separator: " | ")
+                    markdown += "| " + separator + " |\n"
+                    isHeader = false
+                }
+                
+                row = []
+            }
+        }
+        
+        return markdown + "\n"
+    }
+
+    private func renderImage(args: [ResolvedDocumentAST]) -> String {
+        var imagePath = ""
+        for arg in args {
+            if case .text(let str) = arg {
+                let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("\"") {
+                    imagePath = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                    break
                 }
             }
-            let rep = replacement(groups)
-            let adjustedRange = NSRange(location: match.range.location + offset,
-                                        length: match.range.length)
-            let resultNS = result as NSString
-            result = resultNS.replacingCharacters(in: adjustedRange, with: rep)
-            offset += rep.utf16.count - match.range.length
         }
-        return result
+        return "![image](\(imagePath))\n\n"
+    }
+}
+
+/// Compiler pipeline: parser -> evaluator -> renderer.
+public final class TypstASTCompiler {
+    private let environment: TypstEnvironment
+    private let fileLoader: ((String) -> String?)?
+
+    public init(environment: TypstEnvironment = TypstEnvironment(), fileLoader: ((String) -> String?)? = nil) {
+        self.environment = environment
+        self.fileLoader = fileLoader
+    }
+
+    public func compile(source: String) throws -> String {
+        let parser = TypstParser(input: source)
+        let ast = try parser.parse()
+        return try compile(ast: ast)
+    }
+
+    public func compile(ast: TypstAST) throws -> String {
+        let evaluator = Evaluator(environment: environment, fileLoader: fileLoader)
+        let resolved = try evaluator.evaluate(node: ast)
+        let renderer = MarkdownRenderer()
+        return renderer.render(node: resolved ?? .document([]))
     }
 }

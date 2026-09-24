@@ -1029,6 +1029,17 @@ class EditorController: NSObject, ObservableObject {
         }
     }
 
+    private func markdownFileLoader() -> ((String) -> String?)? {
+        let baseDirectory = currentFileURL?.deletingLastPathComponent()
+            ?? projectRootURL
+        guard let baseDirectory else { return nil }
+
+        return { filename in
+            let fileURL = baseDirectory.appendingPathComponent(filename)
+            return try? String(contentsOf: fileURL, encoding: .utf8)
+        }
+    }
+
     /// Converts the current document (or selection, if any) to Markdown and puts it
     /// on the system clipboard. Works for both Typst (.typ) and Markdown (.md/.note)
     /// files.
@@ -1042,7 +1053,11 @@ class EditorController: NSObject, ObservableObject {
         } else {
             rawText = sourceCode
         }
-        let markdown = TypstToMarkdownConverter.convert(rawText, isAlreadyMarkdown: alreadyMarkdown)
+        let markdown = TypstToMarkdownConverter.convert(
+            rawText,
+            isAlreadyMarkdown: alreadyMarkdown,
+            fileLoader: markdownFileLoader()
+        )
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(markdown, forType: .string)
         showStatus("Copied as Markdown")
