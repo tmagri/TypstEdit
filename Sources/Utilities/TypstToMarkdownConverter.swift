@@ -1,5 +1,13 @@
 import Foundation
 
+enum MarkdownRegex {
+    static let nonBreakingSpace = try! NSRegularExpression(pattern: "(?<=\\w)~(?=\\w)")
+    static let labelRef = try! NSRegularExpression(pattern: "@([A-Za-z0-9_:.-]+)")
+    static let numberedListStart = try! NSRegularExpression(pattern: "^\\+\\s")
+    static let numberedListNewline = try! NSRegularExpression(pattern: "\\n\\+\\s")
+    static let consecutiveNewlines = try! NSRegularExpression(pattern: "\\n(?:\\s*\\n){2,}")
+}
+
 /// The public entry point used by the app and tests.
 public struct TypstToMarkdownConverter {
     public var fileLoader: ((String) -> String?)?
@@ -878,7 +886,14 @@ public final class MarkdownRenderer {
             return children.map { render(node: $0) }.joined()
 
         case .text(let content):
-            return content
+            var text = content
+            
+            text = MarkdownRegex.nonBreakingSpace.stringByReplacingMatches(in: text, options: [], range: NSRange(0..<text.utf16.count), withTemplate: " ")
+            text = MarkdownRegex.labelRef.stringByReplacingMatches(in: text, options: [], range: NSRange(0..<text.utf16.count), withTemplate: "*[$1]*")
+            text = MarkdownRegex.numberedListStart.stringByReplacingMatches(in: text, options: [], range: NSRange(0..<text.utf16.count), withTemplate: "1. ")
+            text = MarkdownRegex.numberedListNewline.stringByReplacingMatches(in: text, options: [], range: NSRange(0..<text.utf16.count), withTemplate: "\n1. ")
+            
+            return text
 
         case .heading(let level, let content):
             let prefix = String(repeating: "#", count: level)
@@ -919,21 +934,20 @@ public final class MarkdownRenderer {
                 return "<\(url)>"
             case "image":
                 return renderImage(args: args)
+            case "strike":
+                return "~~\(extractPayload(args: args))~~"
+            case "highlight":
+                return "==\(extractPayload(args: args))=="
+            case "super":
+                return "<sup>\(extractPayload(args: args))</sup>"
+            case "sub":
+                return "<sub>\(extractPayload(args: args))</sub>"
+            case "underline":
+                return "<u>\(extractPayload(args: args))</u>"
+            case "footnote":
+                return " (\(extractPayload(args: args)))"
             case "align", "text", "box", "block", "pad", "rect", "stack", "center", "quote":
-                // For formatting wrappers, we just extract their inner text content payloads
-                let contentArgs = args.filter {
-                    if case .contentBlock = $0 { return true }
-                    return false
-                }
-                if !contentArgs.isEmpty {
-                    return contentArgs.map { render(node: $0) }.joined()
-                }
-                // Fallback: exclude args that look like key-value configurations
-                let positionalArgs = args.filter {
-                    if case .text(let t) = $0, t.contains(":") { return false }
-                    return true
-                }
-                return positionalArgs.map { render(node: $0) }.joined(separator: " ")
+                return extractPayload(args: args)
             default:
                 let renderedArgs = args.map { render(node: $0) }.joined(separator: ", ")
                 return "#\(name)(\(renderedArgs))"
@@ -1001,6 +1015,21 @@ public final class MarkdownRenderer {
         return markdown + "\n"
     }
 
+    private func extractPayload(args: [ResolvedDocumentAST]) -> String {
+        let contentArgs = args.filter {
+            if case .contentBlock = $0 { return true }
+            return false
+        }
+        if !contentArgs.isEmpty {
+            return contentArgs.map { render(node: $0) }.joined()
+        }
+        let positionalArgs = args.filter {
+            if case .text(let t) = $0, t.contains(":") { return false }
+            return true
+        }
+        return positionalArgs.map { render(node: $0) }.joined(separator: " ")
+    }
+
     private func renderImage(args: [ResolvedDocumentAST]) -> String {
         var imagePath = ""
         for arg in args {
@@ -1036,6 +1065,16 @@ public final class TypstASTCompiler {
         let evaluator = Evaluator(environment: environment, fileLoader: fileLoader)
         let resolved = try evaluator.evaluate(node: ast)
         let renderer = MarkdownRenderer()
-        return renderer.render(node: resolved ?? .document([]))
+        var markdown = renderer.render(node: resolved ?? .document([]))
+        
+        // Clean up excessive newlines left by stripped configuration directives
+        markdown = MarkdownRegex.consecutiveNewlines.stringByReplacingMatches(
+            in: markdown,
+            options: [],
+            range: NSRange(0..<markdown.utf16.count),
+            withTemplate: "\n\n"
+        )
+        
+        return markdown.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
     }
 }
