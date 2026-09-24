@@ -30,69 +30,128 @@ struct SettingsView: View {
     }
 }
 
-// Add this structural View right below SettingsView
+// MARK: - General Settings Section Nav
+
+enum GeneralSettingsSection: String, CaseIterable, Identifiable {
+    case appearance = "Appearance"
+    case files = "Files & Backups"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .appearance: return "paintbrush"
+        case .files:      return "folder"
+        }
+    }
+}
+
 struct GeneralSettingsView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @ObservedObject private var notebookManager = NotebookManager.shared
     @AppStorage("maxBackups") private var maxBackups: Int = 3
-    
+    @State private var selectedSection: GeneralSettingsSection = .appearance
+
     var body: some View {
-        ScrollView {
-            Form {
-                Section(header: Text("Theme").fontWeight(.semibold)) {
-                    Picker(selection: $themeManager.appTheme) {
-                        ForEach(AppTheme.allCases) { theme in
-                            Text(theme.rawValue).tag(theme)
-                        }
-                    } label: {
-                        Text("Appearance").fontWeight(.semibold)
-                    }
-                    .pickerStyle(.segmented)
-                }
-                
-                Section(header: Text("Default Folder").fontWeight(.semibold)) {
-                    HStack {
-                        Text("Notebook Location:")
-                            .fontWeight(.regular)
-                        Spacer()
-                        Text(notebookManager.rootDirectory.path)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(notebookManager.rootDirectory.path)
-                    }
-                    
-                    HStack {
-                        Button("Choose...") {
-                            chooseFolder()
-                        }
-                        
-                        if notebookManager.isUsingCustomRoot {
-                            Button("Reset to Default") {
-                                notebookManager.resetRootDirectory()
-                            }
-                        }
-                    }
-                    
-                    Text("Change where notebooks are stored. Useful for syncing via iCloud Drive, Dropbox, or other cloud services.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                Section(header: Text("Backups").fontWeight(.semibold)) {
-                    Stepper(value: $maxBackups, in: 0...20) {
-                        Text("Max Backups Per File").fontWeight(.semibold)
-                    }
-                    Text("Keeps the last \(maxBackups) saved versions per file. A rotating backup is captured each time you press Save. Set to 0 to disable. Stored in a local backups/ folder; excluded from RAG indexing.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            // Segmented Top Navigation
+            Picker("Section", selection: $selectedSection) {
+                ForEach(GeneralSettingsSection.allCases) { section in
+                    Label(section.rawValue, systemImage: section.icon).tag(section)
                 }
             }
-            .padding()
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 24)
+            .padding(.top, 14)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 18) {
+                    switch selectedSection {
+                    case .appearance: appearanceSection
+                    case .files:      filesSection
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: 820)
+            }
         }
     }
-    
+
+    // MARK: - Appearance
+
+    @ViewBuilder
+    private var appearanceSection: some View {
+        SettingsCard(
+            title: "Theme",
+            icon: "paintbrush",
+            description: "Choose how TypstEdit looks across all windows."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("", selection: $themeManager.appTheme) {
+                    ForEach(AppTheme.allCases) { theme in
+                        Text(theme.rawValue).tag(theme)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+        }
+    }
+
+    // MARK: - Files & Backups
+
+    @ViewBuilder
+    private var filesSection: some View {
+        SettingsCard(
+            title: "Notebook Location",
+            icon: "folder",
+            description: "Where your notebooks are stored on disk. Useful for syncing via iCloud Drive, Dropbox, or other cloud services."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsRow(label: "Current Path:") {
+                    Text(notebookManager.rootDirectory.path)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(notebookManager.rootDirectory.path)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack(spacing: 10) {
+                    Spacer().frame(width: 140)
+                    Button("Choose Folder…") { chooseFolder() }
+                    if notebookManager.isUsingCustomRoot {
+                        Button("Reset to Default") { notebookManager.resetRootDirectory() }
+                    }
+                }
+            }
+        }
+
+        SettingsCard(
+            title: "Automatic Backups",
+            icon: "clock.arrow.2.circlepath",
+            description: "TypstEdit keeps rotating snapshots each time you save. Backups are stored in a local backups/ folder and excluded from AI indexing."
+        ) {
+            SettingsRow(
+                label: "Max Backups:",
+                caption: "Keeps the last N saved versions per file. Set to 0 to disable backups entirely."
+            ) {
+                HStack(spacing: 8) {
+                    Stepper("", value: $maxBackups, in: 0...20)
+                        .labelsHidden()
+                    Text(maxBackups == 0 ? "Disabled" : "\(maxBackups) per file")
+                        .font(.body)
+                        .foregroundColor(maxBackups == 0 ? .secondary : .primary)
+                        .frame(width: 100, alignment: .leading)
+                }
+            }
+        }
+    }
+
     private func chooseFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -101,7 +160,6 @@ struct GeneralSettingsView: View {
         panel.allowsMultipleSelection = false
         panel.title = "Choose Default Notebook Folder"
         panel.prompt = "Choose"
-        
         if panel.runModal() == .OK, let url = panel.url {
             notebookManager.setRootDirectory(url)
         }
@@ -809,227 +867,329 @@ struct AISettingsView: View {
     }
 }
 
+// MARK: - Typst Settings Section Nav
+
+enum TypstSettingsSection: String, CaseIterable, Identifiable {
+    case engine  = "Engine"
+    case updates = "Updates"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .engine:  return "terminal"
+        case .updates: return "arrow.down.circle"
+        }
+    }
+}
+
 struct TypstSettingsView: View {
     @StateObject private var settings = GeneralSettingsManager.shared
     @ObservedObject private var updater = TypstUpdater.shared
-    
+
+    @State private var selectedSection: TypstSettingsSection = .engine
     @State private var hasGit: Bool = false
     @State private var hasCargo: Bool = false
     @State private var checkingDependencies: Bool = false
-    
+
     var body: some View {
-        ScrollView {
-            Form {
-                Section(header: Text("Configuration").fontWeight(.semibold)) {
-                    Toggle("Use Custom Typst (compiled or downloaded)", isOn: $settings.useCustomTypst)
-                        .font(.body.weight(.regular))
-                    
-                    Toggle("Check for Typst engine updates on launch", isOn: $settings.checkForTypstUpdatesOnLaunch)
-                        .font(.body.weight(.regular))
-                    Text("When enabled, TypstEdit will check for new stable versions of the Typst compiler each time the app loads. You can re-enable this if you previously chose 'Don't Ask Again'.")
+        VStack(spacing: 0) {
+            // Segmented Top Navigation
+            Picker("Section", selection: $selectedSection) {
+                ForEach(TypstSettingsSection.allCases) { section in
+                    Label(section.rawValue, systemImage: section.icon).tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 24)
+            .padding(.top, 14)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 18) {
+                    switch selectedSection {
+                    case .engine:  engineSection
+                    case .updates: updatesSection
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: 820)
+            }
+        }
+        .onAppear {
+            checkDependencies()
+            Task { await updater.detectCurrentVersion() }
+        }
+    }
+
+    // MARK: - Engine Section
+
+    @ViewBuilder
+    private var engineSection: some View {
+        // Installed version status
+        SettingsCard(
+            title: "Typst Engine",
+            icon: "terminal",
+            description: "The Typst compiler version currently active in TypstEdit."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsRow(label: "Installed Version:") {
+                    HStack(spacing: 8) {
+                        Text(updater.currentVersion ?? "Detecting…")
+                            .font(.system(.body, design: .monospaced))
+                            .fontWeight(.medium)
+                        if let activePath = updater.resolveActiveTypstPath() {
+                            let origin = activePath.contains("stable_bin") ? "Downloaded"
+                                       : activePath.contains("bin/typst")  ? "Bundled"
+                                       : "System"
+                            Text(origin)
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.secondary.opacity(0.12))
+                                .cornerRadius(4)
+                        }
+                    }
+                }
+
+                if !settings.customTypstPath.isEmpty {
+                    SettingsRow(label: "Custom Path:") {
+                        Text(settings.customTypstPath)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+        }
+
+        // Configuration toggles
+        SettingsCard(
+            title: "Configuration",
+            icon: "gearshape",
+            description: "Control which Typst binary is used and how updates are handled."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Use Custom Typst Binary", isOn: $settings.useCustomTypst)
+                        .font(.body.weight(.medium))
+                    Text("When on, TypstEdit uses the path specified above instead of the bundled engine.")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
-                    Picker(selection: $settings.updateMode) {
+                        .padding(.leading, 20)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Check for Updates on Launch", isOn: $settings.checkForTypstUpdatesOnLaunch)
+                        .font(.body.weight(.medium))
+                    Text("Checks for new stable Typst releases each time the app starts. You can re-enable this after choosing \"Don't Ask Again\".")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                }
+
+                Divider()
+
+                SettingsRow(label: "Update Mode:") {
+                    Picker("", selection: $settings.updateMode) {
                         ForEach(TypstUpdateMode.allCases) { mode in
                             Text(mode.rawValue).tag(mode)
                         }
-                    } label: {
-                        Text("Update Mode").fontWeight(.semibold)
                     }
-                    .pickerStyle(.inline)
-                    
-                    if !settings.customTypstPath.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Current Path:")
-                                .font(.caption.weight(.regular))
-                                .foregroundColor(.secondary)
-                            Text(settings.customTypstPath)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
-                        .padding(.vertical, 4)
-                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
                 }
-                
-                Section(header: Text("Typst Engine Version").fontWeight(.semibold)) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Installed Version:")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                            Text(updater.currentVersion ?? "Detecting...")
-                                .font(.system(.subheadline, design: .monospaced))
-                                .fontWeight(.medium)
-                            Spacer()
-                            if let activePath = updater.resolveActiveTypstPath() {
-                                Text(activePath.contains("stable_bin") ? "Downloaded" : (activePath.contains("bin/typst") ? "Bundled" : "System"))
-                                    .font(.caption2)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.secondary.opacity(0.15))
-                                    .cornerRadius(4)
-                            }
-                        }
+            }
+        }
+    }
 
-                        HStack {
-                            Text("Latest Stable:")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                            if updater.isCheckingForUpdate {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else if let release = updater.availableRelease {
-                                Text(release.tag_name)
-                                    .font(.system(.subheadline, design: .monospaced))
-                                    .fontWeight(.medium)
-                            } else {
-                                Text("Not checked")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Button("Check for Updates") {
-                                Task {
-                                    await updater.checkForUpdates(userInitiated: true)
-                                }
-                            }
-                            .disabled(updater.isCheckingForUpdate || updater.isUpdating)
-                        }
+    // MARK: - Updates Section
 
-                        if let checkErr = updater.checkError {
-                            Text(checkErr)
-                                .font(.caption)
-                                .foregroundColor(.red)
-                        } else if let release = updater.availableRelease,
-                                  let current = updater.currentVersion,
-                                  TypstUpdater.isVersion(current, strictlyOlderThan: release.tag_name) {
-                            HStack {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .foregroundColor(.blue)
-                                Text("A new stable version (\(release.tag_name)) is available!")
-                                    .font(.caption)
-                                    .foregroundColor(.blue)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 4)
+    @ViewBuilder
+    private var updatesSection: some View {
+        // Version check status
+        SettingsCard(
+            title: "Version Status",
+            icon: "arrow.triangle.2.circlepath",
+            description: "Compare the active Typst engine against the latest official release."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsRow(label: "Installed:") {
+                    Text(updater.currentVersion ?? "Detecting…")
+                        .font(.system(.body, design: .monospaced))
                 }
 
-                Section(header: Text("Update Typst").fontWeight(.semibold)) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(settings.updateMode == .bleedingEdgeSource ? 
-                            "This will clone the latest source from Git and compile it using Cargo." :
-                            "This will download the latest official pre-compiled binary from GitHub.")
-                            .font(.subheadline)
+                SettingsRow(label: "Latest Stable:") {
+                    if updater.isCheckingForUpdate {
+                        ProgressView().controlSize(.small)
+                    } else if let release = updater.availableRelease {
+                        HStack(spacing: 8) {
+                            Text(release.tag_name)
+                                .font(.system(.body, design: .monospaced))
+                            if let current = updater.currentVersion,
+                               TypstUpdater.isVersion(current, strictlyOlderThan: release.tag_name) {
+                                Label("Update available", systemImage: "arrow.down.circle.fill")
+                                    .labelStyle(.iconOnly)
+                                    .foregroundColor(.blue)
+                                    .font(.callout)
+                            }
+                        }
+                    } else {
+                        Text("Not checked")
                             .foregroundColor(.secondary)
-                        
-                        if updater.isUpdating {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text(updater.status)
-                                    .font(.caption)
-                                ProgressView(value: updater.progress)
-                                    .progressViewStyle(.linear)
-                            }
-                        } else {
-                            if let error = updater.lastError {
-                                Text(error)
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                            } else if updater.status != "Ready" {
-                                Text(updater.status)
-                                    .font(.caption)
-                                    .foregroundColor(.green)
-                            }
-                            
-                            Button(action: {
-                                updater.update()
-                            }) {
-                                Label(settings.updateMode == .bleedingEdgeSource ? "Build from Source" : "Download Latest Binary", 
-                                      systemImage: settings.updateMode == .bleedingEdgeSource ? "hammer.fill" : "arrow.down.circle")
-                            }
-                            .disabled(settings.updateMode == .bleedingEdgeSource && (!hasGit || !hasCargo))
-                        }
                     }
-                    .padding(.vertical, 5)
                 }
-            
-            if settings.updateMode == .bleedingEdgeSource {
-                Section(header: Text("Source Dependencies").fontWeight(.semibold)) {
-                    HStack {
-                        Image(systemName: hasGit ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(hasGit ? .green : .red)
-                        Text("Git")
-                        Spacer()
-                        if !hasGit {
-                            Text("Missing")
-                                .font(.caption)
-                                .foregroundColor(.red)
+
+                if let checkErr = updater.checkError {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
+                        Text(checkErr).font(.caption).foregroundColor(.red)
+                    }
+                } else if let release = updater.availableRelease,
+                          let current = updater.currentVersion,
+                          TypstUpdater.isVersion(current, strictlyOlderThan: release.tag_name) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle.fill").foregroundColor(.blue)
+                        Text("Version \(release.tag_name) is available.")
+                            .font(.caption).foregroundColor(.blue)
+                    }
+                }
+
+                HStack {
+                    Spacer().frame(width: 140)
+                    Button("Check for Updates") {
+                        Task { await updater.checkForUpdates(userInitiated: true) }
+                    }
+                    .disabled(updater.isCheckingForUpdate || updater.isUpdating)
+                }
+            }
+        }
+
+        // Download / build action
+        SettingsCard(
+            title: settings.updateMode == .bleedingEdgeSource ? "Build from Source" : "Download Latest Binary",
+            icon: settings.updateMode == .bleedingEdgeSource ? "hammer" : "arrow.down.circle",
+            description: settings.updateMode == .bleedingEdgeSource
+                ? "Clones the latest Typst source from GitHub and compiles it locally with Cargo. Requires Git and Rust."
+                : "Downloads the latest official pre-compiled Typst binary directly from GitHub Releases."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                if updater.isUpdating {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(updater.status)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        ProgressView(value: updater.progress)
+                            .progressViewStyle(.linear)
+                    }
+                } else {
+                    if let error = updater.lastError {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
+                            Text(error).font(.caption).foregroundColor(.red)
+                        }
+                    } else if updater.status != "Ready" {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                            Text(updater.status).font(.caption).foregroundColor(.green)
                         }
                     }
-                    
+
                     HStack {
-                        Image(systemName: hasCargo ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(hasCargo ? .green : .red)
-                        Text("Rust (Cargo)")
-                        Spacer()
-                        if !hasCargo {
-                            Text("Missing")
-                                .font(.caption)
-                                .foregroundColor(.red)
+                        Spacer().frame(width: 140)
+                        Button {
+                            updater.update()
+                        } label: {
+                            Label(
+                                settings.updateMode == .bleedingEdgeSource ? "Build from Source" : "Download Latest Binary",
+                                systemImage: settings.updateMode == .bleedingEdgeSource ? "hammer.fill" : "arrow.down.circle"
+                            )
                         }
+                        .disabled(settings.updateMode == .bleedingEdgeSource && (!hasGit || !hasCargo))
                     }
-                    
+                }
+            }
+        }
+
+        // Source-build dependencies (only shown for bleeding-edge mode)
+        if settings.updateMode == .bleedingEdgeSource {
+            SettingsCard(
+                title: "Source Build Dependencies",
+                icon: "shippingbox",
+                description: "Both Git and Rust (Cargo) must be installed to compile Typst from source."
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    dependencyRow(name: "Git", available: hasGit)
+                    Divider()
+                    dependencyRow(name: "Rust (Cargo)", available: hasCargo)
+
                     if !hasGit || !hasCargo {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Dependencies are required for source builds.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            
-                            Link("Install Rust & Cargo", destination: URL(string: "https://rustup.rs")!)
-                                .font(.caption)
-                            
+                        Divider()
+                        VStack(alignment: .leading, spacing: 6) {
+                            Link(destination: URL(string: "https://rustup.rs")!) {
+                                Label("Install Rust & Cargo via rustup.rs", systemImage: "link")
+                                    .font(.caption)
+                            }
                             Text("Git is usually included with Xcode Command Line Tools.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        .padding(.top, 4)
                     }
-                }
-            } else {
-                Section(header: Text("Info").fontWeight(.semibold)) {
-                    HStack {
-                        Image(systemName: "info.circle")
-                        Text("Binary downloads are recommended and do not require Git or Rust.")
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
                 }
             }
-        }
-        .padding()
-        }
-        .onAppear {
-            checkDependencies()
-            Task {
-                await updater.detectCurrentVersion()
+        } else {
+            SettingsCard(
+                title: "No Extra Dependencies Needed",
+                icon: "checkmark.circle",
+                description: nil
+            ) {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("Binary downloads are self-contained and do not require Git or Rust.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                }
             }
         }
     }
-    
+
+    @ViewBuilder
+    private func dependencyRow(name: String, available: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: available ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundColor(available ? .green : .red)
+                .font(.body)
+            Text(name)
+                .font(.body)
+            Spacer()
+            if !available {
+                Text("Not found")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+        }
+    }
+
     private func checkDependencies() {
         checkingDependencies = true
         Task {
-            let git = await checkCommand("git")
+            let git   = await checkCommand("git")
             let cargo = await checkCommand("cargo")
             await MainActor.run {
-                self.hasGit = git
+                self.hasGit   = git
                 self.hasCargo = cargo
                 self.checkingDependencies = false
             }
         }
     }
-    
+
     private func resolveCommandPath(_ command: String) -> String? {
         let commonPaths = [
             "/opt/homebrew/bin",
@@ -1039,7 +1199,6 @@ struct TypstSettingsView: View {
             NSString(string: "~/.cargo/bin").expandingTildeInPath,
             NSString(string: "~/bin").expandingTildeInPath
         ]
-        
         for dir in commonPaths {
             let fullPath = (dir as NSString).appendingPathComponent(command)
             if FileManager.default.isExecutableFile(atPath: fullPath) {
@@ -1048,24 +1207,17 @@ struct TypstSettingsView: View {
         }
         return nil
     }
-    
+
     private func checkCommand(_ command: String) async -> Bool {
-        if resolveCommandPath(command) != nil {
-            return true
-        }
-        
+        if resolveCommandPath(command) != nil { return true }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = [command]
-        
         return await withCheckedContinuation { continuation in
-            process.terminationHandler = { process in
-                continuation.resume(returning: process.terminationStatus == 0)
+            process.terminationHandler = { p in
+                continuation.resume(returning: p.terminationStatus == 0)
             }
-            
-            do {
-                try process.run()
-            } catch {
+            do { try process.run() } catch {
                 continuation.resume(returning: false)
             }
         }
