@@ -107,8 +107,115 @@ struct GeneralSettingsView: View {
         }
     }
 }
+// MARK: - Reusable Settings UI Components
+
+struct SettingsCard<Content: View>: View {
+    var title: String? = nil
+    var icon: String? = nil
+    var description: String? = nil
+    @ViewBuilder var content: Content
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let title = title {
+                HStack(spacing: 8) {
+                    if let icon = icon {
+                        Image(systemName: icon)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                    }
+                    Text(title)
+                        .font(.headline)
+                    Spacer()
+                }
+                if let description = description {
+                    Text(description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Divider()
+            }
+            content
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color(NSColor.separatorColor).opacity(0.4), lineWidth: 1)
+        )
+    }
+}
+
+struct SettingsRow<Control: View>: View {
+    var label: String
+    var caption: String? = nil
+    @ViewBuilder var control: Control
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .center, spacing: 12) {
+                Text(label)
+                    .frame(width: 140, alignment: .trailing)
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                control
+            }
+            if let caption = caption {
+                Text(caption)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 152)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+struct KeyboardShortcutBadge: View {
+    let key: String
+    
+    var body: some View {
+        Text(key)
+            .font(.system(.caption, design: .monospaced).weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.primary.opacity(0.18), lineWidth: 0.5))
+    }
+}
+
+// MARK: - AI Settings Sub-sections
+
+enum AISettingsSection: String, CaseIterable, Identifiable {
+    case autocomplete = "Autocomplete"
+    case generation = "Chat & Actions"
+    case rag = "Project Context (RAG)"
+    case apiKeys = "API Keys & Limits"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .autocomplete: return "sparkles"
+        case .generation: return "bubble.left.and.bubble.right"
+        case .rag: return "books.vertical"
+        case .apiKeys: return "key.horizontal"
+        }
+    }
+}
+
+// MARK: - AI Assistant Settings View
+
 struct AISettingsView: View {
     @StateObject private var settings = AISettingsManager.shared
+    @State private var selectedSection: AISettingsSection = .autocomplete
+    
+    @State private var testingTask: ModelTask?
+    @State private var testResults: [ModelTask: (success: Bool, message: String)] = [:]
 
     private func sourceBinding(for task: ModelTask) -> Binding<ModelSource> {
         Binding(
@@ -118,198 +225,372 @@ struct AISettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            Form {
-                Section {
-                    Toggle("Enable Manual & Offline Intellisense", isOn: $settings.intellisenseEnabled)
-                        .font(.body.weight(.regular))
-                    Toggle("Enable AI Completion", isOn: $settings.isEnabled)
-                        .font(.body.weight(.regular))
-                    Toggle("Auto-suggest As You Type", isOn: $settings.isContinuousCompletionEnabled)
-                        .font(.body.weight(.regular))
-                    Text("When 'Auto-suggest As You Type' is enabled, suggestions appear automatically as you write. Press Tab to accept the top suggestion. Use ⌥↓ / ⌥↑ (or ⌥] / ⌥[) to navigate through suggestions without interrupting document cursor navigation. Plain arrow keys dismiss suggestions and move the text cursor normally. You can also trigger suggestions at any time using ⌃Space or Escape.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            // Segmented Top Navigation
+            Picker("Section", selection: $selectedSection) {
+                ForEach(AISettingsSection.allCases) { section in
+                    Label(section.rawValue, systemImage: section.icon).tag(section)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 24)
+            .padding(.top, 14)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 18) {
+                    switch selectedSection {
+                    case .autocomplete:
+                        autocompleteSection
+                    case .generation:
+                        generationSection
+                    case .rag:
+                        ragSection
+                    case .apiKeys:
+                        apiKeysSection
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: 820)
+            }
+        }
+    }
+
+    // MARK: - 1. Autocomplete Section
+
+    @ViewBuilder
+    private var autocompleteSection: some View {
+        // Activation & Modes
+        SettingsCard(
+            title: "Suggestions & Modes",
+            icon: "sparkles",
+            description: "Control how inline completions and syntax intellisense behave while editing."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Enable AI Completion", isOn: $settings.isEnabled)
+                    .font(.body.weight(.medium))
+
+                Toggle("Auto-suggest As You Type", isOn: $settings.isContinuousCompletionEnabled)
+                    .font(.body.weight(.regular))
+                    .padding(.leading, 18)
+
+                Text("Automatically requests completions when you pause typing, without requiring manual shortcut triggers.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 38)
+
+                Divider()
+
+                Toggle("Enable Manual & Offline Typst Intellisense", isOn: $settings.intellisenseEnabled)
+                    .font(.body.weight(.medium))
+
+                Text("Instant 0ms completions for Typst # functions, symbols, and labels even with no AI model active.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+            }
+        }
+
+        // Model & Provider
+        SettingsCard(
+            title: "Autocomplete Model",
+            icon: "cpu",
+            description: "Use a fast, dedicated model for inline completions (e.g. 0.5B–3B compact local models)."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsRow(label: "Source:") {
+                    Picker("", selection: sourceBinding(for: .completion)) {
+                        ForEach(ModelSource.allCases) { source in
+                            Text(source.rawValue).tag(source)
+                        }
+                    }
+                    .pickerStyle(.menu)
                 }
 
-                if settings.isEnabled {
+                completionSourceFields
 
-                    // MARK: - Generation / Chat
-                    Section(header: Text("AI Generation / Chat").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
-                        Picker(selection: sourceBinding(for: .generation)) {
-                            ForEach(ModelSource.allCases) { source in
-                                Text(source.rawValue).tag(source)
-                            }
-                        } label: {
-                            Text("Source").fontWeight(.semibold)
-                        }
-                        .pickerStyle(.menu)
-
-                        generationSourceFields
-
-                        Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
-                            .font(.body.weight(.regular))
-                            .padding(.top, 5)
-                        Text("Extracts content from markdown code blocks in the AI response.")
+                if settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.secondary)
+                        Text("Falling back to chat model: \(settings.generationModel)")
                             .font(.caption)
                             .foregroundColor(.secondary)
-
-                        testButton(for: .generation)
                     }
-
-                    Divider().padding(.vertical, 4)
-
-                    // MARK: - Completion / Autocomplete
-                    Section(header: Text("Autocomplete").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
-                        Picker(selection: sourceBinding(for: .completion)) {
-                            ForEach(ModelSource.allCases) { source in
-                                Text(source.rawValue).tag(source)
-                            }
-                        } label: {
-                            Text("Source").fontWeight(.semibold)
-                        }
-                        .pickerStyle(.menu)
-
-                        completionSourceFields
-
-                        Text("Uses a separate, cheaper/faster model for inline autocomplete. For local models, compact models like 'qwen2.5-coder:1.5b' or '0.5b' generate suggestions 5-10x faster than large models.")
+                    .padding(.leading, 152)
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Active: \(settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines)) via \(settings.source(for: .completion).rawValue)")
                             .font(.caption)
                             .foregroundColor(.secondary)
-
-                        Divider().padding(.vertical, 2)
-
-                        Text("Performance & Latency Tuning").fontWeight(.semibold)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Context Scope:").fontWeight(.regular)
-                                Picker("", selection: Binding(
-                                    get: { settings.completionContextScope },
-                                    set: { settings.completionContextScope = $0 }
-                                )) {
-                                    ForEach(AISettingsManager.CompletionContextScope.allCases) { scope in
-                                        Text(scope.rawValue).tag(scope)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-                                .frame(width: 220)
-                            }
-                            Text(settings.completionContextScope.description)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Thinking Pause (Debounce):")
-                                    .fontWeight(.regular)
-                                Slider(value: $settings.completionDebounceMs, in: 200...2000, step: 50)
-                                Text("\(Int(settings.completionDebounceMs))ms")
-                                    .monospacedDigit()
-                                    .frame(width: 50, alignment: .trailing)
-                            }
-                            Text("How long to wait after you stop typing before querying the model. Increase for slower local models to prevent CPU/GPU overload while actively writing.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Suggestion Timeout:")
-                                    .fontWeight(.regular)
-                                Slider(value: $settings.completionTimeoutSeconds, in: 1...15, step: 0.5)
-                                Text(String(format: "%.1fs", settings.completionTimeoutSeconds))
-                                    .monospacedDigit()
-                                    .frame(width: 45, alignment: .trailing)
-                            }
-                            Text("Maximum duration to wait for an AI completion before silently aborting so the editor never lags.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Max Suggestion Length:")
-                                    .fontWeight(.regular)
-                                TextField("32", value: $settings.completionMaxTokens, formatter: NumberFormatter())
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 60)
-                                Text("tokens")
-                                    .foregroundColor(.secondary)
-                            }
-                            Text("Fewer tokens (e.g. 16–48) generate exponentially faster on local hardware.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        testButton(for: .completion)
                     }
+                    .padding(.leading, 152)
+                }
 
-                    Divider().padding(.vertical, 4)
+                HStack {
+                    Spacer().frame(width: 140)
+                    testButton(for: .completion)
+                }
+            }
+        }
 
-                    // MARK: - Embeddings (RAG)
-                    Section(header: Text("Embeddings (RAG)").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
-                        Toggle("Include Semantic Project Search (RAG)", isOn: $settings.includeProjectContext)
-                            .font(.body.weight(.regular))
-
-                        if settings.includeProjectContext {
-                            Picker(selection: sourceBinding(for: .embedding)) {
-                                ForEach(ModelSource.allCases) { source in
-                                    Text(source.rawValue).tag(source)
-                                }
-                            } label: {
-                                Text("Source").fontWeight(.semibold)
-                            }
-                            .pickerStyle(.menu)
-
-                            embeddingSourceFields
-
-                            Toggle("Cache Embeddings to Disk", isOn: $settings.cacheEmbeddingsToDisk)
-                                .font(.body.weight(.regular))
-                            Text("If disabled, saves disk space but increases API costs and indexing time by regenerating embeddings on every launch.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            testButton(for: .embedding)
+        // Performance & Latency Tuning
+        SettingsCard(
+            title: "Performance & Latency Tuning",
+            icon: "gauge.with.needle",
+            description: "Fine-tune suggestion speed and token context. Essential for smooth local model performance."
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                SettingsRow(label: "Context Scope:", caption: settings.completionContextScope.description) {
+                    Picker("", selection: Binding(
+                        get: { settings.completionContextScope },
+                        set: { settings.completionContextScope = $0 }
+                    )) {
+                        ForEach(AISettingsManager.CompletionContextScope.allCases) { scope in
+                            Text(scope.rawValue).tag(scope)
                         }
                     }
+                    .pickerStyle(.menu)
+                }
 
-                    Divider().padding(.vertical, 4)
+                SettingsRow(label: "Thinking Pause:", caption: "Idle time after typing before querying the model (increase for slower local models).") {
+                    HStack {
+                        Slider(value: $settings.completionDebounceMs, in: 200...2000, step: 50)
+                        Text("\(Int(settings.completionDebounceMs))ms")
+                            .monospacedDigit()
+                            .frame(width: 55, alignment: .trailing)
+                    }
+                }
 
-                    // MARK: - Request Configuration
-                    Section(header: Text("Request Configuration").font(.title3.bold()).frame(maxWidth: .infinity, alignment: .leading)) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Timeout:")
-                                    .fontWeight(.regular)
-                                Slider(value: $settings.timeoutSeconds, in: 5...1200, step: 5)
-                                Text("\(Int(settings.timeoutSeconds))s")
-                                    .monospacedDigit()
-                                    .frame(width: 35, alignment: .trailing)
-                            }
-                            Text("Maximum time to wait for a response from the AI provider.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                SettingsRow(label: "Suggestion Timeout:", caption: "Maximum duration to wait for an AI completion before silently aborting so the editor never lags.") {
+                    HStack {
+                        Slider(value: $settings.completionTimeoutSeconds, in: 1...15, step: 0.5)
+                        Text(String(format: "%.1fs", settings.completionTimeoutSeconds))
+                            .monospacedDigit()
+                            .frame(width: 45, alignment: .trailing)
+                    }
+                }
 
-                        Divider()
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Max Tokens:")
-                                    .fontWeight(.regular)
-                                TextField("2048", value: $settings.maxTokens, formatter: NumberFormatter())
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 80)
-                            }
-                            Text("The maximum number of tokens to generate in the response.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                SettingsRow(label: "Max Tokens:", caption: "Shorter suggestions (16–48 tokens) generate exponentially faster on local hardware.") {
+                    HStack {
+                        TextField("32", value: $settings.completionMaxTokens, formatter: NumberFormatter())
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("tokens")
+                            .foregroundColor(.secondary)
                     }
                 }
             }
-            .padding()
+        }
+
+        // Keyboard Shortcuts Guide
+        SettingsCard(
+            title: "Keyboard Shortcuts",
+            icon: "keyboard",
+            description: "Quick reference for navigating and accepting suggestions without breaking writing flow."
+        ) {
+            VStack(spacing: 8) {
+                shortcutRow(keys: ["Tab"], description: "Accept the highlighted suggestion")
+                Divider()
+                shortcutRow(keys: ["⌥", "↓", "/", "⌥", "↑"], description: "Cycle through suggestions without moving text cursor")
+                Divider()
+                shortcutRow(keys: ["⌥", "]", "/", "⌥", "["], description: "Alternative suggestion cycling hotkeys")
+                Divider()
+                shortcutRow(keys: ["⌃", "Space", "/", "Esc"], description: "Manually trigger or dismiss suggestions")
+                Divider()
+                shortcutRow(keys: ["↑", "/", "↓"], description: "Move text cursor across lines in document (dismisses popup)")
+            }
+        }
+    }
+
+    private func shortcutRow(keys: [String], description: String) -> some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                ForEach(keys.indices, id: \.self) { i in
+                    let k = keys[i]
+                    if k == "/" {
+                        Text("/").foregroundColor(.secondary).font(.caption)
+                    } else {
+                        KeyboardShortcutBadge(key: k)
+                    }
+                }
+            }
+            .frame(width: 140, alignment: .leading)
+
+            Text(description)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Spacer()
+        }
+    }
+
+    // MARK: - 2. Chat & Generation Section
+
+    @ViewBuilder
+    private var generationSection: some View {
+        SettingsCard(
+            title: "Chat & Actions Status",
+            icon: "bubble.left.and.bubble.right",
+            description: "Configure the engine used for the AI Prompt panel, text refinement, and document generation."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Enable AI Assistant Features", isOn: $settings.isEnabled)
+                    .font(.body.weight(.medium))
+
+                Toggle("Force Code Output", isOn: $settings.forceCodeOutput)
+                    .font(.body.weight(.regular))
+                    .padding(.leading, 18)
+
+                Text("Automatically extracts code from markdown code blocks in AI responses.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 38)
+            }
+        }
+
+        SettingsCard(
+            title: "Chat Model & Provider",
+            icon: "server.rack",
+            description: "Select the AI service for general text generation and rewriting."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsRow(label: "Source:") {
+                    Picker("", selection: sourceBinding(for: .generation)) {
+                        ForEach(ModelSource.allCases) { source in
+                            Text(source.rawValue).tag(source)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+
+                generationSourceFields
+
+                HStack {
+                    Spacer().frame(width: 140)
+                    testButton(for: .generation)
+                }
+            }
+        }
+    }
+
+    // MARK: - 3. Project Context (RAG) Section
+
+    @ViewBuilder
+    private var ragSection: some View {
+        SettingsCard(
+            title: "Semantic Project Search (RAG)",
+            icon: "books.vertical",
+            description: "Enriches AI chat requests with relevant context found across your project files."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Include Semantic Project Search", isOn: $settings.includeProjectContext)
+                    .font(.body.weight(.medium))
+
+                if settings.includeProjectContext {
+                    Toggle("Cache Embeddings to Disk", isOn: $settings.cacheEmbeddingsToDisk)
+                        .font(.body.weight(.regular))
+                        .padding(.leading, 18)
+
+                    Text("Saves generated embeddings locally to eliminate re-indexing time and reduce API costs.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 38)
+                }
+            }
+        }
+
+        if settings.includeProjectContext {
+            SettingsCard(
+                title: "Embedding Provider & Model",
+                icon: "brain",
+                description: "Choose how vector embeddings are generated for project indexing."
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsRow(label: "Source:") {
+                        Picker("", selection: sourceBinding(for: .embedding)) {
+                            ForEach(ModelSource.allCases) { source in
+                                Text(source.rawValue).tag(source)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+
+                    embeddingSourceFields
+
+                    HStack {
+                        Spacer().frame(width: 140)
+                        testButton(for: .embedding)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - 4. API Keys & Limits Section
+
+    @ViewBuilder
+    private var apiKeysSection: some View {
+        SettingsCard(
+            title: "Cloud Provider API Keys",
+            icon: "key.horizontal",
+            description: "API keys configured here are shared across all tasks (Chat, Autocomplete, and Embeddings)."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsRow(label: "OpenAI:") {
+                    SecureField("sk-...", text: $settings.openAIApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                SettingsRow(label: "OpenRouter:") {
+                    SecureField("sk-or-...", text: $settings.openRouterApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                SettingsRow(label: "Anthropic:") {
+                    SecureField("sk-ant-...", text: $settings.anthropicApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                SettingsRow(label: "Google Gemini:") {
+                    SecureField("AIzaSy...", text: $settings.geminiApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                SettingsRow(label: "Local Server:") {
+                    SecureField("Optional for Ollama / LM Studio", text: $settings.customApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+        }
+
+        SettingsCard(
+            title: "Global Request Limits",
+            icon: "slider.horizontal.3",
+            description: "Global timeouts and token ceilings for AI generation requests."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsRow(label: "Request Timeout:", caption: "Maximum duration to wait for chat or generation responses.") {
+                    HStack {
+                        Slider(value: $settings.timeoutSeconds, in: 5...1200, step: 5)
+                        Text("\(Int(settings.timeoutSeconds))s")
+                            .monospacedDigit()
+                            .frame(width: 45, alignment: .trailing)
+                    }
+                }
+
+                SettingsRow(label: "Max Generation Tokens:", caption: "The maximum number of tokens to generate in chat responses.") {
+                    TextField("2048", value: $settings.maxTokens, formatter: NumberFormatter())
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+
+                SettingsRow(label: "Context Window:", caption: "Maximum token context sent in prompts.") {
+                    TextField("4096", value: $settings.maxContextWindow, formatter: NumberFormatter())
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                }
+            }
         }
     }
 
@@ -319,26 +600,54 @@ struct AISettingsView: View {
     private var generationSourceFields: some View {
         switch settings.source(for: .generation) {
         case .openAI:
-            SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.generationModel) { Text("Model (e.g. gpt-4o)").fontWeight(.semibold) }
+            SettingsRow(label: "API Key:") {
+                SecureField("OpenAI API Key (or set in API Keys tab)", text: $settings.openAIApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. gpt-4o", text: $settings.generationModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         case .openRouter:
-            SecureField(text: $settings.openRouterApiKey) { Text("OpenRouter API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.generationModel) { Text("Model (e.g. anthropic/claude-3-5-sonnet)").fontWeight(.semibold) }
+            SettingsRow(label: "API Key:") {
+                SecureField("OpenRouter API Key (or set in API Keys tab)", text: $settings.openRouterApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. anthropic/claude-3-5-sonnet", text: $settings.generationModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         case .anthropic:
-            SecureField(text: $settings.anthropicApiKey) { Text("Anthropic API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.generationModel) { Text("Model (e.g. claude-sonnet-4-20250514)").fontWeight(.semibold) }
+            SettingsRow(label: "API Key:") {
+                SecureField("Anthropic API Key (or set in API Keys tab)", text: $settings.anthropicApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. claude-sonnet-4-20250514", text: $settings.generationModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         case .gemini:
-            SecureField(text: $settings.geminiApiKey) { Text("Gemini API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.generationModel) { Text("Model (e.g. gemini-1.5-flash)").fontWeight(.semibold) }
+            SettingsRow(label: "API Key:") {
+                SecureField("Gemini API Key (or set in API Keys tab)", text: $settings.geminiApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. gemini-1.5-flash", text: $settings.generationModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         case .local:
-            TextField(text: $settings.generationEndpoint) { Text("Endpoint URL").fontWeight(.semibold) }
-            SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.generationModel) { Text("Model (e.g. llama3)").fontWeight(.semibold) }
+            SettingsRow(label: "Endpoint URL:") {
+                TextField("http://localhost:11434/v1/chat/completions", text: $settings.generationEndpoint)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "API Key:") {
+                SecureField("Optional for local servers", text: $settings.customApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. llama3", text: $settings.generationModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         }
     }
 
@@ -347,43 +656,53 @@ struct AISettingsView: View {
         let src = settings.source(for: .completion)
         switch src {
         case .openAI:
-            SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.completionModel) { Text("Model (e.g. gpt-4o-mini)").fontWeight(.semibold) }
-        case .openRouter:
-            SecureField(text: $settings.openRouterApiKey) { Text("OpenRouter API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.completionModel) { Text("Model (e.g. anthropic/claude-3-5-haiku)").fontWeight(.semibold) }
-        case .anthropic:
-            SecureField(text: $settings.anthropicApiKey) { Text("Anthropic API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.completionModel) { Text("Model (e.g. claude-3-5-haiku-20241022)").fontWeight(.semibold) }
-        case .gemini:
-            SecureField(text: $settings.geminiApiKey) { Text("Gemini API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.completionModel) { Text("Model (e.g. gemini-1.5-flash)").fontWeight(.semibold) }
-        case .local:
-            TextField(text: $settings.completionEndpoint) { Text("Endpoint URL").fontWeight(.semibold) }
-            SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.completionModel) { Text("Model (e.g. qwen2.5-coder:1.5b)").fontWeight(.semibold) }
-        }
-
-        if settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            HStack(spacing: 4) {
-                Image(systemName: "info.circle")
-                    .foregroundColor(.secondary)
-                Text("Falling back to generation model: \(settings.generationModel)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            SettingsRow(label: "API Key:") {
+                SecureField("OpenAI API Key (or set in API Keys tab)", text: $settings.openAIApiKey)
+                    .textFieldStyle(.roundedBorder)
             }
-        } else {
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Using: \(settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines)) via \(src.rawValue)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            SettingsRow(label: "Model:") {
+                TextField("e.g. gpt-4o-mini", text: $settings.completionModel)
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .openRouter:
+            SettingsRow(label: "API Key:") {
+                SecureField("OpenRouter API Key (or set in API Keys tab)", text: $settings.openRouterApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. anthropic/claude-3-5-haiku", text: $settings.completionModel)
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .anthropic:
+            SettingsRow(label: "API Key:") {
+                SecureField("Anthropic API Key (or set in API Keys tab)", text: $settings.anthropicApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. claude-3-5-haiku-20241022", text: $settings.completionModel)
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .gemini:
+            SettingsRow(label: "API Key:") {
+                SecureField("Gemini API Key (or set in API Keys tab)", text: $settings.geminiApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. gemini-1.5-flash", text: $settings.completionModel)
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .local:
+            SettingsRow(label: "Endpoint URL:") {
+                TextField("http://localhost:11434/v1/chat/completions", text: $settings.completionEndpoint)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "API Key:") {
+                SecureField("Optional for local servers", text: $settings.customApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. qwen2.5-coder:1.5b", text: $settings.completionModel)
+                    .textFieldStyle(.roundedBorder)
             }
         }
     }
@@ -392,29 +711,40 @@ struct AISettingsView: View {
     private var embeddingSourceFields: some View {
         switch settings.source(for: .embedding) {
         case .openAI:
-            SecureField(text: $settings.openAIApiKey) { Text("OpenAI API Key").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.openAIEmbeddingModel) { Text("Embedding Model (e.g. text-embedding-3-small)").fontWeight(.semibold) }
-                .onChange(of: settings.openAIEmbeddingModel) { _ in
-                    // TODO: Trigger RAGManager to wipe the vector cache here
-                }
+            SettingsRow(label: "API Key:") {
+                SecureField("OpenAI API Key (or set in API Keys tab)", text: $settings.openAIApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. text-embedding-3-small", text: $settings.openAIEmbeddingModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         case .local:
-            TextField(text: $settings.embeddingEndpoint) { Text("Embedding URL").fontWeight(.semibold) }
-            SecureField(text: $settings.customApiKey) { Text("API Key (Optional)").fontWeight(.semibold) }
-                .textContentType(.password)
-            TextField(text: $settings.embeddingModel) { Text("Embedding Model (e.g. nomic-embed-text)").fontWeight(.semibold) }
-                .onChange(of: settings.embeddingModel) { _ in
-                    // TODO: Trigger RAGManager to wipe the vector cache here
-                }
+            SettingsRow(label: "Endpoint URL:") {
+                TextField("http://localhost:11434/v1/embeddings", text: $settings.embeddingEndpoint)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "API Key:") {
+                SecureField("Optional for local servers", text: $settings.customApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:") {
+                TextField("e.g. nomic-embed-text", text: $settings.embeddingModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         default:
-            Text("Using Apple Native Embeddings (Fast, Free & On-Device)")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                Spacer().frame(width: 140)
+                Image(systemName: "applelogo")
+                    .foregroundColor(.secondary)
+                Text("Using Apple Native Embeddings (Fast, Free & On-Device)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
-    @State private var testingTask: ModelTask?
-    @State private var testResults: [ModelTask: (success: Bool, message: String)] = [:]
+    // MARK: - Test Connection Logic
 
     private func testConnection(for task: ModelTask) {
         testingTask = task
@@ -451,22 +781,29 @@ struct AISettingsView: View {
 
     @ViewBuilder
     private func testButton(for task: ModelTask) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             Button(action: { testConnection(for: task) }) {
-                if testingTask == task {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
+                HStack(spacing: 6) {
+                    if testingTask == task {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "bolt.fill")
+                    }
                     Text("Test Connection")
                 }
             }
             .disabled(testingTask != nil)
 
             if let result = testResults[task] {
-                Text(result.message)
-                    .font(.caption)
-                    .foregroundColor(result.success ? .green : .red)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(result.success ? .green : .red)
+                    Text(result.message)
+                        .font(.caption)
+                        .foregroundColor(result.success ? .green : .red)
+                        .lineLimit(1)
+                }
             }
         }
     }
