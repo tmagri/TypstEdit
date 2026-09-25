@@ -20,8 +20,6 @@ let package = Package(
         .package(path: "../CodeEditLanguages"),
         // CodeEditSymbols
         .package(path: "../CodeEditSymbols"),
-        // SwiftLint
-        .package(path: "../SwiftLintPlugin"),
         // Rules for indentation, pair completion, whitespace
         .package(path: "../TextFormation")
     ],
@@ -34,9 +32,6 @@ let package = Package(
                 "CodeEditLanguages",
                 "TextFormation",
                 "CodeEditSymbols"
-            ],
-            plugins: [
-                .plugin(name: "SwiftLint", package: "SwiftLintPlugin")
             ]
         ),
 
@@ -46,9 +41,6 @@ let package = Package(
             dependencies: [
                 "CodeEditSourceEditor",
                 "CodeEditLanguages",
-            ],
-            plugins: [
-                .plugin(name: "SwiftLint", package: "SwiftLintPlugin")
             ]
         ),
     ]

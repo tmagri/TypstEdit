@@ -17,9 +17,7 @@ let package = Package(
         // Text mutation, storage helpers
         .package(path: "../TextStory"),
         // Useful data structures
-        .package(path: "../swift-collections"),
-        // SwiftLint
-        .package(path: "../SwiftLintPlugin")
+        .package(path: "../swift-collections")
     ],
     targets: [
         // The main text view target.
@@ -29,9 +27,6 @@ let package = Package(
                 "TextStory",
                 .product(name: "Collections", package: "swift-collections"),
                 "CodeEditTextViewObjC"
-            ],
-            plugins: [
-                .plugin(name: "SwiftLint", package: "SwiftLintPlugin")
             ]
         ),
 
@@ -46,9 +41,6 @@ let package = Package(
             name: "CodeEditTextViewTests",
             dependencies: [
                 "CodeEditTextView"
-            ],
-            plugins: [
-                .plugin(name: "SwiftLint", package: "SwiftLintPlugin")
             ]
         ),
     ]

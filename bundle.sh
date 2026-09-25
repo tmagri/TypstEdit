@@ -13,6 +13,10 @@ else
 fi
 
 echo "Building version $VERSION ($ARCH-only) with configuration: $CONFIG..."
+# SwiftLint's build plugin loads sourcekitdInProc.framework from the local Xcode
+# toolchain. That framework is not portable across machines and is not a Git
+# dependency, so disable the plugin by default for project builds.
+export DISABLE_SWIFTLINT=1
 swift build -c "$CONFIG" --arch "$ARCH"
 
 # Find the executable specifically in the requested configuration folder.

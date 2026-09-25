@@ -12,6 +12,10 @@ else
 fi
 
 echo "Building Universal Binary (ARM64 + x86_64)..."
+# SwiftLint's build plugin loads sourcekitdInProc.framework from the local Xcode
+# toolchain. That framework is not portable across machines and is not a Git
+# dependency, so disable the plugin by default for project builds.
+export DISABLE_SWIFTLINT=1
 
 # Build for ARM64 (Apple Silicon)
 echo "Building for ARM64..."
