@@ -71,7 +71,7 @@ struct ContentView: View {
         )
     }
     
-    @ViewBuilder
+   @ViewBuilder
     private func applyNotificationModifiers(to content: some View) -> some View {
         content
             .onReceive(NotificationCenter.default.publisher(for: .insertSnippet)) { notification in handleSnippetInsertion(notification: notification) }
@@ -90,8 +90,17 @@ struct ContentView: View {
                     }
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in saveFile(to: notification.object as? URL) }
+            .onReceive(NotificationCenter.default.publisher(for: .requestSave)) { notification in 
+                if let dict = notification.object as? [String: Any], let target = dict["target"] as? EditorController {
+                    guard target === self.editorController else { return }
+                    saveFile(to: dict["url"] as? URL)
+                } else {
+                    saveFile(to: notification.object as? URL) 
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .resetToWelcome)) { _ in
+                // Only the main window should react to a full UI reset
+                guard self.editorController === AppDelegate.shared?.editorController else { return }
                 self.selectedFile = nil
                 self.fileSystem.currentFolder = nil
                 self.fileSystem.isNewUnsavedFile = false
@@ -104,25 +113,34 @@ struct ContentView: View {
             }
     }
 
+    private func handleStandaloneLoad(url: URL) {
+        self.selectedFile = url
+        self.loadFile(url: url)
+        fileSystem.currentFolder = nil
+        fileSystem.rootNodes = []
+        editorController.projectRootURL = nil
+        editorController.isSidebarVisible = false
+        RAGManager.shared.disableForStandaloneMode()
+    }
+
     @ViewBuilder
     private func applyFileModifiers(to content: some View) -> some View {
         content
             .onChange(of: selectedFile) { newValue in handleFileSelectionChange(newValue: newValue) }
             .onReceive(NotificationCenter.default.publisher(for: .openStandaloneFile)) { notification in
-                if let url = notification.object as? URL {
-                    self.selectedFile = url
-                    self.loadFile(url: url)
-                    fileSystem.currentFolder = nil
-                    fileSystem.rootNodes = []
-                    editorController.projectRootURL = nil
-                    editorController.isSidebarVisible = false
-                    RAGManager.shared.disableForStandaloneMode()
+                let isMain = (self.editorController === AppDelegate.shared?.editorController)
+                if let dict = notification.object as? [String: Any], let target = dict["target"] as? EditorController {
+                    // Directed specific load instruction
+                    guard target === self.editorController else { return }
+                    if let url = dict["url"] as? URL { self.handleStandaloneLoad(url: url) }
+                } else if let url = notification.object as? URL {
+                    // Legacy un-targeted load (protect external windows from it)
+                    guard isMain else { return }
+                    self.handleStandaloneLoad(url: url)
                 }
             }
-            .onOpenURL { url in 
-                handleOpenURL(url) 
-            }
             .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
+                guard self.editorController === AppDelegate.shared?.editorController else { return }
                 if let url = notification.object as? URL {
                     self.selectedFile = url
                     self.loadFile(url: url)
@@ -132,6 +150,7 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("openNotebooks"))) { _ in
+                guard self.editorController === AppDelegate.shared?.editorController else { return }
                 fileSystem.currentFolder = NotebookManager.shared.rootDirectory
                 NotebookManager.shared.loadNotebooks()
                 fileSystem.isNewUnsavedFile = false
@@ -143,6 +162,7 @@ struct ContentView: View {
                 self.currentPDFURL = nil
             }
             .onReceive(NotificationCenter.default.publisher(for: .openProjectFolder)) { notification in
+                guard self.editorController === AppDelegate.shared?.editorController else { return }
                 if let url = notification.object as? URL {
                     fileSystem.currentFolder = url
                     fileSystem.isNewUnsavedFile = false
@@ -162,6 +182,7 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
+                guard self.editorController === AppDelegate.shared?.editorController else { return }
                 if let url = notification.object as? URL {
                     self.selectedFile = url
                     fileSystem.isNewUnsavedFile = false
@@ -176,6 +197,7 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
+                guard self.editorController === AppDelegate.shared?.editorController else { return }
                 if let url = notification.object as? URL {
                     self.renameTargetURL = url
                     self.newFileName = url.lastPathComponent
@@ -183,6 +205,7 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
+                guard self.editorController === AppDelegate.shared?.editorController else { return }
                 if let info = notification.object as? [String: URL], let newURL = info["new"] { self.selectedFile = newURL }
             }
     }
@@ -881,8 +904,8 @@ struct ContentView: View {
         if newValue == currentlyLoadedFile { return }
         
         if self.editorController.hasUnsavedChanges, let prev = currentlyLoadedFile {
-            if let appDelegate = AppDelegate.shared {
-                appDelegate.showSaveWarningAsync(for: prev) { proceed in
+           if let appDelegate = AppDelegate.shared {
+                appDelegate.showSaveWarningAsync(for: self.editorController, url: prev) { proceed in
                     if proceed {
                         self.loadFile(url: newValue)
                     } else {

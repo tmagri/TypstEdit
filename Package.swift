@@ -29,7 +29,9 @@ let package = Package(
             ],
             path: "Sources",
             resources: [
-                .process("Resources")
+                .process("Resources/EquationEditor.html"),
+                .process("Resources/AppIcon.png"),
+                .process("Resources/Vendor")
             ]
         ),
         .testTarget(

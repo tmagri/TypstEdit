@@ -989,7 +989,7 @@ class EditorController: NSObject, ObservableObject {
     }
 
     func undo() {
-        if forwardActionIfNotFirstResponder(Selector("undo:")) { return }
+        if forwardActionIfNotFirstResponder(#selector(UndoManager.undo)) { return }
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.undo()
@@ -999,7 +999,7 @@ class EditorController: NSObject, ObservableObject {
     }
 
     func redo() {
-        if forwardActionIfNotFirstResponder(Selector("redo:")) { return }
+        if forwardActionIfNotFirstResponder(#selector(UndoManager.redo)) { return }
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.redo()
@@ -1313,7 +1313,7 @@ class EditorController: NSObject, ObservableObject {
     /// If the clipboard holds an image instead of text, Vision OCR is used
     /// to extract text from it and insert the result at the cursor.
     func pasteAsPlainText() {
-        if forwardActionIfNotFirstResponder(Selector("pasteAsPlainText:")) { return }
+        if forwardActionIfNotFirstResponder(NSSelectorFromString("pasteAsPlainText:")) { return }
         if let textView = textViewController?.textView {
             performPaste(into: textView, mode: .plain)
         } else {

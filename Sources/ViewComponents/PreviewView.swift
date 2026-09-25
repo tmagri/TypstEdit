@@ -133,8 +133,9 @@ struct PreviewView: NSViewRepresentable {
                 context.coordinator.lastUrl = url
                 context.coordinator.lastToken = reloadToken
 
+                let text = document.string ?? ""
                 DispatchQueue.global(qos: .userInitiated).async {
-                    let text = document.string ?? ""
+                    
                     let words = text.split { $0.isWhitespace || $0.isNewline }
                     let count = words.count
 

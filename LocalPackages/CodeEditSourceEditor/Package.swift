@@ -18,8 +18,6 @@ let package = Package(
         .package(path: "../CodeEditTextView"),
         // tree-sitter languages
         .package(path: "../CodeEditLanguages"),
-        // CodeEditSymbols
-        .package(path: "../CodeEditSymbols"),
         // Rules for indentation, pair completion, whitespace
         .package(path: "../TextFormation")
     ],
@@ -30,8 +28,7 @@ let package = Package(
             dependencies: [
                 "CodeEditTextView",
                 "CodeEditLanguages",
-                "TextFormation",
-                "CodeEditSymbols"
+                "TextFormation"
             ]
         ),
 

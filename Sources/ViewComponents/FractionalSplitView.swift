@@ -103,6 +103,7 @@ struct FractionalSplitView<Left: View, Right: View>: NSViewRepresentable {
 
         /// Insert the leading pane at the head and (re)apply its default width
         /// on the next layout pass.
+        @MainActor
         func showLeft(_ splitView: NSSplitView, position: CGFloat) {
             guard let leftContainer else { return }
             splitView.insertArrangedSubview(leftContainer, at: 0)
@@ -113,6 +114,7 @@ struct FractionalSplitView<Left: View, Right: View>: NSViewRepresentable {
             (splitView as? FractionalCustomSplitView)?.pendingDividerPosition = position
         }
 
+        @MainActor
         func hideLeft(_ splitView: NSSplitView) {
             leftContainer?.removeFromSuperview()
         }
