@@ -57,11 +57,18 @@ cp "$BUILD_DIR/$APP_NAME-universal" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 # Strip debug symbols from the release binary to reduce size
 strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Copy all SPM resource bundles — use maxdepth 1 to avoid duplicates from nested build dirs
+# Copy all SPM resource bundles — check both layout locations (new swift-build out dir and classic llbuild dir)
 echo "Copying SPM resource bundles..."
-find "$BUILD_DIR/arm64-apple-macosx/release" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
-    echo "  Copying: $(basename "$bundle")"
-    cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
+for BUNDLE_DIR in "$BUILD_DIR/out/Products/Release" "$BUILD_DIR/out/arm64-apple-macosx/release" "$BUILD_DIR/arm64-apple-macosx/release"; do
+    if [ -d "$BUNDLE_DIR" ]; then
+        if [ -n "$(find "$BUNDLE_DIR" -maxdepth 1 -type d -name "*.bundle" 2>/dev/null)" ]; then
+            find "$BUNDLE_DIR" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
+                echo "  Copying: $(basename "$bundle")"
+                cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
+            done
+            break
+        fi
+    fi
 done
 
 # Copy vector.framework into Contents/MacOS/ so @loader_path rpath finds it at launch

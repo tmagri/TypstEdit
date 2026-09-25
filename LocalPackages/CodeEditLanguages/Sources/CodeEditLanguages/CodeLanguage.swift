@@ -81,8 +81,16 @@ public struct CodeLanguage {
     }
 
     internal func queryURL(for highlights: String = "highlights") -> URL? {
-        return resourceURL?
-            .appendingPathComponent("tree-sitter-\(tsName)/\(highlights).scm")
+        guard let resourceURL = resourceURL else { return nil }
+        let direct = resourceURL.appendingPathComponent("tree-sitter-\(tsName)/\(highlights).scm")
+        if FileManager.default.fileExists(atPath: direct.path) {
+            return direct
+        }
+        let nested = resourceURL.appendingPathComponent("Resources/tree-sitter-\(tsName)/\(highlights).scm")
+        if FileManager.default.fileExists(atPath: nested.path) {
+            return nested
+        }
+        return direct
     }
 
     /// Gets the TSLanguage from `tree-sitter`
