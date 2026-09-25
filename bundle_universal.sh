@@ -17,6 +17,21 @@ echo "Building Universal Binary (ARM64 + x86_64)..."
 # dependency, so disable the plugin by default for project builds.
 export DISABLE_SWIFTLINT=1
 
+# Ensure DEVELOPER_DIR points to Xcode if available, avoiding missing SwiftUI macros
+# (like SwiftUIMacros and PreviewsMacros) when xcode-select points to Command Line Tools.
+if [ -z "$DEVELOPER_DIR" ]; then
+    if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+        export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+    elif XCODE_DEV_DIR=$(xcode-select -p 2>/dev/null); then
+        if [[ "$XCODE_DEV_DIR" == *"CommandLineTools"* ]]; then
+            CANDIDATE=$(mdfind 'kMDItemCFBundleIdentifier == "com.apple.dt.Xcode"' 2>/dev/null | head -n 1)
+            if [ -n "$CANDIDATE" ] && [ -d "$CANDIDATE/Contents/Developer" ]; then
+                export DEVELOPER_DIR="$CANDIDATE/Contents/Developer"
+            fi
+        fi
+    fi
+fi
+
 # Build for ARM64 (Apple Silicon)
 echo "Building for ARM64..."
 swift build -c release --arch arm64
