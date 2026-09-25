@@ -17,8 +17,7 @@ let package = Package(
     targets: [
         .target(
             name: "CodeEditSymbols",
-            dependencies: [],
-            resources: [.process("Symbols.xcassets")]
+            dependencies: []
         ),
         .testTarget(
             name: "CodeEditSymbolsTests",

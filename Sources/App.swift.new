@@ -1,0 +1,438 @@
+import SwiftUI
+import AppKit
+
+@MainActor
+private struct ExternalDocumentWindowRoot: View {
+    @State private var selectedFile: URL?
+    @StateObject private var themeManager = ThemeManager()
+    @ObservedObject var editorController: EditorController
+
+    init(initialFile: URL, editorController: EditorController) {
+        self._selectedFile = State(initialValue: initialFile)
+        self.editorController = editorController
+    }
+
+    var body: some View {
+        ContentView(selectedFile: $selectedFile, editorController: editorController)
+            .environmentObject(themeManager)
+            .background(VisualEffectView().ignoresSafeArea())
+    }
+}
+
+@MainActor
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    static private(set) var shared: AppDelegate?
+
+    var editorController: EditorController? {
+        didSet {
+            print("[DEBUG] AppDelegate: editorController assigned (nil? \(editorController == nil))")
+            // Files opened from Finder before the editor was connected
+            // (cold launch) are handled now.
+            flushPendingExternalOpens()
+        }
+    }
+
+    private var titleBarDoubleClickMonitor: Any?
+
+    /// Files that arrived from Finder before the main window had connected
+    /// its EditorController (i.e. the app was launched by opening a file).
+    private var pendingExternalOpens: [URL] = []
+
+    override init() {
+        super.init()
+        AppDelegate.shared = self
+        print("[DEBUG] AppDelegate: init")
+        // NOTE: the kAEOpenDocuments interceptor is deliberately NOT
+        // installed here — see applicationDidFinishLaunching(_:).
+    }
+
+    // MARK: - Opening files from Finder
+
+    nonisolated func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            // Install the interceptor AFTER launch. Registering it in init()
+            // doesn't work: NSApplication/SwiftUI install their own handlers
+            // for the same event later during launch and replace ours, so the
+            // Finder "open" event fell through to SwiftUI, which spawns a new
+            // window of the main WindowGroup — a duplicate of the current
+            // screen, since it shares the same editorController.
+            //
+            // This still runs before the run loop processes any Apple
+            // events, so the odoc event that *launches* the app is
+            // intercepted too.
+            NSAppleEventManager.shared().setEventHandler(
+                self,
+                andSelector: #selector(handleAppleEvent(_:withReplyEvent:)),
+                forEventClass: AEEventClass(kCoreEventClass),
+                andEventID: AEEventID(kAEOpenDocuments)
+            )
+            flushPendingExternalOpens()
+        }
+    }
+
+    /// Safety net: if the raw handler above is ever bypassed by an OS
+    /// re-registering handlers, AppKit delivers the file open here instead.
+    /// Only one of the two paths can receive a given event — no double opens.
+    nonisolated func application(_ application: NSApplication, open urls: [URL]) {
+        print("[DEBUG] application(_:open:) fallback: \(urls.map(\.lastPathComponent))")
+        MainActor.assumeIsolated {
+            handleExternalOpen(urls)
+        }
+    }
+
+    private func flushPendingExternalOpens() {
+        guard editorController != nil, !pendingExternalOpens.isEmpty else { return }
+        let urls = pendingExternalOpens
+        pendingExternalOpens.removeAll()
+        handleExternalOpen(urls)
+    }
+
+    static func normalizedFileURL(from rawValue: String) -> URL? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // 1. Normal case: a valid, percent-encoded file URL string.
+        if let url = URL(string: trimmed), url.isFileURL {
+            return url
+        }
+
+        // 2. A "file://" string URL(string:) rejects (e.g. an unescaped space).
+        //    Strip the scheme/host and treat the rest as a plain path.
+        if trimmed.hasPrefix("file://") {
+            var path = String(trimmed.dropFirst("file://".count))   // "/Users/…" or "localhost/Users/…"
+            if path.hasPrefix("localhost/") {
+                path = String(path.dropFirst("localhost/".count))
+            }
+            return path.hasPrefix("/") ? URL(fileURLWithPath: path) : nil
+        }
+
+        // 3. A bare POSIX path (possibly with characters URL(string:) rejects).
+        if trimmed.hasPrefix("/") {
+            return URL(fileURLWithPath: trimmed)
+        }
+
+        // 4. Anything else (HFS "Disk:Users:…" strings, remote URLs, junk) is
+        //    dropped rather than turned into a bogus file URL.
+        return nil
+    }
+
+    @objc func handleAppleEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
+        print("[DEBUG] handleAppleEvent (kAEOpenDocuments) received")
+        guard let listDescriptor = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject)) else { return }
+
+        var urls: [URL] = []
+        // `1 ... 0` is a runtime crash (ClosedRange requires
+        // lowerBound <= upperBound), so clamp the count.
+        let count = max(listDescriptor.numberOfItems, 1)
+        for i in 1...count {
+            guard let fileDescriptor = listDescriptor.atIndex(i)?.coerce(toDescriptorType: typeFileURL),
+                  let urlString = fileDescriptor.stringValue else { continue }
+            guard let url = Self.normalizedFileURL(from: urlString) else {
+                                    print("[DEBUG] odoc: dropped unparseable URL string: '\(urlString)'")
+                                    continue
+                                }
+                                urls.append(url)
+        }
+
+        guard !urls.isEmpty else { return }
+        Task { @MainActor in
+            self.handleExternalOpen(urls)
+        }
+    }
+
+    func setupTitleBarDoubleClick(for window: NSWindow) {
+        guard titleBarDoubleClickMonitor == nil else { return }
+
+        titleBarDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak window] event in
+            guard let window = window, event.window === window, event.clickCount >= 2 else { return event }
+
+            let mouseLocation = NSEvent.mouseLocation
+            let titleBarHeight: CGFloat = 60
+
+            if mouseLocation.y > window.frame.maxY - titleBarHeight &&
+               mouseLocation.x >= window.frame.minX && mouseLocation.x <= window.frame.maxX {
+                // Local event monitors run on the main thread. Handle the zoom
+                // synchronously (via the shared, debounced entry point) so the
+                // timestamp is recorded before the same clicks are also dispatched
+                // to any SwiftUI double-tap gesture underneath the pointer.
+                MainActor.assumeIsolated {
+                    AppDelegate.toggleWindowZoom(preferred: window)
+                }
+            }
+
+            return event
+        }
+    }
+
+    // MARK: - Window Zoom / Maximize (single source of truth)
+
+    /// Timestamp of the last zoom/fullscreen toggle. A single double-click is
+    /// observed by BOTH this AppKit title-bar monitor and any SwiftUI
+    /// `.onTapGesture(count: 2)` under the pointer, and each independently calls
+    /// `NSWindow.zoom(_:)`. Because `zoom` is a toggle, two calls cancel out
+    /// (zoom then immediately un-zoom), which reads as a flicker or a "glitchy"
+    /// maximize. Debouncing guarantees one physical double-click produces exactly
+    /// one toggle.
+    private static var lastZoomToggle: CFAbsoluteTime = 0
+
+    /// Toggles window zoom (or fullscreen). All double-click-to-maximize paths —
+    /// the title-bar event monitor, the SwiftUI double-tap gestures, and the
+    /// toolbar button — funnel through here so the behavior is consistent
+    /// (fullscreen-aware) and can never double-trigger.
+    @MainActor
+    static func toggleWindowZoom(preferred window: NSWindow? = nil) {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastZoomToggle > 0.3 else { return }
+        lastZoomToggle = now
+
+        let target = window
+            ?? NSApp.windows.first(where: { $0.isKeyWindow })
+            ?? NSApp.keyWindow
+            ?? NSApp.mainWindow
+        guard let target else { return }
+
+        if target.styleMask.contains(.fullScreen) {
+            target.toggleFullScreen(nil)
+        } else {
+            target.zoom(nil)
+        }
+    }
+    
+    // Shared logic for save warning (Async)
+    func showSaveWarningAsync(for url: URL? = nil, completion: @escaping (Bool) -> Void) {
+        print("[DEBUG] showSaveWarningAsync entry: editorController is nil? \(editorController == nil), hasUnsavedChanges=\(editorController?.hasUnsavedChanges ?? false), url=\(url?.lastPathComponent ?? "nil")")
+        guard let controller = editorController, controller.hasUnsavedChanges else {
+            completion(true) // Proceed
+            return
+        }
+        
+        let fileName = url?.lastPathComponent ?? "the document"
+        
+        let alert = NSAlert()
+        alert.messageText = "Do you want to save the changes made to \(fileName)?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Don't Save")
+        
+        // Find the main window
+        guard let window = NSApplication.shared.windows.first(where: { $0.isVisible && $0.isKeyWindow }) ?? NSApplication.shared.mainWindow else {
+            // Fallback to sync if no window found (unlikely but safe)
+            let response = alert.runModal()
+            switch response {
+            case .alertFirstButtonReturn:
+                NotificationCenter.default.post(name: .requestSave, object: url)
+                completion(true)
+            case .alertSecondButtonReturn:
+                completion(false)
+            default:
+                completion(true)
+            }
+            return
+        }
+        
+        alert.beginSheetModal(for: window) { response in
+            switch response {
+            case .alertFirstButtonReturn: // Save
+                NotificationCenter.default.post(name: .requestSave, object: url)
+                completion(true)
+            case .alertSecondButtonReturn: // Cancel
+                completion(false)
+            case .alertThirdButtonReturn: // Don't Save
+                if let targetURL = url ?? self.editorController?.currentFileURL {
+                    AutoRecoveryManager.shared.clearRecovery(for: targetURL)
+                }
+                completion(true)
+            default:
+                completion(false)
+            }
+        }
+    }
+    
+    // Legacy sync version
+    func showSaveWarningIfNeeded(for url: URL? = nil) -> Bool {
+        print("[DEBUG] showSaveWarningIfNeeded entry: editorController is nil? \(editorController == nil), hasUnsavedChanges=\(editorController?.hasUnsavedChanges ?? false), url=\(url?.lastPathComponent ?? "nil")")
+        guard let controller = editorController, controller.hasUnsavedChanges else {
+            return true // Proceed with closing/terminating/switching
+        }
+        
+        let fileName = url?.lastPathComponent ?? "the document"
+        
+        let alert = NSAlert()
+        alert.messageText = "Do you want to save the changes made to \(fileName)?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Don't Save")
+        
+        let response = alert.runModal()
+        
+        switch response {
+        case .alertFirstButtonReturn: // Save
+            NotificationCenter.default.post(name: .requestSave, object: url)
+            return true // Proceed (after starting save)
+        case .alertSecondButtonReturn: // Cancel
+            return false // Abort
+        case .alertThirdButtonReturn: // Don't Save
+            if let targetURL = url ?? self.editorController?.currentFileURL {
+                AutoRecoveryManager.shared.clearRecovery(for: targetURL)
+            }
+            return true // Proceed without saving
+        default:
+            return false
+        }
+    }
+    
+    @MainActor
+    static func shouldOpenExternalFileInSeparateWindow(currentFileURL: URL?) -> Bool {
+        currentFileURL != nil
+    }
+
+    @MainActor
+    private func openExternalFileInNewWindow(_ url: URL) {
+        let editorController = EditorController()
+        let content = ExternalDocumentWindowRoot(initialFile: url, editorController: editorController)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = url.lastPathComponent
+        window.identifier = NSUserInterfaceItemIdentifier("external-document-\(UUID().uuidString)")
+        window.tabbingMode = .disallowed 
+        window.isReleasedWhenClosed = false
+        
+        window.center()
+        window.contentView = NSHostingView(rootView: content)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
+    @MainActor
+    func handleExternalOpen(_ urls: [URL]) {
+        // Cold-launch case: queue until the editor controller is connected,
+        // then flush from editorController's didSet.
+        guard editorController != nil else {
+            pendingExternalOpens.append(contentsOf: urls)
+            return
+        }
+
+        if Self.shouldOpenExternalFileInSeparateWindow(currentFileURL: editorController?.currentFileURL) {
+            for url in urls {
+                openExternalFileInNewWindow(url)
+            }
+            return
+        }
+
+        for url in urls {
+            NotificationCenter.default.post(name: .openStandaloneFile, object: url)
+        }
+
+        if let mainWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
+            mainWindow.makeKeyAndOrderFront(nil)
+            mainWindow.orderFrontRegardless()
+        }
+    }
+
+    nonisolated func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        return MainActor.assumeIsolated {
+            if showSaveWarningIfNeeded() {
+                // Clean up temp files for the current project before quitting
+                if let projectRoot = editorController?.projectRootURL {
+                    TypstCompiler.cleanUpTempDirectory(in: projectRoot)
+                } else if let fileURL = editorController?.currentFileURL {
+                    // Standalone file: clean temp/ next to the file
+                    TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
+                }
+                return .terminateNow
+            } else {
+                return .terminateCancel
+            }
+        }
+    }
+    
+    // NSWindowDelegate
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        print("[DEBUG] AppDelegate: windowShouldClose triggered")
+        return MainActor.assumeIsolated {
+            if showSaveWarningIfNeeded() {
+                // Clean up temp files when the window (project) closes
+                if let projectRoot = editorController?.projectRootURL {
+                    TypstCompiler.cleanUpTempDirectory(in: projectRoot)
+                } else if let fileURL = editorController?.currentFileURL {
+                    TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
+                }
+                // Reset the app state so the Welcome Screen appears on next launch
+                NotificationCenter.default.post(name: .resetToWelcome, object: nil)
+                
+                return true
+            }
+            return false
+        }
+    }
+
+    func windowDidChangeScreen(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let screen = window.screen else { return }
+        
+        // If width > height, it's a landscape monitor (side-by-side panels)
+        // If height > width, it's a portrait monitor (top-and-bottom panels)
+        let isLandscape = screen.frame.width > screen.frame.height
+        
+        // Only update if it actually needs changing
+        if editorController?.isVerticalSplit != isLandscape {
+            editorController?.isVerticalSplit = isLandscape
+        }
+    }
+}
+
+extension Notification.Name {
+    static let requestSave = Notification.Name("requestSave")
+    static let resetToWelcome = Notification.Name("resetToWelcome") 
+}
+
+@main
+struct TypstEditApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var themeManager = ThemeManager()
+    @StateObject private var editorController = EditorController()
+    @State private var selectedFile: URL?
+    
+    var body: some Scene {
+        WindowGroup(id: "main") {
+            ContentView(selectedFile: $selectedFile, editorController: editorController)
+                .environmentObject(themeManager)
+                .background(VisualEffectView().ignoresSafeArea())
+                .background(WindowAccessor { window in
+                    let isMainWindow = window.identifier?.rawValue == "main"
+                    if isMainWindow, window.delegate !== appDelegate {
+                        print("[DEBUG] App: Assigning window delegate to appDelegate")
+                        window.delegate = appDelegate
+                        if let screen = window.screen {
+                            let isLandscape = screen.frame.width > screen.frame.height
+                            editorController.isVerticalSplit = isLandscape
+                        }
+                    }
+                    if isMainWindow {
+                        appDelegate.setupTitleBarDoubleClick(for: window)
+                    }
+                })
+                .onAppear {
+                    print("[DEBUG] TypstEditApp onAppear: assigning editorController to appDelegate")
+                    appDelegate.editorController = editorController
+                }
+        }  
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified)
+        .commands {
+            AppMenuCommands(themeManager: themeManager, selectedFile: $selectedFile, editorController: editorController)
+        }
+        
+        Settings {
+            SettingsView()
+                .environmentObject(themeManager)
+        }
+    }
+}

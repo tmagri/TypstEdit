@@ -27,14 +27,6 @@ struct WelcomeView: View {
             }
         }
         
-        // Try looking in the bundle by path (Loose file in Media.xcassets/AppIcon.imageset if not compiled)
-        if let path = ModuleResources.main.path(forResource: "AppIcon", ofType: "png", inDirectory: "Media.xcassets/AppIcon.imageset") {
-            if let image = NSImage(contentsOfFile: path) {
-                print("[DEBUG] WelcomeView: Loaded AppIcon via Bundle.module.path (xcassets)")
-                return Image(nsImage: image)
-            }
-        }
-
         print("[ERROR] WelcomeView: Failed to load AppIcon image from all known locations")
         // Fallback to system icon if all fails
         return Image(systemName: "doc.text.fill")
