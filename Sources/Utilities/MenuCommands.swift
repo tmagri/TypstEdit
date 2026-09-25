@@ -5,6 +5,7 @@ struct AppMenuCommands: Commands {
     @ObservedObject var themeManager: ThemeManager
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
+    @ObservedObject private var recentFilesManager = RecentFilesManager.shared
     
     @Environment(\.openWindow) private var openWindow
     
@@ -65,6 +66,45 @@ struct AppMenuCommands: Commands {
                 }
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
+
+            Menu("Open Recent") {
+                if recentFilesManager.recentFiles.isEmpty {
+                    Button("No Recent Items", action: {})
+                        .disabled(true)
+                } else {
+                    ForEach(recentFilesManager.recentFiles) { file in
+                        Button(action: {
+                            if file.isProject {
+                                ensureWindowAndPost(name: .openProjectAndFile, object: file.url)
+                            } else {
+                                ensureWindowAndPost(name: .openStandaloneFile, object: file.url)
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: file.isProject ? "folder" : "doc.text")
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(file.name)
+                                    Text(file.path)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                Text(file.isProject ? "Project" : "File")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    Divider()
+
+                    Button("Clear Menu") {
+                        recentFilesManager.clearAll()
+                    }
+                }
+            }
 
             Button("Open Notes") {
                 ensureWindowAndPost(name: NSNotification.Name("openNotebooks"), object: nil)
