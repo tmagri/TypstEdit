@@ -63,9 +63,35 @@ class ExternalWindowDelegate: NSObject, NSWindowDelegate {
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static private(set) var shared: AppDelegate?
 
-    var editorController: EditorController?
+    /// Debug trace to a file — print()/NSLog are unreliable to observe for a
+    /// LS-launched GUI app on this OS (stdout discarded, unified log filtered).
+    nonisolated static func debugLog(_ message: String) {
+        let url = URL(fileURLWithPath: "/tmp/typstedit-debug.log")
+        let ms = Int(Date().timeIntervalSince1970 * 1000) % 100_000
+        let line = "[.\(ms)] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
+        }
+    }
+
+    var editorController: EditorController? {
+        didSet {
+            // Files opened from Finder before the editor was connected
+            // (cold launch) are handled now.
+            flushPendingExternalOpens()
+        }
+    }
     var externalDelegates: [NSWindow: ExternalWindowDelegate] = [:]
-    
+
+    /// Files that arrived from Finder before the main window connected its
+    /// EditorController (i.e. the app was launched by opening a file).
+    private var pendingExternalOpens: [URL] = []
+
     private var titleBarDoubleClickMonitor: Any?
     
     override init() {
@@ -74,13 +100,146 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         print("[DEBUG] AppDelegate: init")
     }
 
+    // MARK: - Opening files from Finder
+
+    private func installOpenDocumentsHandler() {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleAppleEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kCoreEventClass),
+            andEventID: AEEventID(kAEOpenDocuments)
+        )
+        Self.debugLog("AE handler installed")
+    }
+
+    nonisolated func applicationWillFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            // Must beat the open event itself: on modern macOS LaunchServices
+            // delivers kAEOpenDocuments (as application(_:open:)) BEFORE
+            // applicationDidFinishLaunching — and SwiftUI's delegate shim
+            // spawns a new WindowGroup window for every open event it sees.
+            // Registering here means OUR handler consumes the raw event first,
+            // so the shim never sees it and no duplicate window is spawned.
+            installOpenDocumentsHandler()
+            Self.debugLog("willFinishLaunching done")
+        }
+    }
+
+    nonisolated func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            // Backstop only — the launch odoc event is delivered BEFORE this
+            // (see applicationWillFinishLaunching above).
+            installOpenDocumentsHandler()
+            flushPendingExternalOpens()
+            Self.debugLog("didFinishLaunching done")
+        }
+    }
+
+    nonisolated func applicationDidBecomeActive(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            // Safety net: re-claim the handler in case anything re-registered
+            // over ours after launch (e.g. SwiftUI scene setup), so warm opens
+            // while the app is running are always intercepted.
+            installOpenDocumentsHandler()
+            Self.debugLog("didBecomeActive done")
+        }
+    }
+
+    /// Safety net: if the raw handler above is ever bypassed, AppKit delivers the
+    /// file open here instead. Only one of the two paths receives a given event.
+    nonisolated func application(_ application: NSApplication, open urls: [URL]) {
+        Self.debugLog("delegate application(_:open:) fired: \(urls.map(\.lastPathComponent))")
+        MainActor.assumeIsolated {
+            urls.forEach { self.queueExternalOpen($0) }
+        }
+    }
+
+    private func flushPendingExternalOpens() {
+        guard editorController != nil, !pendingExternalOpens.isEmpty else { return }
+        let urls = pendingExternalOpens
+        pendingExternalOpens.removeAll()
+        Self.debugLog("flushing \(urls.count) pending external open(s) (cold launch)")
+        // Route through the debounce: guarantees ContentView's
+        // .onReceive(.openStandaloneFile) subscription is live before we post
+        // (this runs from editorController's didSet, i.e. inside onAppear).
+        urls.forEach { queueExternalOpen($0) }
+    }
+
+    nonisolated static func normalizedFileURL(from rawValue: String) -> URL? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        // 1. Valid, percent-encoded file URL string.
+        if let url = URL(string: trimmed), url.isFileURL { return url }
+        // 2. "file://" string URL(string:) rejects (e.g. unescaped space):
+        //    strip scheme/host and treat the rest as a plain path.
+        if trimmed.hasPrefix("file://") {
+            var path = String(trimmed.dropFirst("file://".count))
+            if path.hasPrefix("localhost/") { path = String(path.dropFirst("localhost/".count)) }
+            return path.hasPrefix("/") ? URL(fileURLWithPath: path) : nil
+        }
+        // 3. Bare POSIX path.
+        if trimmed.hasPrefix("/") { return URL(fileURLWithPath: trimmed) }
+        // 4. HFS-style path ("Macintosh HD:private:tmp:x:y.typ" — `open` CLI and
+        //    some senders deliver these instead of file URLs). Map separators;
+        //    the boot volume prefix becomes "/", other volumes /Volumes/<name>.
+        if trimmed.contains(":") {
+            let path = trimmed.replacingOccurrences(of: ":", with: "/")
+            let bootVolume = (try? URL(fileURLWithPath: "/")
+                .resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? ""
+            if !bootVolume.isEmpty, path.hasPrefix("\(bootVolume)/") {
+                return URL(fileURLWithPath: "/" + path.dropFirst(bootVolume.count + 1))
+            }
+            if path.hasPrefix("/Volumes/") || path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+            return URL(fileURLWithPath: "/Volumes/" + path)
+        }
+        // 5. Anything else (remote URLs, junk): dropped rather than turned into bogus URLs.
+        return nil
+    }
+
+    @objc func handleAppleEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
+        Self.debugLog("AE handleAppleEvent received")
+        guard let listDescriptor = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject)) else { return }
+
+        var urls: [URL] = []
+        // Clamp: `1...0` would crash (ClosedRange requires lowerBound <= upperBound).
+        let count = max(listDescriptor.numberOfItems, 1)
+        for i in 1...count {
+            guard let item = listDescriptor.atIndex(i) else { continue }
+            // Senders differ: Finder sends aliases/file URLs, `open` CLI can
+            // deliver HFS-style text. Try the typed accessors first, then
+            // string parsing.
+            var url = item.fileURLValue
+            if url == nil, let fileDescriptor = item.coerce(toDescriptorType: typeFileURL) {
+                url = fileDescriptor.stringValue.flatMap(Self.normalizedFileURL(from:))
+            }
+            if url == nil {
+                url = item.stringValue.flatMap(Self.normalizedFileURL(from:))
+            }
+            guard let resolvedURL = url else {
+                Self.debugLog("odoc: dropped unparseable descriptor at index \(i)")
+                continue
+            }
+            urls.append(resolvedURL)
+        }
+        guard !urls.isEmpty else { return }
+        Self.debugLog("odoc parsed urls: \(urls.map(\.lastPathComponent))")
+
+        Task { @MainActor in
+            urls.forEach { self.queueExternalOpen($0) }
+        }
+    }
+
     // Replace the openDebounceTimer variable with a Task
-    private var pendingURLs: Set<URL> = []
+    // (array, not Set: preserves the sender's file order across a batch)
+    private var pendingURLs: [URL] = []
     private var debounceTask: Task<Void, Never>?
 
     @MainActor
     func queueExternalOpen(_ url: URL) {
-        pendingURLs.insert(url)
+        Self.debugLog("queueExternalOpen: \(url.lastPathComponent)")
+        if !pendingURLs.contains(url) {
+            pendingURLs.append(url)
+        }
         debounceTask?.cancel()
         debounceTask = Task { @MainActor [weak self] in
             // Wait for 100 milliseconds (0.1 seconds)
@@ -256,24 +415,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @MainActor
     func handleExternalOpen(_ urls: [URL]) {
+        let busy = Self.shouldOpenExternalFileInSeparateWindow(editorController: editorController)
+        Self.debugLog("handleExternalOpen: \(urls.map(\.lastPathComponent)) editorConnected=\(editorController != nil) busy=\(busy) visibleWindows=\(NSApp.windows.filter(\.isVisible).count)")
+        // Cold-launch case: queue until the editor controller is connected,
+        // then flush from editorController's didSet.
+        guard editorController != nil else {
+            pendingExternalOpens.append(contentsOf: urls)
+            Self.debugLog("handleExternalOpen: queued for cold launch (\(pendingExternalOpens.count) pending)")
+            return
+        }
+
         var urlsToProcess = urls
-        
+        var loadedInMainWindow = false
+
         // Target the main window specifically if it is completely idle
-        if !Self.shouldOpenExternalFileInSeparateWindow(editorController: editorController) {
+        if !busy {
             if let firstURL = urlsToProcess.first, let mainController = self.editorController {
                 NotificationCenter.default.post(name: .openStandaloneFile, object: [
                     "url": firstURL,
                     "target": mainController
                 ])
                 urlsToProcess.removeFirst()
+                loadedInMainWindow = true
+                Self.debugLog("handleExternalOpen: routed '\(firstURL.lastPathComponent)' to idle main window")
             }
         }
-        
+
         for url in urlsToProcess {
             openExternalFileInNewWindow(url)
         }
 
-        if let mainWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
+        // Only re-front the main window when a file was routed to it; otherwise
+        // the freshly opened external window stays in front, like standard apps.
+        if loadedInMainWindow,
+           let mainWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
             mainWindow.makeKeyAndOrderFront(nil)
             mainWindow.orderFrontRegardless()
         }
@@ -366,12 +541,7 @@ struct TypstEditApp: App {
                 .onAppear {
                     appDelegate.editorController = editorController
                 }
-                // MOVED HERE: Attach directly to the view, inside the WindowGroup
-                .onOpenURL { url in
-                    appDelegate.queueExternalOpen(url)
-                }
         }
-        .handlesExternalEvents(matching: ["*"])
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         .commands {
