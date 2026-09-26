@@ -78,7 +78,7 @@ class TypstCompiler: ObservableObject {
             count += darkModePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
         }
         if currentFileExtension == "note" {
-            count += notePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+            count += Self.notePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
         }
         return count
     }
@@ -111,9 +111,21 @@ class TypstCompiler: ObservableObject {
 )
 """ + "\n"
 
-    private let notePreamble =
+    // Helpers every .note file can rely on. Defined first so any user
+    // definition of the same name in the note body shadows ours.
+    nonisolated static let notePreamble =
 """
 #let title(body) = align(center)[#text(size: 24pt, weight: "bold")[#body]]
+#let note-box(title, body) = block(
+  width: 100%,
+  fill: rgb("#eef2f7"),
+  stroke: (left: 2.5pt + rgb("#3b82f6")),
+  inset: (x: 12pt, y: 10pt),
+)[
+  #text(size: 11pt, weight: "bold")[#title]
+  #v(4pt)
+  #body
+]
 """ + "\n"
     
     // Check if typst makes sense or we need full path
@@ -302,7 +314,7 @@ class TypstCompiler: ObservableObject {
             
             var injectedPreamble = ""
             if ext == "note" {
-                injectedPreamble += notePreamble
+                injectedPreamble += Self.notePreamble
             }
             if isDarkMode {
                 // 1. Inject the color into partial strokes safely
@@ -808,7 +820,8 @@ class TypstCompiler: ObservableObject {
     /// `#score(generated-abc, width: 100%)` is user-written Typst, not generated
     /// Markdown output. We still allow the fallback to act on Markdown-converted
     /// constructs (`#link`, `#image`, `#table`, `#strike`, `#figure`, `#align`,
-    /// `#line`, `#footnote`, `#super`, `#sub`, `#underline`, `#highlight`, `#raw`)
+    /// `#line`, `#footnote`, `#super`, `#sub`, `#underline`, `#highlight`, `#raw`,
+    /// `#quote`)
     /// which are the functions `sanitizeMarkdownToTypst` is known to emit.
     private func isProtectedTypstDirective(_ line: String, isHybrid: Bool) -> Bool {
         // Always-protected top-level keywords.
@@ -824,7 +837,7 @@ class TypstCompiler: ObservableObject {
         // the fallback can still repair broken converter-generated tables/links/images.
         let markdownConverterFuncs = [
             "link", "image", "table", "strike", "figure", "align", "line",
-            "footnote", "super", "sub", "underline", "highlight", "raw",
+            "footnote", "super", "sub", "underline", "highlight", "raw", "quote",
         ]
         let nsLine = line as NSString
         guard let match = CompilerRegex.markdownConverterFunc.firstMatch(in: line, options: [], range: NSRange(0..<nsLine.length)) else {
@@ -1289,7 +1302,7 @@ class TypstCompiler: ObservableObject {
             }.value
         }
         if ext == "note" {
-            finalContent = notePreamble + finalContent
+            finalContent = Self.notePreamble + finalContent
         }
         
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
@@ -1403,7 +1416,7 @@ class TypstCompiler: ObservableObject {
             }.value
         }
         if ext == "note" {
-            finalContent = notePreamble + finalContent
+            finalContent = Self.notePreamble + finalContent
         }
         
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
@@ -1557,7 +1570,7 @@ class TypstCompiler: ObservableObject {
                     }.value
                     
                     if isHybrid {
-                        converted = notePreamble + converted
+                        converted = Self.notePreamble + converted
                     }
                     
                     let newFilename = filename.replacingOccurrences(of: ".note", with: ".typ").replacingOccurrences(of: ".md", with: ".typ")

@@ -1,85 +1,73 @@
 import Foundation
+import Markdown
 
 // MARK: - Precompiled Regexes
+//
+// The Markdown→Typst conversion itself is AST-based (see `TypstMarkupVisitor`
+// below): the document is parsed once with swift-markdown and walked by a
+// visitor that serializes it straight into a single output buffer. The regexes
+// that remain are confined to well-scoped jobs:
+//
+//   * response cleanup (thinking tags, force-code-output extraction)
+//   * the pre-parse extraction pass — code spans, math, backslash escapes and
+//     footnote definitions must be identified BEFORE cmark parses the text,
+//     because cmark either mangles them (smart quotes, emphasis inside math)
+//     or consumes them outright (backslash escapes, reference definitions)
+//   * leaf-level conversion/escaping of plain text runs
+//   * HTML fragments (tag soup has no grammar worth parsing)
+//   * whole-document post-passes carried over from the old pipeline
 
 enum AICompletionRegex {
+    // Response cleanup
     static let thinkTag = try! NSRegularExpression(pattern: "<think>[\\s\\S]*?<\\/think>", options: [.caseInsensitive])
     static let thoughtTag = try! NSRegularExpression(pattern: "<thought>[\\s\\S]*?<\\/thought>", options: [.caseInsensitive])
     static let extractCode = try! NSRegularExpression(pattern: "```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```")
-    
-    // Masking
+
+    // Pre-parse extraction
+    // Fenced + inline code: a backtick run, content, and the same run back.
     static let codeBlock = try! NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)")
+    // Math: $$…$$, $…$, \[…\] or \(…\). The (?<!\\) guards skip escaped dollars.
     static let mathBlock = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
-    
-    // Autolinks & HTML tags
-    static let autolink = try! NSRegularExpression(pattern: "<(https?://[^>\\s]+)>")
-    static let htmlPAlign = try! NSRegularExpression(pattern: "(?is)\\s*<p\\s+align=[\"']([^\"']+)[\"']>\\s*(.*?)\\s*</p>\\s*")
-    static let htmlP = try! NSRegularExpression(pattern: "(?is)\\s*<p>\\s*(.*?)\\s*</p>\\s*")
-    static let htmlDt = try! NSRegularExpression(pattern: "(?is)\\s*<dt>(.*?)</dt>\\s*")
-    static let htmlDd = try! NSRegularExpression(pattern: "(?is)\\s*<dd>(.*?)</dd>\\s*")
-    static let htmlDl = try! NSRegularExpression(pattern: "(?i)\\s*</?dl>\\s*")
-    static let htmlStrong = try! NSRegularExpression(pattern: "(?is)<(strong|b)>(.*?)</\\1>")
-    static let htmlEm = try! NSRegularExpression(pattern: "(?is)<(em|i)>(.*?)</\\1>")
-    static let htmlDel = try! NSRegularExpression(pattern: "(?is)<del>(.*?)</del>")
-    static let htmlSup = try! NSRegularExpression(pattern: "(?is)<sup>(.*?)</sup>")
-    static let htmlSub = try! NSRegularExpression(pattern: "(?is)<sub>(.*?)</sub>")
-    static let htmlU = try! NSRegularExpression(pattern: "(?is)<u>(.*?)</u>")
-    static let htmlMark = try! NSRegularExpression(pattern: "(?is)<mark>(.*?)</mark>")
-    static let htmlBr = try! NSRegularExpression(pattern: "(?i)<br\\s*/?>")
-    static let htmlLink = try! NSRegularExpression(pattern: "(?is)<a\\s+(?:[^>]*?\\s+)?href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>")
-    static let htmlImg = try! NSRegularExpression(pattern: "(?i)<img\\s+([^>]+)>")
-    static let imgSrc = try! NSRegularExpression(pattern: "(?i)src=[\"']([^\"']+)[\"']")
-    static let imgAlt = try! NSRegularExpression(pattern: "(?i)alt=[\"']([^\"']*)[\"']")
-    static let imgWidth = try! NSRegularExpression(pattern: "(?i)width=[\"']([^\"']+)[\"']")
-    static let imgHeight = try! NSRegularExpression(pattern: "(?i)height=[\"']([^\"']+)[\"']")
-    static let escapeHtmlTags = try! NSRegularExpression(pattern: "(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>")
-    
-    // Footnotes & Headings & Lists
+    // Backslash-escaped ASCII punctuation (the CommonMark escape set). Restored
+    // verbatim so user- or delimitImproperOperators-written escapes like \$ or
+    // \# keep exactly the meaning they had under the old string pipeline.
+    static let backslashEscape = try! NSRegularExpression(pattern: "\\\\[!-/:-@\\[-`{-~]")
+    // Footnote definitions must be pulled out pre-parse: cmark would otherwise
+    // consume `[^id]: text` as a link reference definition and turn every
+    // `[^id]` reference into a plain link instead of a footnote.
     static let fnDef = try! NSRegularExpression(pattern: "(?m)^\\[\\^([^\\]]+)\\]:[ \\t]*(.*?)(?=\\n\\[\\^|\n\\z|\\z)", options: [.dotMatchesLineSeparators])
+
+    // Leaf-level conversions
     static let fnRef = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
     static let fnInline = try! NSRegularExpression(pattern: "(?<!!)\\^\\[([^\\]]+)\\]")
-    static let heading = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)(#+)[ \\t]+")
-    static let docDot = try! NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+")
-    static let taskListChecked = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[[xX]\\][ \\t]+")
-    static let taskListUnchecked = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)[-*+][ \\t]+\\[ \\][ \\t]+")
-    static let unorderedList = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)[*+][ \\t]+")
-    static let orderedList = try! NSRegularExpression(pattern: "(?m)^([ \\t]*(?:>[ \\t]*)?)\\d+\\.[ \\t]+")
-    
-    // Formatting
-    static let strike = try! NSRegularExpression(pattern: "(?s)~~(.+?)~~")
-    static let boldItalicAsterisk = try! NSRegularExpression(pattern: "\\*\\*\\*(.+?)\\*\\*\\*")
-    static let boldItalicUnderscore = try! NSRegularExpression(pattern: "___(.+?)___")
-    static let boldAsymmetric1 = try! NSRegularExpression(pattern: "(?<!\\*)\\*\\*\\*([^*\\n]+)\\*\\*(?!\\*)")
-    static let boldAsymmetric2 = try! NSRegularExpression(pattern: "(?<!\\*)\\*\\*([^*\\n]+)\\*\\*\\*(?!\\*)")
-    static let technicalUnderscore = try! NSRegularExpression(pattern: "(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])")
-    static let underscoreBeforeAsterisk = try! NSRegularExpression(pattern: "_(?=\\\\?\\*(?!\\*))")
-    static let boldAsterisk = try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
-    static let boldUnderscore = try! NSRegularExpression(pattern: "__(.+?)__")
-    
-    // Links and Images
-    static let refDef = try! NSRegularExpression(pattern: "(?m)^[ \\t]*\\[([^\\]]+)\\]:[ \\t]+([^ \\t\\n]+)(?:[ \\t]+[\"'(].*?[\"')])?[ \\t]*$")
-    static let refImg = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\[([^\\]]*)\\]")
-    static let refLink = try! NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\[([^\\]]*)\\]")
-    static let inlineImg = try! NSRegularExpression(pattern: "!\\[([^\\]]*)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)")
-    static let inlineLink = try! NSRegularExpression(pattern: "(?<!!)\\[([^\\]]+)\\]\\(\\s*([^)\\s]+)(?:\\s+\"[^\"]*\")?\\s*\\)")
     static let bareVideo = try! NSRegularExpression(pattern: #"(?m)^[ \t]*(https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch|embed|v|shorts|live)|youtu\.be/|vimeo\.com/)[^\s]+)[ \t]*$"#, options: [.caseInsensitive])
-    
-    // Typst and Cleanups
-    static let markdownAbbr = try! NSRegularExpression(pattern: "(?m)^\\*\\[([^\\]]+)\\]:")
-    static let horizontalRule = try! NSRegularExpression(pattern: "(?m)^[-*_]{3,}[ \\t]*$")
-    static let entityRarr = try! NSRegularExpression(pattern: "(?i)&rarr;")
-    static let entityLarr = try! NSRegularExpression(pattern: "(?i)&larr;")
+
+    // Leaf-level escaping
+    static let escapeHtmlTags = try! NSRegularExpression(pattern: "(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>")
     static let strayBacktick = try! NSRegularExpression(pattern: "(?<!\\\\)`")
     static let literalDollar = try! NSRegularExpression(pattern: "(?<!\\\\)\\$")
-    static let literalHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[)")
+    static let literalHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[|quote\\[)")
     static let literalAt = try! NSRegularExpression(pattern: "(?<!\\\\)@")
+    static let technicalUnderscore = try! NSRegularExpression(pattern: "(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])")
     static let hybridDollarDigit = try! NSRegularExpression(pattern: "(?<!\\\\)\\$(?=\\d)")
     static let hybridAt = try! NSRegularExpression(pattern: "(?<!\\\\)(?<=[a-zA-Z0-9])@|(?<!\\\\)@(?=\\s)")
     static let hybridHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!import\\b|include\\b|let\\b|set\\b|show\\b|return\\b|if\\b|else\\b|for\\b|while\\b|context\\b)([A-Za-z][A-Za-z0-9_]*)(?=[,!?;:]|\\.\\s|\\.$)")
+    // A `#` followed by whitespace or end-of-text can't start a Typst expression,
+    // so it's escaped (delimitImproperOperators used to emit these already
+    // escaped and the old pipeline preserved them verbatim).
+    static let hybridStrayHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?=\\s|$)")
     static let stringLiteral = try! NSRegularExpression(pattern: "\"[^\"]*\"")
-    
-    // Markdown table & video IDs
-    static let markdownTable = try! NSRegularExpression(pattern: "(?m)^[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n[ \\t]*\\|?[ \\t]*:?-+:?[ \\t]*(?:\\|[ \\t]*:?-+:?[ \\t]*)*\\|?[ \\t]*\\n(?:[ \\t]*(?:\\|?[^\\n|]+\\|[^\\n]+|[^\\n|]+\\|[^\\n]*)\\n?)*")
+
+    // Whole-document post-passes
+    static let docDot = try! NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+")
+    static let markdownAbbr = try! NSRegularExpression(pattern: "(?m)^\\*\\[([^\\]]+)\\]:")
+
+    // HTML fragments. One tokenizer finds comments/tags; `htmlAttr` pulls
+    // individual attribute values out of a tag's raw text.
+    static let htmlToken = try! NSRegularExpression(pattern: "(?s)<!--.*?-->|<(/?)([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*>")
+    static let htmlAttr = try! NSRegularExpression(pattern: "(?i)\\b(href|align|src|alt|width|height)\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+))")
+
+    // Video IDs
     static let youtubeID = try! NSRegularExpression(pattern: #"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"#, options: [.caseInsensitive])
     static let vimeoID = try! NSRegularExpression(pattern: #"(?:player\.)?vimeo\.com/(?:video/)?(\d{6,})"#, options: [.caseInsensitive])
 }
@@ -342,547 +330,194 @@ class AICompletionService: ObservableObject {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
     }
 
-    nonisolated func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
-        let processed = NSMutableString(string: text.replacingOccurrences(of: "\r\n", with: "\n"))
+    // MARK: - Markdown → Typst conversion (AST pipeline)
 
-        // --- 1. MASK CODE BLOCKS ---
-        // Temporarily hide inline and fenced code blocks so they aren't mangled by formatting regexes
-        var codeBlocks: [String] = []
-        let codeMatches = AICompletionRegex.codeBlock.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
-        for match in codeMatches { codeBlocks.append(processed.substring(with: match.range)) }
-        for (i, match) in codeMatches.enumerated().reversed() {
-            // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
-            processed.replaceCharacters(in: match.range, with: "MASKEDCODEBLOCK\(i)ENDMASK")
-        }
-
-        // --- 2. MASK MATH BLOCKS ---
-        // Protect real equations so we can safely escape currency dollars later
-        var mathBlocks: [String] = []
-        let mathMatches = AICompletionRegex.mathBlock.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
-        for match in mathMatches { mathBlocks.append(processed.substring(with: match.range)) }
-        for (i, match) in mathMatches.enumerated().reversed() {
-            // Changed from @@@ to purely alphanumeric tokens to prevent regex escaping collision
-            processed.replaceCharacters(in: match.range, with: "MASKEDMATHBLOCK\(i)ENDMASK")
-        }
-
-        // Helper to safely apply precompiled regex replacements
-        func applyRegex(_ regex: NSRegularExpression, template: String) {
-            regex.replaceMatches(in: processed, options: [], range: NSRange(location: 0, length: processed.length), withTemplate: template)
-        }
-
-        // 3. Autolinks (Process before HTML tags to prevent crossfire).
-        // Angle-bracket autolinks to known video hosts become clickable thumbnail embeds.
-        let autoMatches = AICompletionRegex.autolink.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in autoMatches.reversed() {
-            let url = processed.substring(with: match.range(at: 1))
-            let host = url.lowercased()
-            let replacement: String
-            if host.contains("youtube.com") || host.contains("youtu.be") {
-                replacement = Self.videoEmbed(for: url, alt: "YouTube video")
-            } else if host.contains("vimeo.com") {
-                replacement = Self.videoEmbed(for: url, alt: "Vimeo video")
-            } else {
-                replacement = "#link(\"\(url)\")"
-            }
-            processed.replaceCharacters(in: match.range, with: replacement)
-        }
-
-        // 3.5 Common HTML tags to Typst
-        applyRegex(AICompletionRegex.htmlPAlign, template: "\n#align($1)[\n$2\n]\n")
-        applyRegex(AICompletionRegex.htmlP, template: "\n$1\n")
-        applyRegex(AICompletionRegex.htmlDt, template: "\n/ $1: ")
-        applyRegex(AICompletionRegex.htmlDd, template: " $1\n")
-        applyRegex(AICompletionRegex.htmlDl, template: "\n")
-        applyRegex(AICompletionRegex.htmlStrong, template: "*$2*")
-        applyRegex(AICompletionRegex.htmlEm, template: "_$2_")
-        applyRegex(AICompletionRegex.htmlDel, template: "#strike[$1]")
-        applyRegex(AICompletionRegex.htmlSup, template: "#super[$1]")
-        applyRegex(AICompletionRegex.htmlSub, template: "#sub[$1]")
-        applyRegex(AICompletionRegex.htmlU, template: "#underline[$1]")
-        applyRegex(AICompletionRegex.htmlMark, template: "#highlight[$1]")
-        applyRegex(AICompletionRegex.htmlBr, template: "\\\\")
-
-        // 3.6 HTML Links and Images
-        applyRegex(AICompletionRegex.htmlLink, template: "#link(\"$1\")[$2]")
-        let htmlImgMatches = AICompletionRegex.htmlImg.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in htmlImgMatches.reversed() {
-            let attributes = processed.substring(with: match.range(at: 1))
-            var src = ""
-            var alt = ""
-            var width = ""
-            var height = ""
-
-            let attrRange = NSRange(0..<attributes.utf16.count)
-            if let srcMatch = AICompletionRegex.imgSrc.firstMatch(in: attributes, options: [], range: attrRange) {
-                src = (attributes as NSString).substring(with: srcMatch.range(at: 1))
-            }
-            if let altMatch = AICompletionRegex.imgAlt.firstMatch(in: attributes, options: [], range: attrRange) {
-                alt = (attributes as NSString).substring(with: altMatch.range(at: 1))
-            }
-            if let widthMatch = AICompletionRegex.imgWidth.firstMatch(in: attributes, options: [], range: attrRange) {
-                width = (attributes as NSString).substring(with: widthMatch.range(at: 1))
-            }
-            if let heightMatch = AICompletionRegex.imgHeight.firstMatch(in: attributes, options: [], range: attrRange) {
-                height = (attributes as NSString).substring(with: heightMatch.range(at: 1))
-            }
-
-            if !src.isEmpty {
-                let formattedSrc = src.lowercased().hasPrefix("http") || src.hasPrefix("/") || src.hasPrefix("data:") ? src : "/\(src)"
-                var params: [String] = ["\"\(formattedSrc)\""]
-                if !alt.isEmpty { params.append("alt: \"\(alt)\"") }
-
-                // HTML width and height are typically in pixels. In Typst, we can append 'pt' if they are pure numbers.
-                if !width.isEmpty {
-                    if width.allSatisfy({ $0.isNumber }) {
-                        params.append("width: \(width)pt")
-                    } else {
-                        params.append("width: \(width)")
-                    }
-                }
-                if !height.isEmpty {
-                    if height.allSatisfy({ $0.isNumber }) {
-                        params.append("height: \(height)pt")
-                    } else {
-                        params.append("height: \(height)")
-                    }
-                }
-
-                let ext = (src as NSString).pathExtension.lowercased()
-                let isWeb = src.lowercased().hasPrefix("http")
-                let supportedExts = ["png", "jpg", "jpeg", "gif", "svg"]
-
-                let replacement: String
-                if !isWeb && !ext.isEmpty && !supportedExts.contains(ext) {
-                    // Fallback to a link if format is entirely unsupported by Typst (like .icns)
-                    let displayAlt = alt.trimmingCharacters(in: .whitespaces).isEmpty ? "Image" : alt
-                    replacement = "#link(\"\(src)\")[🖼️ \(displayAlt)]"
-                } else {
-                    replacement = "#image(\(params.joined(separator: ", ")))"
-                }
-                processed.replaceCharacters(in: match.range, with: replacement)
-            }
-        }
-
-        // 4. Escape remaining HTML tags to prevent Typst label parsing crashes
-        // Swallow optional preceding backslash to prevent double-escaping into an unclosed label
-        // We use a negative lookahead `(?!(?:[a-z0-9_-]+)>)` to ensure we do NOT escape valid Typst labels `<label>`.
-        applyRegex(AICompletionRegex.escapeHtmlTags, template: "\\\\<$1\\\\>")
-
-        // 5. Markdown Footnotes -> Typst #footnote[]
-        var footnotes: [String: String] = [:]
-        // Extract reference footnote definitions: [^id]: text
-        // This regex matches `[^id]:` at the start of a line, then lazily captures text until it sees
-        // either the next `\n[^something]:` or the end of the string.
-        let fnDefMatches = AICompletionRegex.fnDef.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in fnDefMatches.reversed() {
-            let id = processed.substring(with: match.range(at: 1))
-            let text = processed.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-            footnotes[id] = text
-            processed.replaceCharacters(in: match.range, with: "")
-        }
-
-        // Replace footnote references: [^id]
-        let fnRefMatches = AICompletionRegex.fnRef.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in fnRefMatches.reversed() {
-            let id = processed.substring(with: match.range(at: 1))
-            if let text = footnotes[id] {
-                processed.replaceCharacters(in: match.range, with: "#footnote[\(text)]")
-            } else {
-                // Escape it if no definition found so it doesn't break Typst math
-                processed.replaceCharacters(in: match.range, with: "\\\\[\\\\^\(id)\\\\]")
-            }
-        }
-
-        // Inline footnotes: ^[text]
-        applyRegex(AICompletionRegex.fnInline, template: "#footnote[$1]")
-
-        // 6. Headings (H1 - H6) -> Typst (=)
-        let headingMatches = AICompletionRegex.heading.matches(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length))
-        for match in headingMatches.reversed() {
-            let prefix = processed.substring(with: match.range(at: 1))
-            let hashCount = match.range(at: 2).length
-            let equals = String(repeating: "=", count: hashCount)
-            processed.replaceCharacters(in: match.range, with: "\(prefix)\(equals) ")
-        }
-
-        // 6.5 Translate literal documentation space characters (⋅ or ·) to actual spaces
-        while let match = AICompletionRegex.docDot.firstMatch(in: processed as String, options: [], range: NSRange(location: 0, length: processed.length)) {
-            let matchedString = processed.substring(with: match.range)
-            let replaced = matchedString.replacingOccurrences(of: "⋅", with: " ").replacingOccurrences(of: "·", with: " ")
-            processed.replaceCharacters(in: match.range, with: replaced)
-        }
-
-        // 7. Task Lists -> Typst native Checkboxes
-        applyRegex(AICompletionRegex.taskListChecked, template: "$1- ☑ ")
-        applyRegex(AICompletionRegex.taskListUnchecked, template: "$1- ☐ ")
-
-        // 8. Unordered Lists -> Typst (-)
-        applyRegex(AICompletionRegex.unorderedList, template: "$1- ")
-
-        // 9. Ordered Lists `1. ` -> Typst auto-numbering (`+ `)
-        applyRegex(AICompletionRegex.orderedList, template: "$1+ ")
-
-        // (Tables are converted AFTER inline formatting — see step 13.3 below — so that
-        // links, bold, etc. inside cells are converted to Typst before the cell delimiters
-        // are wrapped around them. Otherwise the link regex mistakes the cell `[...]` for
-        // Markdown link syntax.)
-
-        // 10. Strikethrough -> #strike[text]
-        applyRegex(AICompletionRegex.strike, template: "#strike[$1]")
-
-        // 10.4 Bold-Italic (Markdown *** or ___) -> Typst _*
-        applyRegex(AICompletionRegex.boldItalicAsterisk, template: "_*$1*_")
-        applyRegex(AICompletionRegex.boldItalicUnderscore, template: "_*$1*_")
-
-        // 10.5 Fix asymmetrical bold markers
-        applyRegex(AICompletionRegex.boldAsymmetric1, template: "**$1**")
-        applyRegex(AICompletionRegex.boldAsymmetric2, template: "**$1**")
-
-        // 10.6 Escape underscores in technical terms/filenames
-        // In Hybrid mode (.note), Typst handles my_variable perfectly natively, and `_underscores_` is native italic.
-        // If we escape underscores, we break valid Typst syntax.
-        if !isHybrid {
-            applyRegex(AICompletionRegex.technicalUnderscore, template: "\\\\_")
-            applyRegex(AICompletionRegex.underscoreBeforeAsterisk, template: "\\\\_")
-        }
-
-        // 11. Bold (Markdown ** or __) -> Typst *
-        applyRegex(AICompletionRegex.boldAsterisk, template: "*$1*")
-        applyRegex(AICompletionRegex.boldUnderscore, template: "*$1*")
-
-        // 12. Reference-Style Links & Images (Pass 1: Extract Definitions)
-        var referenceLinks: [String: String] = [:]
-        let refDefMatches = AICompletionRegex.refDef.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in refDefMatches.reversed() {
-            let id = processed.substring(with: match.range(at: 1)).lowercased()
-            let url = processed.substring(with: match.range(at: 2))
-            referenceLinks[id] = url
-            processed.replaceCharacters(in: match.range, with: "")
-        }
-
-        // 12.5 Reference-Style Images (Pass 2)
-        let refImgMatches = AICompletionRegex.refImg.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in refImgMatches.reversed() {
-            let alt = processed.substring(with: match.range(at: 1))
-            var id = processed.substring(with: match.range(at: 2)).lowercased()
-            if id.isEmpty { id = alt.lowercased() }
-
-            if let url = referenceLinks[id] {
-                let formattedUrl = url.lowercased().hasPrefix("http") || url.hasPrefix("/") || url.hasPrefix("data:") ? url : "/\(url)"
-                let replacement = "#image(\"\(formattedUrl)\", alt: \"\(alt)\")"
-                processed.replaceCharacters(in: match.range, with: replacement)
-            }
-        }
-
-        // 12.6 Reference-Style Links (Pass 2)
-        let refLinkMatches = AICompletionRegex.refLink.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in refLinkMatches.reversed() {
-            let text = processed.substring(with: match.range(at: 1))
-            var id = processed.substring(with: match.range(at: 2)).lowercased()
-            if id.isEmpty { id = text.lowercased() }
-
-            if let url = referenceLinks[id] {
-                processed.replaceCharacters(in: match.range, with: "#link(\"\(url)\")[\(text)]")
-            }
-        }
-
-        // 13. Inline Images
-        let imgMatches = AICompletionRegex.inlineImg.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in imgMatches.reversed() {
-            let altText = processed.substring(with: match.range(at: 1))
-            let urlText = processed.substring(with: match.range(at: 2))
-
-            let formattedUrl = urlText.lowercased().hasPrefix("http") || urlText.hasPrefix("/") || urlText.hasPrefix("data:") ? urlText : "/\(urlText)"
-            let replacement = "#image(\"\(formattedUrl)\", alt: \"\(altText)\")"
-            processed.replaceCharacters(in: match.range, with: replacement)
-        }
-
-        // 13.1 Inline Links (with special handling for video URLs)
-        // For links pointing to known video hosts (YouTube, Vimeo, etc.), auto-embed the
-        // thumbnail image as a clickable link to the video, so a single Markdown link like
-        // `[Title](https://youtube.com/watch?v=...)` produces a full embed preview.
-        let linkMatches = AICompletionRegex.inlineLink.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in linkMatches.reversed() {
-            let linkText = processed.substring(with: match.range(at: 1))
-            let rawUrl  = processed.substring(with: match.range(at: 2))
-
-            let replacement: String
-            if let ytID = Self.extractYouTubeID(from: rawUrl) {
-                // If the link body is already an image (e.g. `[![alt](thumb)](url)` was
-                // converted in step 13), keep that image as the clickable thumbnail and
-                // don't try to inject a second one.
-                if linkText.contains("#image(") {
-                    replacement = "#link(\"\(rawUrl)\")[\(linkText)]"
-                } else {
-                    let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
-                    let alt = Self.escapeTypstString(linkText)
-                    replacement = "#link(\"\(rawUrl)\")[#image(\"\(thumb)\", alt: \"\(alt)\")]"
-                }
-            } else {
-                replacement = "#link(\"\(rawUrl)\")[\(linkText)]"
-            }
-            processed.replaceCharacters(in: match.range, with: replacement)
-        }
-
-        // 13.2 Bare video URLs on their own line become clickable thumbnail embeds too,
-        // so pasting a YouTube/Vimeo URL in body text is enough to render a preview.
-        // (Angle-bracket autolinks are already handled in step 3 above.)
-        let bareMatches = AICompletionRegex.bareVideo.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in bareMatches.reversed() {
-            let url = processed.substring(with: match.range(at: 1))
-            let alt = url.lowercased().contains("vimeo") ? "Vimeo video" : "YouTube video"
-            processed.replaceCharacters(in: match.range, with: Self.videoEmbed(for: url, alt: alt))
-        }
-
-        // 13.3 Tables — converted AFTER inline formatting so cells already contain Typst
-        // syntax (`#link(...)`, `*bold*`, etc.) by the time they're wrapped in `[...]`.
-        // This prevents the inline regexes from matching the cell delimiters themselves.
-        processed.setString(convertMarkdownTablesToTypst(processed as String))
-
-        // 13.5 Escape Markdown abbreviation definitions
-        applyRegex(AICompletionRegex.markdownAbbr, template: "\\\\*[$1]:")
-
-        // 14. Horizontal Rules (---, ***, ___) -> #line(length: 100%)
-        applyRegex(AICompletionRegex.horizontalRule, template: "#line(length: 100%)")
-
-        // 14b. Common HTML Entities
-        applyRegex(AICompletionRegex.entityRarr, template: "->")
-        applyRegex(AICompletionRegex.entityLarr, template: "<-")
-
-        // 14e. Escape Stray Backticks (Always)
-        // A stray backtick ALWAYS crashes Typst as an unclosed raw block.
-        // Valid code blocks are already masked, so any remaining backticks are stray.
-        applyRegex(AICompletionRegex.strayBacktick, template: "\\\\`")
-
-        // In pure Markdown mode (e.g. AI completions or .md files), we escape Typst's special characters
-        // so they render as literal text. In hybrid mode (.note), we apply smart escaping to prevent
-        // common Markdown patterns (like $1600 or user@email.com) from crashing the compiler, while
-        // leaving native Typst functions (e.g. #title, $math$, @ref) alone.
-        if !isHybrid {
-            // 14. Escape Literal Dollars (Currency)
-            applyRegex(AICompletionRegex.literalDollar, template: "\\\\$")
-
-            // 14c. Escape Literal Hash
-            applyRegex(AICompletionRegex.literalHash, template: "\\\\#")
-
-            // 14g. Escape Literal At-Signs (@)
-            applyRegex(AICompletionRegex.literalAt, template: "\\\\@")
-        } else {
-            // HYBRID MODE SMART ESCAPING
-            // Escape dollars if followed by a digit (e.g. $1600) to prevent unclosed math block errors,
-            // but leave other dollars alone so Typst math ($E=mc^2$) still works.
-            applyRegex(AICompletionRegex.hybridDollarDigit, template: "\\\\$")
-
-            // Escape @ if it's preceded by a letter/number (e.g. email addresses like user@email.com)
-            // or followed by a space. Typst references (like @fig1) usually have a space before them and letters after.
-            // The `(?<!\\)` guards keep this idempotent with `TypstCompiler.delimitImproperOperators`,
-            // which already backslash-escapes these same cases (and warns the user) for `.note` files.
-            applyRegex(AICompletionRegex.hybridAt, template: "\\\\@")
-
-            // Smart `#` escaping: in `.note` files we leave most `#`-prefixed Typst alone
-            // (so `#let`, `#score(...)`, `#emph[...]` all work). But pasted Markdown often
-            // contains `#word` followed by sentence punctuation — e.g. "#refs," in
-            // "@mentions, #refs, [links]()". That's not a Typst call (no `(` / `[` / `.`),
-            // so escape the `#` to render it as literal text instead of erroring on an
-            // unknown variable. Real Typst continuations (`#word(`, `#word[`, `#word.`)
-            // are explicitly preserved by the negative lookahead.
-            applyRegex(AICompletionRegex.hybridHash, template: "\\\\#$1")
-        }
-
-        // 14f. Un-escape characters inside Typst string parameters
-        let strMatches = AICompletionRegex.stringLiteral.matches(in: processed as String, options: [], range: NSRange(0..<processed.length))
-        for match in strMatches.reversed() {
-            let matchedString = processed.substring(with: match.range)
-            let unescaped = matchedString.replacingOccurrences(of: "\\_", with: "_")
-                                         .replacingOccurrences(of: "\\*", with: "*")
-                                         .replacingOccurrences(of: "\\#", with: "#")
-                                         .replacingOccurrences(of: "\\`", with: "`")
-            processed.replaceCharacters(in: match.range, with: unescaped)
-        }
-
-        var resultString = processed as String
-
-        // 16. UNMASK AND CONVERT MATH BLOCKS
-        for (i, block) in mathBlocks.enumerated() {
-            var latexMath = ""
-            if block.hasPrefix("$$") && block.hasSuffix("$$") {
-                latexMath = String(block.dropFirst(2).dropLast(2))
-            } else if block.hasPrefix("$") && block.hasSuffix("$") {
-                latexMath = String(block.dropFirst(1).dropLast(1))
-            } else if block.hasPrefix("\\[") && block.hasSuffix("\\]") {
-                latexMath = String(block.dropFirst(2).dropLast(2))
-            } else if block.hasPrefix("\\(") && block.hasSuffix("\\)") {
-                latexMath = String(block.dropFirst(2).dropLast(2))
-            } else {
-                latexMath = block
-            }
-            let typstMath = LyxToTypstConverter.convertLatexMathToTypst(latexMath)
-            resultString = resultString.replacingOccurrences(of: "MASKEDMATHBLOCK\(i)ENDMASK", with: "$ \(typstMath) $")
-        }
-
-        // 17. UNMASK CODE BLOCKS
-        for (i, block) in codeBlocks.enumerated() {
-            resultString = resultString.replacingOccurrences(of: "MASKEDCODEBLOCK\(i)ENDMASK", with: block)
-        }
-
-        return resultString
-    }
-    nonisolated private func convertMarkdownTablesToTypst(_ text: String) -> String {
-        // Matches a table block including potential hard-wrapped lines (matches until a blank line).
-        // Supports tables both with and without outer pipes.
-        let matches = AICompletionRegex.markdownTable.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
-        let processed = NSMutableString(string: text)
-
-        for match in matches.reversed() {
-            let tableText = processed.substring(with: match.range)
-            let typstTable = parseSingleMarkdownTable(tableText)
-            processed.replaceCharacters(in: match.range, with: typstTable + "\n")
-        }
-
-        return processed as String
-    }
-
-    nonisolated private func parseSingleMarkdownTable(_ markdown: String) -> String {
-        let rawLines = markdown.components(separatedBy: .newlines)
-        var lines: [String] = []
-
-        // Safely re-join hard-wrapped lines that belong to the same row.
-        // A line is treated as the START of a new row when it contains a `|` (the universal
-        // Markdown table delimiter). Lines without a pipe are continuations of the previous
-        // row — this lets tables work whether or not they use outer pipes (`| … |`) and
-        // also gracefully joins soft-wrapped rows.
-        for line in rawLines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-
-            if trimmed.contains("|") {
-                lines.append(trimmed)
-            } else if !lines.isEmpty {
-                lines[lines.count - 1] += " " + trimmed
-            } else {
-                lines.append(trimmed)
-            }
-        }
-
-        guard lines.count >= 2 else { return markdown }
-
-        func extractCells(from row: String) -> [String] {
-            var rowText = row.trimmingCharacters(in: .whitespaces)
-            if rowText.hasPrefix("|") { rowText.removeFirst() }
-            if rowText.hasSuffix("|") { rowText.removeLast() }
-
-            var cells: [String] = []
-            var currentCell = ""
-            var isEscaped = false
-
-            for char in rowText {
-                if isEscaped {
-                    if char == "|" {
-                        currentCell.append(char) // Keep pipe, drop backslash
-                    } else {
-                        currentCell.append("\\")
-                        currentCell.append(char)
-                    }
-                    isEscaped = false
-                } else if char == "\\" {
-                    isEscaped = true
-                } else if char == "|" {
-                    cells.append(currentCell.trimmingCharacters(in: .whitespaces))
-                    currentCell = ""
-                } else if char == "`" {
-                    // Escape stray backticks (since valid code blocks are already masked)
-                    currentCell.append("\\")
-                    currentCell.append(char)
-                } else {
-                    currentCell.append(char)
-                }
-            }
-
-            if isEscaped { currentCell.append("\\") }
-            cells.append(currentCell.trimmingCharacters(in: .whitespaces))
-
-            return cells
-        }
-
-        /// Parse a column-alignment marker (`:---`, `---:`, `:---:`, `---`) and return
-        /// one of "left", "center", "right", or nil for default alignment.
-        func alignment(for cell: String) -> String? {
-            let trimmed = cell.trimmingCharacters(in: .whitespaces)
-            guard trimmed.contains("-") else { return nil }
-            let leadingColon = trimmed.hasPrefix(":")
-            let trailingColon = trimmed.hasSuffix(":")
-            if leadingColon && trailingColon { return "center" }
-            if leadingColon { return "left" }
-            if trailingColon { return "right" }
-            return nil  // plain `---` — leave default
-        }
-
-        let headerCells = extractCells(from: lines[0])
-        let separatorCells = extractCells(from: lines[1])
-
-        // Validate the separator: every cell must be a dash-alignment marker (or empty).
-        let separatorIsValid = separatorCells.allSatisfy { cell in
-            let stripped = cell.replacingOccurrences(of: "-", with: "")
-                               .replacingOccurrences(of: ":", with: "")
-                               .trimmingCharacters(in: .whitespaces)
-            return stripped.isEmpty && cell.contains("-")
-        }
-        guard separatorIsValid else { return markdown }
-
-        let columnsCount = headerCells.count
-
-        // Compute per-column alignments, if any non-default markers were specified.
-        let columnAlignments: [String?] = (0..<columnsCount).map { idx in
-            idx < separatorCells.count ? alignment(for: separatorCells[idx]) : nil
-        }
-        let hasAnyAlignment = columnAlignments.contains { $0 != nil }
-
-        var typst = "#table(\n"
-        typst += "  columns: \(columnsCount),\n"
-        if hasAnyAlignment {
-            // `align: (x, y, z, ...)` accepts `left`, `center`, `right`, or `auto` per column.
-            let aligns = columnAlignments.map { $0 ?? "auto" }.joined(separator: ", ")
-            typst += "  align: (\(aligns)),\n"
-        }
-
-        // Headers
-        typst += "  table.header(\n"
-        for cell in headerCells {
-            typst += "    [\(escapeTableCell(cell))],\n"
-        }
-        typst += "  ),\n"
-
-        // Body rows
-        for i in 2..<lines.count {
-            var cells = extractCells(from: lines[i])
-
-            while cells.count < columnsCount { cells.append("") }
-            cells = Array(cells.prefix(columnsCount))
-
-            for cell in cells {
-                typst += "  [\(escapeTableCell(cell))],\n"
-            }
-        }
-
-        typst += ")"
-        return typst
-    }
-
-    /// Lightly escapes characters in a table cell that would otherwise confuse Typst.
+    /// Converts Markdown (from AI output or pasted text) into Typst markup.
     ///
-    /// Note: Typst tracks `[...]` depth, so nested literal brackets (`[link]`) inside a
-    /// content-block cell render correctly without escaping — we therefore leave them
-    /// alone so legitimate inline Typst syntax (`#link(...)[$1]`, `*bold*`) keeps working.
-    /// We only neutralise dangling backslashes at the very end of a cell, since those
-    /// would otherwise escape the closing `]` and break the cell.
-    nonisolated private func escapeTableCell(_ cell: String) -> String {
-        var result = cell
-        // A trailing backslash would escape the cell's closing `]`; double it so it
-        // becomes a literal backslash followed by the closing bracket.
-        while result.hasSuffix("\\") && !result.hasSuffix("\\\\") {
-            result += "\\"
+    /// Pipeline:
+    ///   1. Pre-parse extraction — code spans, math, backslash escapes and
+    ///      footnote definitions are lifted out of the raw text and replaced
+    ///      with placeholder tokens, so cmark can neither mangle nor consume
+    ///      them.
+    ///   2. `Document(parsing:)` — a single CommonMark parse (smart punctuation
+    ///      disabled so Typst strings and `--` survive verbatim).
+    ///   3. `TypstMarkupVisitor` — one traversal serializes the AST into Typst.
+    ///   4. Document-level post-passes carried over from the old pipeline.
+    nonisolated func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
+        var work = text.replacingOccurrences(of: "\r\n", with: "\n")
+
+        // Translate literal documentation space characters (⋅ or ·) at line
+        // starts into real spaces BEFORE parsing — several Markdown fixtures use
+        // them as visible indentation for nested list items, and they must be
+        // real indentation by the time cmark builds the list structure. (The old
+        // pipeline ran this pass before its list-marker rewrites for the same
+        // reason.)
+        do {
+            let processed = NSMutableString(string: work)
+            for match in AICompletionRegex.docDot.matches(in: work, options: [], range: NSRange(0..<processed.length)).reversed() {
+                let replaced = processed.substring(with: match.range)
+                    .replacingOccurrences(of: "⋅", with: " ")
+                    .replacingOccurrences(of: "·", with: " ")
+                processed.replaceCharacters(in: match.range, with: replaced)
+            }
+            work = processed as String
         }
+
+        // --- 1. PRE-PARSE EXTRACTION ---
+        //
+        // Each extracted region is replaced by a placeholder token built from
+        // private-use Unicode scalars: cmark treats them as ordinary text that
+        // no Markdown syntax (emphasis, tables, fences…) can bind to, and the
+        // AST walk expands them back at the exact leaf position they came from.
+
+        // Pick marker scalars guaranteed absent from the input so real text can
+        // never be mistaken for a token.
+        let markers = PlaceholderMarkers(for: work)
+        // Indices are base-15 digits, so a token's VS digit run can be longer
+        // than one — the scan must consume ALL of it (`+`), or a multi-digit
+        // token would decode as its low digit and strand the rest in the text.
+        let scan = try! NSRegularExpression(
+            pattern: "[\(markers.codeText)\(markers.mathText)\(markers.escapeText)\(markers.typstText)][\(PlaceholderMarkers.vsStartText)-\(PlaceholderMarkers.vsEndText)]+"
+        )
+
+        // 1e (first, so its regions stay whole): hybrid `.note` Typst regions.
+        //     A line whose first non-space character is `#` opens a Typst code
+        //     region that continues while bracket depth is unclosed. cmark's
+        //     indented-code-block rule otherwise shreds any 4+-space-indented
+        //     line following a blank line, breaking multi-line function bodies
+        //     inside the generated `.typ`. Runs before the other extractions so
+        //     backticks, `$math$` and `\escapes` inside Typst code stay intact.
+        var typstRegions: [String] = []
+        if isHybrid {
+            let extracted = Self.extractTypstRegions(work, marker: markers.typst)
+            typstRegions = extracted.regions
+            if !typstRegions.isEmpty {
+                work = extracted.text
+            }
+        }
+
+        // 1a. Fenced + inline code. Must be extracted before math so `$`-pairing
+        //     can never see (or pair) dollars inside code spans.
+        var codeRegions: [String] = []
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.codeBlock.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                codeRegions.append(processed.substring(with: match.range))
+                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.code, index: codeRegions.count - 1))
+            }
+            work = processed as String
+        }
+
+        // 1b. Math ($$…$$, $…$, \[…\], \(…\)). The LaTeX payload is converted to
+        //     Typst math up front; expansion wraps it in `$ … $`.
+        var mathRegions: [(raw: String, typst: String)] = []
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.mathBlock.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let raw = processed.substring(with: match.range)
+                let latex = Self.strippedMathDelimiters(raw)
+                mathRegions.append((raw, LyxToTypstConverter.convertLatexMathToTypst(latex)))
+                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.math, index: mathRegions.count - 1))
+            }
+            work = processed as String
+        }
+
+        // 1c. Backslash-escaped punctuation (\$, \#, \{…). cmark consumes these
+        //     escapes, but the old pipeline preserved them verbatim — and the
+        //     `.note` pre-pass (`delimitImproperOperators`) relies on that. Lift
+        //     them out and restore them verbatim at their leaf position.
+        var escapeRegions: [String] = []
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.backslashEscape.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                escapeRegions.append(processed.substring(with: match.range))
+                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.escape, index: escapeRegions.count - 1))
+            }
+            work = processed as String
+        }
+
+        // 1d. Footnote definitions (`[^id]: text`). cmark would eat these as
+        //     link reference definitions; removing them up front leaves the
+        //     `[^id]` references as literal text that the leaf converter turns
+        //     into `#footnote[…]` carrying the stored body.
+        var footnoteDefs: [String: String] = [:]
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.fnDef.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let id = processed.substring(with: match.range(at: 1))
+                let body = processed.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                footnoteDefs[id] = body
+                processed.replaceCharacters(in: match.range, with: "")
+            }
+            work = processed as String
+        }
+
+        // --- 2. PARSE ---
+        // Smart punctuation must stay off: it would rewrite "…" into curly
+        // quotes and `--` into dashes, corrupting Typst strings in `.note` files.
+        let document = Document(parsing: work, options: [.disableSmartOpts, .disableSourcePosOpts])
+
+        // --- 3. WALK ---
+        var visitor = TypstMarkupVisitor(
+            isHybrid: isHybrid,
+            codeRegions: codeRegions,
+            mathRegions: mathRegions,
+            escapeRegions: escapeRegions,
+            typstRegions: typstRegions,
+            footnoteDefs: footnoteDefs,
+            markers: markers,
+            placeholderScan: scan
+        )
+        var result = visitor.visit(document)
+
+        // --- 4. POST-PASSES (document level, carried over from the old pipeline) ---
+
+        // Escape Markdown abbreviation definitions (`*[Abbr]: …`).
+        result = Self.replace(AICompletionRegex.markdownAbbr, in: result, template: "\\\\*[$1]:")
+
+        // Un-escape characters inside Typst string parameters — string literals
+        // don't process markup escapes, so `\_` there is a literal backslash.
+        do {
+            let processed = NSMutableString(string: result)
+            for match in AICompletionRegex.stringLiteral.matches(in: result, options: [], range: NSRange(0..<processed.length)).reversed() {
+                let unescaped = processed.substring(with: match.range)
+                    .replacingOccurrences(of: "\\_", with: "_")
+                    .replacingOccurrences(of: "\\*", with: "*")
+                    .replacingOccurrences(of: "\\#", with: "#")
+                    .replacingOccurrences(of: "\\`", with: "`")
+                processed.replaceCharacters(in: match.range, with: unescaped)
+            }
+            result = processed as String
+        }
+
         return result
+    }
+
+    /// Strips the surrounding math delimiters ($$, $, \[…\], \(…\)) from an
+    /// extracted math region, leaving the raw LaTeX payload.
+    nonisolated private static func strippedMathDelimiters(_ raw: String) -> String {
+        if raw.hasPrefix("$$") && raw.hasSuffix("$$") && raw.count >= 4 {
+            return String(raw.dropFirst(2).dropLast(2))
+        }
+        if raw.hasPrefix("\\[") && raw.hasSuffix("\\]") && raw.count >= 4 {
+            return String(raw.dropFirst(2).dropLast(2))
+        }
+        if raw.hasPrefix("\\(") && raw.hasSuffix("\\)") && raw.count >= 4 {
+            return String(raw.dropFirst(2).dropLast(2))
+        }
+        if raw.hasPrefix("$") && raw.hasSuffix("$") && raw.count >= 2 {
+            return String(raw.dropFirst(1).dropLast(1))
+        }
+        return raw
+    }
+
+    /// Helper to safely apply a precompiled regex replacement.
+    nonisolated private static func replace(_ regex: NSRegularExpression, in s: String, template: String) -> String {
+        regex.stringByReplacingMatches(in: s, options: [], range: NSRange(0..<(s as NSString).length), withTemplate: template)
     }
 
     // MARK: - Video Link Helpers
@@ -891,6 +526,171 @@ class AICompletionService: ObservableObject {
     /// `youtube.com/watch?v=ID`, `youtu.be/ID`, `youtube.com/embed/ID`,
     /// `youtube.com/shorts/ID`, `m.youtube.com/...`, etc.
     /// Returns nil if `url` doesn't look like a YouTube link.
+    /// True when `line`'s leading `#` is Typst code the hybrid escaper would
+    /// preserve (so the line can open an extraction region): `#let`, `#show`,
+    /// `#{…}`, `#table(`, `#obj.field`. False for ATX headings (`## h2`),
+    /// stray hashes (`# note`) and hashtag-shaped text (`#refs,`) — those the
+    /// hybrid escaper escapes, so they stay Markdown. Mirrors
+    /// `AICompletionRegex.hybridHash`'s punctuation lookahead.
+    nonisolated static func isTypstRegionOpener(_ line: String) -> Bool {
+        let trimmed = line.drop { $0 == " " || $0 == "\t" }
+        guard trimmed.first == "#" else { return false }
+        let after = trimmed.dropFirst()
+        guard let next = after.first else { return false }  // lone "#" → stray
+        if next == " " || next == "\t" || next == "#" { return false }  // stray / ATX
+        guard next.isLetter else { return true }  // `#{`, `#(`, `#3`, `#"` → code
+        // Ident run; inspect what follows it (hybridHash's lookahead set).
+        var rest = after
+        while let c = rest.first, c.isLetter || c.isNumber || c == "_" {
+            rest = rest.dropFirst()
+        }
+        guard let follower = rest.first else { return true }  // `#ident` → kept
+        if ",!?;:".contains(follower) { return false }  // hashtag punctuation
+        if follower == "." {
+            let afterDot = rest.dropFirst().first
+            if afterDot == nil || afterDot == " " || afterDot == "\t" { return false }
+            return true  // `#obj.field` → code
+        }
+        return true
+    }
+
+    /// Lifts whole Typst code regions out of hybrid `.note` text before the
+    /// CommonMark parse (step 1e). A region opens where `isTypstRegionOpener`
+    /// holds and continues while its bracket depth is unclosed. Depth counting
+    /// respects `"strings"` (with `\"` escapes), `//` line comments and
+    /// `/* */` block comments. Extraction is idempotent: re-running on
+    /// already-sanitized text re-extracts the same regions.
+    nonisolated static func extractTypstRegions(_ text: String, marker: Unicode.Scalar) -> (text: String, regions: [String]) {
+        var lines = text.components(separatedBy: "\n")
+        var regions: [String] = []
+        var index = 0
+        var insideFence = false
+        let regionLineCap = 500
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Fenced code blocks are Markdown, not live Typst — skip wholesale.
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                insideFence.toggle()
+                index += 1
+                continue
+            }
+            guard !insideFence else {
+                index += 1
+                continue
+            }
+
+            // Region opener: the complement of the hybrid escaper's escape set.
+            guard isTypstRegionOpener(line) else {
+                index += 1
+                continue
+            }
+            let hashIndex = line.firstIndex(of: "#")!
+
+            // Walk forward line by line, tracking depth until it returns to zero
+            // (or the 500-line safety cap so one unbalanced brace can't swallow
+            // the document).
+            var depth = 0
+            var inString = false
+            var inBlockComment = false
+            var end = index
+            while true {
+                let lineText = lines[end]
+                var pos = (end == index) ? hashIndex : lineText.startIndex
+                var inLineComment = false
+                while pos < lineText.endIndex {
+                    let ch = lineText[pos]
+                    if inLineComment { break }
+                    if inString {
+                        if ch == "\\" {
+                            pos = lineText.index(after: pos)   // skip escaped char
+                        } else if ch == "\"" {
+                            inString = false
+                        }
+                    } else if inBlockComment {
+                        if ch == "/" {
+                            // possible "*/"; the next loop iteration sees the "/"
+                            // as a normal char — handle explicitly:
+                            let next = lineText.index(after: pos)
+                            if next < lineText.endIndex, lineText[next] == "*" {
+                                // this "/" belongs to an opener; fall through
+                            }
+                        }
+                        if ch == "*" {
+                            let next = lineText.index(after: pos)
+                            if next < lineText.endIndex, lineText[next] == "/" {
+                                inBlockComment = false
+                                pos = lineText.index(after: pos)
+                            }
+                        }
+                    } else {
+                        switch ch {
+                        case "\"":
+                            inString = true
+                        case "/":
+                            let next = lineText.index(after: pos)
+                            if next < lineText.endIndex, lineText[next] == "/" {
+                                // Only a comment when it starts the line or
+                                // follows whitespace — `https://` in link text
+                                // must not hide the line's closing brackets
+                                // (an unclosed `[` made the region swallow the
+                                // rest of the note, landing pagebreaks inside
+                                // the link's container).
+                                let isCommentStart = pos == lineText.startIndex
+                                    || lineText[lineText.index(before: pos)] == " "
+                                    || lineText[lineText.index(before: pos)] == "\t"
+                                if isCommentStart {
+                                    inLineComment = true
+                                }
+                            } else if next < lineText.endIndex, lineText[next] == "*" {
+                                inBlockComment = true
+                                pos = lineText.index(after: pos)
+                            }
+                        case "(", "[", "{":
+                            depth += 1
+                        case ")", "]", "}":
+                            depth -= 1
+                        default:
+                            break
+                        }
+                    }
+                    pos = lineText.index(after: pos)
+                }
+                if depth <= 0 || end + 1 >= min(lines.count, index + regionLineCap) {
+                    break
+                }
+                end += 1
+            }
+
+            // cmark lazy-continues a column-0 line into a preceding list
+            // item's paragraph, which pulled region tokens (and their
+            // expansions — images, pagebreaks) inside the list container
+            // (typst: "pagebreaks are not allowed inside of containers").
+            // A blank line closes the open block so the token starts fresh.
+            if index > 0, !lines[index - 1].trimmingCharacters(in: .whitespaces).isEmpty {
+                lines.insert("", at: index)
+                index += 1
+                end += 1
+            }
+            regions.append(lines[index...end].joined(separator: "\n"))
+            lines.replaceSubrange(
+                index...end,
+                with: [PlaceholderMarkers.token(kind: marker, index: regions.count - 1)]
+            )
+            // The region's lines collapsed into one token, so `index` now names
+            // the token itself in the shortened array — the next candidate line
+            // is `index + 1`. Advancing to the OLD `end + 1` would skip
+            // (region line count − 1) real lines, dropping openers that follow
+            // a multi-line region (a layout function swallowed every `#if`
+            // block after it).
+            index += 1
+        }
+
+        return (lines.joined(separator: "\n"), regions)
+    }
+
     nonisolated static func extractYouTubeID(from url: String) -> String? {
         // Normalise HTML entities so `&amp;v=` works the same as `&v=`.
         let cleaned = url.replacingOccurrences(of: "&amp;", with: "&")
@@ -925,5 +725,838 @@ class AICompletionService: ObservableObject {
         // Vimeo doesn't expose a free public thumbnail URL, so render a clearly-clickable
         // text link instead. The user can swap in their own image if desired.
         return "#link(\"\(url)\")[▶ \(alt)]"
+    }
+}
+
+// MARK: - Placeholder Tokens
+
+/// Placeholder tokens mark the spots where pre-extracted regions (code, math,
+/// backslash escapes) used to live. A token is one marker scalar from a
+/// private-use block plus base-15 index digits encoded in variation selectors —
+/// whitespace-free, punctuation-free characters that cmark passes through as
+/// plain text and that no Markdown syntax can bind to.
+struct PlaceholderMarkers: Sendable {
+    let code: Unicode.Scalar
+    let math: Unicode.Scalar
+    let escape: Unicode.Scalar
+    let typst: Unicode.Scalar
+
+    static let vsStart: UInt32 = 0xFE00
+    static let vsEnd: UInt32 = 0xFE0E   // inclusive; 15 usable selectors
+
+    static var vsStartText: String { String(Unicode.Scalar(vsStart)!) }
+    static var vsEndText: String { String(Unicode.Scalar(vsEnd)!) }
+
+    /// Picks four marker scalars that don't occur anywhere in `text`.
+    init(for text: String) {
+        var base: UInt32 = 0xE000
+        while true {
+            let inUse = text.unicodeScalars.contains { $0.value >= base && $0.value < base + 4 }
+            if !inUse {
+                code = Unicode.Scalar(base)!
+                math = Unicode.Scalar(base + 1)!
+                escape = Unicode.Scalar(base + 2)!
+                typst = Unicode.Scalar(base + 3)!
+                return
+            }
+            base += 4
+        }
+    }
+
+    var codeText: String { String(code) }
+    var mathText: String { String(math) }
+    var escapeText: String { String(escape) }
+    var typstText: String { String(typst) }
+
+    /// Builds a token of `kind` carrying `index`.
+    static func token(kind: Unicode.Scalar, index: Int) -> String {
+        var scalars = String.UnicodeScalarView()
+        scalars.append(kind)
+        var i = UInt32(index)
+        repeat {
+            scalars.append(Unicode.Scalar(Self.vsStart + i % 15)!)
+            i /= 15
+        } while i > 0
+        return String(scalars)
+    }
+
+    /// Decodes a token back into its kind and index. Returns nil for anything
+    /// that isn't a well-formed token.
+    func decode(_ token: String) -> (kind: Unicode.Scalar, index: Int)? {
+        var it = token.unicodeScalars.makeIterator()
+        guard let first = it.next(), first == code || first == math || first == escape || first == typst else { return nil }
+        // `token(_ index:)` writes digits least-significant first, so the
+        // positional weight grows with each further selector.
+        var index: UInt32 = 0
+        var weight: UInt32 = 1
+        var digits = 0
+        while let s = it.next() {
+            guard s.value >= Self.vsStart, s.value <= Self.vsEnd else { return nil }
+            index += (s.value - Self.vsStart) * weight
+            weight *= 15
+            digits += 1
+        }
+        guard digits > 0 else { return nil }
+        return (first, Int(index))
+    }
+}
+
+// MARK: - TypstMarkupVisitor
+
+/// Serializes a swift-markdown AST into Typst markup in a single traversal.
+///
+/// Every method returns a freshly-built fragment; block-level containers join
+/// their children with blank lines and inline containers concatenate, so the
+/// whole document is produced in O(N) without intermediate string rewrites.
+///
+/// Escaping happens only at `Text` leaves, and only on the plain-text segments
+/// of those leaves — Typst syntax this visitor emits (links, tables, footnotes,
+/// placeholder expansions) is assembled after escaping and can never be
+/// damaged by it.
+struct TypstMarkupVisitor: MarkupVisitor {
+    typealias Result = String
+
+    let isHybrid: Bool
+    let codeRegions: [String]
+    let mathRegions: [(raw: String, typst: String)]
+    let escapeRegions: [String]
+    /// Hybrid-only: whole Typst code regions lifted pre-parse so cmark can
+    /// neither shred their indentation nor bind to their punctuation.
+    let typstRegions: [String]
+    let footnoteDefs: [String: String]
+    let markers: PlaceholderMarkers
+    let placeholderScan: NSRegularExpression
+
+    /// Guards footnote-body / HTML-inner recursive conversions.
+    var recursionDepth = 0
+
+    /// Bracket-wrapping HTML tags (`<mark>`, `<a href>`, …) whose closer hasn't
+    /// arrived yet. Saved/restored per inline container so a tag opened inside
+    /// one paragraph can never leak into the next.
+    struct PendingHTMLClose {
+        let tag: String
+        let closer: String
+    }
+    var openHTMLTags: [PendingHTMLClose] = []
+
+    /// Marker used for the list item currently being rendered.
+    private var listMarker = "- "
+
+    private static let parseOptions: ParseOptions = [.disableSmartOpts, .disableSourcePosOpts]
+
+    // MARK: Fallback
+
+    /// Unhandled nodes concatenate their children inline.
+    mutating func defaultVisit(_ markup: Markup) -> String {
+        var out = ""
+        for child in markup.children { out += visit(child) }
+        return out
+    }
+
+    // MARK: Blocks
+
+    mutating func visitDocument(_ document: Document) -> String {
+        document.children.map { visit($0) }.joined(separator: "\n\n")
+    }
+
+    mutating func visitParagraph(_ paragraph: Paragraph) -> String {
+        renderInline(paragraph.children)
+    }
+
+    mutating func visitHeading(_ heading: Heading) -> String {
+        String(repeating: "=", count: heading.level) + " " + renderInline(heading.children)
+    }
+
+    mutating func visitBlockQuote(_ blockQuote: BlockQuote) -> String {
+        let inner = blockQuote.children.map { visit($0) }.joined(separator: "\n\n")
+        return "#quote[\n" + inner + "\n]"
+    }
+
+    mutating func visitThematicBreak(_ thematicBreak: ThematicBreak) -> String {
+        "#line(length: 100%)"
+    }
+
+    mutating func visitCodeBlock(_ codeBlock: CodeBlock) -> String {
+        let code = expandRaw(codeBlock.code)
+        // Only keep safe characters in the fence info so the raw block can't be
+        // broken open by a crafted language string.
+        let lang = String((codeBlock.language ?? "").filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
+        let fence = String(repeating: "`", count: max(3, Self.longestBacktickRun(in: code) + 1))
+        return fence + lang + "\n" + code + (code.hasSuffix("\n") || code.isEmpty ? "" : "\n") + fence
+    }
+
+    // MARK: Lists
+
+    mutating func visitUnorderedList(_ list: UnorderedList) -> String {
+        let saved = listMarker
+        listMarker = "- "
+        // `listItems` is a lazy sequence whose `map` is escaping — materialize
+        // into an Array so the eager (non-escaping) map can mutate self.
+        let out = Array(list.listItems).map { visit($0) }.joined(separator: "\n")
+        listMarker = saved
+        return out
+    }
+
+    mutating func visitOrderedList(_ list: OrderedList) -> String {
+        let saved = listMarker
+        listMarker = "+ "
+        let out = Array(list.listItems).map { visit($0) }.joined(separator: "\n")
+        listMarker = saved
+        return out
+    }
+
+    mutating func visitListItem(_ listItem: ListItem) -> String {
+        // Task-list items override the marker with a native checkbox glyph.
+        var marker = listMarker
+        if let checkbox = listItem.checkbox {
+            marker = checkbox == .checked ? "- ☑ " : "- ☐ "
+        }
+        let inner = listItem.children.map { visit($0) }.joined(separator: "\n")
+        // Indent continuation lines (loose items, nested lists) to the marker
+        // width so Typst keeps them inside the item's lazy continuation.
+        let pad = String(repeating: " ", count: marker.count)
+        let lines = inner.components(separatedBy: "\n")
+        let indented = lines.enumerated().map { line -> String in
+            line.offset == 0 || line.element.isEmpty ? line.element : pad + line.element
+        }.joined(separator: "\n")
+        return marker + indented
+    }
+
+    // MARK: Tables
+
+    mutating func visitTable(_ table: Table) -> String {
+        // `cells` is a lazy sequence — materialize before the eager map/count.
+        let headerCells = Array(table.head.cells).map { renderInline($0.children) }
+        let columns = max(headerCells.count, 1)
+
+        var out = "#table(\n"
+        out += "  columns: \(columns),\n"
+
+        let alignments = table.columnAlignments
+        if alignments.contains(where: { $0 != nil }) {
+            let names = (0..<columns).map { idx -> String in
+                guard idx < alignments.count, let alignment = alignments[idx] else { return "auto" }
+                switch alignment {
+                case .left: return "left"
+                case .center: return "center"
+                case .right: return "right"
+                }
+            }
+            out += "  align: (\(names.joined(separator: ", "))),\n"
+        }
+
+        out += "  table.header(\n"
+        for cell in headerCells.prefix(columns) {
+            out += "    \(Self.cellBlock(cell)),\n"
+        }
+        out += "  ),\n"
+
+        for row in table.body.children {
+            var rendered = (row as? Table.Row)?.cells.prefix(columns).map { renderInline($0.children) } ?? [String]()
+            while rendered.count < columns { rendered.append("") }
+            for cell in rendered {
+                out += "  \(Self.cellBlock(cell)),\n"
+            }
+        }
+
+        out += ")"
+        return out
+    }
+
+    /// Wraps a rendered cell in a content block. Typst tracks `[...]` depth, so
+    /// nested literal brackets render correctly; only a dangling trailing
+    /// backslash needs doubling so it can't escape the closing bracket.
+    private static func cellBlock(_ content: String) -> String {
+        var result = content
+        while result.hasSuffix("\\") && !result.hasSuffix("\\\\") {
+            result += "\\"
+        }
+        return "[" + result + "]"
+    }
+
+    // MARK: Inline containers
+
+    mutating func visitEmphasis(_ emphasis: Emphasis) -> String {
+        "_" + renderInline(emphasis.children) + "_"
+    }
+
+    mutating func visitStrong(_ strong: Strong) -> String {
+        "*" + renderInline(strong.children) + "*"
+    }
+
+    mutating func visitStrikethrough(_ strikethrough: Strikethrough) -> String {
+        "#strike[" + renderInline(strikethrough.children) + "]"
+    }
+
+    mutating func visitLink(_ link: Link) -> String {
+        let destination = link.destination ?? ""
+        let inner = renderInline(link.children)
+        let escapedDestination = AICompletionService.escapeTypstString(destination)
+
+        // Links to known video hosts become clickable thumbnail embeds so a
+        // single Markdown link renders as a full video preview. If the body is
+        // already an image (e.g. `[![thumb](…)](url)`), keep it as-is instead of
+        // injecting a second one.
+        if AICompletionService.extractYouTubeID(from: destination) != nil {
+            if inner.contains("#image(") {
+                return "#link(\"\(escapedDestination)\")[\(inner)]"
+            }
+            return AICompletionService.videoEmbed(for: destination, alt: inner)
+        }
+
+        // Angle-bracket autolinks (`<https://…>`) render as bare links — except
+        // video hosts, which get the embed treatment like the old pipeline did.
+        if link.isAutolink {
+            let host = destination.lowercased()
+            if host.contains("youtube.com") || host.contains("youtu.be") {
+                return AICompletionService.videoEmbed(for: destination, alt: "YouTube video")
+            }
+            if host.contains("vimeo.com") {
+                return AICompletionService.videoEmbed(for: destination, alt: "Vimeo video")
+            }
+            return "#link(\"\(escapedDestination)\")"
+        }
+
+        return "#link(\"\(escapedDestination)\")[\(inner)]"
+    }
+
+    mutating func visitImage(_ image: Image) -> String {
+        guard let source = image.source, !source.isEmpty else {
+            return renderInline(image.children)
+        }
+        // Alt text stays plain, exactly like the old raw attribute handling.
+        let alt = Self.plainText(of: image)
+        let formatted = source.lowercased().hasPrefix("http") || source.hasPrefix("/") || source.hasPrefix("data:")
+            ? source
+            : "/" + source
+        return "#image(\"\(AICompletionService.escapeTypstString(formatted))\", alt: \"\(AICompletionService.escapeTypstString(alt))\")"
+    }
+
+    // MARK: Leaves
+
+    mutating func visitText(_ text: Text) -> String {
+        var out = ""
+        let s = text.string
+        let ns = s as NSString
+        var cursor = 0
+        for match in placeholderScan.matches(in: s, options: [], range: NSRange(0..<ns.length)) {
+            if match.range.location > cursor {
+                out += convertPlainInline(ns.substring(with: NSRange(cursor..<match.range.location)))
+            }
+            let token = ns.substring(with: match.range)
+            if let expansion = expandToken(token) {
+                out += expansion
+            } else {
+                // Unknown token (shouldn't happen) — treat it as plain text.
+                out += convertPlainInline(token)
+            }
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            out += convertPlainInline(ns.substring(from: cursor))
+        }
+        return out
+    }
+
+    mutating func visitInlineCode(_ inlineCode: InlineCode) -> String {
+        Self.rawSpan(expandRaw(inlineCode.code))
+    }
+
+    mutating func visitSoftBreak(_ softBreak: SoftBreak) -> String {
+        "\n"
+    }
+
+    mutating func visitLineBreak(_ lineBreak: LineBreak) -> String {
+        "\\\n"
+    }
+
+    mutating func visitInlineHTML(_ inlineHTML: InlineHTML) -> String {
+        emitHTMLTag(inlineHTML.rawHTML)
+    }
+
+    mutating func visitHTMLBlock(_ htmlBlock: HTMLBlock) -> String {
+        let raw = htmlBlock.rawHTML
+        let savedTags = openHTMLTags
+        openHTMLTags = []
+
+        var out = ""
+        let ns = raw as NSString
+        var cursor = 0
+        for match in AICompletionRegex.htmlToken.matches(in: raw, options: [], range: NSRange(0..<ns.length)) {
+            if match.range.location > cursor {
+                out += convertHTMLInnerText(ns.substring(with: NSRange(cursor..<match.range.location)))
+            }
+            out += emitHTMLTag(ns.substring(with: match.range))
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            out += convertHTMLInnerText(ns.substring(from: cursor))
+        }
+        // Close anything the fragment left open, then restore the outer stack.
+        while let pending = openHTMLTags.popLast() {
+            out += pending.closer
+        }
+        openHTMLTags = savedTags
+        return out
+    }
+
+    // MARK: Placeholder expansion
+
+    /// Expands a token at an inline (markup) position: code comes back
+    /// verbatim, math comes back converted and wrapped in `$ … $`, backslash
+    /// escapes come back verbatim.
+    private func expandToken(_ token: String) -> String? {
+        guard let decoded = markers.decode(token) else { return nil }
+        if decoded.kind == markers.code {
+            guard decoded.index < codeRegions.count else { return nil }
+            return codeRegions[decoded.index]
+        }
+        if decoded.kind == markers.math {
+            guard decoded.index < mathRegions.count else { return nil }
+            return "$ \(mathRegions[decoded.index].typst) $"
+        }
+        if decoded.kind == markers.typst {
+            guard decoded.index < typstRegions.count else { return nil }
+            return typstRegions[decoded.index]
+        }
+        guard decoded.index < escapeRegions.count else { return nil }
+        return escapeRegions[decoded.index]
+    }
+
+    /// Expands a token inside raw contexts (code blocks/spans): everything comes
+    /// back verbatim, including the original math delimiters.
+    private func expandRaw(_ s: String) -> String {
+        let ns = s as NSString
+        var out = ""
+        var cursor = 0
+        for match in placeholderScan.matches(in: s, options: [], range: NSRange(0..<ns.length)) {
+            if match.range.location > cursor {
+                out += ns.substring(with: NSRange(cursor..<match.range.location))
+            }
+            let token = ns.substring(with: match.range)
+            if let decoded = markers.decode(token) {
+                if decoded.kind == markers.code, decoded.index < codeRegions.count {
+                    out += codeRegions[decoded.index]
+                } else if decoded.kind == markers.math, decoded.index < mathRegions.count {
+                    out += mathRegions[decoded.index].raw
+                } else if decoded.kind == markers.typst, decoded.index < typstRegions.count {
+                    out += typstRegions[decoded.index]
+                } else if decoded.kind == markers.escape, decoded.index < escapeRegions.count {
+                    out += escapeRegions[decoded.index]
+                }
+            }
+            cursor = match.range.location + match.range.length
+        }
+        if cursor < ns.length {
+            out += ns.substring(from: cursor)
+        }
+        return out
+    }
+
+    // MARK: Plain-text leaf conversion
+
+    /// Converts one run of plain leaf text: applies the special conversions
+    /// that emit Typst syntax (footnote refs, bare video URLs) as typed
+    /// segments, then escapes only the remaining plain segments.
+    private mutating func convertPlainInline(_ s: String) -> String {
+        guard !s.isEmpty else { return s }
+
+        var segments: [(typst: Bool, text: String)] = [(false, s)]
+
+        // Bare video URLs on their own line → clickable thumbnail embeds, so
+        // pasting a YouTube/Vimeo URL in body text renders a preview.
+        segments = Self.explode(segments, regex: AICompletionRegex.bareVideo) { match, ns in
+            let url = ns.substring(with: match.range(at: 1))
+            let alt = url.lowercased().contains("vimeo") ? "Vimeo video" : "YouTube video"
+            return AICompletionService.videoEmbed(for: url, alt: alt)
+        }
+
+        // Footnote references `[^id]` → `#footnote[body]`. References without a
+        // definition are escaped so they can't be mistaken for Typst content.
+        if !footnoteDefs.isEmpty {
+            var mutableSelf = self
+            segments = Self.explode(segments, regex: AICompletionRegex.fnRef) { match, ns in
+                let id = ns.substring(with: match.range(at: 1))
+                if let body = mutableSelf.footnoteDefs[id] {
+                    return "#footnote[\(mutableSelf.convertedFootnoteBody(body))]"
+                }
+                return "\\\\[\\\\^\(id)\\\\]"
+            }
+        }
+
+        // Inline footnotes `^[text]` → `#footnote[text]`.
+        segments = Self.explode(segments, regex: AICompletionRegex.fnInline) { match, ns in
+            let inner = ns.substring(with: match.range(at: 1))
+            return "#footnote[\(self.escapeText(inner))]"
+        }
+
+        var out = ""
+        for segment in segments {
+            out += segment.typst ? segment.text : escapeText(segment.text)
+        }
+        return out
+    }
+
+    /// Splits plain segments on `regex`, replacing each match via `transform`.
+    /// A nil transform result keeps the match as plain text. Typst segments are
+    /// never re-scanned.
+    private static func explode(
+        _ segments: [(typst: Bool, text: String)],
+        regex: NSRegularExpression,
+        transform: (NSTextCheckingResult, NSString) -> String?
+    ) -> [(typst: Bool, text: String)] {
+        var out: [(typst: Bool, text: String)] = []
+        for segment in segments {
+            if segment.typst {
+                out.append(segment)
+                continue
+            }
+            let ns = segment.text as NSString
+            let matches = regex.matches(in: segment.text, options: [], range: NSRange(0..<ns.length))
+            if matches.isEmpty {
+                out.append(segment)
+                continue
+            }
+            var cursor = 0
+            for match in matches {
+                if match.range.location > cursor {
+                    out.append((false, ns.substring(with: NSRange(cursor..<match.range.location))))
+                }
+                if let replacement = transform(match, ns) {
+                    out.append((true, replacement))
+                } else {
+                    out.append((false, ns.substring(with: match.range)))
+                }
+                cursor = match.range.location + match.range.length
+            }
+            if cursor < ns.length {
+                out.append((false, ns.substring(from: cursor)))
+            }
+        }
+        return out
+    }
+
+    /// Recursively converts a footnote body so markdown inside definitions
+    /// (bold, links, math placeholders…) is formatted like the old pipeline's
+    /// inline insertion was. Depth-limited against self-referencing footnotes.
+    private mutating func convertedFootnoteBody(_ raw: String) -> String {
+        guard recursionDepth < 3 else { return escapeText(raw) }
+        var sub = self
+        sub.recursionDepth += 1
+        let document = Document(parsing: raw, options: Self.parseOptions)
+        var out = sub.visit(document)
+        while let pending = sub.openHTMLTags.popLast() {
+            out += pending.closer
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: Escaping
+
+    /// Escapes plain text so it renders literally under Typst.
+    ///
+    /// Pure Markdown mode (AI completions, .md files) escapes `$`, `#` and `@`
+    /// wholesale so Typst features can't fire accidentally. Hybrid mode (.note)
+    /// leaves isolated `#`/`@`/`$` alone so legitimate Typst (`#let`, `$math$`,
+    /// `@ref`) executes, and only escapes the patterns that look like pasted
+    /// Markdown (`$1600`, `user@email.com`, `#refs,`). The `(?<!\\)` guards keep
+    /// this idempotent with `TypstCompiler.delimitImproperOperators`.
+    ///
+    /// Precondition: `s` contains no pre-extracted tokens — callers split those
+    /// out first so this can never escape generated Typst syntax.
+    func escapeText(_ s: String) -> String {
+        // A stray backtick ALWAYS crashes Typst as an unclosed raw block; valid
+        // code was already extracted pre-parse, so any backtick here is stray.
+        var out = Self.replace(AICompletionRegex.strayBacktick, in: s, template: "\\\\`")
+        // Escape leftover HTML tags so they can't parse as Typst labels. The
+        // negative lookahead preserves valid Typst labels `<label>`.
+        out = Self.replace(AICompletionRegex.escapeHtmlTags, in: out, template: "\\\\<$1\\\\>")
+        if !isHybrid {
+            // Escape underscores in technical terms/filenames. In hybrid mode
+            // Typst handles `my_variable` natively and `_italics_` is native
+            // italic, so escaping there would break valid Typst syntax.
+            out = Self.replace(AICompletionRegex.technicalUnderscore, in: out, template: "\\\\_")
+            out = Self.replace(AICompletionRegex.literalDollar, in: out, template: "\\\\$")
+            out = Self.replace(AICompletionRegex.literalHash, in: out, template: "\\\\#")
+            out = Self.replace(AICompletionRegex.literalAt, in: out, template: "\\\\@")
+        } else {
+            // Escape dollars followed by a digit (`$1600`) to prevent unclosed
+            // math, but leave real math (`$E=mc^2$`) alone.
+            out = Self.replace(AICompletionRegex.hybridDollarDigit, in: out, template: "\\\\$")
+            // Escape `@` glued to a word (email addresses) or followed by space;
+            // Typst references (`@fig1`) have a space before and letters after.
+            out = Self.replace(AICompletionRegex.hybridAt, in: out, template: "\\\\@")
+            // `#word` followed by sentence punctuation isn't a Typst call (no
+            // `(` / `[` / `.` continuation) — escape it so it renders literally
+            // instead of erroring on an unknown variable. Real Typst
+            // continuations are preserved by the negative lookahead.
+            out = Self.replace(AICompletionRegex.hybridHash, in: out, template: "\\\\#$1")
+            out = Self.replace(AICompletionRegex.hybridStrayHash, in: out, template: "\\\\#")
+        }
+        return out
+    }
+
+    // MARK: HTML fragments
+
+    /// Emits Typst for one HTML token (comment, open tag, close tag).
+    /// Bracket wrappers push onto `openHTMLTags`; their closers are emitted
+    /// when the matching close arrives, or flushed at the end of the enclosing
+    /// container so a stray opener can never leave an unbalanced `[` behind.
+    private mutating func emitHTMLTag(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return raw }
+
+        let ns = trimmed as NSString
+        guard let match = AICompletionRegex.htmlToken.firstMatch(in: trimmed, options: [], range: NSRange(0..<ns.length)),
+              match.range.location == 0, match.range.length == ns.length else {
+            return trimmed.hasPrefix("<!--") ? "" : Self.escapeHTMLTagText(trimmed)
+        }
+
+        // Comments disappear.
+        guard match.range(at: 2).location != NSNotFound else { return "" }
+
+        // `(/?)` matches the empty string at position 0 for opening tags, so
+        // test the group's LENGTH, not its location (location is only
+        // NSNotFound for non-participating groups).
+        let isClosing = match.range(at: 1).length > 0
+        let name = ns.substring(with: match.range(at: 2)).lowercased()
+
+        if isClosing {
+            switch name {
+            case "a", "p", "mark", "sub", "sup", "u", "del", "s", "strike":
+                // Pop through to the matching opener, closing anything left open
+                // in between, so malformed nesting still yields balanced output.
+                if let idx = openHTMLTags.lastIndex(where: { $0.tag == name }) {
+                    var out = ""
+                    while openHTMLTags.count > idx {
+                        out += openHTMLTags.removeLast().closer
+                    }
+                    return out
+                }
+                return Self.escapeHTMLTagText(trimmed)
+            case "b", "strong":
+                return "*"
+            case "em", "i":
+                return "_"
+            case "dt":
+                return ": "
+            case "dd":
+                return "\n"
+            case "dl":
+                return "\n"
+            default:
+                return Self.escapeHTMLTagText(trimmed)
+            }
+        }
+
+        switch name {
+        case "br":
+            return "\\\\"
+        case "hr":
+            return "\n#line(length: 100%)\n"
+        case "img":
+            return Self.imageFromHTMLTag(trimmed) ?? ""
+        case "a":
+            guard let href = Self.attr("href", in: trimmed), !href.isEmpty else { return "" }
+            openHTMLTags.append(PendingHTMLClose(tag: "a", closer: "]"))
+            return "#link(\"\(AICompletionService.escapeTypstString(href))\")["
+        case "p":
+            if let alignment = Self.attr("align", in: trimmed) {
+                openHTMLTags.append(PendingHTMLClose(tag: "p", closer: "\n]"))
+                return "\n#align(\(alignment))[\n"
+            }
+            return "\n"
+        case "mark":
+            openHTMLTags.append(PendingHTMLClose(tag: "mark", closer: "]"))
+            return "#highlight["
+        case "sub":
+            openHTMLTags.append(PendingHTMLClose(tag: "sub", closer: "]"))
+            return "#sub["
+        case "sup":
+            openHTMLTags.append(PendingHTMLClose(tag: "sup", closer: "]"))
+            return "#super["
+        case "u":
+            openHTMLTags.append(PendingHTMLClose(tag: "u", closer: "]"))
+            return "#underline["
+        case "del", "s", "strike":
+            openHTMLTags.append(PendingHTMLClose(tag: name, closer: "]"))
+            return "#strike["
+        case "dt":
+            return "\n/ "
+        case "dd":
+            return " "
+        case "dl":
+            return "\n"
+        case "b", "strong":
+            return "*"
+        case "em", "i":
+            return "_"
+        default:
+            // Unknown tag — escape it so it can't parse as a Typst label.
+            return Self.escapeHTMLTagText(trimmed)
+        }
+    }
+
+    /// Converts the raw text between HTML tags: whitespace passes through, real
+    /// content is converted as a Markdown fragment so inline formatting, links
+    /// and math placeholders inside HTML blocks keep working. The edge
+    /// whitespace is kept verbatim — cmark strips a paragraph's trailing spaces,
+    /// and losing one here would glue the fragment to the next token's output
+    /// (e.g. `HTML` + `_tags_`, which Typst reads as a literal snake_case
+    /// underscore followed by an unclosed emph).
+    private mutating func convertHTMLInnerText(_ text: String) -> String {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return text }
+        let leadingCount = text.prefix(while: { $0.isWhitespace }).count
+        let trailingCount = text.reversed().prefix(while: { $0.isWhitespace }).count
+        let start = text.index(text.startIndex, offsetBy: leadingCount)
+        let end = text.index(text.endIndex, offsetBy: -trailingCount)
+        let middle = String(text[start..<end])
+        return String(text.prefix(leadingCount)) + convertedMarkdownFragment(middle) + String(text.suffix(trailingCount))
+    }
+
+    /// Recursively converts a Markdown fragment (HTML tag bodies, footnote
+    /// definitions). Depth-limited so pathological nesting can't loop. Trailing
+    /// whitespace is preserved — trimming it would glue the fragment to whatever
+    /// Typst syntax the next HTML token emits (e.g. `HTML` + `_tags_`, where
+    /// Typst reads the word-internal `_` as literal and the closing `_` as an
+    /// unclosed emph).
+    private mutating func convertedMarkdownFragment(_ raw: String) -> String {
+        guard recursionDepth < 3 else { return escapeText(raw) }
+        var sub = self
+        sub.recursionDepth += 1
+        let document = Document(parsing: raw, options: Self.parseOptions)
+        var out = sub.visit(document)
+        while let pending = sub.openHTMLTags.popLast() {
+            out += pending.closer
+        }
+        return out
+    }
+
+    private static func escapeHTMLTagText(_ tag: String) -> String {
+        Self.replace(AICompletionRegex.escapeHtmlTags, in: tag, template: "\\\\<$1\\\\>")
+    }
+
+    private static func replace(_ regex: NSRegularExpression, in s: String, template: String) -> String {
+        regex.stringByReplacingMatches(in: s, options: [], range: NSRange(0..<(s as NSString).length), withTemplate: template)
+    }
+
+    private static func attr(_ name: String, in tag: String) -> String? {
+        let ns = tag as NSString
+        for match in AICompletionRegex.htmlAttr.matches(in: tag, options: [], range: NSRange(0..<ns.length)) {
+            guard ns.substring(with: match.range(at: 1)).lowercased() == name.lowercased() else { continue }
+            for group in [3, 4, 5] where match.range(at: group).location != NSNotFound {
+                return ns.substring(with: match.range(at: group))
+            }
+        }
+        return nil
+    }
+
+    /// Builds a Typst `#image(...)` from an HTML `<img>` tag, mirroring the old
+    /// pipeline's attribute handling (relative-path prefixing, pixel units,
+    /// fallback to a link for formats Typst can't decode).
+    private static func imageFromHTMLTag(_ tag: String) -> String? {
+        guard let src = attr("src", in: tag), !src.isEmpty else { return nil }
+        let alt = attr("alt", in: tag) ?? ""
+        let width = attr("width", in: tag) ?? ""
+        let height = attr("height", in: tag) ?? ""
+
+        let formattedSrc = src.lowercased().hasPrefix("http") || src.hasPrefix("/") || src.hasPrefix("data:") ? src : "/\(src)"
+        var params: [String] = ["\"\(AICompletionService.escapeTypstString(formattedSrc))\""]
+        if !alt.isEmpty { params.append("alt: \"\(AICompletionService.escapeTypstString(alt))\"") }
+
+        // HTML width/height are typically pixels; Typst wants an explicit unit.
+        for (label, value) in [("width", width), ("height", height)] where !value.isEmpty {
+            if value.allSatisfy({ $0.isNumber }) {
+                params.append("\(label): \(value)pt")
+            } else {
+                params.append("\(label): \(value)")
+            }
+        }
+
+        let ext = (src as NSString).pathExtension.lowercased()
+        let isWeb = src.lowercased().hasPrefix("http")
+        let supportedExts = ["png", "jpg", "jpeg", "gif", "svg"]
+
+        if !isWeb && !ext.isEmpty && !supportedExts.contains(ext) {
+            // Fallback to a link if the format is entirely unsupported (like .icns).
+            let displayAlt = alt.trimmingCharacters(in: .whitespaces).isEmpty ? "Image" : alt
+            return "#link(\"\(AICompletionService.escapeTypstString(src))\")[🖼️ \(displayAlt)]"
+        }
+        return "#image(\(params.joined(separator: ", ")))"
+    }
+
+    // MARK: Inline rendering helper
+
+    /// Renders a run of inline children with per-container HTML-tag state.
+    ///
+    /// If the source left a bracket-wrapping tag open, its closer is appended
+    /// here — at the exact end of the inline run — so a stray `<mark>` can
+    /// never leave an unclosed `#highlight[` behind. Also neutralises a
+    /// trailing `_` glued to a following emphasis marker (`word_*bold*`),
+    /// which the old pipeline handled with its `underscoreBeforeAsterisk`
+    /// regex.
+    mutating func renderInline(_ children: MarkupChildren) -> String {
+        let savedTags = openHTMLTags
+        openHTMLTags = []
+
+        let array = Array(children)
+        var parts: [String] = []
+        parts.reserveCapacity(array.count)
+
+        for (index, child) in array.enumerated() {
+            var chunk = visit(child)
+            if chunk.hasSuffix("_"), index + 1 < array.count,
+               array[index + 1] is Strong || array[index + 1] is Emphasis {
+                chunk = String(chunk.dropLast()) + "\\_"
+            }
+            parts.append(chunk)
+        }
+
+        while let pending = openHTMLTags.popLast() {
+            parts.append(pending.closer)
+        }
+        openHTMLTags = savedTags
+        return parts.joined()
+    }
+
+    // MARK: Small helpers
+
+    /// Concatenates all `Text` descendants — used for image alt text, which
+    /// must stay plain (the old pipeline used the raw attribute value).
+    private static func plainText(of markup: Markup) -> String {
+        var out = ""
+        for child in markup.children {
+            if let text = child as? Text {
+                out += text.string
+            } else {
+                out += plainText(of: child)
+            }
+        }
+        return out
+    }
+
+    private static func longestBacktickRun(in s: String) -> Int {
+        var longest = 0
+        var run = 0
+        for ch in s {
+            if ch == "`" {
+                run += 1
+                longest = max(longest, run)
+            } else {
+                run = 0
+            }
+        }
+        return longest
+    }
+
+    /// Wraps raw content in a Typst inline raw span, growing the backtick run
+    /// past anything the content contains and padding if the edges are ticks.
+    private static func rawSpan(_ code: String) -> String {
+        let ticks = String(repeating: "`", count: max(1, longestBacktickRun(in: code) + 1))
+        var inner = code
+        if inner.hasPrefix("`") || inner.hasSuffix("`") {
+            inner = " " + inner + " "
+        }
+        return ticks + inner + ticks
     }
 }

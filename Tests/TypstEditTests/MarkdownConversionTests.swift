@@ -1,4 +1,5 @@
 import XCTest
+import Markdown
 @testable import TypstEdit
 
 @MainActor
@@ -8,12 +9,353 @@ final class MarkdownConversionTests: XCTestCase {
         AICompletionService.shared.sanitizeMarkdownToTypst(text, isHybrid: isHybrid)
     }
 
+    // MARK: - Hybrid Typst-region extraction (PDF compile fix)
+
+    /// A multi-line layout function with the exact shape that cmark's
+    /// indented-code-block rule used to shred: 4+-space-indented lines after
+    /// blank lines inside the body. Extraction must keep it whole (no fences,
+    /// no raw blocks, indentation preserved).
+    private static let layoutSample = """
+    #let doc-layout(title: none, body) = {
+      set page(
+        paper: "a4",
+        margin: (x: 2cm, top: 2cm, bottom: 2cm),
+
+        // Watermark comment line
+        footer: context {
+          let display-date = datetime.today().display("[month repr:long] [day], [year]")
+          grid(columns: (1fr, 2fr, 1fr),
+            align(left)[Page 1 of 2],
+            align(center)[Footer center],
+            align(right)[December 1, 2026])
+        }
+      )
+      align(center)[
+        #block(width: 100%, inset: (bottom: 2em))[
+          #if title != none { text(weight: "bold", size: 28pt)[#title] }
+        ]
+      ]
+      body
+    }
+    #show: doc-layout.with(title: "T")
+    Body text.
+    """
+
+    func testSanitizeHybridKeepsLayoutFunctionIntact() {
+        let output = convert(Self.layoutSample, isHybrid: true)
+        XCTAssertTrue(output.contains("#let doc-layout(title: none, body) = {"), "definition opener survives: \(output)")
+        XCTAssertTrue(output.contains("footer: context {"), "footer brace keeps its line: \(output)")
+        XCTAssertTrue(output.contains("datetime.today().display(\"[month repr:long] [day], [year]\")"), "footer datetime survives: \(output)")
+        XCTAssertTrue(output.contains("#show: doc-layout.with(title: \"T\")"), "call site survives: \(output)")
+        XCTAssertFalse(output.contains("```"), "no fences may appear inside the function: \(output)")
+    }
+
+    func testSanitizeHybridLayoutIdempotent() {
+        let first = convert(Self.layoutSample, isHybrid: true)
+        let second = convert(first, isHybrid: true)
+        XCTAssertEqual(first, second, "double-sanitize must equal single-sanitize")
+    }
+
+    func testTypstRegionExtractionBoundaries() {
+        let marker = Unicode.Scalar(0xE003)!
+        let source = """
+        # Heading One
+        #let x = 1
+        #if true [
+          inner
+        ] else [
+          other
+        ]
+        plain text
+        """
+        let (text, regions) = AICompletionService.extractTypstRegions(source, marker: marker)
+        XCTAssertEqual(regions.count, 2)
+        XCTAssertEqual(regions[0], "#let x = 1")
+        XCTAssertEqual(regions[1], "#if true [\n  inner\n] else [\n  other\n]")
+        XCTAssertTrue(text.hasPrefix("# Heading One"), "ATX headings must not be captured: \(text)")
+    }
+
+    func testPlaceholderTokenRoundTripsMultiDigitIndices() {
+        // token() writes index digits least-significant first; decode() must
+        // read them the same way or every region past index 14 mis-expands.
+        let markers = PlaceholderMarkers(for: "")
+        for index in [0, 1, 13, 14, 15, 16, 17, 29, 30, 224, 255] {
+            let token = PlaceholderMarkers.token(kind: markers.typst, index: index)
+            let decoded = markers.decode(token)
+            XCTAssertEqual(decoded?.kind, markers.typst)
+            XCTAssertEqual(decoded?.index, index, "index \(index) round-trip failed")
+        }
+    }
+
+    func testExtractionDoesNotSkipLinesAfterMultiLineRegion() {
+        // Regression: after replacing a multi-line region with one token, the
+        // scanner advanced in stale coordinates and skipped (region lines − 1)
+        // following lines — a layout function swallowed the next `#if` block's
+        // opener, so the block fell to cmark and its `_*bold*_` mangled into
+        // `__…__` (typst: "no text within underscores").
+        let source = """
+        #let f(a) = {
+          set page(paper: "a4")
+          a
+        }
+
+        #f("x")
+
+        = Section
+        Body paragraph.
+
+        #if on [
+          first
+        ] else [
+          second
+        ]
+
+        #if other [
+          third
+        ]
+
+        #v(1em)
+        """
+        let (text, regions) = AICompletionService.extractTypstRegions(source, marker: Unicode.Scalar(0xE003)!)
+        XCTAssertEqual(regions.count, 5, "all five openers must be captured: \(regions)")
+        XCTAssertEqual(regions[0].components(separatedBy: "\n").count, 4, "function region is 4 lines")
+        XCTAssertTrue(regions.contains("#if on [\n  first\n] else [\n  second\n]"))
+        XCTAssertTrue(regions.contains("#if other [\n  third\n]"))
+        XCTAssertTrue(regions.contains("#v(1em)"))
+        // Every original line must survive in the tokenized text or a region.
+        for markerLine in ["#if on [", "#if other [", "#v(1em)"] {
+            XCTAssertTrue(text.contains(markerLine) || regions.contains(where: { $0.contains(markerLine) }),
+                          "\(markerLine) must not be skipped")
+        }
+    }
+
+    func testRegionTokenAfterListItemGetsBlankSeparator() {
+        // Regression: cmark lazy-continues a column-0 token line into a
+        // preceding list item's paragraph, dragging the expanded region
+        // (image, line, pagebreak) inside the list container — typst:
+        // "pagebreaks are not allowed inside of containers". Extraction
+        // must blank-separate the token so the list closes first.
+        let source = """
+        + *Lorem ipsum dolor* sit amet, consectetur.
+        #align(center)[
+          #image("lorem.png", width: 80%)
+        ]
+        #line(length: 100%)
+        #pagebreak()
+
+        = Next Section
+        """
+        let (text, regions) = AICompletionService.extractTypstRegions(source, marker: Unicode.Scalar(0xE003)!)
+        XCTAssertEqual(regions.count, 3, "align/image region, #line, #pagebreak: \(regions)")
+        XCTAssertTrue(text.contains("consectetur.\n\n"),
+                      "a blank line must separate the list item from the first token")
+        // End-to-end: the sanitized PDF source must keep every pagebreak
+        // standalone at column 0, never inside a list's container.
+        let sanitized = convert(source, isHybrid: true)
+        for line in sanitized.components(separatedBy: "\n") where line.contains("#pagebreak()") {
+            XCTAssertEqual(line.trimmingCharacters(in: .whitespaces), "#pagebreak()",
+                           "pagebreak not standalone: \(line)")
+        }
+    }
+
+    func testExtractionClosesRegionOnLinkWithURLText() {
+        // Regression: `//` inside URL text (link labels and targets) triggered
+        // the line-comment rule, hiding the line's closing `)`/`]`. The region
+        // never closed and swallowed the rest of the document — pagebreaks
+        // then expanded inside the link's container ("pagebreaks are not
+        // allowed inside of containers").
+        let source = """
+        Intro paragraph.
+
+        #link("https://example.com/lorem/ipsum")[https://example.com/lorem/ipsum]
+
+        = Next Section
+
+        #pagebreak()
+
+        Tail content.
+        """
+        let (text, regions) = AICompletionService.extractTypstRegions(source, marker: Unicode.Scalar(0xE003)!)
+        XCTAssertEqual(regions.count, 2, "link line and #pagebreak() are regions: \(regions)")
+        XCTAssertEqual(regions[0].components(separatedBy: "\n").count, 1,
+                       "the link region must close on its own line, got: \(regions[0])")
+        XCTAssertEqual(regions[1], "#pagebreak()")
+        XCTAssertTrue(text.contains("Tail content."), "content after the link must survive")
+    }
+
+    func testSanitizeHybridPreservesRegionOrderPastFourteenRegions() {
+        // 17 typst regions force multi-digit tokens (base-15 digits): index 15
+        // is the first one that used to decode as 1, duplicating region 1's
+        // content and dropping region 15's.
+        var source = ""
+        let expected = (0..<17).map { i -> String in
+            source += "#let region_\(i) = \(i)\n\n"
+            return "#let region_\(i) = \(i)"
+        }
+        let output = convert(source, isHybrid: true)
+        for (i, region) in expected.enumerated() {
+            XCTAssertTrue(output.contains(region), "region \(i) missing from output")
+        }
+        // The first line of each region must appear in extraction order.
+        var searchRange = output.startIndex..<output.endIndex
+        for region in expected {
+            guard let found = output.range(of: region, range: searchRange) else {
+                XCTFail("region \(region) out of order or missing")
+                return
+            }
+            searchRange = found.upperBound..<output.endIndex
+        }
+        // No duplicated region content (the index-15-as-1 bug duplicated line 1).
+        let lines = output.components(separatedBy: "\n").filter { $0.contains("#let region_") }
+        XCTAssertEqual(lines.count, 17, "each region line must appear exactly once: \(lines)")
+    }
+
+    /// A self-contained hybrid note exercising every end-to-end regression the
+    /// real-note probes caught: URL text in link labels, pagebreaks after list
+    /// items, backtick spans with brackets in table cells, the note-box
+    /// preamble helper, redaction-style `_*...*_` blocks, a relative import,
+    /// and a pasted image. Lorem Ipsum text only — no personal content.
+    func testPDFCompileHybridNoteFixture() throws {
+        let typstPath = ProcessInfo.processInfo.environment["TYPSTEDIT_PDF_PROBE"]
+            ?? "/Applications/TypstEdit.app/Contents/Resources/bin/typst"
+        guard FileManager.default.isExecutableFile(atPath: typstPath) else {
+            throw XCTSkip("bundled typst binary not available")
+        }
+
+        let note = """
+        #let show-redacted = false
+        #import "lorem-vars.typ": *
+
+        = Lorem Ipsum Dolor
+
+        *Sit amet:* #lorem-value
+
+        #link("https://example.com/lorem/ipsum")[https://example.com/lorem/ipsum]
+
+        + consectetur adipiscing elit
+        #align(center)[
+          #image("lorem-ipsum.png", width: 60%)
+        ]
+        #line(length: 100%)
+        #pagebreak()
+
+        #table(
+          columns: (1fr, 2fr),
+          table.header([Lorem], [Ipsum]),
+          [`eget`], [Fusce `[0, 100)` blandit.],
+        )
+
+        #note-box("Lorem Title", [
+          Duis quis ipsum nulla.
+        ])
+
+        #if show-redacted [
+          #lorem-value
+        ] else [
+          #text(size: 16pt)[_*Lorem redactedum*_]
+        ]
+        """
+
+        // Full real chain, exactly as the PDF preview runs it.
+        let autoFixed = TypstCompiler.autoFixBrokenNoteSyntax(note)
+        let delimited = TypstCompiler.delimitImproperOperators(autoFixed)
+        let sanitized = TypstCompiler.notePreamble + convert(delimited.output, isHybrid: true)
+
+        // Redaction-style blocks must survive verbatim: indented, single
+        // underscores. Doubled `__` means the block fell through cmark, which
+        // makes typst warn about empty underscores.
+        for line in sanitized.components(separatedBy: "\n") where line.contains("redactedum") {
+            XCTAssertFalse(line.contains("__Lorem"), "mangled redaction line: \(line)")
+            XCTAssertTrue(line.hasPrefix("  #text("), "indentation lost: \(line)")
+        }
+
+        // Pagebreaks must survive at the top level — never inside brackets
+        // (typst: "pagebreaks are not allowed inside of containers").
+        for line in sanitized.components(separatedBy: "\n") where line.contains("#pagebreak()") {
+            XCTAssertEqual(line.trimmingCharacters(in: .whitespaces), "#pagebreak()",
+                           "pagebreak not standalone: \(line)")
+        }
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("typstedit-fixture-probe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // The note imports a sibling file, as notes sharing variables do.
+        let importFile = dir.appendingPathComponent("lorem-vars.typ")
+        try "#let lorem-value = \"Lorem ipsum dolor sit amet\""
+            .write(to: importFile, atomically: true, encoding: .utf8)
+
+        // Stub the pasted image with a 1x1 PNG next to the .typ (typst
+        // resolves the path against the compile root).
+        let stubPNG = Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")!
+        try stubPNG.write(to: dir.appendingPathComponent("lorem-ipsum.png"))
+
+        let typFile = dir.appendingPathComponent("note.typ")
+        try sanitized.write(to: typFile, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: typstPath)
+        process.arguments = ["compile", typFile.path, dir.appendingPathComponent("out.pdf").path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let diagnostics = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(
+            process.terminationStatus, 0,
+            "typst compile failed:\n\(diagnostics)\n--- sanitized .typ ---\n\(sanitized)"
+        )
+    }
+
+    func testPDFCompileOfSanitizedLayoutSample() throws {
+        // Manual PDF-pipeline verification: runs the real bundled typst binary
+        // on the sanitized sample — the same compile the PDF export performs
+        // after sanitizeMarkdownToTypst(isHybrid: true). Skips when the binary
+        // isn't installed.
+        let typstPath = ProcessInfo.processInfo.environment["TYPSTEDIT_PDF_PROBE"]
+            ?? "/Applications/TypstEdit.app/Contents/Resources/bin/typst"
+        guard FileManager.default.isExecutableFile(atPath: typstPath) else {
+            throw XCTSkip("bundled typst binary not available")
+        }
+
+        // The same preamble the compiler injects for .note files.
+        let sanitized = convert(Self.layoutSample, isHybrid: true)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("typstedit-pdf-probe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let typFile = dir.appendingPathComponent("note.typ")
+        try (TypstCompiler.notePreamble + sanitized).write(to: typFile, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: typstPath)
+        process.arguments = ["compile", typFile.path, dir.appendingPathComponent("out.pdf").path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let diagnostics = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(
+            process.terminationStatus, 0,
+            "typst compile failed:\n\(diagnostics)\n--- sanitized .typ ---\n\(TypstCompiler.notePreamble + sanitized)"
+        )
+    }
+
     // MARK: - Typst AST / variable evaluation
 
     func testTypstLetVariableEvaluation() {
         let input = "#let name = \"Typst\"\n#name"
         let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
-        XCTAssertEqual(output, "Typst")
+        // The converter trims and appends one trailing newline; compare on the
+        // trimmed form so the assertion stays about the evaluated value.
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "Typst")
     }
 
     func testTypstImportAndConditionalEvaluation() {
@@ -35,17 +377,17 @@ final class MarkdownConversionTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
 
-        let noteURL = tempDir.appendingPathComponent("Troy.note")
+        let noteURL = tempDir.appendingPathComponent("glossary.note")
         let noteContent = """
-        #let sensitive = (
-          testator: "Troy"
+        #let terms = (
+          mainTerm: "Lorem"
         )
         """
         try? noteContent.write(to: noteURL, atomically: true, encoding: .utf8)
 
         let input = """
-        #import "Troy.note"
-        #sensitive.testator
+        #import "glossary.note"
+        #terms.mainTerm
         """
 
         let output = TypstToMarkdownConverter.convert(
@@ -57,17 +399,17 @@ final class MarkdownConversionTests: XCTestCase {
             }
         )
 
-        XCTAssertTrue(output.contains("Troy"), "Expected imported note variables to resolve via the file loader")
+        XCTAssertTrue(output.contains("Lorem"), "Expected imported note variables to resolve via the file loader")
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    func testRelativeImportRewriterUsesSourceDirectory() {
+    func testRelativeImportRewriterUsesSourceDirectory() async {
         let compiler = TypstCompiler()
         let content = "#import \"lib.typ\"\n#image(\"hero.png\")"
         let sourceDir = URL(fileURLWithPath: "/Users/example/project/subfolder")
         let tempDir = URL(fileURLWithPath: "/Users/example/project/temp")
 
-        let rewritten = compiler.rewriteRelativeImports(in: content, sourceDirectory: sourceDir, tempDirectory: tempDir)
+        let rewritten = await compiler.rewriteRelativeImports(in: content, sourceDirectory: sourceDir, tempDirectory: tempDir)
 
         XCTAssertTrue(rewritten.contains("#import \"../subfolder/lib.typ\""), "Relative imports should be resolved from the source file directory")
         XCTAssertTrue(rewritten.contains("#image(\"../subfolder/hero.png\")"), "Relative images should be resolved from the source file directory")
@@ -255,6 +597,57 @@ final class MarkdownConversionTests: XCTestCase {
         let output = convert(input)
         print("\n[DOLLAR] OUTPUT:\n\(output)\n")
         XCTAssertTrue(output.contains("\\$"))
+    }
+
+    // MARK: - Blockquotes, task lists, code
+
+    func testBlockQuoteBecomesQuote() {
+        let input = "> advice line\n> second line"
+        let output = convert(input)
+        print("\n[QUOTE] OUTPUT:\n\(output)\n")
+        XCTAssertTrue(output.contains("#quote["), "Blockquote should become #quote[…]: \(output)")
+        XCTAssertTrue(output.contains("advice line"))
+    }
+
+    func testTaskListItems() {
+        let input = "- [x] done thing\n- [ ] open thing"
+        let output = convert(input)
+        print("\n[TASKLIST] OUTPUT:\n\(output)\n")
+        XCTAssertTrue(output.contains("- ☑ done thing"), "Checked item: \(output)")
+        XCTAssertTrue(output.contains("- ☐ open thing"), "Unchecked item: \(output)")
+    }
+
+    func testInlineCodePreserved() {
+        let input = "run `make build` now"
+        let output = convert(input)
+        XCTAssertEqual(output, "run `make build` now")
+    }
+
+    func testFencedCodeBlockPreserved() {
+        let input = "```swift\nlet x = 1\n```"
+        let output = convert(input)
+        XCTAssertTrue(output.contains("```swift"), "Fence + language preserved: \(output)")
+        XCTAssertTrue(output.contains("let x = 1"))
+    }
+
+    func testMathBlockConverts() {
+        let input = "Energy: $$E = mc^2$$ done."
+        let output = convert(input)
+        print("\n[MATH] OUTPUT:\n\(output)\n")
+        // The LaTeX payload goes through LyxToTypstConverter (multi-letter runs
+        // like `mc` become quoted upright text), then is wrapped in Typst math.
+        XCTAssertTrue(output.contains("Energy: $ "), "Math wrapped in Typst dollars: \(output)")
+        XCTAssertTrue(output.contains("mc"), "Payload preserved: \(output)")
+        XCTAssertTrue(output.contains("^2"), "Superscript preserved: \(output)")
+        XCTAssertTrue(output.contains(" $ done."), "Math region closed: \(output)")
+    }
+
+    func testStrikethroughBecomesStrike() {
+        let input = "~struck~ and ~~gone~~"
+        let output = convert(input)
+        print("\n[STRIKE] OUTPUT:\n\(output)\n")
+        XCTAssertTrue(output.contains("#strike[struck]"), "\(output)")
+        XCTAssertTrue(output.contains("#strike[gone]"), "\(output)")
     }
 
     // MARK: - End-to-End: converted Markdown must compile under typst
@@ -460,7 +853,7 @@ final class MarkdownConversionTests: XCTestCase {
         guard isHybrid else { return false }
         let markdownFuncs = ["link", "image", "table", "strike", "figure", "align",
                              "line", "footnote", "super", "sub", "underline",
-                             "highlight", "raw"]
+                             "highlight", "raw", "quote"]
         let pattern = #"^#([A-Za-z][A-Za-z0-9_]*)[\[(]"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
         let ns = line as NSString
