@@ -311,6 +311,70 @@ final class MarkdownConversionTests: XCTestCase {
         )
     }
 
+    // MARK: - Missing-font substitution
+
+    func testMissingFontSubstitutesMetricCompatibleFace() {
+        XCTAssertEqual(
+            TypstCompiler.substituteMissingFonts("#set text(font: \"Liberation Serif\")"),
+            "#set text(font: \"Times New Roman\")"
+        )
+    }
+
+    func testMissingFontListSubstitutionKeepsInstalledEntries() {
+        XCTAssertEqual(
+            TypstCompiler.substituteMissingFonts("#text(font: (\"Liberation Sans\", \"Georgia\"))[x]"),
+            "#text(font: (\"Arial\", \"Georgia\"))[x]"
+        )
+    }
+
+    func testFontSubstitutionIsCaseInsensitiveAndWholeLiteral() {
+        XCTAssertEqual(
+            TypstCompiler.substituteMissingFonts("#text(font: \"LIBERATION SERIF\")[x]"),
+            "#text(font: \"Times New Roman\")[x]"
+        )
+        // A font that merely contains an alias name is left alone.
+        let untouched = "#text(font: \"MyLiberation Serif\")[x]"
+        XCTAssertEqual(TypstCompiler.substituteMissingFonts(untouched), untouched)
+    }
+
+    func testPDFCompileLiberationSerifNoteHasNoFontWarning() throws {
+        // Regression: a document asking for a Linux-only font (Liberation
+        // Serif) compiled with typst's fallback face plus an "unknown font
+        // family" warning. The substitution must remove the warning entirely.
+        let typstPath = ProcessInfo.processInfo.environment["TYPSTEDIT_PDF_PROBE"]
+            ?? "/Applications/TypstEdit.app/Contents/Resources/bin/typst"
+        guard FileManager.default.isExecutableFile(atPath: typstPath) else {
+            throw XCTSkip("bundled typst binary not available")
+        }
+
+        let source = TypstCompiler.substituteMissingFonts(
+            "#set text(font: \"Liberation Serif\")\nLorem ipsum dolor sit amet.\n"
+        )
+        XCTAssertTrue(source.contains("\"Times New Roman\""), "substitution did not apply: \(source)")
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("typstedit-font-probe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let typFile = dir.appendingPathComponent("note.typ")
+        try source.write(to: typFile, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: typstPath)
+        process.arguments = ["compile", typFile.path, dir.appendingPathComponent("out.pdf").path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        process.waitUntilExit()
+        let diagnostics = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(process.terminationStatus, 0, "typst compile failed:\n\(diagnostics)")
+        XCTAssertFalse(diagnostics.contains("unknown font family"),
+                       "missing-font warning leaked through:\n\(diagnostics)")
+    }
+
     func testPDFCompileOfSanitizedLayoutSample() throws {
         // Manual PDF-pipeline verification: runs the real bundled typst binary
         // on the sanitized sample — the same compile the PDF export performs

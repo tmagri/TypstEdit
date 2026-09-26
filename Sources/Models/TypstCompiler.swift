@@ -20,6 +20,8 @@ enum CompilerRegex {
     static let webImage = try! NSRegularExpression(pattern: #"#image\(\s*"([^"]*)""#)
     static let relativeImport = try! NSRegularExpression(pattern: #"(\b(?:import|include)\s+")([^/@.][^"]*)(")"#)
     static let relativeImage = try! NSRegularExpression(pattern: #"(#image\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#)
+    static let fontArgument = try! NSRegularExpression(pattern: #"font\s*:\s*(?:"[^"]*"|\([^()]*\))"#)
+    static let quotedString = try! NSRegularExpression(pattern: #""([^"]*)""#)
 }
 
 struct TypstError: Identifiable, Equatable {
@@ -311,6 +313,13 @@ class TypstCompiler: ObservableObject {
                 pendingNoteWarnings = []
                 shadowToSourceLine = [:]
             }
+
+            // Fonts that don't ship on macOS (e.g. Liberation Serif) would only
+            // yield an "unknown font family" warning plus typst's default
+            // fallback face. Substituting the metric-compatible font in the
+            // shadow source renders the preview with the intended metrics.
+            // Within-line rewrite, so line numbers still map back to the source.
+            finalSource = Self.substituteMissingFonts(finalSource)
             
             var injectedPreamble = ""
             if ext == "note" {
@@ -870,6 +879,62 @@ class TypstCompiler: ObservableObject {
         return result
     }
 
+    // MARK: - Missing-Font Substitution
+
+    /// Fonts that don't ship on macOS, mapped to the metric-compatible face
+    /// every Mac has. Substituting keeps the intended metrics of a document
+    /// authored against e.g. Liberation Serif; without it typst falls back to
+    /// its default face and emits an "unknown font family" warning.
+    private nonisolated static let missingFontAliases: [String: String] = [
+        "liberation serif": "Times New Roman",
+        "liberation sans": "Arial",
+        "liberation sans narrow": "Arial",
+        "liberation mono": "Courier New",
+        "dejavu sans mono": "Menlo",
+        "consolas": "Menlo",
+    ]
+
+    /// Rewrites `font:` named-argument values naming fonts that don't ship on
+    /// macOS to their metric-compatible installed equivalents
+    /// (`font: "Liberation Serif"` → `font: "Times New Roman"`). Matches are
+    /// whole string literals only — `"MyLiberation Serif"` is left alone —
+    /// and cover both `font: "X"` and `font: ("X", "Y")` forms. Shadow-source
+    /// only: the user's file itself is never modified.
+    nonisolated static func substituteMissingFonts(_ source: String) -> String {
+        guard source.contains("font") else { return source }
+        let nsSource = source as NSString
+        let mutable = NSMutableString(string: source)
+        // Right-to-left so earlier match ranges survive the replacements.
+        for match in CompilerRegex.fontArgument.matches(
+            in: source, options: [], range: NSRange(0..<nsSource.length)
+        ).reversed() {
+            let argument = nsSource.substring(with: match.range)
+            var rebuilt = ""
+            var cursor = argument.startIndex
+            var changed = false
+            for literal in CompilerRegex.quotedString.matches(
+                in: argument, options: [], range: NSRange(0..<argument.utf16.count)
+            ) {
+                guard let fullRange = Range(literal.range, in: argument),
+                      let valueRange = Range(literal.range(at: 1), in: argument) else { continue }
+                rebuilt += argument[cursor..<fullRange.lowerBound]
+                let name = String(argument[valueRange]).lowercased()
+                if let installed = missingFontAliases[name] {
+                    rebuilt += "\"\(installed)\""
+                    changed = true
+                } else {
+                    rebuilt += String(argument[fullRange])
+                }
+                cursor = fullRange.upperBound
+            }
+            rebuilt += argument[cursor...]
+            if changed {
+                mutable.replaceCharacters(in: match.range, with: rebuilt)
+            }
+        }
+        return mutable as String
+    }
+
     // MARK: - Auto-Fix Broken Syntax (.note)
 
     /// Proactively repairs broken or incomplete syntax in `.note` files prior to compilation,
@@ -1304,9 +1369,12 @@ class TypstCompiler: ObservableObject {
         if ext == "note" {
             finalContent = Self.notePreamble + finalContent
         }
-        
+
+        // Same missing-font substitution the live preview applies (shadow-only).
+        finalContent = Self.substituteMissingFonts(finalContent)
+
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
-        
+
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory, tempDirectory: tempDir)
         
         do {
@@ -1418,9 +1486,12 @@ class TypstCompiler: ObservableObject {
         if ext == "note" {
             finalContent = Self.notePreamble + finalContent
         }
-        
+
+        // Same missing-font substitution the live preview applies (shadow-only).
+        finalContent = Self.substituteMissingFonts(finalContent)
+
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
-        
+
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory ?? tempDir, tempDirectory: tempDir)
         
         do {
