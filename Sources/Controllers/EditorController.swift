@@ -3801,7 +3801,11 @@ class EditorController: NSObject, ObservableObject {
         self.showFoundationEditor = true
     }
     
-    func generateAIContent(from prompt: String) async throws -> String {
+    /// - Parameter forceTypstConversion: When true, the generated content is
+    ///   run through the Markdown→Typst converter regardless of the current
+    ///   file type, so any markdown or plain text the model produces is
+    ///   inserted as Typst.
+    func generateAIContent(from prompt: String, forceTypstConversion: Bool = false) async throws -> String {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
         
@@ -3839,7 +3843,7 @@ class EditorController: NSObject, ObservableObject {
             maxTokens: AISettingsManager.shared.maxTokens
         )
         
-        if !isMd {
+        if !isMd || forceTypstConversion {
             return AICompletionService.shared.sanitizeMarkdownToTypst(result)
         }
         return result
@@ -4057,14 +4061,15 @@ class EditorController: NSObject, ObservableObject {
         demoteHeadingItem.target = self
         baseMenu.addItem(demoteHeadingItem)
         
-        // AI Refine / Grammar — only when the user has selected text.
-        if selectedRange.length > 0 {
+        // AI Refine / Grammar — only when the user has selected text and AI
+        // features are enabled in settings.
+        if selectedRange.length > 0, AISettingsManager.shared.isEnabled {
             baseMenu.addItem(NSMenuItem.separator())
-            
+
             let refineItem = NSMenuItem(title: "✨ Refine Writing", action: #selector(contextMenuRefineWriting(_:)), keyEquivalent: "")
             refineItem.target = self
             baseMenu.addItem(refineItem)
-            
+
             let grammarItem = NSMenuItem(title: "✓ Fix Grammar", action: #selector(contextMenuFixGrammar(_:)), keyEquivalent: "")
             grammarItem.target = self
             baseMenu.addItem(grammarItem)
@@ -4120,12 +4125,21 @@ class EditorController: NSObject, ObservableObject {
                     baseMenu.addItem(NSMenuItem.separator())
                 }
                 
-                // AI Fix
-                let item = NSMenuItem(title: "✨ Fix with AI", action: #selector(fixErrorWithAI(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = error
-                baseMenu.addItem(item)
-                
+                // AI Fix — only when AI features are enabled in settings.
+                if AISettingsManager.shared.isEnabled {
+                    let item = NSMenuItem(title: "✨ Fix with AI", action: #selector(fixErrorWithAI(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = error
+                    baseMenu.addItem(item)
+                }
+
+                // The static-fix separator assumes the AI fix follows it; when
+                // that item is gated off, drop the separator instead of
+                // leaving a dangling line at the menu's end.
+                if let last = baseMenu.items.last, last.isSeparatorItem {
+                    baseMenu.removeItem(last)
+                }
+
                 return baseMenu
             }
         }

@@ -6,6 +6,7 @@ struct AppMenuCommands: Commands {
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
     @ObservedObject private var recentFilesManager = RecentFilesManager.shared
+    @AppStorage("aiEnabled") private var aiEnabled = false
     
     @Environment(\.openWindow) private var openWindow
     
@@ -394,10 +395,12 @@ struct AppMenuCommands: Commands {
                 }
                 .keyboardShortcut("s", modifiers: [.command, .control])
                 
-                Button("AI Prompt...") {
-                    NotificationCenter.default.post(name: .menuCommand, object: "aiPrompt")
+                if aiEnabled {
+                    Button("AI Prompt...") {
+                        NotificationCenter.default.post(name: .menuCommand, object: "aiPrompt")
+                    }
+                    .keyboardShortcut("a", modifiers: [.command, .control])
                 }
-                .keyboardShortcut("a", modifiers: [.command, .control])
                     
                 Button("Outline...") {
                     NotificationCenter.default.post(name: .menuCommand, object: "openOutlineEditor")
