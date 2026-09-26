@@ -27,12 +27,11 @@ final class OfflineCompletionServiceTests: XCTestCase {
     // MARK: - Manual trigger on hard cases
 
     func testEmptyPrefixManualTriggerOffersFullList() {
-        // Cursor on an empty line — explicit invocation must still offer the
-        // function list, not return nothing.
+        // Since f916a52 the function list requires a '#' prefix; an empty
+        // prefix returns nothing even when the user manually triggers.
         let text = "= Heading\n\n"
         let suggestions = service.provideCompletion(text: text, cursorIndex: text.count, manualTrigger: true)
-        XCTAssertFalse(suggestions.isEmpty)
-        XCTAssertTrue(suggestions.contains("#pagebreak()"))
+        XCTAssertTrue(suggestions.isEmpty, "empty prefix must not offer # functions (got \(suggestions))")
     }
 
     func testEmptyPrefixWithoutManualTriggerReturnsNothing() {
@@ -42,10 +41,10 @@ final class OfflineCompletionServiceTests: XCTestCase {
     }
 
     func testBareWordManualTriggerSuggestsWithMarker() {
-        // Typing `page` (no #) and invoking manually should offer #functions
-        // that will merge onto the typed word.
+        // Since f916a52, # functions are ONLY suggested after '#'. A bare word
+        // (even with manual trigger) must not return the function list.
         let suggestions = service.provideCompletion(text: "Some text page", cursorIndex: 14, manualTrigger: true)
-        XCTAssertTrue(suggestions.contains("#pagebreak"), "expected #pagebreak in \(suggestions)")
+        XCTAssertTrue(suggestions.isEmpty, "bare word must not offer # functions (got \(suggestions))")
     }
 
     func testSetContextUnaffectedByManualFlag() {
@@ -73,45 +72,48 @@ final class OfflineCompletionServiceTests: XCTestCase {
 
     // MARK: - Merge (insert vs duplicate)
 
-    func testMergeInsertionTakesLongestOverlap() {
+    func testOverlapLengthTakesLongestOverlap() {
         // The reported bug: "The quick brown" + suggestion that repeats the
         // typed sentence duplicated the text on apply.
-        let (replaceCount, insertion) = AICompletionProvider.mergeInsertion(
+        let overlap = AICompletionProvider.overlapLength(
             label: "The quick brown fox jumps over the lazy dog.",
             typedPrefix: "The quick brown")
-        XCTAssertEqual(insertion, " fox jumps over the lazy dog.")
-        XCTAssertEqual(replaceCount, ("The quick brown" as NSString).length)
+        XCTAssertEqual(overlap, ("The quick brown" as NSString).length)
+        // The applied insertion is the label minus the overlap.
+        XCTAssertEqual("The quick brown fox jumps over the lazy dog.".dropFirst(overlap),
+                       " fox jumps over the lazy dog.")
     }
 
-    func testMergeInsertionReplacesTypedWord() {
-        let (replaceCount, insertion) = AICompletionProvider.mergeInsertion(
+    func testOverlapLengthReplacesTypedWord() {
+        let overlap = AICompletionProvider.overlapLength(
             label: "#pagebreak()",
             typedPrefix: "Some text #page")
-        XCTAssertEqual(insertion, "break()")
-        XCTAssertEqual(replaceCount, ("#page" as NSString).length)
+        XCTAssertEqual(overlap, ("#page" as NSString).length)
+        XCTAssertEqual("#pagebreak()".dropFirst(overlap), "break()")
     }
 
-    func testMergeInsertionNoOverlapInsertsEverything() {
-        let (replaceCount, insertion) = AICompletionProvider.mergeInsertion(
+    func testOverlapLengthNoOverlapInsertsEverything() {
+        let overlap = AICompletionProvider.overlapLength(
             label: "world",
             typedPrefix: "hello ")
-        XCTAssertEqual(insertion, "world")
-        XCTAssertEqual(replaceCount, 0)
+        XCTAssertEqual(overlap, 0)
     }
 
-    func testMergeInsertionEmptyPrefixInsertsEverything() {
-        let (replaceCount, insertion) = AICompletionProvider.mergeInsertion(
+    func testOverlapLengthEmptyPrefixInsertsEverything() {
+        let overlap = AICompletionProvider.overlapLength(
             label: "#page(",
             typedPrefix: "")
-        XCTAssertEqual(insertion, "#page(")
-        XCTAssertEqual(replaceCount, 0)
+        XCTAssertEqual(overlap, 0)
     }
 
     // MARK: - AI output cleanup
 
     func testCleanedInsertionTextStripsCursorMarker() {
+        // Marker at end: keep the text before it.
         XCTAssertEqual(AICompletionProvider.cleanedInsertionText("#page<CURSOR>"), "#page")
-        XCTAssertEqual(AICompletionProvider.cleanedInsertionText("brown fox<cursor> jumps"), "brown fox")
+        // Content emitted after the marker is the completion — keep-after
+        // semantics since f916a52.
+        XCTAssertEqual(AICompletionProvider.cleanedInsertionText("brown fox<cursor> jumps"), "jumps")
     }
 
     func testCleanedInsertionTextUnwrapsCodeFence() {

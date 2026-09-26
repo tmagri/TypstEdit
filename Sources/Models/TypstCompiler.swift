@@ -20,6 +20,8 @@ enum CompilerRegex {
     static let webImage = try! NSRegularExpression(pattern: #"#image\(\s*"([^"]*)""#)
     static let relativeImport = try! NSRegularExpression(pattern: #"(\b(?:import|include)\s+")([^/@.][^"]*)(")"#)
     static let relativeImage = try! NSRegularExpression(pattern: #"(#image\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#)
+    static let fontArgument = try! NSRegularExpression(pattern: #"font\s*:\s*(?:"[^"]*"|\([^()]*\))"#)
+    static let quotedString = try! NSRegularExpression(pattern: #""([^"]*)""#)
 }
 
 struct TypstError: Identifiable, Equatable {
@@ -78,7 +80,7 @@ class TypstCompiler: ObservableObject {
             count += darkModePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
         }
         if currentFileExtension == "note" {
-            count += notePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+            count += Self.notePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
         }
         return count
     }
@@ -111,9 +113,21 @@ class TypstCompiler: ObservableObject {
 )
 """ + "\n"
 
-    private let notePreamble =
+    // Helpers every .note file can rely on. Defined first so any user
+    // definition of the same name in the note body shadows ours.
+    nonisolated static let notePreamble =
 """
 #let title(body) = align(center)[#text(size: 24pt, weight: "bold")[#body]]
+#let note-box(title, body) = block(
+  width: 100%,
+  fill: rgb("#eef2f7"),
+  stroke: (left: 2.5pt + rgb("#3b82f6")),
+  inset: (x: 12pt, y: 10pt),
+)[
+  #text(size: 11pt, weight: "bold")[#title]
+  #v(4pt)
+  #body
+]
 """ + "\n"
     
     // Check if typst makes sense or we need full path
@@ -299,10 +313,17 @@ class TypstCompiler: ObservableObject {
                 pendingNoteWarnings = []
                 shadowToSourceLine = [:]
             }
+
+            // Fonts that don't ship on macOS (e.g. Liberation Serif) would only
+            // yield an "unknown font family" warning plus typst's default
+            // fallback face. Substituting the metric-compatible font in the
+            // shadow source renders the preview with the intended metrics.
+            // Within-line rewrite, so line numbers still map back to the source.
+            finalSource = Self.substituteMissingFonts(finalSource)
             
             var injectedPreamble = ""
             if ext == "note" {
-                injectedPreamble += notePreamble
+                injectedPreamble += Self.notePreamble
             }
             if isDarkMode {
                 // 1. Inject the color into partial strokes safely
@@ -808,7 +829,8 @@ class TypstCompiler: ObservableObject {
     /// `#score(generated-abc, width: 100%)` is user-written Typst, not generated
     /// Markdown output. We still allow the fallback to act on Markdown-converted
     /// constructs (`#link`, `#image`, `#table`, `#strike`, `#figure`, `#align`,
-    /// `#line`, `#footnote`, `#super`, `#sub`, `#underline`, `#highlight`, `#raw`)
+    /// `#line`, `#footnote`, `#super`, `#sub`, `#underline`, `#highlight`, `#raw`,
+    /// `#quote`)
     /// which are the functions `sanitizeMarkdownToTypst` is known to emit.
     private func isProtectedTypstDirective(_ line: String, isHybrid: Bool) -> Bool {
         // Always-protected top-level keywords.
@@ -824,7 +846,7 @@ class TypstCompiler: ObservableObject {
         // the fallback can still repair broken converter-generated tables/links/images.
         let markdownConverterFuncs = [
             "link", "image", "table", "strike", "figure", "align", "line",
-            "footnote", "super", "sub", "underline", "highlight", "raw",
+            "footnote", "super", "sub", "underline", "highlight", "raw", "quote",
         ]
         let nsLine = line as NSString
         guard let match = CompilerRegex.markdownConverterFunc.firstMatch(in: line, options: [], range: NSRange(0..<nsLine.length)) else {
@@ -855,6 +877,62 @@ class TypstCompiler: ObservableObject {
         result = result.replacingOccurrences(of: "`",  with: "\\`")
         
         return result
+    }
+
+    // MARK: - Missing-Font Substitution
+
+    /// Fonts that don't ship on macOS, mapped to the metric-compatible face
+    /// every Mac has. Substituting keeps the intended metrics of a document
+    /// authored against e.g. Liberation Serif; without it typst falls back to
+    /// its default face and emits an "unknown font family" warning.
+    private nonisolated static let missingFontAliases: [String: String] = [
+        "liberation serif": "Times New Roman",
+        "liberation sans": "Arial",
+        "liberation sans narrow": "Arial",
+        "liberation mono": "Courier New",
+        "dejavu sans mono": "Menlo",
+        "consolas": "Menlo",
+    ]
+
+    /// Rewrites `font:` named-argument values naming fonts that don't ship on
+    /// macOS to their metric-compatible installed equivalents
+    /// (`font: "Liberation Serif"` → `font: "Times New Roman"`). Matches are
+    /// whole string literals only — `"MyLiberation Serif"` is left alone —
+    /// and cover both `font: "X"` and `font: ("X", "Y")` forms. Shadow-source
+    /// only: the user's file itself is never modified.
+    nonisolated static func substituteMissingFonts(_ source: String) -> String {
+        guard source.contains("font") else { return source }
+        let nsSource = source as NSString
+        let mutable = NSMutableString(string: source)
+        // Right-to-left so earlier match ranges survive the replacements.
+        for match in CompilerRegex.fontArgument.matches(
+            in: source, options: [], range: NSRange(0..<nsSource.length)
+        ).reversed() {
+            let argument = nsSource.substring(with: match.range)
+            var rebuilt = ""
+            var cursor = argument.startIndex
+            var changed = false
+            for literal in CompilerRegex.quotedString.matches(
+                in: argument, options: [], range: NSRange(0..<argument.utf16.count)
+            ) {
+                guard let fullRange = Range(literal.range, in: argument),
+                      let valueRange = Range(literal.range(at: 1), in: argument) else { continue }
+                rebuilt += argument[cursor..<fullRange.lowerBound]
+                let name = String(argument[valueRange]).lowercased()
+                if let installed = missingFontAliases[name] {
+                    rebuilt += "\"\(installed)\""
+                    changed = true
+                } else {
+                    rebuilt += String(argument[fullRange])
+                }
+                cursor = fullRange.upperBound
+            }
+            rebuilt += argument[cursor...]
+            if changed {
+                mutable.replaceCharacters(in: match.range, with: rebuilt)
+            }
+        }
+        return mutable as String
     }
 
     // MARK: - Auto-Fix Broken Syntax (.note)
@@ -1289,11 +1367,14 @@ class TypstCompiler: ObservableObject {
             }.value
         }
         if ext == "note" {
-            finalContent = notePreamble + finalContent
+            finalContent = Self.notePreamble + finalContent
         }
-        
+
+        // Same missing-font substitution the live preview applies (shadow-only).
+        finalContent = Self.substituteMissingFonts(finalContent)
+
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
-        
+
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory, tempDirectory: tempDir)
         
         do {
@@ -1403,11 +1484,14 @@ class TypstCompiler: ObservableObject {
             }.value
         }
         if ext == "note" {
-            finalContent = notePreamble + finalContent
+            finalContent = Self.notePreamble + finalContent
         }
-        
+
+        // Same missing-font substitution the live preview applies (shadow-only).
+        finalContent = Self.substituteMissingFonts(finalContent)
+
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
-        
+
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory ?? tempDir, tempDirectory: tempDir)
         
         do {
@@ -1557,7 +1641,7 @@ class TypstCompiler: ObservableObject {
                     }.value
                     
                     if isHybrid {
-                        converted = notePreamble + converted
+                        converted = Self.notePreamble + converted
                     }
                     
                     let newFilename = filename.replacingOccurrences(of: ".note", with: ".typ").replacingOccurrences(of: ".md", with: ".typ")

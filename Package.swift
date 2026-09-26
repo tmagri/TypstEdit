@@ -16,7 +16,8 @@ let package = Package(
         .package(path: "LocalPackages/CodeEditSourceEditor"),
         .package(path: "LocalPackages/CodeEditLanguages"),
         .package(path: "LocalPackages/CSQLite"),
-        .package(url: "https://github.com/sqliteai/sqlite-vector", from: "1.0.0")
+        .package(url: "https://github.com/sqliteai/sqlite-vector", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-markdown.git", from: "0.5.0")
     ],
     targets: [
         .executableTarget(
@@ -25,7 +26,8 @@ let package = Package(
                 "CodeEditSourceEditor",
                 .product(name: "CodeEditLanguages", package: "CodeEditLanguages"),
                 .product(name: "CSQLite", package: "CSQLite"),
-                .product(name: "vector", package: "sqlite-vector")
+                .product(name: "vector", package: "sqlite-vector"),
+                .product(name: "Markdown", package: "swift-markdown")
             ],
             path: "Sources",
             resources: [

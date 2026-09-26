@@ -60,8 +60,8 @@ class OfflineCompletionService {
     private init() {}
 
     /// - Parameter manualTrigger: `true` when the user explicitly invoked
-    ///   completions (Escape / Ctrl+Space). Manual invocation on an empty or
-    ///   plain word still offers the Typst function list instead of nothing.
+    ///   completions (Escape / Ctrl+Space). Retained for call-site
+    ///   compatibility; suggestions still require a `#` prefix regardless.
     func provideCompletion(text: String, cursorIndex: Int, manualTrigger: Bool = false) -> [String] {
         let prefix = getWordPrefix(text: text, cursorIndex: cursorIndex)
         print("[OfflineCompletion] Prefix found: '\(prefix)' at index \(cursorIndex)")

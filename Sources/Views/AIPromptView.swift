@@ -6,6 +6,7 @@ struct AIPromptView: View {
     @State private var generatedResult: String = ""
     @State private var errorMessage: String? = nil
     @State private var isEditorFocused: Bool = false
+    @AppStorage("aiPromptForceTypst") private var forceTypstConversion: Bool = false
     @FocusState private var editorFocus: Bool
     
     var body: some View {
@@ -46,6 +47,12 @@ struct AIPromptView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .help("Includes relevant project snippets and Typst patterns to improve quality.")
+
+                Toggle("Force Convert to Typst", isOn: $forceTypstConversion)
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .help("Converts the generated markdown or plain text into Typst before insertion.")
             }
             
             if !generatedResult.isEmpty {
@@ -110,7 +117,7 @@ struct AIPromptView: View {
                             errorMessage = nil // Clear previous errors
                         }
                         do {
-                            let result = try await controller.generateAIContent(from: promptText)
+                            let result = try await controller.generateAIContent(from: promptText, forceTypstConversion: forceTypstConversion)
                             await MainActor.run {
                                 self.generatedResult = result
                                 controller.isAIGenerating = false
