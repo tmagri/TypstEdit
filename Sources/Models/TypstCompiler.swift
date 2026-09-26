@@ -1113,6 +1113,8 @@ class TypstCompiler: ObservableObject {
     ///   - `$ … $`             math (masked out before scanning)
     ///   - `<label>`, `<tag>`, `</tag>`, `<!--…-->`  labels & HTML (handled later)
     ///   - anything inside inline/fenced code spans or math regions (masked out)
+    ///   - string literals on code lines (`#link("mailto:a@b.com")`) — a `\@`
+    ///     there would be an invalid string escape, so they are masked out
     ///
     /// Each source line that needed delimiting produces a single `.warning`
     /// `TypstError` (1-based line numbers refer to the user's original file). The
@@ -1141,6 +1143,57 @@ class TypstCompiler: ObservableObject {
         // Math regions: $$…$$, $…$, \[…\], \(…\).
         CompilerRegex.mathRegion.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
             if let m = m { blank(m.range) }
+        }
+        // Typst string literals: a backslash inside "…" is a STRING escape, so
+        // auto-inserting `\@` there would be an invalid escape sequence that
+        // breaks the compile (`#link("mailto:a@b.com")`). When a line carries a
+        // code expression — an unescaped `#` before its first quote — mask the
+        // quoted interiors like code: operators inside them are neither flagged
+        // nor escaped. Prose quotes (no `#` before the first quote, or a `#`
+        // that only appears after it, like She said "#hi") keep getting scanned
+        // so stray operators in quoted prose are still auto-escaped. The quote
+        // characters themselves stay visible so the `#"…"` hash-continuation
+        // check keeps working.
+        var stringLineStart = 0
+        while stringLineStart < length {
+            var lineEnd = stringLineStart
+            while lineEnd < length, masked[lineEnd] != 0x0A { lineEnd += 1 }
+
+            // First unescaped `#` and `"` on the line (code spans and math are
+            // already blanked, so their quotes never open a string here).
+            var hashLoc: Int?
+            var quoteLoc: Int?
+            var i = stringLineStart
+            while i < lineEnd {
+                let c = masked[i]
+                if c == 0x5C { i += 2; continue }                    // escaped char (\")
+                if c == 0x23 { hashLoc = hashLoc ?? i }              // '#'
+                if c == 0x22 { quoteLoc = quoteLoc ?? i }            // '"'
+                i += 1
+            }
+
+            if let hash = hashLoc, let firstQuote = quoteLoc, hash < firstQuote {
+                var inString = false
+                var stringStart = 0
+                var j = firstQuote
+                while j < lineEnd {
+                    let c = masked[j]
+                    if c == 0x5C { j += 2; continue }
+                    if c == 0x22 {
+                        if inString {
+                            blank(NSRange(location: stringStart + 1, length: j - stringStart - 1))
+                            inString = false
+                        } else {
+                            inString = true
+                            stringStart = j
+                        }
+                    }
+                    j += 1
+                }
+                // An unterminated span (odd quote count) is left unmasked —
+                // typst has no multi-line strings, so it was never a string.
+            }
+            stringLineStart = lineEnd + 1
         }
         let maskedString = NSString(characters: masked, length: length) as String
 

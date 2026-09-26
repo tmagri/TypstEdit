@@ -41,6 +41,42 @@ final class DelimitImproperOperatorsTests: XCTestCase {
         }
     }
 
+    func testDoesNotEscapeOperatorsInsideLinkTargetString() {
+        // `@` inside a Typst string is a literal character. Escaping it produces
+        // `\@` — an invalid string escape that breaks the compile — plus a
+        // bogus "needs delimiting" warning. The label's `\@` (content-mode
+        // escaping, typed by the user) must also pass through untouched.
+        let source = "#link(\"mailto:jane.doe@example.com\")[jane.doe\\@example.com]"
+        let (output, warnings) = delimit(source)
+        XCTAssertEqual(output, source, "string contents must pass through untouched")
+        XCTAssertTrue(warnings.isEmpty, "no warning expected, got: \(warnings.map(\.message))")
+    }
+
+    func testMasksEveryStringOnACodeLine() {
+        let source = "#text(font: \"Liberation Serif\", fill: \"l@r<>\")[a]"
+        let (output, warnings) = delimit(source)
+        XCTAssertEqual(output, source)
+        XCTAssertTrue(warnings.isEmpty, "no warning expected, got: \(warnings.map(\.message))")
+    }
+
+    func testStillEscapesAtInProseBeforeCodeOnSameLine() {
+        // The `#` must precede the first quote for string masking to apply;
+        // operators in the prose part of the same line still get escaped.
+        let source = "Mail jane@example.com or visit #link(\"https://example.com\")[the site]"
+        let (output, warnings) = delimit(source)
+        XCTAssertTrue(output.contains("jane\\@example.com"), "prose @ still escaped: \(output)")
+        XCTAssertFalse(output.contains("https://example.com\\@"), "string target untouched")
+        XCTAssertEqual(warnings.count, 1)
+    }
+
+    func testProseQuotesKeepEscapingWithoutHash() {
+        // No code expression on the line: quoted prose keeps the old behavior.
+        let source = "Email \"the team\" at jane@example.com today"
+        let (output, warnings) = delimit(source)
+        XCTAssertTrue(output.contains("jane\\@example.com"), "prose @ still escaped: \(output)")
+        XCTAssertEqual(warnings.count, 1)
+    }
+
     func testPreservesOperatorsInsideCodeSpans() {
         let out = delimit("Call `user@x.com` and `#foo` now.").output
         XCTAssertEqual(out, "Call `user@x.com` and `#foo` now.")

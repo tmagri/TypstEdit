@@ -230,6 +230,8 @@ final class MarkdownConversionTests: XCTestCase {
 
         *Sit amet:* #lorem-value
 
+        #link("mailto:jane.doe@example.com")[jane.doe\\@example.com]
+
         #link("https://example.com/lorem/ipsum")[https://example.com/lorem/ipsum]
 
         + consectetur adipiscing elit
@@ -259,6 +261,10 @@ final class MarkdownConversionTests: XCTestCase {
         // Full real chain, exactly as the PDF preview runs it.
         let autoFixed = TypstCompiler.autoFixBrokenNoteSyntax(note)
         let delimited = TypstCompiler.delimitImproperOperators(autoFixed)
+        // Operator delimiting must stay silent here: the `@` in the mailto
+        // target lives inside a string literal, and escaping it would be an
+        // invalid string escape that breaks the compile.
+        XCTAssertTrue(delimited.warnings.isEmpty, "unexpected delimit warnings: \(delimited.warnings.map(\.message))")
         let sanitized = TypstCompiler.notePreamble + convert(delimited.output, isHybrid: true)
 
         // Redaction-style blocks must survive verbatim: indented, single
