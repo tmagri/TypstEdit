@@ -11,9 +11,11 @@ struct TableEditorView: View {
     @State private var selectedCols: Int = 0
     @State private var isPicking: Bool = false
     @State private var hasInitialized = false
-    
-    private let maxRows = 10
-    private let maxCols = 10
+    @State private var pasteMessage: String?
+    @State private var pasteMessageIsError: Bool = false
+
+    @State private var maxRows = 10
+    @State private var maxCols = 10
     
     private let alignOptions = [
         "", "left", "center", "right",
@@ -41,7 +43,25 @@ struct TableEditorView: View {
         let displayCols = isPicking ? (hoveredCols > 0 ? hoveredCols : selectedCols) : selectedCols
         return max(1, displayCols)
     }
-    
+
+    private func pasteFromClipboard() {
+        switch controller.importTabularDataFromClipboard() {
+        case .success(let rows, let cols):
+            selectedRows = rows
+            selectedCols = cols
+            maxRows = max(10, min(rows, 50))
+            maxCols = max(10, min(cols, 50))
+            pasteMessage = "Imported \(rows) x \(cols) table"
+            pasteMessageIsError = false
+        case .emptyClipboard:
+            pasteMessage = "Clipboard is empty"
+            pasteMessageIsError = true
+        case .notATable:
+            pasteMessage = "Clipboard doesn't contain a table"
+            pasteMessageIsError = true
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -52,6 +72,12 @@ struct TableEditorView: View {
                 Text("Insert Table")
                     .font(.headline)
                 Spacer()
+                Button {
+                    pasteFromClipboard()
+                } label: {
+                    Label("Paste from Clipboard", systemImage: "doc.on.clipboard")
+                }
+                .controlSize(.small)
                 Button(action: onCancel) {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundColor(.secondary)
@@ -87,7 +113,15 @@ struct TableEditorView: View {
                             }
                         }
                         .padding(.bottom, 5)
-                        
+
+                        if let pasteMessage {
+                            Text(pasteMessage)
+                                .font(.caption)
+                                .foregroundColor(pasteMessageIsError ? .red : .accentColor)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.bottom, 5)
+                        }
+
                         if controller.tableEditInitialRows > 0 && controller.tableEditInitialCols > 0 {
                             let displayRows = isPicking ? (hoveredRows > 0 ? hoveredRows : selectedRows) : selectedRows
                             let displayCols = isPicking ? (hoveredCols > 0 ? hoveredCols : selectedCols) : selectedCols
@@ -256,6 +290,8 @@ struct TableEditorView: View {
         }
         .frame(width: 450, height: 600)
         .onAppear {
+            pasteMessage = nil
+            pasteMessageIsError = false
             if !hasInitialized {
                 if controller.tableEditInitialRows > 0 && controller.tableEditInitialCols > 0 {
                     selectedRows = controller.tableEditInitialRows

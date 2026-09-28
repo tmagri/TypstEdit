@@ -40,6 +40,12 @@ enum FormattingRegex {
     static let brackets = try! NSRegularExpression(pattern: "\\[|\\]")
 }
 
+enum TabularImportResult: Equatable {
+    case success(rows: Int, cols: Int)
+    case emptyClipboard
+    case notATable
+}
+
 @MainActor
 class EditorController: NSObject, ObservableObject {
     enum SupportedFileType {
@@ -1536,8 +1542,36 @@ class EditorController: NSObject, ObservableObject {
             }
         }
     }
-    
-    private func ensureTypstContent(_ str: String) -> String {
+
+    func importTabularData(from text: String) -> TabularImportResult {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .emptyClipboard }
+        guard let data = TabularConverter.parse(trimmed) else { return .notATable }
+
+        let cols = data.columnCount
+        let padded = data.rows.map { row -> [String] in
+            var r = row
+            while r.count < cols { r.append("") }
+            return Array(r.prefix(cols))
+        }
+
+        let headerRow = padded.first ?? []
+        let bodyRows = Array(padded.dropFirst())
+
+        self.useTableHeader = true
+        self.tableHeaderCells = headerRow
+        self.currentTableCells = bodyRows.flatMap { $0 }
+        self.tableEditInitialRows = bodyRows.count
+        self.tableEditInitialCols = cols
+
+        return .success(rows: bodyRows.count, cols: cols)
+    }
+
+    func importTabularDataFromClipboard() -> TabularImportResult {
+        importTabularData(from: NSPasteboard.general.string(forType: .string) ?? "")
+    }
+
+    func ensureTypstContent(_ str: String) -> String {
         let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return "[]" }
         
@@ -1549,11 +1583,13 @@ class EditorController: NSObject, ObservableObject {
             return trimmed
         }
         
-        // If it looks like a function call or a variable starting with #, or contains math $
-        if trimmed.hasPrefix("#") || trimmed.contains("(") || (trimmed.hasPrefix("$") && trimmed.hasSuffix("$")) {
+        // If it's a Typst expression (starts with #) or math ($...$), return as is.
+        // A "(" in the middle of text is just a literal character inside a content
+        // block, so we deliberately do not treat it as an expression here.
+        if trimmed.hasPrefix("#") || (trimmed.hasPrefix("$") && trimmed.hasSuffix("$")) {
             return trimmed
         }
-        
+
         return "[\(trimmed)]"
     }
     
@@ -1646,7 +1682,7 @@ class EditorController: NSObject, ObservableObject {
             }
             
             let headerContent = effectiveHeaders.map { ensureTypstContent($0) }.joined(separator: ", ")
-            snippet += "  table.header(\n    \(headerContent),\n  ),\n"
+            snippet += "  table.header(\n    \(headerContent)\n  ),\n"
         }
         
         // Preserve data from currentTableCells if we are editing
@@ -1673,9 +1709,11 @@ class EditorController: NSObject, ObservableObject {
             var rowText = "  "
             for c in 0..<cols {
                 let index = r * cols + c
-                rowText += "\(ensureTypstContent(cellsToInsert[index])), "
+                rowText += ensureTypstContent(cellsToInsert[index])
+                if c < cols - 1 { rowText += ", " }
             }
-            snippet += rowText.trimmingCharacters(in: CharacterSet(charactersIn: ", ")) + ",\n"
+            if r < rows - 1 { rowText += "," }
+            snippet += rowText + "\n"
         }
         snippet += ")"
         
