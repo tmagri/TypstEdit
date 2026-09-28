@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "lldb",
+            "type": "lldb-dap",
             "request": "launch",
             "name": "Debug TypstEdit (App)",
             "program": "${workspaceFolder}/TypstEdit.app/Contents/MacOS/TypstEdit",
@@ -11,7 +11,7 @@
             "preLaunchTask": "bundle: app (debug)"
         },
         {
-            "type": "lldb",
+            "type": "lldb-dap",
             "request": "launch",
             "name": "Debug TypstEdit Tests",
             "program": "swift",

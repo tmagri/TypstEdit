@@ -999,7 +999,7 @@ class EditorController: NSObject, ObservableObject {
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.undo()
-        if let tv = textViewController?.textView {
+        if let tv = textViewController?.textView, sourceCode != tv.string {
             sourceCode = tv.string
         }
     }
@@ -1009,7 +1009,7 @@ class EditorController: NSObject, ObservableObject {
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
         textViewController?.textView.undoManager?.redo()
-        if let tv = textViewController?.textView {
+        if let tv = textViewController?.textView, sourceCode != tv.string {
             sourceCode = tv.string
         }
     }

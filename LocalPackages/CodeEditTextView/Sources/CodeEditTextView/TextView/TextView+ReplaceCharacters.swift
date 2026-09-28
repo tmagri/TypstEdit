@@ -21,6 +21,7 @@ extension TextView {
     ) {
         guard isEditable else { return }
         NotificationCenter.default.post(name: Self.textWillChangeNotification, object: self)
+        let skipLayout = isBatchEditing
         textStorage.beginEditing()
 
         func valid(range: NSRange, string: String) -> Bool {
@@ -54,9 +55,11 @@ extension TextView {
 
         textStorage.endEditing()
 
-        updateFrameIfNeeded()
-        layoutManager.layoutLines()
-        needsDisplay = true
+        if !skipLayout {
+            updateFrameIfNeeded()
+            layoutManager.layoutLines()
+            needsDisplay = true
+        }
 
         if !skipUpdateSelection {
             selectionManager.notifyAfterEdit()

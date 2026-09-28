@@ -258,6 +258,10 @@ open class TextView: NSView, NSTextContent {
 
     public internal(set) var isFirstResponder: Bool = false
 
+    /// True while a batch of mutations is being applied (e.g. undo/redo group, replace-all).
+    /// When true, `replaceCharacters` skips layout because the line storage is not yet updated.
+    public var isBatchEditing: Bool = false
+
     /// When dragging to create a selection, these enable us to scroll the view as the user drags outside the view's
     /// bounds.
     var mouseDragAnchor: CGPoint?

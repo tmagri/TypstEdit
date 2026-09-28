@@ -52,10 +52,12 @@ public final class TextLine: Identifiable, Equatable {
         markedRanges: MarkedRanges?,
         attachments: [AnyTextAttachment]
     ) {
-        let string = stringRef.attributedSubstring(from: range)
+        let clampedLength = max(0, min(range.length, stringRef.length - range.location))
+        let safeRange = NSRange(location: min(range.location, stringRef.length), length: clampedLength)
+        let string = stringRef.attributedSubstring(from: safeRange)
         let maxWidth = typesetter.typeset(
             string,
-            documentRange: range,
+            documentRange: safeRange,
             displayData: displayData,
             markedRanges: markedRanges,
             attachments: attachments

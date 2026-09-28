@@ -43,6 +43,7 @@ extension FindPanelViewModel {
         }
 
         target.textView.undoManager?.beginUndoGrouping()
+        target.textView.isBatchEditing = true
         target.textView.textStorage.beginEditing()
 
         var sortedMatches = findMatches.sorted(by: { $0.location < $1.location })
@@ -51,6 +52,10 @@ extension FindPanelViewModel {
         }
 
         target.textView.textStorage.endEditing()
+        target.textView.isBatchEditing = false
+        target.textView.updateFrameIfNeeded()
+        target.textView.layoutManager.layoutLines()
+        target.textView.needsDisplay = true
         target.textView.undoManager?.endUndoGrouping()
 
         if let lastMatch = sortedMatches.last {

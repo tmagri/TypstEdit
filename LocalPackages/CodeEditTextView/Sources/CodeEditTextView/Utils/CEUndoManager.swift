@@ -77,6 +77,7 @@ public class CEUndoManager: UndoManager {
         }
 
         _isUndoing = true
+        textView.isBatchEditing = true
         NotificationCenter.default.post(name: .NSUndoManagerWillUndoChange, object: self)
         textView.textStorage.beginEditing()
         for mutation in item.mutations.reversed() {
@@ -91,6 +92,11 @@ public class CEUndoManager: UndoManager {
             )
         }
         textView.textStorage.endEditing()
+        textView.isBatchEditing = false
+
+        textView.updateFrameIfNeeded()
+        textView.layoutManager.layoutLines()
+        textView.needsDisplay = true
 
         updateSelectionsForMutations(mutations: item.mutations.map { $0.mutation })
         textView.scrollSelectionToVisible()
@@ -112,6 +118,7 @@ public class CEUndoManager: UndoManager {
         }
 
         _isRedoing = true
+        textView.isBatchEditing = true
         NotificationCenter.default.post(name: .NSUndoManagerWillRedoChange, object: self)
         textView.selectionManager.removeCursors()
         textView.textStorage.beginEditing()
@@ -127,6 +134,11 @@ public class CEUndoManager: UndoManager {
             )
         }
         textView.textStorage.endEditing()
+        textView.isBatchEditing = false
+
+        textView.updateFrameIfNeeded()
+        textView.layoutManager.layoutLines()
+        textView.needsDisplay = true
 
         updateSelectionsForMutations(mutations: item.mutations.map { $0.inverse })
         textView.scrollSelectionToVisible()
