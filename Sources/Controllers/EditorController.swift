@@ -235,10 +235,10 @@ class EditorController: NSObject, ObservableObject {
         // write at the wrong offset and corrupt the tree-sitter Highlighter's parse tree /
         // StyledRangeContainer for that region — leaving the section unstyled/blank with no
         // completion until the document is reopened (the "paste loses completion / goes blank"
-        // bug). When diverged we must use a full `setText` rebuild so `setUpHighlighter()`
-        // re-queries every range from scratch.
-        let viewInSync = textViewController?.textView.string == sourceCode
-
+        // bug). reconcileTextViewIfNeeded() above handles any divergence via a full setText
+        // rebuild, so by the time we get here the view matches the model and a surgical
+        // replaceCharacters is safe.
+        
         // Set isApplyingProgrammaticChange before mutating sourceCode so that
         // onChange listeners observe the programmatic edit and can force a preview refresh.
         isApplyingProgrammaticChange = true
@@ -249,31 +249,23 @@ class EditorController: NSObject, ObservableObject {
         // --- Sync with actual editor if available ---
         // This is necessary because SourceEditor's binding is one-way (upwards) in some versions
          if let tvc = textViewController {
-             let tvLen = (tvc.textView.string as NSString).length
-             let insertLength = (text as NSString).length
-
-             // Use a full setText rebuild when the view was empty OR had diverged from the
-             // model before this edit. setText calls setUpHighlighter(), guaranteeing the
-             // tree-sitter parse tree and StyledRangeContainer are rebuilt against the new
-             // text storage.
-             if (tvLen == 0 && insertLength > 0) || !viewInSync {
-                 tvc.setText(sourceCode)
-             } else {
-                 // Surgical update to avoid resetting the entire highlighter (fixes "going white").
-                 // Safe because we verified the view matches the model pre-edit, so `range`
-                 // is a valid location in the text view's coordinate space — no clamping needed.
-                 tvc.textView.replaceCharacters(in: range, with: text)
-             }
+              // Always use surgical replaceCharacters so an undo mutation is registered.
+              // reconcileTextViewIfNeeded() above already handled any view/model divergence
+              // via setText (which rebuilds the highlighter). For an empty view the
+              // highlighter has nothing to rebuild, and replaceCharacters triggers a
+              // re-highlight via the storage delegate. Using setText here would clear
+              // the undo stack and make this edit impossible to undo.
+              tvc.textView.replaceCharacters(in: range, with: text)
 
              // Force layout update and redraw to ensure changes are visible immediately
              tvc.textView.updateFrameIfNeeded()
              tvc.textView.layoutManager.layoutLines()
              tvc.textView.needsDisplay = true
 
-             // Safety net: make sure the view's text now matches the model. With the
-             // viewInSync check above this should be a no-op in practice, but keeps any
-             // unforeseen edge case from leaving the view stale.
-             reconcileTextViewIfNeeded()
+              // Safety net: make sure the view's text now matches the model. This should
+              // be a no-op in practice, but keeps any unforeseen edge case from leaving
+              // the view stale.
+              reconcileTextViewIfNeeded()
          } else {
              print("[EditorController] WARNING: No TextViewController available for sync")
          }
