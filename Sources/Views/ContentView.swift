@@ -101,16 +101,29 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .resetToWelcome)) { _ in
                 // Only the main window should react to a full UI reset
                 guard self.editorController === AppDelegate.shared?.editorController else { return }
-                self.selectedFile = nil
-                self.fileSystem.currentFolder = nil
-                self.fileSystem.isNewUnsavedFile = false
-                self.editorController.currentFileURL = nil
-                self.editorController.projectRootURL = nil
-                self.editorController.sourceCode = ""
-                self.editorController.syncSavedContent("")
-                self.currentPDFURL = nil
-                self.editorController.isSidebarVisible = false
+                resetToWelcomeState()
             }
+    }
+
+    /// Clears all document state so the welcome screen shows. Shared by the
+    /// `.resetToWelcome` notification and the Dock-click reopen path.
+    private func resetToWelcomeState() {
+        // Clear the controller's document state first so that the
+        // `onChange(of: selectedFile)` handler (fired by the `selectedFile = nil`
+        // below) sees a nil `currentFileURL` and no unsaved changes, and returns
+        // early instead of triggering a load or a save warning.
+        self.editorController.currentFileURL = nil
+        self.editorController.syncSavedContent("")
+        self.editorController.projectRootURL = nil
+        self.editorController.sourceCode = ""
+        self.selectedFile = nil
+        self.fileSystem.currentFolder = nil
+        self.fileSystem.isNewUnsavedFile = false
+        self.currentPDFURL = nil
+        self.editorController.isSidebarVisible = false
+        // Invalidate any in-flight load so a stale background read can't
+        // re-populate the editor after we've cleared it.
+        self.currentLoadID = UUID()
     }
 
     private func handleStandaloneLoad(url: URL) {
@@ -229,8 +242,15 @@ struct ContentView: View {
                 }
             }
             .preferredColorScheme(themeManager.appTheme.colorScheme)
-            .onAppear { 
-                if let file = selectedFile { loadFile(url: file) }
+            .onAppear {
+                if editorController.pendingWelcomeReset {
+                    // Dock-click reopen: land on the welcome screen, not the
+                    // last file (whose URL lingers in `selectedFile`).
+                    editorController.pendingWelcomeReset = false
+                    resetToWelcomeState()
+                } else if let file = selectedFile {
+                    loadFile(url: file)
+                }
                 applyAppKitAppearance(themeManager.appTheme)
                 editorController.applyTheme()
                 syncPreviewTheme()

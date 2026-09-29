@@ -145,6 +145,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Clicking the Dock icon with no visible windows does nothing by default
+    /// for a SwiftUI `WindowGroup` app. Reopen the main window and flag the
+    /// controller to land on the welcome screen. The `selectedFile` `@State` in
+    /// `TypstEditApp` persists the last file URL across close/reopen, and the
+    /// close-time `.resetToWelcome` `onReceive` is lost (the view is torn down
+    /// first), so `ContentView.onAppear` honors `pendingWelcomeReset` to clear
+    /// it and show the welcome screen.
+    nonisolated func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        MainActor.assumeIsolated {
+            guard !hasVisibleWindows else { return false }
+            Self.debugLog("Dock click with no visible windows: reopening main window")
+            self.editorController?.pendingWelcomeReset = true
+            WindowOpener.shared.open?(id: "main")
+            return true
+        }
+    }
+
     /// Safety net: if the raw handler above is ever bypassed, AppKit delivers the
     /// file open here instead. Only one of the two paths receives a given event.
     nonisolated func application(_ application: NSApplication, open urls: [URL]) {
@@ -513,6 +530,28 @@ extension Notification.Name {
     static let resetToWelcome = Notification.Name("resetToWelcome") 
 }
 
+/// Holds the SwiftUI `openWindow` action so AppKit-level entry points (a
+/// Dock-icon click with no visible windows) can reopen the main window. The
+/// action is scene-level, so it stays valid even after the window that
+/// captured it is closed.
+@MainActor
+final class WindowOpener {
+    static let shared = WindowOpener()
+    var open: OpenWindowAction?
+    private init() {}
+}
+
+/// Invisible view that captures the main window's `openWindow` action and
+/// hands it to `WindowOpener.shared`.
+private struct WindowOpenerInstaller: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onAppear { WindowOpener.shared.open = openWindow }
+    }
+}
+
 @main
 struct TypstEditApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -538,6 +577,7 @@ struct TypstEditApp: App {
                         appDelegate.setupTitleBarDoubleClick(for: window)
                     }
                 })
+                .background(WindowOpenerInstaller())
                 .onAppear {
                     appDelegate.editorController = editorController
                 }

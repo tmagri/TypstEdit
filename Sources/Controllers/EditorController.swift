@@ -577,6 +577,11 @@ class EditorController: NSObject, ObservableObject {
         }
     }
     @Published var isSidebarVisible: Bool = true
+    /// Set when a Dock-click reopen should land on the welcome screen. The
+    /// close-time `.resetToWelcome` notification is unreliable (SwiftUI tears
+    /// down the view before the `onReceive` fires), so this flag is honored in
+    /// `ContentView.onAppear`, where the view is guaranteed alive.
+    @Published var pendingWelcomeReset: Bool = false
     @Published var wrapLines: Bool = true {
         didSet {
             setupDefaultConfiguration()
