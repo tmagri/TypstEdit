@@ -154,6 +154,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// it and show the welcome screen.
     nonisolated func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         MainActor.assumeIsolated {
+            // Minimized windows don't count as visible, so the Dock click on a
+            // minimized app would otherwise fall through to the "reopen" path
+            // below (which does nothing useful). Restore the minimized window.
+            let minimized = NSApp.windows.filter { $0.isMiniaturized }
+            if !minimized.isEmpty {
+                let target = minimized.first(where: { $0.identifier?.rawValue == "main" }) ?? minimized[0]
+                Self.debugLog("Dock click: restoring minimized window")
+                NSApp.activate(ignoringOtherApps: true)
+                target.deminiaturize(nil)
+                target.makeKeyAndOrderFront(nil)
+                return false
+            }
             guard !hasVisibleWindows else { return false }
             Self.debugLog("Dock click with no visible windows: reopening main window")
             self.editorController?.pendingWelcomeReset = true
