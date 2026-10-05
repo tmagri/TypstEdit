@@ -575,12 +575,15 @@ class TypstCompiler: ObservableObject {
         let parts = locationMatch.split(separator: ":")
         guard let lineNum = parts.first.flatMap({ Int($0) }) else { return }
 
-        if !pendingFallbackRawLines.contains(lineNum) {
+        // Only errors queue a fallback rewrite. Warnings don't block output, and
+        // rewriting their lines wrapped valid content (e.g. a list item whose
+        // `__x__` triggers "no text within underscores") in `#raw(...)`.
+        let isWarning = pendingDiagnosticLine?.hasPrefix("warning: ") ?? false
+        if !isWarning, !pendingFallbackRawLines.contains(lineNum) {
             pendingFallbackRawLines.append(lineNum)
         }
 
         guard let diagnosticLine = pendingDiagnosticLine else { return }
-        let isWarning = diagnosticLine.hasPrefix("warning: ")
         let prefix = isWarning ? "warning: " : "error: "
         let message = String(diagnosticLine.dropFirst(prefix.count))
 

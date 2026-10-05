@@ -1028,3 +1028,11 @@ final class MarkdownConversionTests: XCTestCase {
         }
     }
 }
+
+extension MarkdownConversionTests {
+    func testNestedEmphasisDoesNotEmitDoubleUnderscore() {
+        let out = AICompletionService.shared.sanitizeMarkdownToTypst("- *Slack* _*\\#help*_ channel", isHybrid: true)
+        XCTAssertFalse(out.contains("__"), out)
+        XCTAssertTrue(out.contains("_*\\#help*_"), out)
+    }
+}

@@ -977,7 +977,14 @@ struct TypstMarkupVisitor: MarkupVisitor {
     // MARK: Inline containers
 
     mutating func visitEmphasis(_ emphasis: Emphasis) -> String {
-        "_" + renderInline(emphasis.children) + "_"
+        // `_*x*_` parses as emphasis-in-emphasis. Emitting `__x__` is a Typst
+        // warning (no text within underscores) that does nothing, so the inner
+        // level becomes strong, which is what Typst's `_*x*_` means.
+        let inner = emphasis.children.map { $0 as? Emphasis }
+        if emphasis.childCount == 1, let nested = inner.first ?? nil {
+            return "_*" + renderInline(nested.children) + "*_"
+        }
+        return "_" + renderInline(emphasis.children) + "_"
     }
 
     mutating func visitStrong(_ strong: Strong) -> String {
