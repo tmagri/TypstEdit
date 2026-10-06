@@ -159,7 +159,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // below (which does nothing useful). Restore the minimized window.
             let minimized = NSApp.windows.filter { $0.isMiniaturized }
             if !minimized.isEmpty {
-                let target = minimized.first(where: { $0.identifier?.rawValue == "main" }) ?? minimized[0]
+                let target = minimized.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true }) ?? minimized[0]
                 Self.debugLog("Dock click: restoring minimized window")
                 NSApp.activate(ignoringOtherApps: true)
                 target.deminiaturize(nil)
@@ -283,17 +283,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    func setupTitleBarDoubleClick(for window: NSWindow) {
+    func setupTitleBarDoubleClick() {
         guard titleBarDoubleClickMonitor == nil else { return }
 
-        titleBarDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak window] event in
-            guard let window = window, event.window === window, event.clickCount >= 2 else { return event }
+        // Resolves the window per event (not at install time) so the monitor
+        // keeps working after the NSWindow is closed and SwiftUI recreates it.
+        titleBarDoubleClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { event in
+            guard let window = event.window, event.clickCount >= 2 else { return event }
+            // Only document windows: SwiftUI assigns "main-AppWindow-N"
+            // (older macOS: "main") to WindowGroup(id: "main") windows.
+            guard window.identifier?.rawValue.hasPrefix("main") == true else { return event }
 
-            let mouseLocation = NSEvent.mouseLocation
             let titleBarHeight: CGFloat = 60
+            let p = event.locationInWindow
+            let frame = window.frame
 
-            if mouseLocation.y > window.frame.maxY - titleBarHeight &&
-               mouseLocation.x >= window.frame.minX && mouseLocation.x <= window.frame.maxX {
+            if p.y > frame.height - titleBarHeight && p.x >= 0 && p.x <= frame.width {
                 MainActor.assumeIsolated {
                     AppDelegate.toggleWindowZoom(preferred: window)
                 }
@@ -577,7 +582,9 @@ struct TypstEditApp: App {
                 .environmentObject(themeManager)
                 .background(VisualEffectView().ignoresSafeArea())
                 .background(WindowAccessor { window in
-                    let isMainWindow = window.identifier?.rawValue == "main"
+                    // Current macOS assigns "main-AppWindow-N" to
+                    // WindowGroup(id: "main") windows, older ones "main".
+                    let isMainWindow = window.identifier?.rawValue.hasPrefix("main") == true
                     if isMainWindow, window.delegate !== appDelegate {
                         window.delegate = appDelegate
                         if let screen = window.screen {
@@ -586,7 +593,7 @@ struct TypstEditApp: App {
                         }
                     }
                     if isMainWindow {
-                        appDelegate.setupTitleBarDoubleClick(for: window)
+                        appDelegate.setupTitleBarDoubleClick()
                     }
                 })
                 .background(WindowOpenerInstaller())
