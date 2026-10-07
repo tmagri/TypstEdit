@@ -409,20 +409,14 @@ class EditorController: NSObject, ObservableObject {
         TextView.appPasteHandler = { [weak self] textView in
             MainActor.assumeIsolated {
                 guard let self = self else { return false }
-                if textView === self.textViewController?.textView {
-                    return self.performPaste(into: textView, mode: .smart)
-                }
-                // Stale/racing text view: plain single-insert directly into this view.
-                // Never fall through to the library default's per-selection insertion.
-                var range = textView.selectedRange()
-                if range.location == NSNotFound {
-                    range = NSRange(location: (textView.string as NSString).length, length: 0)
-                }
-                guard let string = NSPasteboard.general.string(forType: .string) else { return false }
-                textView.replaceCharacters(in: range, with: string)
-                textView.selectionManager.setSelectedRange(
-                    NSRange(location: range.location + (string as NSString).length, length: 0))
-                return true
+                // Always funnel through the single deduped paste implementation, targeting the
+                // view that actually received the `paste:` action (the first responder). That is
+                // the view the user is looking at, even during a file-switch race where
+                // `self.textViewController` briefly points at a stale controller. The previous
+                // `===` check routed the stale case to an unguarded plain insert that could
+                // double-paste alongside the monitor/menu routes. `performPaste`'s shared
+                // changeCount dedup guarantees at most one insertion no matter how many routes fire.
+                return self.performPaste(into: textView, mode: .smart)
             }
         }
     }
@@ -1084,6 +1078,25 @@ class EditorController: NSObject, ObservableObject {
     // genuine key repeat.
     private var lastPaste: (changeCount: Int, time: CFAbsoluteTime, event: NSEvent?)?
 
+    /// Returns `true` if this paste invocation is a racing duplicate of a recent paste and
+    /// should be dropped. A single physical Cmd+V can fire across the local keyDown monitor,
+    /// the SwiftUI menu shortcut, the responder-chain `paste:`, and the model-only fallback.
+    /// Sharing this state across every insertion route guarantees at most one insertion.
+    /// Genuine key repeats (a held Cmd+V) are allowed through.
+    private func shouldDropDuplicatePaste() -> Bool {
+        let currentEvent = NSApp.currentEvent
+        let changeCount = NSPasteboard.general.changeCount
+        let now = CFAbsoluteTimeGetCurrent()
+        if let last = lastPaste,
+           last.changeCount == changeCount,
+           now - last.time < 0.5 {
+            let isNewRepeatEvent = currentEvent != nil && currentEvent !== last.event && currentEvent?.isARepeat == true
+            return !isNewRepeatEvent
+        }
+        lastPaste = (changeCount, now, currentEvent)
+        return false
+    }
+
     /// Which Markdown→Typst conversion policy a paste applies.
     enum PasteConversionMode {
         /// Convert unless the clipboard already looks like Typst (default, Cmd+V).
@@ -1139,18 +1152,9 @@ class EditorController: NSObject, ObservableObject {
             // The window is generous because in large documents the duplicate route can be
             // delayed well past 250ms by main-thread work (tree-sitter highlighting, preview
             // relayout) — which is exactly when the "pastes twice" symptom resurfaced.
-            let currentEvent = NSApp.currentEvent
-            let changeCount = pasteboard.changeCount
-            let now = CFAbsoluteTimeGetCurrent()
-            if let last = lastPaste,
-               last.changeCount == changeCount,
-               now - last.time < 0.5 {
-                let isNewRepeatEvent = currentEvent != nil && currentEvent !== last.event && currentEvent?.isARepeat == true
-                if !isNewRepeatEvent {
-                    return true
-                }
+            if shouldDropDuplicatePaste() {
+                return true
             }
-            lastPaste = (changeCount, now, currentEvent)
 
             // Route through the text view's own replaceCharacters so the CEUndoManager
             // correctly records the mutation and undo works. Using insertText/setText for
@@ -1161,7 +1165,12 @@ class EditorController: NSObject, ObservableObject {
             textView.replaceCharacters(in: range, with: textToInsert)
             // Keep the model in sync; textViewDidChangeText will also do this but we set
             // it early so any code that reads sourceCode afterwards sees the correct value.
-            sourceCode = textView.string
+            // Only sync when pasting into the controller's current view — during a file-switch
+            // race `textView` may be a different (transient) view, and copying its text into
+            // `sourceCode` would clobber the active document's model.
+            if textView === self.textViewController?.textView {
+                sourceCode = textView.string
+            }
 
             // Collapse any extra cursors (e.g. a leftover column selection) to a single
             // caret after the inserted text. Without this, surviving cursors would make
@@ -1194,6 +1203,7 @@ class EditorController: NSObject, ObservableObject {
                 showStatus("Nothing to paste")
                 return
             }
+            if shouldDropDuplicatePaste() { return }
             insertText(applyPasteConversion(text, mode: mode), replacementRange: selectedRange)
         } else {
             switch mode {
