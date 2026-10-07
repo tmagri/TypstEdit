@@ -4070,7 +4070,12 @@ class EditorController: NSObject, ObservableObject {
         copyItem.target = self
         copyItem.isEnabled = selectedRange.length > 0
         baseMenu.addItem(copyItem)
-        
+
+        let copyMarkdownItem = NSMenuItem(title: "Copy as Markdown", action: #selector(contextMenuCopyAsMarkdown(_:)), keyEquivalent: "")
+        copyMarkdownItem.target = self
+        copyMarkdownItem.isEnabled = selectedRange.length > 0 && (isTypstFile || isMarkdownFile)
+        baseMenu.addItem(copyMarkdownItem)
+
         let pasteItem = NSMenuItem(title: "Paste", action: #selector(contextMenuPaste(_:)), keyEquivalent: "")
         pasteItem.target = self
         pasteItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
@@ -4188,7 +4193,12 @@ class EditorController: NSObject, ObservableObject {
     @objc func contextMenuCopy(_ sender: NSMenuItem) {
         copySelection()
     }
-    
+
+    @objc func contextMenuCopyAsMarkdown(_ sender: NSMenuItem) {
+        copyAsMarkdown()
+    }
+
+
     @objc func contextMenuPaste(_ sender: NSMenuItem) {
         pasteSelection()
     }
