@@ -38,6 +38,10 @@ struct ContentView: View {
     @State private var currentLoadID: UUID = UUID()
     @State private var isInternalSelectionChange: Bool = false
     @State private var showRecoveryAlert: Bool = false
+    /// The NSWindow hosting this ContentView. Used to ensure only the key
+    /// window reacts to broadcast `.menuCommand` notifications (see
+    /// `shouldHandleMenuCommand`).
+    @State private var hostingWindow: NSWindow?
     @State private var recoveryContentToRestore: String?
     @EnvironmentObject var themeManager: ThemeManager
 
@@ -66,6 +70,7 @@ struct ContentView: View {
                     .cornerRadius(12)
                     .shadow(color: themeManager.shadowColor, radius: themeManager.shadowRadius, x: 0, y: 5)
                     .padding(.vertical, 12)
+                    .background(WindowAccessor { window in self.hostingWindow = window })
                 )
             )
         )
@@ -79,6 +84,7 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in editorController.toggleLink() }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertTable"))) { _ in editorController.insertTableSnippet() }
             .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
+                guard shouldHandleMenuCommand() else { return }
                 if let command = notification.object as? String { handleMenuCommand(command) }
             }
             .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
@@ -1414,6 +1420,18 @@ struct ContentView: View {
             let anchorRect = NSRect(x: contentView.bounds.midX, y: contentView.bounds.midY, width: 1, height: 1)
             picker.show(relativeTo: anchorRect, of: contentView, preferredEdge: .minY)
         }
+    }
+
+    /// Menu commands are window/document-specific, but the `.menuCommand`
+    /// notification is broadcast to every open window's `ContentView`. Without
+    /// this guard, each window would react — presenting a save panel per window
+    /// (the "export dialog appears twice" bug) or applying edits to the wrong
+    /// document. Only the key window (the one the user is interacting with)
+    /// should act.
+    private func shouldHandleMenuCommand() -> Bool {
+        guard let hostingWindow else { return true }
+        guard let keyWindow = NSApp.keyWindow else { return true }
+        return hostingWindow === keyWindow
     }
 
     @MainActor
