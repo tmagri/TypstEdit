@@ -1236,13 +1236,16 @@ class EditorController: NSObject, ObservableObject {
         return (applyPasteConversion(text, mode: mode), false)
     }
 
-    /// Converts clipboard HTML into the syntax of the current document: `.typ`
-    /// files get Markdown rendered to native Typst, while `.md`/`.note` files
-    /// receive the Markdown verbatim (the note/compiler renders it).
+    /// Converts clipboard HTML into the syntax of the current document.
+    ///
+    /// HTML is always normalized to Markdown first, then rendered to native Typst
+    /// for `.typ` and `.note` documents. Notes use the *hybrid* sanitizer (the same
+    /// one the compiler and force-convert paste use) so Typst constructs survive,
+    /// while `.md` files receive the Markdown verbatim.
     private func convertHTMLToCurrentFileType(_ html: String) -> String {
         let markdown = HTMLToMarkdownConverter.convert(html)
-        guard currentFileType == .typst, !isNoteFile else { return markdown }
-        return AICompletionService.shared.sanitizeMarkdownToTypst(markdown)
+        guard currentFileType == .typst else { return markdown }
+        return AICompletionService.shared.sanitizeMarkdownToTypst(markdown, isHybrid: isNoteFile)
     }
 
     /// Applies the paste's conversion mode to clipboard text. Only converts while

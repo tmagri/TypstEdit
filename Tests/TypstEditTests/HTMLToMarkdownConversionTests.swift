@@ -177,3 +177,38 @@ final class HTMLToMarkdownConversionTests: XCTestCase {
         XCTAssertFalse(HTMLToMarkdownConverter.looksLikeHTML(""))
     }
 }
+
+/// Verifies the full paste pipeline used for `.typ` and `.note` documents:
+/// HTML → Markdown → Typst. `.typ` uses the pure sanitizer, `.note` the hybrid one.
+@MainActor
+final class HTMLToTypstPipelineTests: XCTestCase {
+
+    private func pipeline(_ html: String, isHybrid: Bool) -> String {
+        let markdown = HTMLToMarkdownConverter.convert(html)
+        return AICompletionService.shared.sanitizeMarkdownToTypst(markdown, isHybrid: isHybrid)
+    }
+
+    func testHeadingsAndEmphasisConvertToTypst() {
+        let typst = pipeline("<h1>Title</h1><p>Hello <strong>world</strong> and <em>you</em>.</p>", isHybrid: false)
+        XCTAssertTrue(typst.contains("= Title"), typst)
+        XCTAssertTrue(typst.contains("*world*"), typst)
+        XCTAssertTrue(typst.contains("_you_"), typst)
+    }
+
+    func testListsConvertToTypst() {
+        let typst = pipeline("<ul><li>One</li><li>Two</li></ul>", isHybrid: false)
+        XCTAssertTrue(typst.contains("- One"), typst)
+        XCTAssertTrue(typst.contains("- Two"), typst)
+    }
+
+    func testLinkConvertsToTypstLink() {
+        let typst = pipeline(#"<p>See <a href="https://example.com">Example</a></p>"#, isHybrid: false)
+        XCTAssertTrue(typst.contains("#link(\"https://example.com\")"), typst)
+    }
+
+    func testNoteHybridPipelineProducesTypst() {
+        let typst = pipeline("<h2>Notes</h2><ul><li>One</li></ul>", isHybrid: true)
+        XCTAssertTrue(typst.contains("== Notes"), typst)
+        XCTAssertTrue(typst.contains("- One"), typst)
+    }
+}
