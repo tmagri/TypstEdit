@@ -1123,11 +1123,11 @@ class EditorController: NSObject, ObservableObject {
     func performPaste(into textView: TextView, mode: PasteConversionMode) -> Bool {
         let pasteboard = NSPasteboard.general
 
-        // 1. Prefer text data (with optional Markdown→Typst conversion).
-        if let items = pasteboard.pasteboardItems?.first,
-           let text = items.string(forType: .string) {
+        // 1. Prefer text data (with optional HTML/Markdown→Typst conversion).
+        if let content = readPasteboardContent(pasteboard, mode: mode) {
+            let textToInsert = content.text
 
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if textToInsert.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 showStatus("Nothing to paste")
                 return true
             }
@@ -1137,12 +1137,6 @@ class EditorController: NSObject, ObservableObject {
             if range.location == NSNotFound {
                 range = NSRange(location: (textView.string as NSString).length, length: 0)
             }
-
-            // Perform conversion synchronously on the main thread.
-            // Doing this async previously caused the captured `selectedRange` to become
-            // stale by the time the main-thread callback fired, inserting at the wrong
-            // position. The conversion is regex-based and fast enough to run inline.
-            let textToInsert = applyPasteConversion(text, mode: mode)
 
             // Drop racing duplicate invocations of the same physical paste. A single physical
             // Cmd+V can fire across the local keyDown monitor, the SwiftUI menu shortcut, and
@@ -1178,6 +1172,9 @@ class EditorController: NSObject, ObservableObject {
             textView.selectionManager.setSelectedRange(
                 NSRange(location: range.location + (textToInsert as NSString).length, length: 0))
             textView.scrollSelectionToVisible()
+            if content.wasHTML {
+                showStatus(currentFileType == .typst ? "Pasted HTML as Typst" : "Pasted HTML as Markdown")
+            }
             return true
         }
 
@@ -1198,13 +1195,13 @@ class EditorController: NSObject, ObservableObject {
     /// Model-only paste used when no live text view exists (e.g. unit tests).
     private func pasteViaModel(mode: PasteConversionMode) {
         let pasteboard = NSPasteboard.general
-        if let text = pasteboard.string(forType: .string) {
-            if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if let content = readPasteboardContent(pasteboard, mode: mode) {
+            if content.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 showStatus("Nothing to paste")
                 return
             }
             if shouldDropDuplicatePaste() { return }
-            insertText(applyPasteConversion(text, mode: mode), replacementRange: selectedRange)
+            insertText(content.text, replacementRange: selectedRange)
         } else {
             switch mode {
             case .plain: _ = pasteImageAsOCR(from: pasteboard, forceConvert: false)
@@ -1212,6 +1209,40 @@ class EditorController: NSObject, ObservableObject {
             case .smart: _ = pasteImageAsFile(from: pasteboard)
             }
         }
+    }
+
+    /// Reads the clipboard and returns the text to insert together with whether it
+    /// came from a rich HTML flavor.
+    ///
+    /// Rich sources (web pages, Word, Google Docs) publish a `public.html` flavor
+    /// alongside the plain-text fallback. Preferring the HTML flavor preserves
+    /// structure — headings, lists, links, tables — that the plain-text flavor
+    /// flattens away. Plain-text paste (`mode == .plain`) deliberately ignores HTML
+    /// so "Paste as Plain Text" still yields the literal text.
+    private func readPasteboardContent(
+        _ pasteboard: NSPasteboard,
+        mode: PasteConversionMode
+    ) -> (text: String, wasHTML: Bool)? {
+        if mode != .plain,
+           let html = pasteboard.string(forType: .html),
+           HTMLToMarkdownConverter.looksLikeHTML(html) {
+            let converted = convertHTMLToCurrentFileType(html)
+            if !converted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return (converted, true)
+            }
+        }
+
+        guard let text = pasteboard.string(forType: .string) else { return nil }
+        return (applyPasteConversion(text, mode: mode), false)
+    }
+
+    /// Converts clipboard HTML into the syntax of the current document: `.typ`
+    /// files get Markdown rendered to native Typst, while `.md`/`.note` files
+    /// receive the Markdown verbatim (the note/compiler renders it).
+    private func convertHTMLToCurrentFileType(_ html: String) -> String {
+        let markdown = HTMLToMarkdownConverter.convert(html)
+        guard currentFileType == .typst, !isNoteFile else { return markdown }
+        return AICompletionService.shared.sanitizeMarkdownToTypst(markdown)
     }
 
     /// Applies the paste's conversion mode to clipboard text. Only converts while
