@@ -976,8 +976,20 @@ class EditorController: NSObject, ObservableObject {
     
     // --- Undo/Redo Functions ---
     
+    /// Forwards `action` up the native responder chain and reports `true` ("I'm
+    /// done, don't do your own thing") only when some *other* real responder —
+    /// e.g. a native dialog's text field (Insert Link, rename, find panel) —
+    /// genuinely has keyboard focus right now. If our own editor simply isn't
+    /// wired up yet (`textViewController == nil`, e.g. immediately after
+    /// creating/opening a file, before the SwiftUI coordinator finishes
+    /// attaching it) there is no other responder to hand this off to — forwarding
+    /// anyway would call `NSApp.sendAction` on a selector nothing implements,
+    /// silently discarding the action instead of letting the caller fall through
+    /// to its own `pasteViaModel`/model-based fallback. That was the root cause
+    /// of "Paste as Plain Text does nothing" right after creating a new note.
     private func forwardActionIfNotFirstResponder(_ action: Selector) -> Bool {
-        let isEditorFocused = textViewController != nil && NSApp.keyWindow?.firstResponder == textViewController?.textView
+        guard let tvc = textViewController else { return false }
+        let isEditorFocused = NSApp.keyWindow?.firstResponder == tvc.textView
         if !isEditorFocused {
             NSApp.sendAction(action, to: nil, from: nil)
             return true
