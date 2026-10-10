@@ -9,13 +9,23 @@ enum CompilerRegex {
     static let black = try! NSRegularExpression(pattern: "(:\\s*\\b)(black|rgb\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)|rgb\\(\"#000000\"\\))(\\b|\\))", options: [.caseInsensitive])
     static let diagnosticLocation = try! NSRegularExpression(pattern: ":\\d+:\\d+")
     static let markdownConverterFunc = try! NSRegularExpression(pattern: #"^#([A-Za-z][A-Za-z0-9_]*)[\[(]"#)
-    static let mathBlock = try! NSRegularExpression(pattern: "\\$\\$?([^\\$]+)\\$\\$?")
+    // Inline/block math for the dangling-operator fixer. The trailing lookahead
+    // keeps two register tokens (`$3DF8/$3E50`, `$DC10/$DC4F`) from being read as
+    // one math block (which would inject `""` into the hex literal).
+    static let mathBlock = try! NSRegularExpression(pattern: "\\$\\$?([^\\$]+)\\$\\$?(?![A-Za-z0-9])")
     static let trailSupSub = try! NSRegularExpression(pattern: "([\\^_])\\s*$")
     static let trailOp = try! NSRegularExpression(pattern: "([+\\-*\\/=<>]|\\\\times|\\\\cdot)\\s*$")
     static let loneCaret = try! NSRegularExpression(pattern: "(?<![\\\\\\$])\\^\\s*$")
     static let bareHash = try! NSRegularExpression(pattern: "(?<!\\\\)#\\s*$")
     static let codeSpan = try! NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)")
-    static let mathRegion = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
+    // The inline `$…$` branch requires the closing `$` to not be glued to an
+    // alphanumeric. Otherwise two register-style `$` tokens separated by a
+    // non-space punctuation (e.g. `$DC10–$DC4F`, `$3DF8/$3E50`, `$FE00–$FE9F`)
+    // are mis-paired into a single math region, so neither `$` is escaped and
+    // Typst tries to parse the hex token as a math expression (compile error).
+    // A genuine inline math region (`$E = mc^2$`, `$B=p(1+i)^{t}$`) ends at a
+    // whitespace/punctuation/EOF boundary, so the lookahead does not affect it.
+    static let mathRegion = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$(?![A-Za-z0-9])|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
     static let operatorRe = try! NSRegularExpression(pattern: "(?<!\\\\)[@#$<>]")
     static let webImage = try! NSRegularExpression(pattern: #"#image\(\s*"([^"]*)""#)
     static let relativeImport = try! NSRegularExpression(pattern: #"(\b(?:import|include)\s+")([^/@.][^"]*)(")"#)
@@ -1000,18 +1010,30 @@ class TypstCompiler: ObservableObject {
                 }
             }
 
-            // If odd number of $, close the math — unless the dollars read as
-            // currency amounts (e.g. `$4017 … $4015`, all followed by a digit and
-            // no math operators anywhere). Closing those would pair two currency
-            // dollars into a bogus math region that swallows the rest of the line;
-            // the delimiting pass escapes them as literal text instead.
+            // If odd number of $, close the math — unless every `$` on the line is
+            // a literal token: a register/address (`$FF4F`, `$DC10`, `$3DF8`) or a
+            // currency amount (`$5`, with no math operators on the line). Closing
+            // those would pair two literal dollars into a bogus math region that
+            // swallows the rest of the line; the delimiting pass escapes them as
+            // literal text instead. Register tokens start with a hex letter
+            // (`$FF4F`), so decimal-only detection is not enough; and the single
+            // hex char of a math variable (`$B=…`) must NOT read as a register.
             if dollarIndices.count % 2 != 0 {
-                let isCurrency = !dollarIndices.isEmpty && dollarIndices.allSatisfy { idx in
-                    idx + 1 < nsMasked.length && (0x30...0x39).contains(nsMasked.character(at: idx + 1))
-                }
+                // `_` only counts as a math operator when it is not part of an
+                // identifier (`TASK_FADE_MIRROR`); otherwise a filename vetoes the
+                // literal-token heuristic for lines full of `$XX` hex tokens.
+                let hasMathSubscript = maskedLine.range(
+                    of: "(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])", options: .regularExpression
+                ) != nil
                 let hasMathOperators = maskedLine.contains("=") || maskedLine.contains("^")
-                    || maskedLine.contains("_") || maskedLine.contains("\\")
-                if !(isCurrency && !hasMathOperators) {
+                    || maskedLine.contains("\\") || hasMathSubscript
+                let allLiteral = dollarIndices.allSatisfy { idx in
+                    Self.isRegisterDollarToken(nsMasked, at: idx)
+                        || (idx + 1 < nsMasked.length
+                            && Self.isHexDigit(nsMasked.character(at: idx + 1))
+                            && !hasMathOperators)
+                }
+                if !allLiteral {
                     line.append("$")
                 }
             }
@@ -1076,6 +1098,29 @@ class TypstCompiler: ObservableObject {
         }
         
         return lines.joined(separator: "\n")
+    }
+
+    /// True for ASCII hex digits (`0-9`, `A-F`, `a-f`), used to recognize
+    /// register-style `$XX` tokens (`$4017`, `$FF4F`, `$DC10`) as literal text
+    /// rather than the start of a math region.
+    nonisolated static func isHexDigit(_ c: unichar) -> Bool {
+        (0x30...0x39).contains(c) || (0x41...0x46).contains(c) || (0x61...0x66).contains(c)
+    }
+
+    /// True when the `$` at `idx` begins a register/address literal: at least
+    /// two hex digits followed by a non-alphanumeric boundary (`$FF4F`, `$DC10`,
+    /// `$3DF8/`, `$00,`). The two-digit minimum keeps a math variable (`$B=…`,
+    /// `$E = mc^2$`) from being mistaken for a register.
+    nonisolated static func isRegisterDollarToken(_ s: NSString, at idx: Int) -> Bool {
+        guard idx >= 0, idx < s.length, s.character(at: idx) == 0x24 else { return false }
+        var k = idx + 1
+        var run = 0
+        while k < s.length, isHexDigit(s.character(at: k)) { run += 1; k += 1 }
+        guard run >= 2 else { return false }
+        guard k < s.length else { return true }
+        let next = s.character(at: k)
+        let isAlnum = (0x30...0x39).contains(next) || (0x41...0x5A).contains(next) || (0x61...0x7A).contains(next)
+        return !isAlnum
     }
 
     /// Ranges of inline code spans (`` `…` ``) in a single line, using the same
@@ -1254,7 +1299,13 @@ class TypstCompiler: ObservableObject {
         }
 
         // 4. Enumerate every unescaped operator and classify it against its context.
-        var improper: [(loc: Int, op: Character)] = []
+        // `silent` marks an operator that is escaped so it renders literally but
+        // must not raise an advisory warning: ordinary prose punctuation (`<`,
+        // `>`, `@`, and register/address `$`). The escape is transparent (the
+        // user sees the same characters), so warning about it is noise for
+        // technical notes. `#` and currency `$` stay noisy because they are more
+        // likely to be intended Typst.
+        var improper: [(loc: Int, op: Character, silent: Bool)] = []
         for m in CompilerRegex.operatorRe.matches(in: maskedString, options: [], range: NSRange(0..<length)) {
             let loc = m.range.location
             guard loc < length else { continue }
@@ -1277,7 +1328,13 @@ class TypstCompiler: ObservableObject {
                 improperNow = false
             }
             if improperNow, let scalar = UnicodeScalar(u) {
-                improper.append((loc, Character(scalar)))
+                let silent: Bool
+                switch u {
+                case 0x24: silent = Self.isRegisterDollarToken(maskedString as NSString, at: loc)
+                case 0x3C, 0x3E, 0x40: silent = true
+                default: silent = false
+                }
+                improper.append((loc, Character(scalar), silent))
             }
         }
         guard !improper.isEmpty else { return (source, []) }
@@ -1285,7 +1342,7 @@ class TypstCompiler: ObservableObject {
         // 5. Group delimitations per source line → one warning per line.
         var byLine: [Int: [Character]] = [:]
         var lineOrder: [Int] = []
-        for (loc, op) in improper {
+        for (loc, op, silent) in improper where !silent {
             let ln = lineOf[loc]
             if byLine[ln] == nil { lineOrder.append(ln) }
             var arr = byLine[ln] ?? []
@@ -1302,7 +1359,7 @@ class TypstCompiler: ObservableObject {
         // 6. Apply the backslash escapes to the original source (right-to-left so
         //    earlier insert locations aren't shifted by later ones).
         let mutable = NSMutableString(string: source)
-        for (loc, _) in improper.sorted(by: { $0.loc > $1.loc }) {
+        for (loc, _, _) in improper.sorted(by: { $0.loc > $1.loc }) {
             mutable.insert("\\", at: loc)
         }
         return ((mutable as String), warnings)

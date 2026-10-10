@@ -45,6 +45,20 @@ final class NoteSyntaxAutoFixTests: XCTestCase {
         XCTAssertEqual(output, "Interest rate is high \\^")
     }
 
+    func testAutoFixDoesNotCloseRegisterTokenNextToEqualsInProse() {
+        // `$DFEF` is a register/address token; the prose `SP = $DFEF` contains a
+        // `=`, which used to trigger a bogus closing `$` that swallowed the rest
+        // of the line as a math region.
+        let input = "the stack (SP = $DFEF region) is never at risk"
+        XCTAssertEqual(TypstCompiler.autoFixBrokenNoteSyntax(input), input)
+    }
+
+    func testAutoFixDoesNotCloseRegisterTokenList() {
+        // An odd number of register tokens must not be "closed" into math.
+        let input = "preserved labels ($3DF8/$3E50/$3EC3) untouched"
+        XCTAssertEqual(TypstCompiler.autoFixBrokenNoteSyntax(input), input)
+    }
+
     func testPreservesValidNoteSyntax() {
         let input = """
         = Note Title

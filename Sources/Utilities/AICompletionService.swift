@@ -26,8 +26,11 @@ enum AICompletionRegex {
     // Pre-parse extraction
     // Fenced + inline code: a backtick run, content, and the same run back.
     static let codeBlock = try! NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)")
-    // Math: $$…$$, $…$, \[…\] or \(…\). The (?<!\\) guards skip escaped dollars.
-    static let mathBlock = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
+    // Math: $$…$$, $…$, \[…\] or \(…\). The (?<!\\) guards skip escaped dollars,
+    // and the closing `$` must not be glued to an alphanumeric so two
+    // register-style tokens (`$DC10–$DC4F`, `$3DF8/$3E50`, `$FE00–$FE9F`) are
+    // not mis-paired into one math region and run through the LaTeX converter.
+    static let mathBlock = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$(?![A-Za-z0-9])|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
     // Backslash-escaped ASCII punctuation (the CommonMark escape set). Restored
     // verbatim so user- or delimitImproperOperators-written escapes like \$ or
     // \# keep exactly the meaning they had under the old string pipeline.

@@ -66,7 +66,7 @@ final class DelimitImproperOperatorsTests: XCTestCase {
         let (output, warnings) = delimit(source)
         XCTAssertTrue(output.contains("jane\\@example.com"), "prose @ still escaped: \(output)")
         XCTAssertFalse(output.contains("https://example.com\\@"), "string target untouched")
-        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings.isEmpty, "prose @ is escaped silently: \(warnings.map(\.message))")
     }
 
     func testProseQuotesKeepEscapingWithoutHash() {
@@ -74,7 +74,7 @@ final class DelimitImproperOperatorsTests: XCTestCase {
         let source = "Email \"the team\" at jane@example.com today"
         let (output, warnings) = delimit(source)
         XCTAssertTrue(output.contains("jane\\@example.com"), "prose @ still escaped: \(output)")
-        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings.isEmpty, "prose @ is escaped silently: \(warnings.map(\.message))")
     }
 
     func testPreservesOperatorsInsideCodeSpans() {
@@ -94,20 +94,20 @@ final class DelimitImproperOperatorsTests: XCTestCase {
         XCTAssertEqual(delimit(source).output, source)
     }
 
-    // MARK: - Improper operators get delimited + warned
+    // MARK: - Improper operators get delimited (silently) + warned
 
-    func testEscapesBareAtSign() {
+    func testEscapesBareAtSignSilently() {
+        // A bare `@` is escaped so it renders literally, but prose punctuation is
+        // not worth an advisory warning.
         let result = delimit("Price @ the store")
         XCTAssertTrue(result.output.contains("\\@"))
-        XCTAssertEqual(result.warnings.count, 1)
-        XCTAssertEqual(result.warnings[0].severity, .warning)
-        XCTAssertEqual(result.warnings[0].line, 1)
+        XCTAssertTrue(result.warnings.isEmpty, "got: \(result.warnings.map(\.message))")
     }
 
-    func testEscapesEmailAtSign() {
+    func testEscapesEmailAtSignSilently() {
         let result = delimit("Contact user@email.com")
         XCTAssertTrue(result.output.contains("user\\@email.com"))
-        XCTAssertEqual(result.warnings.count, 1)
+        XCTAssertTrue(result.warnings.isEmpty, "got: \(result.warnings.map(\.message))")
     }
 
     func testEscapesStrayHash() {
@@ -122,16 +122,44 @@ final class DelimitImproperOperatorsTests: XCTestCase {
         XCTAssertEqual(result.warnings.count, 1)
     }
 
-    func testEscapesComparisonAngles() {
+    // MARK: - Register-style `$` tokens (assembly / technical notes)
+
+    func testEscapesRegisterTokenPairWithoutWarning() {
+        // `$DC10–$DC4F` is two register/address tokens, not one math region. Both
+        // must be escaped so they render literally, and neither should warn.
+        let source = "at $DC10–$DC4F here"
+        let (output, warnings) = delimit(source)
+        XCTAssertEqual(output, "at \\$DC10–\\$DC4F here")
+        XCTAssertTrue(warnings.isEmpty, "got: \(warnings.map(\.message))")
+    }
+
+    func testEscapesSlashSeparatedRegisterListWithoutWarning() {
+        let source = "labels ($3DF8/$3E50/$3E54) untouched"
+        let (output, warnings) = delimit(source)
+        XCTAssertEqual(output, "labels (\\$3DF8/\\$3E50/\\$3E54) untouched")
+        XCTAssertTrue(warnings.isEmpty, "got: \(warnings.map(\.message))")
+    }
+
+    func testStillWarnsForSingleDigitAmount() {
+        // `$5` is a currency amount, not a register token: it is escaped and the
+        // warning is kept so the user knows the dollar was auto-delimited.
+        let result = delimit("It costs $5 total")
+        XCTAssertTrue(result.output.contains("\\$5"))
+        XCTAssertEqual(result.warnings.count, 1)
+    }
+
+    func testEscapesComparisonAnglesSilently() {
+        // `<`/`>` as comparison operators are ordinary prose: escape them so they
+        // render literally, but do not warn.
         let result = delimit("If 5 < 3 then 3 > 5")
         XCTAssertTrue(result.output.contains("\\"), "Expected an escape")
-        XCTAssertEqual(result.warnings.count, 1, "One warning per line")
+        XCTAssertTrue(result.warnings.isEmpty, "got: \(result.warnings.map(\.message))")
     }
 
     // MARK: - Line numbers + grouping
 
     func testWarningLineNumbersAreOneBasedAndAccurate() {
-        let source = "line one\nline two # bad\nline three @ bad"
+        let source = "line one\nline two # bad\nline three # bad"
         let result = delimit(source)
         let lines = result.warnings.map(\.line).sorted()
         XCTAssertEqual(lines, [2, 3])
