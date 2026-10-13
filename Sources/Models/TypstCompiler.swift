@@ -192,6 +192,7 @@ class TypstCompiler: ObservableObject {
     private var currentFileExtension: String = ""
     private var fallbackAttempts: [Int: Int] = [:]
     private var pendingFallbackRawLines: [Int] = []   // shadow-file error lines awaiting a fallback fix
+    private var pendingFallbackRewrite: Bool = false    // true while a fallback rewrite is in-flight and another compile cycle is expected
 
     // Watch-output stream state. `typst watch` diagnostics can be split across
     // arbitrary pipe chunks, so output is buffered until a complete line arrives,
@@ -499,6 +500,7 @@ class TypstCompiler: ObservableObject {
         if line.contains("compiling ...") {
             isCompiling = true
             compilationStatus = "Compiling..."
+            pendingFallbackRewrite = false
             return
         }
 
@@ -525,6 +527,13 @@ class TypstCompiler: ObservableObject {
             // this marker, so start the batch from a clean slate.
             isCompiling = false
             compilationStatus = "Compilation Error"
+            // Only publish the error list if no fallback rewrite is pending
+            // (i.e. the compilation is truly settled). When a fallback fix just
+            // modified the shadow file, another compile cycle is expected and
+            // showing transient errors would cause the panel to flash.
+            if !pendingFallbackRewrite {
+                publishIssues()
+            }
             typstErrors = []
             typstWarnings = []
             pendingDiagnosticLine = nil
@@ -611,18 +620,30 @@ class TypstCompiler: ObservableObject {
                 typstErrors.append(error)
             }
         }
-        publishIssues()
+        // Errors are accumulated here but NOT published yet — they will be
+        // published in bulk once the compile cycle completes (at "compiled
+        // successfully" or "compiled with errors") to avoid the error panel
+        // flickering with transient diagnostics.
     }
 
     /// Runs the lenient fallback fixer for any diagnostics that completed since the
     /// last flush. For `.note` / `.md` files this rewrites the offending shadow-file
     /// lines so the document compiles and the preview is preserved.
+    ///
+    /// Sets `pendingFallbackRewrite` so the error panel defers display until the
+    /// resulting recompile finishes.
     private func flushPendingFallbackFix() {
         let rawLines = pendingFallbackRawLines
         pendingFallbackRawLines = []
         guard !rawLines.isEmpty else { return }
         guard currentFileExtension == "note" || currentFileExtension == "md" else { return }
         attemptFallbackFix(rawErrorLines: rawLines)
+        // If the fallback modified the shadow file, typst watch will recompile.
+        // Mark that we're mid-fix so the error panel doesn't flash transient errors.
+        if currentShadowSourceURL != nil,
+           fallbackAttempts.values.contains(where: { $0 > 0 }) {
+            pendingFallbackRewrite = true
+        }
     }
 
     /// Maps a shadow-file line number to the line in the user's editor buffer. The

@@ -3966,7 +3966,6 @@ class EditorController: NSObject, ObservableObject {
         ```
         
         Please provide a corrected version of this line or block to fix the error.
-        Explain briefly what was wrong.
         """
         
         // Open AI Prompt Editor with this prompt pre-filled
