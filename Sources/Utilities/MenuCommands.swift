@@ -6,7 +6,7 @@ struct AppMenuCommands: Commands {
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
     @ObservedObject private var recentFilesManager = RecentFilesManager.shared
-    @AppStorage("aiEnabled") private var aiEnabled = false
+    @AppStorage("aiAssistantEnabled") private var aiEnabled = false
     
     @Environment(\.openWindow) private var openWindow
     

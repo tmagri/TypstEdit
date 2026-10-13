@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ToolbarView: View {
     @ObservedObject var controller: EditorController
-    @AppStorage("aiEnabled") private var aiEnabled = false
+    @AppStorage("aiAssistantEnabled") private var aiEnabled = false
     @State private var showColorPopover = false
     @State private var customColor: Color = .blue
 

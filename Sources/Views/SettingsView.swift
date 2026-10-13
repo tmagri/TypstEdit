@@ -327,7 +327,7 @@ struct AISettingsView: View {
             description: "Control how inline completions and syntax intellisense behave while editing."
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Enable AI Completion", isOn: $settings.isEnabled)
+                Toggle("Enable AI Completion", isOn: $settings.completionEnabled)
                     .font(.body.weight(.medium))
 
                 Toggle("Auto-suggest As You Type", isOn: $settings.isContinuousCompletionEnabled)
@@ -497,7 +497,7 @@ struct AISettingsView: View {
             description: "Configure the engine used for the AI Prompt panel, text refinement, and document generation."
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Enable AI Assistant Features", isOn: $settings.isEnabled)
+                Toggle("Enable AI Assistant Features", isOn: $settings.assistantEnabled)
                     .font(.body.weight(.medium))
 
                 Toggle("Force Code Output", isOn: $settings.forceCodeOutput)

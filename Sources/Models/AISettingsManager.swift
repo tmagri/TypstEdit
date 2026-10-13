@@ -89,7 +89,11 @@ typealias AIProvider = ModelSource
 class AISettingsManager: ObservableObject {
     static let shared = AISettingsManager()
 
-    @AppStorage("aiEnabled") var isEnabled: Bool = false
+    @AppStorage("aiCompletionEnabled") var completionEnabled: Bool = false
+    @AppStorage("aiAssistantEnabled") var assistantEnabled: Bool = false
+
+    /// Convenience: true when at least one AI feature is active.
+    var isEnabled: Bool { completionEnabled || assistantEnabled }
     @AppStorage("intellisenseEnabled") var intellisenseEnabled: Bool = true
 
     // MARK: - Per-Task Source Assignment

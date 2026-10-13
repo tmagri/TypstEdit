@@ -4158,7 +4158,7 @@ class EditorController: NSObject, ObservableObject {
         
         // AI Refine / Grammar — only when the user has selected text and AI
         // features are enabled in settings.
-        if selectedRange.length > 0, AISettingsManager.shared.isEnabled {
+        if selectedRange.length > 0, AISettingsManager.shared.assistantEnabled {
             baseMenu.addItem(NSMenuItem.separator())
 
             let refineItem = NSMenuItem(title: "✨ Refine Writing", action: #selector(contextMenuRefineWriting(_:)), keyEquivalent: "")
@@ -4221,7 +4221,7 @@ class EditorController: NSObject, ObservableObject {
                 }
                 
                 // AI Fix — only when AI features are enabled in settings.
-                if AISettingsManager.shared.isEnabled {
+                if AISettingsManager.shared.assistantEnabled {
                     let item = NSMenuItem(title: "✨ Fix with AI", action: #selector(fixErrorWithAI(_:)), keyEquivalent: "")
                     item.target = self
                     item.representedObject = error

@@ -37,7 +37,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
         
         let settings = AISettingsManager.shared
         // If continuous completion is enabled, trigger on any letter
-        if (settings.isEnabled || settings.intellisenseEnabled) && settings.isContinuousCompletionEnabled {
+        if (settings.completionEnabled || settings.intellisenseEnabled) && settings.isContinuousCompletionEnabled {
             let alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
             triggers.formUnion(alphabet.map { String($0) })
         }
@@ -51,7 +51,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
         cursorPosition: CursorPosition
     ) async -> (windowPosition: CursorPosition, items: [any CodeSuggestionEntry])? {
         let settings = AISettingsManager.shared
-        guard settings.isEnabled || settings.intellisenseEnabled else { return nil }
+        guard settings.completionEnabled || settings.intellisenseEnabled else { return nil }
 
         let pos = cursorPosition.start.line != -1 ? cursorPosition : (textView.cursorPositions.first ?? cursorPosition)
         let text = textView.text
@@ -79,7 +79,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
         }
         
         // 2. AI Completion (Async in background, never blocking the editor)
-        if settings.isEnabled {
+        if settings.completionEnabled {
             // Cancel any in-flight AI task immediately when new keystroke arrives
             debounceTask?.cancel()
             debounceTask = nil
@@ -177,7 +177,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
         cursorPosition: CursorPosition
     ) -> [any CodeSuggestionEntry]? {
         let settings = AISettingsManager.shared
-        guard settings.isEnabled || settings.intellisenseEnabled else { return nil }
+        guard settings.completionEnabled || settings.intellisenseEnabled else { return nil }
 
         let text = textView.text
         let index = cursorIndex(from: cursorPosition.start, in: text)
