@@ -4,7 +4,17 @@ set -e
 APP_NAME="TypstEdit"
 
 CONFIG=${1:-release}
-ARCH="arm64"
+ARCH=${2:-arm64}
+
+case "$ARCH" in
+    arm64|x86_64) ;;
+    *)
+        echo "Usage: $0 [debug|release] [arm64|x86_64]"
+        exit 1
+        ;;
+esac
+
+SCRATCH_PATH=".build/arch-build/$ARCH"
 
 if [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
@@ -32,41 +42,12 @@ if [ -z "$DEVELOPER_DIR" ]; then
         fi
     fi
 fi
-swift build -c "$CONFIG" --arch "$ARCH"
+swift build --scratch-path "$SCRATCH_PATH" -c "$CONFIG" --arch "$ARCH"
 
-# Find the executable specifically in the requested configuration folder.
-# SwiftPM's output location depends on the build system in use: the classic
-# llbuild layout is .build/$ARCH-apple-macosx/$CONFIG/, while the newer
-# swift-build layout writes .build/out/Products/{Debug,Release}/. Prefer the
-# NEWEST candidate so a stale binary left behind by the other layout can
-# never get packaged (this once shipped an old app that was missing freshly
-# added features even though `swift build` had compiled them).
-case "$CONFIG" in
-    release) EXEC_CONFIG="Release" ;;
-    debug)   EXEC_CONFIG="Debug" ;;
-    *)       EXEC_CONFIG="$CONFIG" ;;
-esac
-
-CANDIDATES=(
-    ".build/out/Products/$EXEC_CONFIG/$APP_NAME"
-    ".build/out/$ARCH-apple-macosx/$CONFIG/$APP_NAME"
-    ".build/$ARCH-apple-macosx/$CONFIG/$APP_NAME"
-)
-
-EXECUTABLE=""
-EXEC_TIME=0
-for candidate in "${CANDIDATES[@]}"; do
-    if [ -f "$candidate" ]; then
-        mtime=$(stat -f "%m" "$candidate")
-        if [ "$mtime" -gt "$EXEC_TIME" ]; then
-            EXEC_TIME="$mtime"
-            EXECUTABLE="$candidate"
-        fi
-    fi
-done
-
-if [ -z "$EXECUTABLE" ]; then
-    echo "Error: Executable $APP_NAME not found for configuration $CONFIG (searched: ${CANDIDATES[*]})"
+BIN_DIR=$(swift build --show-bin-path --scratch-path "$SCRATCH_PATH" -c "$CONFIG" --arch "$ARCH")
+EXECUTABLE="$BIN_DIR/$APP_NAME"
+if [ ! -f "$EXECUTABLE" ]; then
+    echo "Error: Executable $APP_NAME not found at $EXECUTABLE"
     exit 1
 fi
 
@@ -83,39 +64,49 @@ cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 # Strip debug symbols from the binary to reduce size
 strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Copy all SPM resource bundles — check both layout locations (new swift-build out dir and classic llbuild dir)
+# Copy all SwiftPM resource bundles from this architecture's build.
 echo "Copying resources bundle..."
-BUNDLE_FOUND=0
-for BUNDLE_DIR in ".build/out/Products/$EXEC_CONFIG" ".build/out/$ARCH-apple-macosx/$CONFIG" ".build/$ARCH-apple-macosx/$CONFIG"; do
-    if [ -d "$BUNDLE_DIR" ]; then
-        find "$BUNDLE_DIR" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
-            echo "  Copying: $(basename "$bundle")"
-            cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
-            BUNDLE_FOUND=1
-        done
-        # If we found bundles in this location, don't keep searching to avoid duplicates
-        if [ "$BUNDLE_FOUND" -eq 1 ] || [ -n "$(find "$BUNDLE_DIR" -maxdepth 1 -type d -name "*.bundle" 2>/dev/null)" ]; then
-            break
-        fi
-    fi
-done
+find "$BIN_DIR" -maxdepth 1 -type d -name "*.bundle" -exec cp -R {} "$APP_BUNDLE/Contents/Resources/" \;
 
 # Copy vector.framework into Contents/MacOS/ so @loader_path rpath finds it at launch
 echo "Copying vector.framework..."
-VECTOR_XCFW=".build/artifacts/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64"
-if [ -d "$VECTOR_XCFW/vector.framework" ]; then
-    cp -r "$VECTOR_XCFW/vector.framework" "$APP_BUNDLE/Contents/MacOS/"
-    echo "  Copied: vector.framework"
-elif [ -d ".build/arm64-apple-macosx/$CONFIG/vector.framework" ]; then
-    cp -r ".build/arm64-apple-macosx/$CONFIG/vector.framework" "$APP_BUNDLE/Contents/MacOS/"
-    echo "  Copied: vector.framework (from build)"
+VECTOR_FRAMEWORK=""
+for VECTOR_ROOT in "$SCRATCH_PATH/artifacts" ".build/artifacts"; do
+    CANDIDATE="$VECTOR_ROOT/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64/vector.framework"
+    if [ -d "$CANDIDATE" ]; then
+        VECTOR_FRAMEWORK="$CANDIDATE"
+        break
+    fi
+done
+
+if [ -z "$VECTOR_FRAMEWORK" ]; then
+    echo "Error: vector.framework not found in this architecture's SwiftPM artifacts."
+    exit 1
 fi
+
+cp -R "$VECTOR_FRAMEWORK" "$APP_BUNDLE/Contents/MacOS/"
+VECTOR_BINARY="$APP_BUNDLE/Contents/MacOS/vector.framework/Versions/A/vector"
+if [ ! -f "$VECTOR_BINARY" ] || ! lipo -verify_arch "$ARCH" "$VECTOR_BINARY" >/dev/null 2>&1; then
+    echo "Error: vector.framework does not contain the required $ARCH architecture."
+    exit 1
+fi
+
+VECTOR_ARCHS=$(lipo -archs "$VECTOR_BINARY")
+if [ "$VECTOR_ARCHS" != "$ARCH" ]; then
+    lipo "$VECTOR_BINARY" -thin "$ARCH" -output "$VECTOR_BINARY.thin"
+    mv "$VECTOR_BINARY.thin" "$VECTOR_BINARY"
+fi
+echo "  Copied and thinned vector.framework to $ARCH."
 
 # Copy Typst executable into the bundle
 echo "Bundling Typst executable..."
 mkdir -p "$APP_BUNDLE/Contents/Resources/bin"
-if [ -f "typst-aarch64-apple-darwin/typst" ]; then
-    cp "typst-aarch64-apple-darwin/typst" "$APP_BUNDLE/Contents/Resources/bin/typst"
+case "$ARCH" in
+    arm64) TYPST_BINARY="typst-aarch64-apple-darwin/typst" ;;
+    x86_64) TYPST_BINARY="typst-x86_64-apple-darwin/typst" ;;
+esac
+if [ -f "$TYPST_BINARY" ]; then
+    cp "$TYPST_BINARY" "$APP_BUNDLE/Contents/Resources/bin/typst"
     chmod +x "$APP_BUNDLE/Contents/Resources/bin/typst"
     echo "✓ Typst executable bundled"
 else

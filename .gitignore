@@ -6,8 +6,8 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
-TypstEdit_Installer.dmg
-TypstEdit.app
+*.dmg
+*.app
 temp.dmg
 dmg_contents/Applications
 repomix-output.xml

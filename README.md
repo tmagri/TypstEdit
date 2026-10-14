@@ -43,7 +43,7 @@
 * **🚀 Project Templates:** Start quickly with built-in templates for **Articles, Reports, Presentations, and Resumes**.
 * **📁 Project Sidebar:** Easily navigate through your project files.
 * **📥 LyX Import:** Convert LyX documents to Typst format with automatic font, page size, and heading detection.
-* **📤 Export Options:** Export to PDF, PNG, or SVG formats.
+* **📤 Export Options:** Export to PDF, PNG, SVG, or Markdown formats.
 * **💾 Project Backup:** One-click project backup functionality.
 
 ### Smart Snippets & Insertion
@@ -90,7 +90,9 @@ If you want to contribute or build the app yourself:
     ```
 
 2.  **Ensure the Typst binary is present:**
-    The app requires the `typst` binary. Place the appropriate binary for your architecture in `TypstEdit/typst-aarch64-apple-darwin/typst` (or allow the script to handle it if configured).
+    The app requires the `typst` binary. Place the matching binary in
+    `typst-aarch64-apple-darwin/typst` for ARM64 or
+    `typst-x86_64-apple-darwin/typst` for Intel.
 
 3.  **Bundle and Build:**
     Use the included script to compile and create the bundle:
@@ -103,8 +105,32 @@ If you want to contribute or build the app yourself:
     To generate the `.dmg` file:
     ```bash
     chmod +x create_dmg.sh
-    ./create_dmg.sh
+    ./create_dmg.sh arm64
     ```
+    Use `./create_dmg.sh x86_64` to build the separate Intel installer.
+
+### Build separate architecture binaries
+
+In VS Code, run **swift: build all (arm64 + Intel x86_64)** to build two separate
+release binaries. The task builds ARM64 and Intel sequentially; it does not
+combine them into a universal binary. You can also run either architecture task
+individually:
+
+* **swift: build (arm64)**
+* **swift: build (Intel x86_64)**
+
+The binaries are written to
+`.build/arch-build/arm64/out/Products/Release/TypstEdit` and
+`.build/arch-build/x86_64/out/Products/Release/TypstEdit`, respectively.
+
+### Publish separate installers
+
+Use **publish: installer (arm64)** and **publish: installer (Intel x86_64)**
+to create the separate `TypstEdit_AppleSilicon.dmg` and `TypstEdit_Intel.dmg`
+installers. **publish: installers (arm64 + Intel x86_64)** runs both in
+sequence. Each DMG contains an architecture-specific app and framework; no
+universal binary is created.
+
 ### ⚠️ "App is damaged" Error
 
 Since this app is open-source and not signed with a paid Apple Developer ID, macOS Gatekeeper might show a message saying **"TypstEdit is damaged and can't be opened"** on the first launch.

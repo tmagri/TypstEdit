@@ -2,6 +2,48 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "swift: build (arm64)",
+            "type": "shell",
+            "command": "swift build --scratch-path .build/arch-build/arm64 -c release --arch arm64",
+            "options": {
+                "env": {
+                    "DISABLE_SWIFTLINT": "1"
+                }
+            },
+            "group": "build",
+            "problemMatcher": "$swiftc",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "swift: build (Intel x86_64)",
+            "type": "shell",
+            "command": "swift build --scratch-path .build/arch-build/x86_64 -c release --arch x86_64",
+            "options": {
+                "env": {
+                    "DISABLE_SWIFTLINT": "1"
+                }
+            },
+            "group": "build",
+            "problemMatcher": "$swiftc",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "swift: build all (arm64 + Intel x86_64)",
+            "dependsOn": [
+                "swift: build (arm64)",
+                "swift: build (Intel x86_64)"
+            ],
+            "dependsOrder": "sequence",
+            "group": "build",
+            "problemMatcher": "$swiftc"
+        },
+        {
             "label": "swift: build",
             "type": "shell",
             "command": "swift build",
@@ -45,7 +87,7 @@
         },
         {
             "label": "publish: installer (arm64)",
-            "detail": "Default — arm64-only release DMG",
+            "detail": "Apple Silicon — arm64-only release DMG",
             "type": "shell",
             "command": "./create_dmg.sh arm64",
             "presentation": {
@@ -55,14 +97,23 @@
             "problemMatcher": "$swiftc"
         },
         {
-            "label": "publish: installer (universal)",
-            "detail": "Universal (arm64 + x86_64) release DMG",
+            "label": "publish: installer (Intel x86_64)",
+            "detail": "Intel — x86_64-only release DMG",
             "type": "shell",
-            "command": "./create_dmg.sh universal",
+            "command": "./create_dmg.sh x86_64",
             "presentation": {
                 "reveal": "always",
                 "panel": "shared"
             },
+            "problemMatcher": "$swiftc"
+        },
+        {
+            "label": "publish: installers (arm64 + Intel x86_64)",
+            "dependsOn": [
+                "publish: installer (arm64)",
+                "publish: installer (Intel x86_64)"
+            ],
+            "dependsOrder": "sequence",
             "problemMatcher": "$swiftc"
         }
     ]
