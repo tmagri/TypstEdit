@@ -33,6 +33,7 @@ let package = Package(
             resources: [
                 .process("Resources/EquationEditor.html"),
                 .process("Resources/AppIcon.png"),
+                //.process("Resources/AppIconDark.png"),
                 .process("Resources/Vendor")
             ]
         ),

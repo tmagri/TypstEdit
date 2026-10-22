@@ -2,12 +2,106 @@ import SwiftUI
 
 struct AIPromptView: View {
     @ObservedObject var controller: EditorController
+    @ObservedObject private var skillsManager = SkillsManager.shared
+    @ObservedObject private var mcpManager = MCPManager.shared
     @State private var promptText: String = ""
     @State private var generatedResult: String = ""
     @State private var errorMessage: String? = nil
     @State private var isEditorFocused: Bool = false
     @AppStorage("aiPromptForceTypst") private var forceTypstConversion: Bool = false
     @FocusState private var editorFocus: Bool
+    
+    private func skillBinding(_ skill: AISkill) -> Binding<Bool> {
+        Binding(
+            get: { controller.selectedSkillIDs.contains(skill.id) },
+            set: { isOn in
+                if isOn { controller.selectedSkillIDs.insert(skill.id) }
+                else { controller.selectedSkillIDs.remove(skill.id) }
+            }
+        )
+    }
+
+    private func serverBinding(_ server: ScopedMCPServer) -> Binding<Bool> {
+        Binding(
+            get: { controller.selectedMCPServerIDs.contains(server.id) },
+            set: { isOn in
+                if isOn { controller.selectedMCPServerIDs.insert(server.id) }
+                else { controller.selectedMCPServerIDs.remove(server.id) }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var skillsAndToolsMenus: some View {
+        HStack(spacing: 10) {
+            Menu {
+                if skillsManager.allSkills.isEmpty {
+                    Text("No skills configured. Add some in Settings → AI Assistant → Skills.")
+                } else {
+                    ForEach(skillsManager.allSkills) { skill in
+                        Toggle(isOn: skillBinding(skill)) {
+                            Text("\(skill.name)  ·  \(skill.scope.label)")
+                        }
+                        .help(skill.description)
+                    }
+                }
+            } label: {
+                Label(controller.selectedSkillIDs.isEmpty ? "Skills" : "Skills (\(controller.selectedSkillIDs.count))", systemImage: "sparkles.square.filled.on.square")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Menu {
+                let servers = mcpManager.allServers.filter { $0.config.isConfigured }
+                if servers.isEmpty {
+                    Text("No MCP servers configured. Add some in Settings → AI Assistant → MCP Servers.")
+                } else {
+                    ForEach(servers) { server in
+                        Toggle(isOn: serverBinding(server)) {
+                            Text("\(server.config.name)  ·  \(server.scope.label)")
+                        }
+                        .disabled(!server.config.enabled)
+                        .help(server.config.enabled ? "" : "Disabled in Settings")
+                    }
+                }
+            } label: {
+                Label(controller.selectedMCPServerIDs.isEmpty ? "Tools" : "Tools (\(controller.selectedMCPServerIDs.count))", systemImage: "wrench.and.screwdriver")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Spacer()
+        }
+        .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private var toolActivityLog: some View {
+        if !controller.aiToolActivityLog.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Tool Activity")
+                    .font(.caption.bold())
+                    .foregroundColor(.secondary)
+                ForEach(Array(controller.aiToolActivityLog.enumerated()), id: \.offset) { _, entry in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "wrench.and.screwdriver.fill")
+                            .font(.caption2)
+                            .foregroundColor(.accentColor)
+                        Text(entry)
+                            .font(.caption2.monospaced())
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.08))
+            .cornerRadius(8)
+        }
+    }
     
     var body: some View {
         VStack(spacing: 20) {
@@ -53,7 +147,11 @@ struct AIPromptView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .help("Converts the generated markdown or plain text into Typst before insertion.")
+
+                skillsAndToolsMenus
             }
+
+            toolActivityLog
             
             if !generatedResult.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {

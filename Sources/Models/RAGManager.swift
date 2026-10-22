@@ -109,7 +109,7 @@ class RAGManager: ObservableObject {
             return true
         }
 
-        return specialDir != "backups" && specialDir != "temp" && specialDir != "vectorcaches"
+        return specialDir != "backups" && specialDir != "temp" && specialDir != "vectorcaches" && specialDir != ProjectSettingsManager.dotFolderName
     }
     
     // MARK: - Path Configuration
@@ -496,8 +496,10 @@ class RAGManager: ObservableObject {
             let filename = fileURL.lastPathComponent
             let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             
-            // Exclude the vector cache, temp build, and rotating backups directories
-            if isDirectory && (filename == "vectorcaches" || filename == "temp" || filename == "backups") {
+            // Exclude the vector cache, temp build, rotating backups, and
+            // TypstEdit project-config (.typstedit/ — skills, mcp.json, etc.)
+            // directories from indexing.
+            if isDirectory && (filename == "vectorcaches" || filename == "temp" || filename == "backups" || filename == ProjectSettingsManager.dotFolderName) {
                 enumerator.skipDescendants()
                 continue
             }

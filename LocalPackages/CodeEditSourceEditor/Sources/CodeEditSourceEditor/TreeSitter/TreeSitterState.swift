@@ -225,13 +225,18 @@ public final class TreeSitterState {
 
         var updatedRanges = IndexSet()
 
-        for (languageName, ranges) in languageRanges {
+        for (languageName, namedRanges) in languageRanges {
             guard let treeSitterLanguage = TreeSitterLanguage(rawValue: languageName) else {
                 continue
             }
 
             if treeSitterLanguage == primaryLayer.id {
                 continue
+            }
+
+            var ranges = namedRanges.map { $0.range }
+            if layer.id == .note && treeSitterLanguage == .typst {
+                ranges = noteTypstRanges(paragraphs: ranges, rootNode: rootNode, readCallback: readCallback)
             }
 
             for range in ranges {
@@ -241,7 +246,7 @@ public final class TreeSitterState {
                     tsLanguage: nil,
                     parser: Parser(),
                     supportsInjections: false,
-                    ranges: [range.range]
+                    ranges: [range]
                 )
 
                 if layerSet.contains(layer) {
@@ -250,18 +255,36 @@ public final class TreeSitterState {
                 } else {
                     // New range, make a new layer!
                     if let addedLayer = addLanguageLayer(layerId: treeSitterLanguage, readBlock: readBlock) {
-                        addedLayer.ranges = [range.range]
+                        addedLayer.ranges = [range]
                         addedLayer.parser.includedRanges = addedLayer.ranges.map { $0.tsRange }
                         addedLayer.tree = addedLayer.parser.parse(tree: nil as Tree?, readBlock: readBlock)
 
                         layerSet.insert(addedLayer)
-                        updatedRanges.insert(range: range.range)
+                        updatedRanges.insert(range: range)
                     }
                 }
             }
         }
 
         return updatedRanges
+    }
+
+    /// Widens the `.note` Typst overlay's per-paragraph ranges so each Typst
+    /// code region (a `#` opener plus every line until its brackets close) is
+    /// one injected range. Without this, a blank line inside e.g.
+    /// `#show x: it => { … }` splits the code into independently parsed
+    /// paragraphs and Markdown indented-code blocks. See ``NoteTypstRegions``.
+    private func noteTypstRanges(
+        paragraphs: [NSRange],
+        rootNode: Node,
+        readCallback: SwiftTreeSitter.Predicate.TextProvider
+    ) -> [NSRange] {
+        let documentRange = NSRange(location: 0, length: rootNode.range.upperBound)
+        guard documentRange.length > 0,
+              let text = readCallback(documentRange, rootNode.pointRange) else {
+            return paragraphs
+        }
+        return NoteTypstRegions.merge(paragraphs: paragraphs, regions: NoteTypstRegions.regions(in: text))
     }
 
     /// Returns all injected languages from a given cursor. The cursor must be new,

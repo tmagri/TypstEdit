@@ -131,6 +131,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // (see applicationWillFinishLaunching above).
             installOpenDocumentsHandler()
             flushPendingExternalOpens()
+            // macOS does not promptly purge NSTemporaryDirectory() itself, so
+            // TypstEdit prunes its own stale OS-temp mirrors (used when a
+            // project opts out of in-project temp/vectorcache storage) here.
+            AppTempDirectoryManager.pruneStale()
             Self.debugLog("didFinishLaunching done")
         }
     }
@@ -505,6 +509,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
                 }
             }
+            // MCP servers are local subprocesses spawned on demand — never
+            // leave one running after the app itself has quit.
+            MCPManager.shared.stopAll()
             return .terminateNow
         }
     }

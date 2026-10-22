@@ -158,9 +158,22 @@ class EditorController: NSObject, ObservableObject {
     
     // --- AI Prompt Editor State ---
     @Published var showAIPromptEditor: Bool = false
+    @Published var showProjectSettings: Bool = false
     @Published var aiPromptText: String = ""
     @Published var isAIGenerating: Bool = false
     @Published var useMCPForPrompt: Bool = true
+
+    // --- AI Skills & MCP Tool Selection (AI Prompt) ---
+    /// Skill ids (see `AISkill.id`, "scope:folderName") enabled for the next
+    /// AI Prompt generation. Populated from the project's default
+    /// `enabledSkillIDs` when the prompt editor opens, user-adjustable per request.
+    @Published var selectedSkillIDs: Set<String> = []
+    /// MCP server ids (see `ScopedMCPServer.id`) enabled for the next AI
+    /// Prompt generation — the model may call any tool these servers expose.
+    @Published var selectedMCPServerIDs: Set<String> = []
+    /// Human-readable trace of tool calls made during the current/last
+    /// generation, shown in the AI Prompt panel's "Tool Activity" log.
+    @Published var aiToolActivityLog: [String] = []
     
     // --- AI Refine / Grammar State ---
     @Published var showAIRefinePreview: Bool = false
@@ -512,9 +525,47 @@ class EditorController: NSObject, ObservableObject {
     @Published var currentFileURL: URL? {
         didSet {
             updateFileType()
+            guard currentFileURL != oldValue else { return }
+            AIChatManager.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
         }
     }
-    @Published var projectRootURL: URL?
+    @Published var projectRootURL: URL? {
+        didSet {
+            guard projectRootURL != oldValue else { return }
+            SkillsManager.shared.setProjectRoot(projectRootURL)
+            MCPManager.shared.setProjectRoot(projectRootURL)
+            projectSettings = projectRootURL.map { ProjectSettingsManager(projectRoot: $0) }
+            AIChatManager.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
+        }
+    }
+    /// Project-scoped settings (temp/vectorcache storage overrides, default
+    /// enabled skills/MCP servers) for the active project. `nil` in
+    /// standalone-file mode.
+    @Published var projectSettings: ProjectSettingsManager?
+
+    /// What the left-hand panel (where the file browser normally lives)
+    /// currently shows. AI Chat shares that real estate with the file list
+    /// instead of taking its own column, keeping the editor and preview
+    /// full-width. Switched via the in-panel segmented control, the status
+    /// bar icon, or Editor → AI Chat.
+    enum SidebarContent {
+        case files
+        case aiChat
+    }
+    @Published var sidebarContent: SidebarContent = .files
+
+    /// Reveals AI Chat in the left panel (showing the sidebar if it was
+    /// hidden), or switches back to the file browser if chat is already
+    /// showing. No-ops entirely unless chat is enabled in Settings.
+    func toggleAIChatPanel() {
+        guard AISettingsManager.shared.chatEnabled else { return }
+        if isSidebarVisible && sidebarContent == .aiChat {
+            sidebarContent = .files
+        } else {
+            isSidebarVisible = true
+            sidebarContent = .aiChat
+        }
+    }
     @Published var shouldCopyImages: Bool = true
     
     // --- Image Editor State ---
@@ -3885,6 +3936,12 @@ class EditorController: NSObject, ObservableObject {
     
     func openAIPromptEditor() {
         self.aiPromptText = ""
+        self.aiToolActivityLog = []
+        // Seed from this project's defaults (falls back to nothing selected
+        // in standalone mode, or when the project has never set defaults).
+        let defaults = projectSettings?.config
+        self.selectedSkillIDs = Set(defaults?.enabledSkillIDs ?? [])
+        self.selectedMCPServerIDs = Set(defaults?.enabledMCPServerIDs ?? [])
         self.showAIPromptEditor = true
     }
 
@@ -3913,10 +3970,15 @@ class EditorController: NSObject, ObservableObject {
             )
             finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)"
         }
+
+        // Fold in any skills the user enabled for this request: their full
+        // body (not just the description) becomes part of the system prompt,
+        // same spirit as Agent Skills — cheap to list, only loaded when used.
+        let activeSkills = SkillsManager.shared.allSkills.filter { selectedSkillIDs.contains($0.id) }
         
         let isMd = self.isMarkdownFile
         
-        let systemPrompt = isMd ? """
+        var systemPrompt = isMd ? """
         You are an expert Markdown editor and general writing assistant.
         Generate the requested content or code based on the user's prompt. 
         If the user asks for prose, annotations, or text, write the text. If they ask for code, write the code.
@@ -3927,12 +3989,47 @@ class EditorController: NSObject, ObservableObject {
         If the user asks for prose, annotations, or text, write the text. If they ask for code, write the code.
         IMPORTANT: Output ONLY the raw content to be inserted into the document. Do not include conversational filler like "Here is the text:" and do not wrap the response in markdown code blocks unless explicitly requested.
         """
-        
-        let result = try await AICompletionService.shared.fetchCompletion(
-            prompt: finalPrompt,
-            systemPrompt: systemPrompt,
-            maxTokens: AISettingsManager.shared.maxTokens
-        )
+
+        if !activeSkills.isEmpty {
+            systemPrompt += "\n\n" + activeSkills.map { "SKILL: \($0.name)\n\($0.body)" }.joined(separator: "\n\n---\n\n")
+        }
+
+        // MCP tools: start every selected server and gather its tools. If
+        // none are selected (the common case), this is a no-op and the
+        // request goes through the plain, pre-existing chat path unchanged.
+        let scopedServers = MCPManager.shared.allServers.filter { selectedMCPServerIDs.contains($0.id) }
+        let tools = await MCPManager.shared.availableTools(for: scopedServers)
+
+        self.aiToolActivityLog = []
+
+        let result: String
+        if tools.isEmpty {
+            result = try await AICompletionService.shared.fetchCompletion(
+                prompt: finalPrompt,
+                systemPrompt: systemPrompt,
+                maxTokens: AISettingsManager.shared.maxTokens
+            )
+        } else {
+            result = try await AICompletionService.shared.fetchCompletionWithTools(
+                prompt: finalPrompt,
+                systemPrompt: systemPrompt,
+                maxTokens: AISettingsManager.shared.maxTokens,
+                tools: tools,
+                onToolCall: { [weak self] qualifiedName, argumentsJSON in
+                    self?.aiToolActivityLog.append("Called \(qualifiedName.replacingOccurrences(of: "__", with: " → ")) with \(argumentsJSON)")
+                },
+                executeTool: { qualifiedName, argumentsJSON in
+                    guard let separatorRange = qualifiedName.range(of: "__") else {
+                        throw MCPError.toolNotFound(qualifiedName)
+                    }
+                    let serverName = String(qualifiedName[..<separatorRange.lowerBound])
+                    let toolName = String(qualifiedName[separatorRange.upperBound...])
+                    let argumentsData = Data(argumentsJSON.utf8)
+                    let arguments = (try? JSONSerialization.jsonObject(with: argumentsData)) as? [String: Any] ?? [:]
+                    return try await MCPManager.shared.callTool(serverName: serverName, toolName: toolName, arguments: arguments)
+                }
+            )
+        }
         
         if !isMd || forceTypstConversion {
             return AICompletionService.shared.sanitizeMarkdownToTypst(result)

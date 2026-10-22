@@ -310,9 +310,7 @@ struct ContentView: View {
                         showLeft: editorController.isSidebarVisible,
                         initialLeftWidth: 180
                     ) {
-                        SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
-                            .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
-                            .onAppear { editorController.projectRootURL = fileSystem.currentFolder }
+                        sidebarPanel
                     } right: {
                         Group {
                             if selectedFile != nil || fileSystem.isNewUnsavedFile {
@@ -337,6 +335,43 @@ struct ContentView: View {
         }
     }
     
+    /// The left panel swaps between the file browser and AI Chat — rather
+    /// than giving chat its own column — to keep the real estate focused on
+    /// the editor and preview. The segmented toggle only appears once chat
+    /// is enabled in Settings; otherwise this is just the file browser, as
+    /// before.
+    private var sidebarPanel: some View {
+        VStack(spacing: 0) {
+            if aiSettings.chatEnabled {
+                Picker("", selection: $editorController.sidebarContent) {
+                    Text("📄 Files").tag(EditorController.SidebarContent.files)
+                    Text("💬 AI Chat").tag(EditorController.SidebarContent.aiChat)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
+            }
+
+            switch editorController.sidebarContent {
+            case .files:
+                SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+            case .aiChat:
+                if aiSettings.chatEnabled {
+                    AIChatView(controller: editorController)
+                } else {
+                    SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+                }
+            }
+        }
+        .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
+        .onAppear { editorController.projectRootURL = fileSystem.currentFolder }
+        .onChange(of: aiSettings.chatEnabled) { enabled in
+            if !enabled { editorController.sidebarContent = .files }
+        }
+    }
+
     private var editorPreviewArea: some View {
         VStack(spacing: 0) {
             ZStack {
@@ -447,6 +482,18 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Split Horizontally")
+
+                        if aiSettings.chatEnabled {
+                            Button(action: {
+                                withAnimation { editorController.toggleAIChatPanel() }
+                            }) {
+                                Image(systemName: "bubble.left.and.text.bubble.right")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? .accentColor : themeManager.textColor.opacity(0.7))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Toggle AI Chat")
+                        }
                     }
                     
                     Divider().frame(height: 12).padding(.horizontal, 4)
@@ -815,6 +862,7 @@ struct ContentView: View {
                 }
                 .sheet(isPresented: $editorController.showSymbolPicker) { SymbolPickerView(controller: editorController) }
                 .sheet(isPresented: $editorController.showAIPromptEditor) { AIPromptView(controller: editorController).environmentObject(themeManager) }
+                .sheet(isPresented: $editorController.showProjectSettings) { ProjectSettingsView(controller: editorController) }
                 .sheet(isPresented: $editorController.showAIRefinePreview) { AIRefinePreviewView(controller: editorController).environmentObject(themeManager) }
                 .sheet(isPresented: $editorController.showQuoteEditor) {
                     QuoteEditorView(controller: editorController, onInsert: { t, a, b in editorController.insertQuote(text: t, attribution: a, isBlock: b) }, onCancel: { editorController.showQuoteEditor = false })
@@ -1502,6 +1550,7 @@ struct ContentView: View {
         case "openBlockEditor": editorController.openBlockEditor()
         case "openGridEditor": editorController.openGridEditor()
         case "aiPrompt": editorController.openAIPromptEditor()
+        case "openProjectSettings": editorController.showProjectSettings = true
         case "openFoundationEditor": editorController.openFoundationEditor()
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()

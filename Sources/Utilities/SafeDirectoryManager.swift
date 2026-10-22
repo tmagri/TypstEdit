@@ -4,7 +4,7 @@ import Foundation
 /// This utility ensures that if a file is already located in one of these special directories,
 /// we never create a nested subfolder of the same type within it.
 enum SafeDirectoryManager {
-    private static let specialDirs = ["backups", "temp", "vectorcaches"]
+    private static let specialDirs = ["backups", "temp", "vectorcaches", ".typstedit"]
     
     /// Checks if a given URL path contains any of the special directory names.
     /// - Parameter url: The URL to check
@@ -55,23 +55,31 @@ enum SafeDirectoryManager {
     
     /// Safely resolves a temp directory, preventing nested temp directories.
     /// If the project is already in a temp directory, returns that directory.
-    /// Otherwise, returns the project root with "temp" appended.
+    /// Otherwise, returns either `<project>/temp` or, when the project (or the
+    /// global default) opts out of in-project storage, a per-project mirror
+    /// under the OS temp directory — see `AppTempDirectoryManager`.
     /// - Parameter projectRoot: The project root URL
     /// - Returns: Safe temp directory URL
+    @MainActor
     static func safeTempDirectory(in projectRoot: URL) -> URL {
         if let specialDir = containsSpecialDirectory(projectRoot), specialDir == "temp" {
             // Project is already in a temp directory, return it as-is
             return projectRoot
         }
-        // Normal case: create temp directory in project root
-        return projectRoot.appendingPathComponent("temp")
+        if ProjectSettingsManager.effectiveStoreTempInProject(for: projectRoot) {
+            return projectRoot.appendingPathComponent("temp")
+        }
+        return AppTempDirectoryManager.ensureDirectory(for: projectRoot, kind: .compilerScratch)
     }
     
     /// Safely resolves a vectorcaches directory, preventing nested vectorcaches directories.
     /// If the project is already in a vectorcaches directory, returns that directory.
-    /// Otherwise, returns the project root with "vectorcaches" appended.
+    /// Otherwise, returns either `<project>/vectorcaches` or, when the project (or the
+    /// global default) opts out of in-project storage, a per-project mirror
+    /// under the OS temp directory — see `AppTempDirectoryManager`.
     /// - Parameter projectRoot: The project root URL
     /// - Returns: Safe vectorcaches directory URL
+    @MainActor
     static func safeVectorcachesDirectory(in projectRoot: URL) -> URL? {
         guard projectRoot.pathComponents.count > 0 else { return nil }
         
@@ -79,8 +87,10 @@ enum SafeDirectoryManager {
             // Project is already in a vectorcaches directory, return it as-is
             return projectRoot
         }
-        // Normal case: create vectorcaches directory in project root
-        return projectRoot.appendingPathComponent("vectorcaches", isDirectory: true)
+        if ProjectSettingsManager.effectiveStoreVectorCacheInProject(for: projectRoot) {
+            return projectRoot.appendingPathComponent("vectorcaches", isDirectory: true)
+        }
+        return AppTempDirectoryManager.ensureDirectory(for: projectRoot, kind: .vectorCache)
     }
     
     /// Creates a directory safely, ensuring no nested special directories are created.

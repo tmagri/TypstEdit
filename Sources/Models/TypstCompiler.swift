@@ -229,18 +229,23 @@ class TypstCompiler: ObservableObject {
         TypstCompiler.cleanUpTempDirectory(in: projectRoot)
     }
 
-    /// Removes the `temp/` directory inside the given project root, silently.
+    /// Removes the resolved temp directory for the given project root,
+    /// silently — whether that's `<project>/temp` or, when the project opts
+    /// out of in-project storage, its OS-temp mirror (see
+    /// `AppTempDirectoryManager`).
     static func cleanUpTempDirectory(in projectRoot: URL) {
-        let tempDir = projectRoot.appendingPathComponent("temp")
-        cleanUpTempDirectory(tempDir)
-    }
-
-    private static func cleanUpTempDirectory(_ tempDir: URL) {
-        // Skip cleanup if project is already in a temp directory (to avoid deleting the entire project)
-        if SafeDirectoryManager.containsSpecialDirectory(tempDir) == "temp" {
-            print("[TypstCompiler] Skipping cleanup of temp directory (project is in temp): \(tempDir.path)")
+        // Skip cleanup only when the project root itself IS a "temp" directory
+        // (e.g. the user opened a literal temp/ folder as their project root)
+        // — never delete the project's own folder outright.
+        if SafeDirectoryManager.containsSpecialDirectory(projectRoot) == "temp" {
+            print("[TypstCompiler] Skipping cleanup: project root is itself a temp directory: \(projectRoot.path)")
             return
         }
+        let tempDir = SafeDirectoryManager.safeTempDirectory(in: projectRoot)
+        cleanUpTempDirectory(tempDir)
+    }
+    
+    private static func cleanUpTempDirectory(_ tempDir: URL) {
         guard FileManager.default.fileExists(atPath: tempDir.path) else { return }
         do {
             try FileManager.default.removeItem(at: tempDir)

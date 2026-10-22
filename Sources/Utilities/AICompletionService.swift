@@ -106,6 +106,42 @@ enum AIRequestPurpose {
     }
 }
 
+// MARK: - Agentic Tool Calling Types
+
+/// One tool call the model asked to execute, in a provider-neutral shape.
+struct AIToolCallRequest {
+    let id: String
+    /// The tool's `qualifiedName` (`server__tool`), as sent to the provider.
+    let name: String
+    let argumentsJSON: String
+}
+
+/// The result of executing one tool call, fed back to the model.
+struct AIToolResult {
+    let callID: String
+    let name: String
+    let output: String
+}
+
+/// A provider-neutral chat message used internally by the tool-calling loop
+/// in `AICompletionService`. Converted to each provider's wire format
+/// immediately before sending (OpenAI-compatible vs. Anthropic shapes differ
+/// enough — system role, tool role vs. tool_result blocks — that a single
+/// shared JSON shape isn't worth forcing).
+enum AIChatMessage {
+    case system(String)
+    case user(String)
+    case assistantText(String)
+    case assistantToolCalls([AIToolCallRequest])
+    case toolResult(AIToolResult)
+}
+
+/// What one turn of a tool-calling conversation produced.
+enum AIChatStep {
+    case finalText(String)
+    case toolCalls([AIToolCallRequest])
+}
+
 @MainActor
 class AICompletionService: ObservableObject {
     static let shared = AICompletionService()
@@ -331,6 +367,271 @@ class AICompletionService: ObservableObject {
     /// Verifies the connection to the AI provider by sending a minimal prompt.
     func testConnection() async throws -> String {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
+    }
+
+    // MARK: - Agentic Tool Calling (MCP)
+    //
+    // Only reached when the caller explicitly passes `tools` (AI Prompt with
+    // one or more MCP servers enabled) — `fetchCompletion` above is
+    // completely untouched, so autocomplete, Refine, and every other
+    // existing caller behaves exactly as before.
+
+    func fetchCompletionWithTools(
+        prompt: String,
+        systemPrompt: String,
+        maxTokens: Int,
+        tools: [MCPTool],
+        maxTurns: Int = 6,
+        onToolCall: @escaping (String, String) -> Void = { _, _ in },
+        executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
+    ) async throws -> String {
+        guard !tools.isEmpty else {
+            return try await fetchCompletion(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, purpose: .chat)
+        }
+
+        isFetching = true
+        defer { isFetching = false }
+
+        let settings = AISettingsManager.shared
+        let ctx = settings.modelContext(for: .generation)
+
+        if !ctx.isLocal && ctx.apiKey.isEmpty {
+            throw AIError.apiError("API Key is missing for \(ctx.source.rawValue)")
+        }
+        guard !ctx.isGemini else {
+            // Gemini's function-calling schema isn't wired up yet — fail
+            // clearly rather than silently ignoring the tools the user picked.
+            throw AIError.apiError("Tool calling (MCP) isn't supported yet for Google Gemini. Choose a different Chat source, or disable MCP tools for this request.")
+        }
+
+        var messages: [AIChatMessage] = [.system(systemPrompt), .user(prompt)]
+
+        for turn in 0..<maxTurns {
+            let step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens)
+
+            switch step {
+            case .finalText(let text):
+                var finalResult = stripThinkingTags(from: text)
+                if settings.forceCodeOutput {
+                    let extracted = extractCode(from: finalResult)
+                    finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalResult : extracted
+                }
+                let sanitized = sanitizeMarkdownToTypst(finalResult)
+                if sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw AIError.apiError("The AI processed the request but returned an empty response. Try rephrasing your prompt.")
+                }
+                return sanitized
+
+            case .toolCalls(let calls):
+                messages.append(.assistantToolCalls(calls))
+                for call in calls {
+                    onToolCall(call.name, call.argumentsJSON)
+                    let output: String
+                    do {
+                        output = try await executeTool(call.name, call.argumentsJSON)
+                    } catch {
+                        output = "Error: \(error.localizedDescription)"
+                    }
+                    messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
+                }
+                if turn == maxTurns - 1 {
+                    throw AIError.apiError("The AI kept calling tools without producing a final answer after \(maxTurns) turns.")
+                }
+            }
+        }
+        throw AIError.apiError("The AI did not produce a response.")
+    }
+
+    /// Sends one turn of a tool-calling conversation and returns either the
+    /// model's final text or the tool calls it wants executed next.
+    private func requestChatStep(ctx: ModelContext, messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int) async throws -> AIChatStep {
+        let settings = AISettingsManager.shared
+        guard let url = URL(string: ctx.chatEndpoint) else { throw AIError.invalidURL }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = settings.timeoutSeconds
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        if ctx.isAnthropic {
+            request.addValue(ctx.apiKey, forHTTPHeaderField: "x-api-key")
+            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else {
+            request.addValue("Bearer \(ctx.apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if ctx.source == .openRouter {
+            request.addValue("TypstEdit", forHTTPHeaderField: "HTTP-Referer")
+            request.addValue("TypstEdit", forHTTPHeaderField: "X-Title")
+        }
+
+        request.httpBody = ctx.isAnthropic
+            ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools)
+            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
+
+        guard httpResponse.statusCode == 200 else {
+            var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                parsedErrorMsg = msg
+            }
+            throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AIError.parsingError("Invalid JSON structure returned by provider.")
+        }
+
+        return ctx.isAnthropic ? try Self.parseAnthropicStep(json) : try Self.parseOpenAIStep(json)
+    }
+
+    // MARK: Provider wire-format conversion (OpenAI-compatible)
+
+    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool]) throws -> Data {
+        var wireMessages: [[String: Any]] = []
+        for message in messages {
+            switch message {
+            case .system(let text):
+                wireMessages.append(["role": "system", "content": text])
+            case .user(let text):
+                wireMessages.append(["role": "user", "content": text])
+            case .assistantText(let text):
+                wireMessages.append(["role": "assistant", "content": text])
+            case .assistantToolCalls(let calls):
+                wireMessages.append([
+                    "role": "assistant",
+                    "content": NSNull(),
+                    "tool_calls": calls.map { call in
+                        [
+                            "id": call.id,
+                            "type": "function",
+                            "function": ["name": call.name, "arguments": call.argumentsJSON]
+                        ] as [String: Any]
+                    }
+                ])
+            case .toolResult(let result):
+                wireMessages.append([
+                    "role": "tool",
+                    "tool_call_id": result.callID,
+                    "content": result.output
+                ])
+            }
+        }
+
+        var body: [String: Any] = [
+            "model": model,
+            "messages": wireMessages,
+            "max_tokens": maxTokens,
+            "temperature": 0.2,
+            "stream": false
+        ]
+        if !tools.isEmpty {
+            body["tools"] = tools.map { tool in
+                [
+                    "type": "function",
+                    "function": [
+                        "name": tool.qualifiedName,
+                        "description": tool.description,
+                        "parameters": tool.inputSchema
+                    ]
+                ] as [String: Any]
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+
+    private static func parseOpenAIStep(_ json: [String: Any]) throws -> AIChatStep {
+        guard let choices = json["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any] else {
+            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                throw AIError.apiError(msg)
+            }
+            throw AIError.parsingError("OpenAI-compatible response missing message.")
+        }
+
+        if let toolCalls = message["tool_calls"] as? [[String: Any]], !toolCalls.isEmpty {
+            let parsed: [AIToolCallRequest] = toolCalls.compactMap { call in
+                guard let id = call["id"] as? String,
+                      let function = call["function"] as? [String: Any],
+                      let name = function["name"] as? String else { return nil }
+                let arguments = function["arguments"] as? String ?? "{}"
+                return AIToolCallRequest(id: id, name: name, argumentsJSON: arguments)
+            }
+            if !parsed.isEmpty { return .toolCalls(parsed) }
+        }
+
+        return .finalText(message["content"] as? String ?? "")
+    }
+
+    // MARK: Provider wire-format conversion (Anthropic)
+
+    private static func buildAnthropicBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool]) throws -> Data {
+        var systemText = ""
+        var wireMessages: [[String: Any]] = []
+
+        for message in messages {
+            switch message {
+            case .system(let text):
+                systemText = text
+            case .user(let text):
+                wireMessages.append(["role": "user", "content": [["type": "text", "text": text]]])
+            case .assistantText(let text):
+                wireMessages.append(["role": "assistant", "content": [["type": "text", "text": text]]])
+            case .assistantToolCalls(let calls):
+                wireMessages.append([
+                    "role": "assistant",
+                    "content": calls.map { call -> [String: Any] in
+                        let argData = Data(call.argumentsJSON.utf8)
+                        let input = (try? JSONSerialization.jsonObject(with: argData)) as? [String: Any] ?? [:]
+                        return ["type": "tool_use", "id": call.id, "name": call.name, "input": input]
+                    }
+                ])
+            case .toolResult(let result):
+                wireMessages.append([
+                    "role": "user",
+                    "content": [["type": "tool_result", "tool_use_id": result.callID, "content": result.output]]
+                ])
+            }
+        }
+
+        var body: [String: Any] = [
+            "model": model,
+            "max_tokens": maxTokens,
+            "system": systemText,
+            "messages": wireMessages
+        ]
+        if !tools.isEmpty {
+            body["tools"] = tools.map { tool in
+                ["name": tool.qualifiedName, "description": tool.description, "input_schema": tool.inputSchema]
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: body)
+    }
+
+    private static func parseAnthropicStep(_ json: [String: Any]) throws -> AIChatStep {
+        guard let contentArray = json["content"] as? [[String: Any]] else {
+            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                throw AIError.apiError(msg)
+            }
+            throw AIError.parsingError("Anthropic response missing content.")
+        }
+
+        let toolUses = contentArray.filter { ($0["type"] as? String) == "tool_use" }
+        if !toolUses.isEmpty {
+            let calls: [AIToolCallRequest] = toolUses.compactMap { block in
+                guard let id = block["id"] as? String, let name = block["name"] as? String else { return nil }
+                let input = block["input"] as? [String: Any] ?? [:]
+                let argumentsJSON = (try? JSONSerialization.data(withJSONObject: input)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                return AIToolCallRequest(id: id, name: name, argumentsJSON: argumentsJSON)
+            }
+            return .toolCalls(calls)
+        }
+
+        let text = contentArray.first(where: { ($0["type"] as? String) == "text" })?["text"] as? String ?? ""
+        return .finalText(text)
     }
 
     // MARK: - Markdown → Typst conversion (AST pipeline)

@@ -7,6 +7,7 @@ struct AppMenuCommands: Commands {
     @ObservedObject var editorController: EditorController
     @ObservedObject private var recentFilesManager = RecentFilesManager.shared
     @AppStorage("aiAssistantEnabled") private var aiEnabled = false
+    @AppStorage("aiChatEnabled") private var chatEnabled = false
     
     @Environment(\.openWindow) private var openWindow
     
@@ -182,6 +183,14 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "refreshNotebooks")
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
+
+            if editorController.projectRootURL != nil {
+                Divider()
+
+                Button("Project AI Settings…") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "openProjectSettings")
+                }
+            }
         }
         
         // MARK: - Edit Menu
@@ -509,6 +518,13 @@ struct AppMenuCommands: Commands {
             Toggle("Scroll on Type", isOn: .constant(true))
             
             Toggle("Wrap Lines", isOn: $editorController.wrapLines)
+
+            if chatEnabled {
+                Button(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? "Show Files" : "Show AI Chat") {
+                    editorController.toggleAIChatPanel()
+                }
+                .keyboardShortcut("j", modifiers: [.command, .shift])
+            }
             
             Toggle("Preview Dark Mode", isOn: $editorController.isPreviewDarkMode)
             

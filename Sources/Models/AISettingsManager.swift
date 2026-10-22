@@ -96,6 +96,23 @@ class AISettingsManager: ObservableObject {
     var isEnabled: Bool { completionEnabled || assistantEnabled }
     @AppStorage("intellisenseEnabled") var intellisenseEnabled: Bool = true
 
+    // MARK: - AI Chat (opt-in, like every other AI feature here)
+    //
+    // The chat panel itself is a separate switch from "is a project/notebook
+    // scope available" — it's off for every new install until explicitly
+    // turned on in Settings, same as `completionEnabled`/`assistantEnabled`.
+    @AppStorage("aiChatEnabled") var chatEnabled: Bool = false
+    /// Separate, extra opt-in for the sandboxed Python execution tool — off
+    /// by default even when chat itself is on, since it's a materially
+    /// different risk (arbitrary code execution) from read/search/write.
+    @AppStorage("aiChatPythonToolEnabled") var chatPythonToolEnabled: Bool = false
+    /// Default starting state for Chat's built-in semantic project search
+    /// tool (`search_project`, the same RAG index AI Prompt uses). On by
+    /// default, same risk tier as read_file — but the user can still flip it
+    /// off per session from the chat panel itself; this only controls where
+    /// each new session starts from.
+    @AppStorage("aiChatRAGToolEnabledDefault") var chatRAGToolEnabledDefault: Bool = true
+
     // MARK: - Per-Task Source Assignment
 
     @AppStorage("generationSource") private var generationSourceString: String = ModelSource.openAI.rawValue
@@ -134,6 +151,17 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiMaxTokens") var maxTokens: Int = 2048
     @AppStorage("aiCacheEmbeddingsToDisk") var cacheEmbeddingsToDisk: Bool = true
     @AppStorage("aiTimeoutSeconds") var timeoutSeconds: Double = 120.0
+
+    // MARK: - Temp & Vector Cache Storage Location (Global Defaults)
+    //
+    // Projects may override these in `.typstedit/config.json`
+    // (see `ProjectConfig.storeTempInProject` / `storeVectorCacheInProject`).
+    // When a given toggle is off, TypstEdit stores that folder's contents
+    // under the OS temp directory instead of inside the project — see
+    // `AppTempDirectoryManager`, which also owns cleaning it up since macOS
+    // does not promptly purge its own temp directory.
+    @AppStorage("aiStoreTempInProjectDefault") var storeTempInProjectDefault: Bool = true
+    @AppStorage("aiStoreVectorCacheInProjectDefault") var storeVectorCacheInProjectDefault: Bool = true
 
     // MARK: - Autocomplete Context Scope
     enum CompletionContextScope: String, CaseIterable, Identifiable {

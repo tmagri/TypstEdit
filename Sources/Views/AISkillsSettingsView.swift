@@ -1,0 +1,197 @@
+import SwiftUI
+
+/// Settings UI for AI Skills: portable `SKILL.md` folders (frontmatter
+/// `name`/`description` + a markdown instructions body) that the user can
+/// enable per-request from the AI Prompt panel. Global skills apply to every
+/// project; project skills live in `.typstedit/skills/` inside the active
+/// project and are git-shareable with collaborators.
+struct AISkillsSettingsView: View {
+    @ObservedObject private var skillsManager = SkillsManager.shared
+    @State private var editingSkill: AISkill?
+    @State private var isCreatingNew = false
+    @State private var newSkillScope: ConfigScope = .global
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                SettingsCard(
+                    title: "What are Skills?",
+                    icon: "sparkles.square.filled.on.square",
+                    description: "A skill is a reusable set of instructions (formatting conventions, citation styles, house rules) the AI follows when you enable it for a request in the AI Prompt panel. Only the name and description are shown while browsing — the full instructions are only sent to the model once you turn a skill on."
+                ) {
+                    EmptyView()
+                }
+
+                skillsCard(title: "Global Skills", scope: .global, skills: skillsManager.globalSkills)
+
+                if let projectRoot = skillsManager.projectRoot {
+                    skillsCard(title: "Project Skills", scope: .project, skills: skillsManager.projectSkills, subtitle: projectRoot.path)
+                } else {
+                    SettingsCard(
+                        title: "Project Skills",
+                        icon: "folder.badge.gearshape",
+                        description: "Open a project folder to add skills scoped to it (stored in .typstedit/skills/, shareable via git)."
+                    ) {
+                        EmptyView()
+                    }
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 820)
+        }
+        .sheet(item: $editingSkill) { skill in
+            SkillEditorSheet(mode: .edit(skill))
+        }
+        .sheet(isPresented: $isCreatingNew) {
+            SkillEditorSheet(mode: .create(scope: newSkillScope))
+        }
+    }
+
+    @ViewBuilder
+    private func skillsCard(title: String, scope: ConfigScope, skills: [AISkill], subtitle: String? = nil) -> some View {
+        SettingsCard(
+            title: title,
+            icon: scope == .global ? "globe" : "folder",
+            description: subtitle
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                if skills.isEmpty {
+                    Text("No skills yet.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(skills) { skill in
+                        skillRow(skill)
+                        if skill.id != skills.last?.id {
+                            Divider()
+                        }
+                    }
+                }
+
+                Button {
+                    newSkillScope = scope
+                    isCreatingNew = true
+                } label: {
+                    Label("Add Skill…", systemImage: "plus.circle")
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func skillRow(_ skill: AISkill) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(skill.name)
+                    .font(.body.weight(.medium))
+                Text(skill.description.isEmpty ? "No description" : skill.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button {
+                editingSkill = skill
+            } label: {
+                Image(systemName: "pencil")
+            }
+            .buttonStyle(.plain)
+            Button {
+                skillsManager.deleteSkill(skill)
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+private enum SkillEditorMode {
+    case create(scope: ConfigScope)
+    case edit(AISkill)
+}
+
+private struct SkillEditorSheet: View {
+    let mode: SkillEditorMode
+    @ObservedObject private var skillsManager = SkillsManager.shared
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var name: String = ""
+    @State private var skillDescription: String = ""
+    @State private var skillBody: String = ""
+    @State private var scope: ConfigScope = .global
+
+    private var isEditing: Bool {
+        if case .edit = mode { return true }
+        return false
+    }
+
+    private var canUseProjectScope: Bool { skillsManager.projectRoot != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(isEditing ? "Edit Skill" : "New Skill")
+                .font(.headline)
+
+            TextField("Name (e.g. \"Formal Resume Style\")", text: $name)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("One-line description — used to decide when this applies", text: $skillDescription)
+                .textFieldStyle(.roundedBorder)
+
+            if !isEditing {
+                Picker("Scope", selection: $scope) {
+                    Text("Global").tag(ConfigScope.global)
+                    Text("Project").tag(ConfigScope.project).disabled(!canUseProjectScope)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Text("Instructions")
+                .font(.caption.bold())
+                .foregroundColor(.secondary)
+            TextEditor(text: $skillBody)
+                .font(.system(.body, design: .monospaced))
+                .frame(height: 220)
+                .padding(4)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                Spacer()
+                Button(isEditing ? "Save" : "Create") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        switch mode {
+        case .create(let initialScope):
+            scope = initialScope
+        case .edit(let skill):
+            name = skill.name
+            skillDescription = skill.description
+            skillBody = skill.body
+            scope = skill.scope
+        }
+    }
+
+    private func save() {
+        switch mode {
+        case .create:
+            skillsManager.createSkill(name: name, description: skillDescription, body: skillBody, scope: scope, projectRoot: skillsManager.projectRoot)
+        case .edit(let skill):
+            skillsManager.updateSkill(skill, name: name, description: skillDescription, body: skillBody)
+        }
+        dismiss()
+    }
+}

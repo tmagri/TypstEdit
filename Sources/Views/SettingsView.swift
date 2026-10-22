@@ -49,8 +49,10 @@ enum GeneralSettingsSection: String, CaseIterable, Identifiable {
 struct GeneralSettingsView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @ObservedObject private var notebookManager = NotebookManager.shared
+    @StateObject private var aiSettings = AISettingsManager.shared
     @AppStorage("maxBackups") private var maxBackups: Int = 3
     @State private var selectedSection: GeneralSettingsSection = .appearance
+    @State private var osTempSize: Int64 = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -150,6 +152,39 @@ struct GeneralSettingsView: View {
                 }
             }
         }
+
+        SettingsCard(
+            title: "Compiler Temp Files",
+            icon: "folder.badge.gearshape",
+            description: "TypstEdit writes shadow files while compiling a live preview."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Store Temp Files Inside Project", isOn: $aiSettings.storeTempInProjectDefault)
+                    .font(.body.weight(.medium))
+
+                Text("When on (default), compiler scratch files live in a temp/ folder inside each project and are cleaned up automatically when you close it. When off, they're kept in the system temp directory instead. Individual projects can override this default from Project Settings.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Divider()
+
+                SettingsRow(
+                    label: "OS Temp Usage:",
+                    caption: "Combined size of every project's temp/vector-cache mirror kept under the system temp directory (only used when the toggles above are off)."
+                ) {
+                    HStack(spacing: 10) {
+                        Text(ByteCountFormatter.string(fromByteCount: osTempSize, countStyle: .file))
+                            .foregroundColor(.secondary)
+                        Button("Clear All Temp Files") {
+                            AppTempDirectoryManager.clearAll()
+                            osTempSize = AppTempDirectoryManager.totalSize()
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear { osTempSize = AppTempDirectoryManager.totalSize() }
     }
 
     private func chooseFolder() {
@@ -251,7 +286,10 @@ struct KeyboardShortcutBadge: View {
 enum AISettingsSection: String, CaseIterable, Identifiable {
     case autocomplete = "Autocomplete"
     case generation = "Chat & Actions"
+    case chat = "AI Chat"
     case rag = "Project Context (RAG)"
+    case skills = "Skills"
+    case mcp = "MCP Servers"
     case apiKeys = "API Keys & Limits"
 
     var id: String { rawValue }
@@ -260,7 +298,10 @@ enum AISettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .autocomplete: return "sparkles"
         case .generation: return "bubble.left.and.bubble.right"
+        case .chat: return "bubble.left.and.text.bubble.right"
         case .rag: return "books.vertical"
+        case .skills: return "sparkles.square.filled.on.square"
+        case .mcp: return "wrench.and.screwdriver"
         case .apiKeys: return "key.horizontal"
         }
     }
@@ -297,21 +338,32 @@ struct AISettingsView: View {
 
             Divider()
 
-            ScrollView {
-                VStack(spacing: 18) {
-                    switch selectedSection {
-                    case .autocomplete:
-                        autocompleteSection
-                    case .generation:
-                        generationSection
-                    case .rag:
-                        ragSection
-                    case .apiKeys:
-                        apiKeysSection
+            switch selectedSection {
+            case .skills:
+                AISkillsSettingsView()
+            case .mcp:
+                MCPServersSettingsView()
+            default:
+                ScrollView {
+                    VStack(spacing: 18) {
+                        switch selectedSection {
+                        case .autocomplete:
+                            autocompleteSection
+                        case .generation:
+                            generationSection
+                        case .chat:
+                            chatSection
+                        case .rag:
+                            ragSection
+                        case .apiKeys:
+                            apiKeysSection
+                        case .skills, .mcp:
+                            EmptyView()
+                        }
                     }
+                    .padding(24)
+                    .frame(maxWidth: 820)
                 }
-                .padding(24)
-                .frame(maxWidth: 820)
             }
         }
     }
@@ -536,6 +588,78 @@ struct AISettingsView: View {
         }
     }
 
+    // MARK: - AI Chat Section
+
+    @ViewBuilder
+    private var chatSection: some View {
+        SettingsCard(
+            title: "AI Chat Panel",
+            icon: "bubble.left.and.text.bubble.right",
+            description: "A persistent chat panel between the editor and preview that can see and, with your approval, edit files across the whole open project (or just the current notebook, for notes) — unlike AI Prompt, which only ever inserts at your selection. Off by default, like every AI feature here."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Enable AI Chat", isOn: $settings.chatEnabled)
+                    .font(.body.weight(.medium))
+
+                Text("Once enabled, toggle the panel itself from the status bar icon or Editor → AI Chat (⌘⇧J).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+            }
+        }
+
+        SettingsCard(
+            title: "Built-in Tools",
+            icon: "hammer",
+            description: "Always available to the chat (no MCP server needed): listing/reading/searching files, writing files (always shown to you for approval first), and a Typst compile check."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("list_files, read_file", systemImage: "doc.text.magnifyingglass").font(.caption)
+                Label("write_file — always requires your approval, with a diff preview", systemImage: "pencil.and.outline").font(.caption)
+                Label("run_typst_check — compiles a snippet in an isolated temp folder", systemImage: "checkmark.seal").font(.caption)
+            }
+            .foregroundColor(.secondary)
+        }
+
+        SettingsCard(
+            title: "Project Search (RAG) Tool",
+            icon: "magnifyingglass.circle",
+            description: "The chat's search_project tool reuses the same semantic index AI Prompt searches. Independent of read_file/write_file — turn it off if you'd rather the AI only work from files it opens explicitly."
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Allow Project Search (RAG) by Default", isOn: $settings.chatRAGToolEnabledDefault)
+                    .font(.body.weight(.medium))
+
+                Text("This sets where each new session starts from. You can still flip it per session from the RAG toggle in the chat panel itself, next to the Skills/Tools menus.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+            }
+        }
+
+        SettingsCard(
+            title: "Python Execution Tool",
+            icon: "exclamationmark.triangle.fill",
+            description: "A separate, extra opt-in on top of AI Chat itself. When on, the model may ask to run a Python 3 script using your Mac's python3, with your full user permissions, no sandbox, and no network isolation — working directory set to the open project/notebook. You are shown the exact code and must approve it every single time; nothing runs silently."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Allow the Run Python Tool", isOn: $settings.chatPythonToolEnabled)
+                    .font(.body.weight(.medium))
+                    .foregroundColor(.red)
+
+                if settings.chatPythonToolEnabled {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                        Text("Only approve scripts you've actually read. Treat this exactly like pasting and running code yourself.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                    .padding(.leading, 20)
+                }
+            }
+        }
+    }
+
     // MARK: - 3. Project Context (RAG) Section
 
     @ViewBuilder
@@ -558,6 +682,19 @@ struct AISettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.leading, 38)
+
+                    if settings.cacheEmbeddingsToDisk {
+                        Divider()
+
+                        Toggle("Store Vector Cache Inside Project", isOn: $settings.storeVectorCacheInProjectDefault)
+                            .font(.body.weight(.regular))
+                            .padding(.leading, 18)
+
+                        Text("When on (default), the index lives in a vectorcaches/ folder inside each project. When off, it's kept in the system temp directory instead — useful if you don't want this folder showing up in git or Finder. Individual projects can override this default from Project Settings. TypstEdit prunes its own temp copies automatically; use \"Clear All Temp Files\" below if you want to remove them immediately.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 38)
+                    }
                 }
             }
         }

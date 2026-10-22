@@ -9,6 +9,10 @@
 ; HASHTAG COMMANDS (Purple)
 "#" @function
 (call item: (ident) @function)
+; Method calls: `counter(page).get()`, `datetime.today().display(…)`,
+; `calc.max(…)`, `outline.entry.where(…)` — only the called name, not the
+; object it is called on.
+(call item: (field field: (ident) @function))
 (set (ident) @function)
 (show (ident) @function)
 

@@ -16,10 +16,35 @@ enum AppTheme: String, CaseIterable, Identifiable {
     }
 }
 
+@MainActor
 class ThemeManager: ObservableObject {
     @AppStorage("appTheme") var appTheme: AppTheme = .system {
         willSet { objectWillChange.send() }
+        didSet { Self.applyDockIcon(for: appTheme) }
     }
+
+    init() {
+        // Picks up a persisted "Dark" preference immediately on launch, before
+        // any explicit theme change happens this session.
+        Self.applyDockIcon(for: appTheme)
+    }
+
+    /// The Dock tile normally stays the default light/blue artwork. When the
+    /// user explicitly forces Dark theme in Settings, swap the running app's
+    /// Dock icon for the black "dark mode" variant so it matches the rest of
+    /// the system's dark utility icons (FaceTime, Phone, Reminders, ...).
+    /// This only affects the live running app; Finder/Launchpad keep showing
+    /// the bundle's default icon.
+    private static func applyDockIcon(for theme: AppTheme) {
+        NSApp.applicationIconImage = (theme == .dark) ? darkIconImage : nil
+    }
+
+    private static let darkIconImage: NSImage? = {
+        if let path = ModuleResources.main.path(forResource: "AppIconDark", ofType: "png") {
+            return NSImage(contentsOfFile: path)
+        }
+        return nil
+    }()
     
     var mainBackground: Color { .clear }
     var sidebarBackground: Color { .clear }

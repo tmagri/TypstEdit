@@ -272,8 +272,8 @@ struct SidebarView: View {
             
             // Mode Selector
             Picker("", selection: $sidebarMode) {
-                Label("Projects", systemImage: "folder").tag(0)
-                Label("Notebooks", systemImage: "book.closed").tag(1)
+                Text("📁 Projects").tag(0)
+                Text("📓 Notebooks").tag(1)
             }
             .pickerStyle(SegmentedPickerStyle())
             .labelsHidden()
