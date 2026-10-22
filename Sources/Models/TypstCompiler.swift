@@ -509,7 +509,12 @@ class TypstCompiler: ObservableObject {
             return
         }
 
-        if line.contains("compiled successfully") {
+        // `typst watch` prints its status marker BEFORE the diagnostics of that
+        // cycle, so each marker starts a fresh batch; the batch is published as
+        // its diagnostic blocks complete (see `consumeDiagnosticLine`).
+        if line.contains("compiled successfully") || line.contains("compiled with warnings") {
+            // Both mean a PDF was written; "with warnings" is followed by the
+            // warning diagnostics.
             isCompiling = false
             compilationStatus = "Watching..."
             // Notify the view with a small delay to ensure the file is fully flushed.
@@ -521,6 +526,7 @@ class TypstCompiler: ObservableObject {
             // source changes.
             typstErrors = []
             typstWarnings = []
+            pendingDiagnosticLine = nil
             publishIssues()
             return
         }
@@ -532,13 +538,6 @@ class TypstCompiler: ObservableObject {
             // this marker, so start the batch from a clean slate.
             isCompiling = false
             compilationStatus = "Compilation Error"
-            // Only publish the error list if no fallback rewrite is pending
-            // (i.e. the compilation is truly settled). When a fallback fix just
-            // modified the shadow file, another compile cycle is expected and
-            // showing transient errors would cause the panel to flash.
-            if !pendingFallbackRewrite {
-                publishIssues()
-            }
             typstErrors = []
             typstWarnings = []
             pendingDiagnosticLine = nil
@@ -581,6 +580,13 @@ class TypstCompiler: ObservableObject {
         if line.trimmingCharacters(in: .whitespaces).isEmpty {
             // Blank line ends a diagnostic block — repair anything it flagged.
             flushPendingFallbackFix()
+            // Publish the diagnostics collected so far for this cycle, unless a
+            // fallback rewrite just modified the shadow file: another compile
+            // cycle is then expected, and showing transient errors would make
+            // the panel flash.
+            if !pendingFallbackRewrite {
+                publishIssues()
+            }
         }
     }
 

@@ -8,12 +8,14 @@ final class SafeDirectoryManagerTests: XCTestCase {
         XCTAssertEqual(dir.path, "/tmp/project/backups")
     }
 
+    @MainActor
     func testTempDirectoryDoesNotNestInsideTemp() {
         let projectURL = URL(fileURLWithPath: "/tmp/project/temp")
         let dir = SafeDirectoryManager.safeTempDirectory(in: projectURL)
         XCTAssertEqual(dir.path, "/tmp/project/temp")
     }
 
+    @MainActor
     func testVectorCachesDirectoryDoesNotNestInsideVectorCaches() {
         let projectURL = URL(fileURLWithPath: "/tmp/project/vectorcaches")
         let dir = SafeDirectoryManager.safeVectorcachesDirectory(in: projectURL)
