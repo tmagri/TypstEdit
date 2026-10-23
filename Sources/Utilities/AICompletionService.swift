@@ -388,7 +388,7 @@ class AICompletionService: ObservableObject {
 
         // Trap completely empty responses so the UI doesn't silently reset
         if sanitizedResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw AIError.apiError("The AI processed the request but returned an empty response. Try rephrasing your prompt.")
+            throw AIError.apiError(Self.emptyAnswerFailureMessage(nudges: 0, hadReasoning: !combinedReasoning.isEmpty))
         }
 
         return sanitizedResult
@@ -452,6 +452,9 @@ class AICompletionService: ObservableObject {
         // made tool calls), so the whole exchange's thinking is available
         // once a final answer lands — not just whatever the last turn said.
         var collectedReasoning: [String] = []
+        // How many times we've nudged the model after it stopped without
+        // writing anything — see the empty-response handling below.
+        var emptyAnswerNudges = 0
 
         for turn in 0..<maxTurns {
             if let contextCharBudget {
@@ -472,9 +475,29 @@ class AICompletionService: ObservableObject {
                     finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalResult : extracted
                 }
                 let sanitized = sanitize ? sanitizeMarkdownToTypst(finalResult) : finalResult
+
                 if sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    throw AIError.apiError("The AI processed the request but returned an empty response. Try rephrasing your prompt.")
+                    let hadReasoning = (stepReasoning?.isEmpty == false) || (tagReasoning?.isEmpty == false)
+                    // The model stopped without writing anything — often after
+                    // a long run of tool calls that didn't pan out, or (with a
+                    // reasoning model) after spending its whole reply budget on
+                    // invisible "thinking" tokens. Discarding every tool call
+                    // it already made and failing outright would be wasteful:
+                    // nudge it to use what it has instead, a few times, before
+                    // giving up. This is the fix for empty responses landing
+                    // after a visible trail of successful tool calls.
+                    guard emptyAnswerNudges < Self.maxEmptyAnswerNudges, turn < maxTurns - 1 else {
+                        throw AIError.apiError(Self.emptyAnswerFailureMessage(nudges: emptyAnswerNudges, hadReasoning: hadReasoning))
+                    }
+                    emptyAnswerNudges += 1
+                    // A placeholder (never literally empty) keeps strict
+                    // user/assistant alternation intact for providers, like
+                    // Anthropic, that require it.
+                    messages.append(.assistantText("(no response)"))
+                    messages.append(.user(Self.emptyAnswerNudgeMessage(hadReasoning: hadReasoning)))
+                    continue
                 }
+
                 if !collectedReasoning.isEmpty {
                     onReasoning(collectedReasoning.joined(separator: "\n\n"))
                 }
@@ -501,6 +524,33 @@ class AICompletionService: ObservableObject {
             }
         }
         throw AIError.apiError("The AI did not produce a response.")
+    }
+
+    /// At most this many times, an empty final answer gets a nudge instead
+    /// of an immediate failure — bounded well below `maxTurns` so a model
+    /// that's truly stuck still gives up in a reasonable number of turns.
+    /// `nonisolated` (and not private): pure value, no instance state, and
+    /// directly unit-testable without hopping onto the main actor.
+    nonisolated static let maxEmptyAnswerNudges = 2
+
+    nonisolated static func emptyAnswerNudgeMessage(hadReasoning: Bool) -> String {
+        hadReasoning
+            ? "You thought that through but didn't write an answer — the reply was empty. Using what you already found above, write the actual answer now in plain text."
+            : "That reply came back empty. Using what you've already found above, write the actual answer now in plain text — even if the answer is that you couldn't find anything."
+    }
+
+    nonisolated static func emptyAnswerFailureMessage(nudges: Int, hadReasoning: Bool) -> String {
+        var message = "The AI processed the request but returned an empty response"
+        if nudges > 0 {
+            message += " even after \(nudges) follow-up attempt\(nudges == 1 ? "" : "s")"
+        }
+        message += "."
+        if hadReasoning {
+            message += " It spent its reply on reasoning and left nothing for the answer — try raising Max Tokens in Settings, or lowering the model's reasoning effort if it has one."
+        } else {
+            message += " Try rephrasing your prompt."
+        }
+        return message
     }
 
     /// Keeps a long tool-calling conversation inside a rough character budget

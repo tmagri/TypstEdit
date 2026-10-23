@@ -269,6 +269,91 @@ final class LocalToolExecutorTests: XCTestCase {
         }
     }
 
+    // MARK: - Markdown → Typst conversion
+
+    func testConvertMarkdownToTypstUsesTheSharedConverter() async throws {
+        let out = try await run("convert_markdown_to_typst", ["markdown": "**bold** and *italic*"])
+        XCTAssertEqual(out, AICompletionService.shared.sanitizeMarkdownToTypst("**bold** and *italic*"))
+        XCTAssertTrue(out.contains("bold"))
+    }
+
+    func testConvertMarkdownToTypstRequiresNonEmptyInput() async throws {
+        let out = try await run("convert_markdown_to_typst", ["markdown": ""])
+        XCTAssertTrue(out.contains("markdown is required"), out)
+    }
+
+    // MARK: - Typst check
+
+    private func requireTypst() throws -> String {
+        guard let path = TypstUpdater.shared.resolveActiveTypstPath() else {
+            throw XCTSkip("No typst binary available on this machine.")
+        }
+        return path
+    }
+
+    func testRunTypstCheckRequiresSourceOrPath() async throws {
+        let out = try await run("run_typst_check", [:])
+        XCTAssertTrue(out.contains("Provide either"), out)
+    }
+
+    func testRunTypstCheckOnGoodSourceCompiles() async throws {
+        _ = try requireTypst()
+        let out = try await run("run_typst_check", ["source": "= Hello\n\nWorld"])
+        XCTAssertTrue(out.contains("Compiled successfully"), out)
+    }
+
+    func testRunTypstCheckOnBadSourceReportsTheCompilerError() async throws {
+        _ = try requireTypst()
+        let out = try await run("run_typst_check", ["source": "#undefinedFunctionCall()"])
+        XCTAssertTrue(out.contains("Compile failed"), out)
+    }
+
+    func testRunTypstCheckWithPathCompilesTheRealFileInPlace() async throws {
+        _ = try requireTypst()
+        try write("doc.typ", "= Title\n\nBody text")
+        let out = try await run("run_typst_check", ["path": "doc.typ"])
+        XCTAssertTrue(out.contains("Compiled successfully"), out)
+    }
+
+    func testRunTypstCheckWithMissingPathReportsNotFound() async throws {
+        _ = try requireTypst()
+        let out = try await run("run_typst_check", ["path": "nope.typ"])
+        XCTAssertTrue(out.contains("File not found"), out)
+    }
+
+    // MARK: - Automatic post-edit validation
+
+    func testEditFileAppendsPassingValidationNote() async throws {
+        _ = try requireTypst()
+        try write("doc.typ", "= Title\n\nalpha\n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+        let out = try await run("edit_file", ["path": "doc.typ", "old_string": "alpha", "new_string": "beta"])
+        XCTAssertTrue(out.contains("Typst check: compiles cleanly"), out)
+    }
+
+    func testWriteFileAppendsFailingValidationNoteWithoutThrowing() async throws {
+        _ = try requireTypst()
+        let out = try await run("write_file", ["path": "broken.typ", "content": "#undefinedFunctionCall()"])
+        XCTAssertTrue(out.contains("Wrote"), out)
+        XCTAssertTrue(out.contains("⚠️ Typst check"), out)
+        XCTAssertTrue(out.contains("Compile failed"), out)
+        // Advisory only — the file is still written even though it doesn't compile.
+        XCTAssertEqual(try read("broken.typ"), "#undefinedFunctionCall()")
+    }
+
+    func testValidationNoteIsSkippedWhenDisabled() async throws {
+        _ = try requireTypst()
+        executor.autoValidateTypstEdits = false
+        let out = try await run("write_file", ["path": "untouched.typ", "content": "#undefinedFunctionCall()"])
+        XCTAssertFalse(out.contains("Typst check"), out)
+    }
+
+    func testValidationNoteIsSkippedForNonTypFiles() async throws {
+        _ = try requireTypst()
+        let out = try await run("write_file", ["path": "notes.md", "content": "# Just markdown"])
+        XCTAssertFalse(out.contains("Typst check"), out)
+    }
+
     // MARK: - Prompt shaping / plan round-trip
 
     func testBuildPromptExcludesCompactedAndToolCalls() {

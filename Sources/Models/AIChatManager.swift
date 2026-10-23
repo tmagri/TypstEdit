@@ -184,6 +184,7 @@ final class AIChatManager: ObservableObject {
         localTools.ragToolEnabled = ragToolEnabled
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
+        localTools.autoValidateTypstEdits = AISettingsManager.shared.chatAutoValidateTypstEdits
         localTools.activeSkillAttachments = activeSkills.compactMap { skill in
             let files = skill.attachments
             guard !files.isEmpty else { return nil }
@@ -198,11 +199,14 @@ final class AIChatManager: ObservableObject {
 
         Work like a careful editor:
         - Read before you change. edit_file/write_file only work on a file you've read in this request, and edit_file needs old_string copied exactly from what you read. Prefer edit_file for localized changes — write_file replaces the whole file.
+        - edit_file/write_file automatically compile the .typ file they just touched and report the result ("✓ compiles cleanly" or a compiler error) right in their own output — read that before telling the user you're done. If it reports an error, fix it (another edit_file call) rather than leaving it. Ignore a failure only if the file is clearly a fragment meant to be #include'd elsewhere and the error is about something defined in its parent document.
+        - If you're not confident of Typst's exact syntax for something (bold, headings, lists, links, tables, math), write it in Markdown and run it through convert_markdown_to_typst first rather than guessing at delimiters. Use run_typst_check on a snippet (or an existing path) any time you want to double-check before or after writing.
         - Use grep_project for exact lookups (a symbol, a phrase, a heading) before reading whole files, and read_file's offset/limit to page through a large document instead of pulling it in at once.
         - For a job with several distinct steps, call update_plan first and keep it current.
         - If understanding a large document or several files would flood this conversation, use delegate_task: a read-only subagent explores and reports back just the facts and quotes you ask for.
         - Explain briefly what you're about to do before calling a tool that changes anything.
         - Chat replies are shown as plain text to the user, not inserted into the document. Only change files when asked to.
+        - Always finish with a written answer, even after a long run of tool calls that didn't find anything — never stop silently. If a search came up empty, say so directly instead of leaving your reply blank.
 
         Current scope: \(scopeLabel)
         """

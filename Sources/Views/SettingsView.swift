@@ -616,16 +616,25 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Built-in Tools",
             icon: "hammer",
-            description: "Always available to the chat (no MCP server needed): listing/reading/searching files, precise edits, and a Typst compile check. Anything that changes a file — or runs code — is shown to you for approval first, unless YOLO mode is on."
+            description: "Always available to the chat (no MCP server needed): listing/reading/searching files, precise edits, Typst compile checks, and Markdown→Typst conversion. Anything that changes a file — or runs code — is shown to you for approval first, unless YOLO mode is on."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 Label("list_files, read_file (paged), grep_project — case-insensitive content search", systemImage: "doc.text.magnifyingglass").font(.caption)
                 Label("edit_file — exact-match replacement, with a diff preview; write_file for whole-file changes", systemImage: "pencil.and.outline").font(.caption)
+                Label("convert_markdown_to_typst — the same converter used when pasting Markdown into the editor", systemImage: "arrow.left.arrow.right").font(.caption)
+                Label("run_typst_check — compiles a snippet, or an existing file in place, to check for errors", systemImage: "checkmark.seal").font(.caption)
                 Label("update_plan — a visible task list for multi-step jobs", systemImage: "checklist").font(.caption)
                 Label("delegate_task — a read-only subagent for large research jobs", systemImage: "person.2").font(.caption)
-                Label("run_typst_check — compiles a snippet in an isolated temp folder", systemImage: "checkmark.seal").font(.caption)
             }
             .foregroundColor(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            Toggle("Auto-validate .typ edits", isOn: $settings.chatAutoValidateTypstEdits)
+                .font(.body.weight(.medium))
+            Text("When on, edit_file and write_file automatically compile the .typ file they just changed and report the result in their own output — the model sees a compiler error immediately, in the same step, instead of leaving a broken document behind. Purely a read-only check against a throwaway temp file; it never blocks the edit itself.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
 
         SettingsCard(

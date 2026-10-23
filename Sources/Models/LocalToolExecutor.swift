@@ -138,6 +138,13 @@ final class LocalToolExecutor {
     /// exactly as the old behavior.
     var pythonSandboxEnabled: Bool = true
 
+    /// Whether `edit_file`/`write_file` automatically compile the `.typ`
+    /// file they just changed and report the result alongside their own
+    /// output. On by default — catching a mismatched delimiter or bad
+    /// reference immediately, in the same tool call, is far more reliable
+    /// than hoping the model remembers to check on its own afterwards.
+    var autoValidateTypstEdits: Bool = true
+
     /// Files the model has read during the *current* request, keyed by
     /// standardized absolute path, valued by the file's modification date at
     /// read time. Enforces the read-before-edit invariant (`edit_file` and
@@ -266,11 +273,26 @@ final class LocalToolExecutor {
         tools.append(MCPTool(
             serverName: Self.namespace,
             name: "run_typst_check",
-            description: "Compile the given Typst source in an isolated temp directory and report any compiler errors — does not touch the open document.",
+            description: "Checks Typst source for compiler errors — delimiter mismatches, bad syntax, unresolved references — without touching the open document. Pass `source` to check an isolated snippet (e.g. before deciding it's safe to write), or `path` to compile an existing file in place at its real location, so its own relative imports resolve. (edit_file/write_file already run this automatically on the `.typ` file they just changed and report the result alongside their own output — call this directly if you want to double-check something else, like a chunk you haven't written yet.)",
             inputSchema: [
                 "type": "object",
-                "properties": ["source": ["type": "string"]],
-                "required": ["source"]
+                "properties": [
+                    "source": ["type": "string", "description": "A standalone Typst snippet to compile in isolation."],
+                    "path": ["type": "string", "description": "Path to an existing file in the \(scope.noun), relative to its root, to compile at its real location instead."]
+                ]
+            ]
+        ))
+        tools.append(MCPTool(
+            serverName: Self.namespace,
+            name: "convert_markdown_to_typst",
+            description: "Converts Markdown into native Typst markup using TypstEdit's own converter — the exact same pass used when you paste Markdown into the editor. If you're unsure of Typst's own syntax for something (bold, headings, lists, links, tables, math), write it in plain Markdown and run it through here rather than hand-writing Typst delimiters from memory, then pass the result to edit_file/write_file.",
+            inputSchema: [
+                "type": "object",
+                "properties": [
+                    "markdown": ["type": "string", "description": "Markdown text to convert, e.g. \"**bold**\", \"# Heading\", \"- a list\", \"$x^2$\"."],
+                    "hybrid": ["type": "boolean", "description": "Set true only when converting content for a .note file, which mixes Markdown prose with live Typst code regions. Default false."]
+                ],
+                "required": ["markdown"]
             ]
         ))
 
@@ -309,6 +331,7 @@ final class LocalToolExecutor {
         case "search_project": return await searchProject(arguments)
         case "write_file": return try await writeFile(arguments, requestApproval: requestApproval)
         case "run_typst_check": return await runTypstCheck(arguments)
+        case "convert_markdown_to_typst": return convertMarkdownToTypst(arguments)
         case "run": return try await runPython(arguments, requestApproval: requestApproval)
         default: throw LocalToolError.invalidArguments("Unknown built-in tool '\(toolName)'")
         }
@@ -634,7 +657,26 @@ final class LocalToolExecutor {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
-        return "Wrote \(content.utf8.count) bytes to '\(path)'."
+        return "Wrote \(content.utf8.count) bytes to '\(path)'." + (await validationNote(for: url, path: path))
+    }
+
+    /// Advisory Typst compile check appended after `edit_file`/`write_file`
+    /// touches a `.typ` file — never a hard failure. A file that's only ever
+    /// `#include`d into another document (a chapter, a shared component)
+    /// often can't compile standalone on its own symbols, so a failure here
+    /// is a hint to double-check, not proof something's actually broken.
+    private func validationNote(for url: URL, path: String) async -> String {
+        guard autoValidateTypstEdits, url.pathExtension.lowercased() == "typ" else { return "" }
+        guard let typstPath = TypstUpdater.shared.resolveActiveTypstPath() else { return "" }
+
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("typstedit-autocheck-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let result = await Self.compile(typstPath: typstPath, inputURL: url, outputURL: outputURL, rootPath: scope.root?.path)
+
+        if result.hasPrefix("Compiled successfully") {
+            return "\n\n✓ Typst check: compiles cleanly."
+        }
+        return "\n\n⚠️ Typst check (standalone — ignore if '\(path)' is only ever #include'd into another file that supplies missing context):\n\(result)"
     }
 
     /// Requires that `url` was read earlier in this request (and, since this
@@ -710,7 +752,8 @@ final class LocalToolExecutor {
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
 
         let what = occurrences == 1 ? "1 place" : "\(occurrences) places"
-        return "Edited '\(path)': replaced \(what) with \(newNormalized.count) character\(newNormalized.count == 1 ? "" : "s") of new text."
+        let summary = "Edited '\(path)': replaced \(what) with \(newNormalized.count) character\(newNormalized.count == 1 ? "" : "s") of new text."
+        return summary + (await validationNote(for: url, path: path))
     }
 
     private static func occurrenceCount(of needle: String, in haystack: String) -> Int {
@@ -738,14 +781,56 @@ final class LocalToolExecutor {
     }
 
     private func runTypstCheck(_ arguments: [String: Any]) async -> String {
-        guard let source = arguments["source"] as? String, !source.isEmpty else {
-            return "source is required"
+        let path = arguments["path"] as? String
+        let source = arguments["source"] as? String
+        guard (path?.isEmpty == false) || (source?.isEmpty == false) else {
+            return "Provide either 'source' (a standalone snippet) or 'path' (an existing file in the \(scope.noun))."
         }
         guard let typstPath = TypstUpdater.shared.resolveActiveTypstPath() else {
             return "Could not locate the Typst compiler."
         }
 
-        let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("typstedit-check-\(UUID().uuidString)", isDirectory: true)
+        // `path`: compile an existing file at its real location, so its own
+        // relative imports/includes resolve — the accurate signal after an
+        // actual edit, rather than a detached copy.
+        if let path, !path.isEmpty {
+            guard scope.root != nil else {
+                return "No project or notebook is open, so there's no real file to check."
+            }
+            let url: URL
+            do {
+                url = try resolvePath(path)
+            } catch {
+                return error.localizedDescription
+            }
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                return "File not found: \(path)"
+            }
+            let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("typstedit-check-\(UUID().uuidString).pdf")
+            defer { try? FileManager.default.removeItem(at: outputURL) }
+            return await Self.compile(typstPath: typstPath, inputURL: url, outputURL: outputURL, rootPath: scope.root?.path)
+        }
+
+        // `source`: compile an isolated snippet that doesn't exist on disk
+        // yet — for checking a chunk of Typst before deciding it's safe to
+        // write anywhere.
+        guard let source, !source.isEmpty else {
+            return "Provide either 'source' (a standalone snippet) or 'path' (an existing file in the \(scope.noun))."
+        }
+
+        // Typst requires the input file to live inside `--root` — the system
+        // temp directory isn't under the project root, so passing both used
+        // to fail every isolated-snippet check with "source file must be
+        // contained in project root". When there's a scope, the scratch file
+        // goes under its already-hidden `.typstedit/` folder instead, which
+        // also lets the snippet use root-relative imports to other project
+        // files if it needs to.
+        let workDir: URL
+        if let root = scope.root {
+            workDir = ProjectSettingsManager.dotFolderURL(for: root).appendingPathComponent("tmp-check-\(UUID().uuidString)", isDirectory: true)
+        } else {
+            workDir = FileManager.default.temporaryDirectory.appendingPathComponent("typstedit-check-\(UUID().uuidString)", isDirectory: true)
+        }
         try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: workDir) }
 
@@ -757,11 +842,18 @@ final class LocalToolExecutor {
             return "Failed to write a temporary source file: \(error.localizedDescription)"
         }
 
+        return await Self.compile(typstPath: typstPath, inputURL: sourceURL, outputURL: outputURL, rootPath: scope.root?.path)
+    }
+
+    /// Runs `typst compile` and reports success/failure as a short string the
+    /// model can act on directly. Shared by the ad-hoc snippet/real-file
+    /// checks above and the automatic post-edit validation (`validationNote`).
+    private static func compile(typstPath: String, inputURL: URL, outputURL: URL, rootPath: String?) async -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: typstPath)
-        var args = ["compile", sourceURL.path, outputURL.path]
-        if let root = scope.root {
-            args += ["--root", root.path]
+        var args = ["compile", inputURL.path, outputURL.path]
+        if let rootPath {
+            args += ["--root", rootPath]
         }
         process.arguments = args
         let stderrPipe = Pipe()
@@ -785,6 +877,19 @@ final class LocalToolExecutor {
                 }
             }
         }
+    }
+
+    /// Runs Markdown text through TypstEdit's own Markdown→Typst converter —
+    /// the same pipeline used when pasting Markdown into the editor, and when
+    /// sanitizing AI Prompt output — so the model can write in Markdown (which
+    /// it's typically far more reliable at) instead of hand-writing Typst
+    /// delimiters it might get wrong.
+    private func convertMarkdownToTypst(_ arguments: [String: Any]) -> String {
+        guard let markdown = arguments["markdown"] as? String, !markdown.isEmpty else {
+            return "markdown is required"
+        }
+        let hybrid = (arguments["hybrid"] as? Bool) ?? false
+        return AICompletionService.shared.sanitizeMarkdownToTypst(markdown, isHybrid: hybrid)
     }
 
     private func runPython(_ arguments: [String: Any], requestApproval: @escaping (PendingApprovalKind) async -> Bool) async throws -> String {

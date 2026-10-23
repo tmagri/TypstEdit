@@ -94,13 +94,14 @@ Built-in tools (always available, no MCP server required):
 | `read_file` | Reads a file, paged — large files come back a window at a time instead of flooding the conversation. |
 | `grep_project` | Case-insensitive by default; exact-string or regex search across the project, with a glob filter. |
 | `search_project` | Semantic (RAG) search, falling back to a literal scan if nothing semantic matches. |
-| `edit_file` | Precise find-and-replace on a file it has already read — cheaper and safer than rewriting the whole thing. |
-| `write_file` | Creates or overwrites a whole file. |
+| `edit_file` | Precise find-and-replace on a file it has already read — cheaper and safer than rewriting the whole thing. Automatically compiles the `.typ` file it just touched and reports the result (success or the compiler error) in its own output, so a mismatched delimiter gets caught immediately instead of left behind. |
+| `write_file` | Creates or overwrites a whole file — same automatic compile check as `edit_file` for `.typ` files. |
+| `convert_markdown_to_typst` | Runs text through the same Markdown→Typst converter the editor uses when you paste — lets the AI write in Markdown instead of guessing at Typst syntax it's unsure of. |
 | `read_skill_file` | Reads a file attached to a currently enabled Skill. |
-| `run_typst_check` | Compiles a snippet in an isolated temp folder to check for errors, without touching your document. |
+| `run_typst_check` | Compiles a snippet, or an existing file in place, to check for errors on demand — without touching your document. |
 | `run` (Python, opt-in) | Runs a short Python script, sandboxed by default — no network access, writes limited to a scratch folder. |
 
-Anything that changes a file or runs code is shown to you first — a diff for writes/edits, the exact code for Python — and needs your approval, unless you turn on **YOLO mode** (a session-only toggle, with a confirmation dialog) to auto-approve everything for the rest of the session. YOLO never relaxes the project/notebook scope boundary.
+Anything that changes a file or runs code is shown to you first — a diff for writes/edits, the exact code for Python — and needs your approval, unless you turn on **YOLO mode** (a session-only toggle, with a confirmation dialog) to auto-approve everything for the rest of the session. YOLO never relaxes the project/notebook scope boundary. The automatic compile check is purely advisory — it never blocks a write — and can be turned off in Settings → AI Chat.
 
 For multi-step requests, the chat keeps a visible task checklist (`update_plan`), and can delegate large research jobs to a **read-only subagent** (`delegate_task`) that explores in its own context and reports back only its findings. If the model exposes reasoning/"thinking" content, it's shown collapsed under the reply. A context-size estimate sits in the chat header against a configurable budget; once a conversation grows past it, older turns are automatically (or manually) summarized so the chat keeps working instead of failing with an empty response.
 

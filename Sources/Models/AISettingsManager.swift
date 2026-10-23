@@ -116,6 +116,11 @@ class AISettingsManager: ObservableObject {
     /// limited to a scratch folder). On by default — turning it off is the
     /// "full user permissions" behavior the tool used to have.
     @AppStorage("aiChatPythonSandboxEnabled") var chatPythonSandboxEnabled: Bool = true
+    /// Whether edit_file/write_file automatically compile the `.typ` file
+    /// they just touched and report the result inline. On by default — it's
+    /// read-only (compiles to a throwaway temp file) and is the main defense
+    /// against a model leaving behind a document with mismatched delimiters.
+    @AppStorage("aiChatAutoValidateTypstEdits") var chatAutoValidateTypstEdits: Bool = true
     /// Rough token budget for one chat request before old turns get summarized
     /// into a compaction summary. Bigger models/local models with long
     /// contexts can raise this.
