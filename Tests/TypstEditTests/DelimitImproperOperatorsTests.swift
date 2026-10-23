@@ -161,7 +161,8 @@ final class DelimitImproperOperatorsTests: XCTestCase {
     func testWarningLineNumbersAreOneBasedAndAccurate() {
         let source = "line one\nline two # bad\nline three # bad"
         let result = delimit(source)
-        let lines = result.warnings.map(\.line).sorted()
+        XCTAssertTrue(result.warnings.allSatisfy { $0.line != nil })
+        let lines = result.warnings.compactMap(\.line).sorted()
         XCTAssertEqual(lines, [2, 3])
     }
 

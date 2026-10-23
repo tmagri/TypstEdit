@@ -921,7 +921,7 @@ class EditorController: NSObject, ObservableObject {
         }
         
         for error in errors {
-            if let range = getRangeForLine(error.line) {
+            if let line = error.line, let range = getRangeForLine(line) {
                 // Ensure range is valid
                 if range.location + range.length <= textStorage.length {
                     textStorage.addAttributes(attributes(for: error.severity), range: range)
@@ -950,6 +950,60 @@ class EditorController: NSObject, ObservableObject {
             index = NSMaxRange(lineRange)
         }
         return nil
+    }
+
+    /// The exact span (`^^^`) the compiler reported, as a range in the editor.
+    /// Only available when the error is in this document and the editor line
+    /// still reads exactly as the compiler saw it (for `.note`/`.md` files and
+    /// dark-mode previews the compiled text differs, so columns don't apply).
+    func spanRange(for error: TypstError) -> NSRange? {
+        guard error.file == nil,
+              let line = error.line,
+              let column = error.column,
+              let snippet = error.snippet,
+              let lineRange = getRangeForLine(line) else { return nil }
+        var lineText = (sourceCode as NSString).substring(with: lineRange)
+        while lineText.hasSuffix("\n") || lineText.hasSuffix("\r") { lineText.removeLast() }
+        guard lineText == snippet else { return nil }
+
+        let count = lineText.count
+        let start = lineText.index(lineText.startIndex, offsetBy: min(column, count))
+        let spanLength = min(max(error.length ?? 0, 0), lineText.distance(from: start, to: lineText.endIndex))
+        let end = lineText.index(start, offsetBy: spanLength)
+        let utf16Start = lineText.utf16.distance(from: lineText.utf16.startIndex, to: start)
+        let utf16Length = lineText.utf16.distance(from: start, to: end)
+        return NSRange(location: lineRange.location + utf16Start, length: utf16Length)
+    }
+
+    /// Jumps to an error: selects its exact span when known, otherwise the line start.
+    @MainActor
+    func goToError(_ error: TypstError) {
+        guard let line = error.line else { return }
+        if let span = spanRange(for: error) {
+            reveal(range: span)
+        } else {
+            goToLine(line)
+        }
+    }
+
+    /// Line-level quick fixes for an error, with replacement ranges in the editor.
+    func quickFixes(for error: TypstError) -> [TypstFix] {
+        guard error.file == nil, let line = error.line, let range = getRangeForLine(line),
+              let r = Range(range, in: sourceCode) else { return [] }
+        let lineCode = String(sourceCode[r])
+        // The engine works on the line without its newline; keep the newline in
+        // the replacement so applying a fix doesn't join lines.
+        let cleanLine = lineCode.hasSuffix("\n") ? String(lineCode.dropLast()) : lineCode
+        let suffix = lineCode.hasSuffix("\n") ? "\n" : ""
+        return TypstSuggestionEngine.shared.suggestFixes(for: error, in: cleanLine).map {
+            TypstFix(title: $0.title, replacement: $0.replacement + suffix, range: range)
+        }
+    }
+
+    func applyQuickFix(_ fix: TypstFix) {
+        guard let range = fix.range else { return }
+        insertText(fix.replacement, replacementRange: range)
+        showStatus("Fixed: \(fix.title)")
     }
 
     @Published var errors: [TypstError] = []
@@ -3723,14 +3777,21 @@ class EditorController: NSObject, ObservableObject {
             charIndex += 1
         }
         
-        self.selectedRange = NSRange(location: charIndex, length: 0)
+        reveal(range: NSRange(location: charIndex, length: 0))
+    }
+
+    /// Selects `range` and scrolls it to the middle of the viewport.
+    @MainActor
+    func reveal(range: NSRange) {
+        let charIndex = range.location
+        self.selectedRange = range
         
         // Explicitly scroll to the new position
         DispatchQueue.main.async {
             guard let tvc = self.textViewController else { return }
             
             // 1. Set Cursor
-            let newPos = CursorPosition(range: NSRange(location: charIndex, length: 0))
+            let newPos = CursorPosition(range: range)
             tvc.setCursorPositions([newPos], scrollToVisible: false) // We handle scroll manually
             
             // 2. Calculate Scroll Position
@@ -4039,28 +4100,32 @@ class EditorController: NSObject, ObservableObject {
     
     func requestAIFix(for error: TypstError) {
         // Construct a prompt for the fix
-        let range = getRangeForLine(error.line)
+        let range = error.line.flatMap { getRangeForLine($0) }
         var contextCode = ""
         if let range = range, let r = Range(range, in: sourceCode) {
             contextCode = String(sourceCode[r])
         }
         
-        // Get surrounding lines for context (e.g. 5 lines before/after)
-        var surroundingContext = ""
-        if range != nil {
-            // This is getting complicated to extract efficiently without helper.
-            // Let's just use the error line content for now + error message.
-            surroundingContext = contextCode
+        // The full diagnostic (location, caret, Typst hints, call trace and the
+        // panel's "how to fix" note) gives the model far more to go on than the
+        // one-line message.
+        let report = error.reportText(documentName: currentFileURL?.lastPathComponent)
+        let codeSection: String
+        if let line = error.line, !contextCode.isEmpty {
+            codeSection = """
+            Code at line \(line):
+            ```typ
+            \(contextCode)
+            ```
+            """
+        } else {
+            codeSection = "This error has no single line in the open document."
         }
         
         let prompt = """
         I have a Typst compilation error:
-        Error: "\(error.message)"
-        
-        Code at line \(error.line):
-        ```typ
-        \(surroundingContext)
-        ```
+        \(report)
+        \(codeSection)
         
         Please provide a corrected version of this line or block to fix the error.
         """
@@ -4269,49 +4334,20 @@ class EditorController: NSObject, ObservableObject {
         
         for error in self.errors {
             // Check if click is on the error line
-            if let range = getRangeForLine(error.line), NSLocationInRange(index, range) {
+            if let line = error.line, let range = getRangeForLine(line), NSLocationInRange(index, range) {
                 baseMenu.addItem(NSMenuItem.separator())
                 
                 // Static Fixes
-                // Get line content
-                var lineCode = ""
-                if let r = Range(range, in: sourceCode) {
-                    lineCode = String(sourceCode[r])
-                    // Strip newline for analysis if needed, but replacement usually handles it.
-                    // TypstSuggestionEngine expects line content (possibly with newline).
-                    // If replacement includes newline, great.
-                    // Actually, sourceCode[r] includes the newline if getRangeForLine returns lineRange.
-                    // Let's trim for the engine, but remember to preserve newline in replacement if we want?
-                    // The engine mimics the input. If input has newline, output typically should.
-                    // Let's pass the raw line.
-                }
-                
-                // let fixes = TypstSuggestionEngine.shared.suggestFixes(for: error, in: lineCode)
-                
-                if !lineCode.isEmpty { // Only offer fixes if we have line content
+                let fixes = quickFixes(for: error)
+                if !fixes.isEmpty {
                     let headerItem = NSMenuItem(title: "Quick Fixes", action: nil, keyEquivalent: "")
                     headerItem.isEnabled = false
                     baseMenu.addItem(headerItem)
                     
-                    // Let's handle newline logic here to be safe and robust.
-                    var cleanLine = lineCode
-                    var suffix = ""
-                    if lineCode.hasSuffix("\n") {
-                        cleanLine = String(lineCode.dropLast())
-                        suffix = "\n"
-                    }
-                    
-                    // Engine works on clean line
-                    let cleanFixes = TypstSuggestionEngine.shared.suggestFixes(for: error, in: cleanLine)
-                    
-                    // Use the clean logic
-                    for cleanFix in cleanFixes {
-                         let finalReplacement = cleanFix.replacement + suffix
-                         let rangeFix = TypstFix(title: cleanFix.title, replacement: finalReplacement, range: range)
-                         
-                         let item = NSMenuItem(title: cleanFix.title, action: #selector(applyStaticFix(_:)), keyEquivalent: "")
+                    for fix in fixes {
+                         let item = NSMenuItem(title: fix.title, action: #selector(applyStaticFix(_:)), keyEquivalent: "")
                          item.target = self
-                         item.representedObject = rangeFix
+                         item.representedObject = fix
                          baseMenu.addItem(item)
                     }
                     baseMenu.addItem(NSMenuItem.separator())
@@ -4372,11 +4408,9 @@ class EditorController: NSObject, ObservableObject {
     }
     
     @objc func applyStaticFix(_ sender: NSMenuItem) {
-        guard let fix = sender.representedObject as? TypstFix, let range = fix.range else { return }
-        
-        insertText(fix.replacement, replacementRange: range)
-        showStatus("Fixed: \(fix.title)")
-    } 
+        guard let fix = sender.representedObject as? TypstFix else { return }
+        applyQuickFix(fix)
+    }
     
     @objc func fixErrorWithAI(_ sender: NSMenuItem) {
         guard let error = sender.representedObject as? TypstError else { return }

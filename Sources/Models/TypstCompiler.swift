@@ -40,16 +40,82 @@ struct TypstError: Identifiable, Equatable {
         case warning
     }
 
+    /// One `help: …` frame Typst prints under a diagnostic, e.g.
+    /// "error occurred in this call of function `boom`" with its location.
+    struct TraceEntry: Equatable {
+        let message: String
+        /// Line in the open document (already mapped), or nil when the frame
+        /// is in another file.
+        var line: Int?
+        /// Path as Typst printed it, when the frame is in another file.
+        var file: String?
+        var fileLine: Int?
+    }
+
     let id = UUID()
-    let line: Int // 1-based
+    /// 1-based line in the open document. `nil` when the diagnostic has no
+    /// location in this document (a general compiler error, or an error that is
+    /// entirely inside another file).
+    let line: Int?
     let message: String
     var severity: Severity = .error
+    /// 0-based character offset of the reported span within `snippet`.
+    var column: Int? = nil
+    /// Length, in characters, of the reported span (`^^^` under the code).
+    var length: Int? = nil
+    /// The source line as the compiler saw it.
+    var snippet: String? = nil
+    /// Set when the diagnostic is inside another file (e.g. an imported module).
+    var file: String? = nil
+    var fileLine: Int? = nil
+    /// `= hint: …` lines from Typst.
+    var hints: [String] = []
+    /// `help: …` frames from Typst (where an error in another file was triggered).
+    var trace: [TraceEntry] = []
 
     /// Convenience constructor that keeps existing call sites (line/message) working.
-    init(line: Int, message: String, severity: Severity = .error) {
+    init(line: Int?, message: String, severity: Severity = .error) {
         self.line = line
         self.message = message
         self.severity = severity
+    }
+
+    /// Short location label for the UI, e.g. "Line 53, col 76", "lib.typ:2", "General".
+    var locationLabel: String {
+        if let file {
+            return fileLine.map { "\(file):\($0)" } ?? file
+        }
+        guard let line else { return "General" }
+        if let column { return "Line \(line), col \(column + 1)" }
+        return "Line \(line)"
+    }
+
+    /// Plain-text rendering of the full diagnostic, suitable for the clipboard
+    /// (bug reports, pasting into a chat).
+    func reportText(documentName: String? = nil) -> String {
+        var out = "\(severity == .warning ? "warning" : "error"): \(message)\n"
+        if let file {
+            out += "  in \(file)\(fileLine.map { ", line \($0)" } ?? "")\n"
+        } else if let line {
+            let doc = documentName.map { "\($0), " } ?? ""
+            out += "  at \(doc)line \(line)\(column.map { ", column \($0 + 1)" } ?? "")\n"
+        }
+        if let snippet {
+            out += "    \(snippet)\n"
+            if let column {
+                out += "    " + String(repeating: " ", count: column) + String(repeating: "^", count: max(1, length ?? 1)) + "\n"
+            }
+        }
+        for hint in hints { out += "  hint: \(hint)\n" }
+        for frame in trace {
+            let at = frame.file.map { "\($0)\(frame.fileLine.map { ":\($0)" } ?? "")" }
+                ?? frame.line.map { "line \($0)" } ?? ""
+            out += "  \(frame.message)\(at.isEmpty ? "" : " (\(at))")\n"
+        }
+        if let explanation = TypstErrorExplainer.explanation(for: self) {
+            out += "  how to fix: \(explanation)\n"
+        }
+        return out
     }
 }
 
@@ -195,11 +261,14 @@ class TypstCompiler: ObservableObject {
     private var pendingFallbackRewrite: Bool = false    // true while a fallback rewrite is in-flight and another compile cycle is expected
 
     // Watch-output stream state. `typst watch` diagnostics can be split across
-    // arbitrary pipe chunks, so output is buffered until a complete line arrives,
-    // and each diagnostic's `error:`/`warning:` line is held until its location
-    // line (`┌─ file:line:col`) is seen.
+    // arbitrary pipe chunks, so output is buffered until a complete line arrives;
+    // complete lines are assembled into diagnostics by `diagnosticParser`.
     private var pendingOutputBuffer: String = ""
-    private var pendingDiagnosticLine: String? = nil
+    private var diagnosticParser = TypstDiagnosticParser()
+    /// The file whose diagnostics belong to the open document: its name as
+    /// Typst prints it, and whether it is the shadow copy (whose line numbers
+    /// must be mapped back to the editor buffer).
+    private var diagnosticDocument: (fileName: String, isShadow: Bool)? = nil
 
     /// Maps a converted-output line number (1-based, excluding the injected preamble)
     /// back to the user's source line, so compile errors are reported against the text
@@ -218,7 +287,7 @@ class TypstCompiler: ObservableObject {
         currentShadowPDFURL = nil
         // Drop any partially-buffered watch output so the next watch starts clean.
         pendingOutputBuffer = ""
-        pendingDiagnosticLine = nil
+        diagnosticParser.reset()
         pendingFallbackRawLines = []
         // We do not clear fallback tracking here because updateContent() sets them
         // up just before cleanUp() is called to switch processes.
@@ -295,7 +364,7 @@ class TypstCompiler: ObservableObject {
             currentFileExtension = ext
             fallbackAttempts = [:]
             pendingFallbackRawLines = []
-            pendingDiagnosticLine = nil
+            diagnosticParser.reset()
             pendingOutputBuffer = ""
 
             // Operator-delimiting warnings for `.note` files (computed alongside
@@ -434,7 +503,8 @@ class TypstCompiler: ObservableObject {
         // which describe the source and are recomputed on each `updateContent`.
         self.typstErrors = []
         self.typstWarnings = []
-        self.pendingDiagnosticLine = nil
+        self.diagnosticParser.reset()
+        self.diagnosticDocument = (sourceURL.lastPathComponent, true)
         self.pendingOutputBuffer = ""
         self.pendingFallbackRawLines = []
         self.publishIssues()
@@ -452,10 +522,28 @@ class TypstCompiler: ObservableObject {
         self.processOutputPipe = pipe
         self.currentProcess = process
         
-        process.terminationHandler = { [weak self] _ in
+        process.terminationHandler = { [weak self] terminated in
+            let exitCode = terminated.terminationStatus
+            let processID = ObjectIdentifier(terminated)
             Task { @MainActor [weak self] in
-                self?.isCompiling = false
-                self?.compilationStatus = "Watch process ended."
+                // The pipe's last chunk can be delivered after termination;
+                // give it a moment so the final diagnostic is not cut off.
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let self else { return }
+                self.isCompiling = false
+                // Only the active watch may touch the shared parser state; an
+                // older process terminated by `cleanUp()` must not.
+                guard let current = self.currentProcess, ObjectIdentifier(current) == processID else {
+                    self.compilationStatus = "Watch process ended."
+                    return
+                }
+                // `typst watch` exits on fatal errors (e.g. "source file must be
+                // contained in project root"), sometimes without the blank line
+                // that ends a diagnostic block — publish whatever it printed.
+                self.finishCompilerOutput()
+                self.compilationStatus = exitCode == 0
+                    ? "Watch process ended."
+                    : "Error: the Typst compiler stopped (exit code \(exitCode))."
             }
         }
         
@@ -526,7 +614,7 @@ class TypstCompiler: ObservableObject {
             // source changes.
             typstErrors = []
             typstWarnings = []
-            pendingDiagnosticLine = nil
+            diagnosticParser.reset()
             publishIssues()
             return
         }
@@ -535,50 +623,46 @@ class TypstCompiler: ObservableObject {
             // NOTE: this contains the substring "compiled", so it must be checked
             // separately from the success case above. `typst watch` keeps running
             // after a failed compile and re-reports the full diagnostic set below
-            // this marker, so start the batch from a clean slate.
+            // this marker, so start the batch from a clean slate. The previous
+            // list stays on screen until the new blocks arrive (no flicker).
             isCompiling = false
             compilationStatus = "Compilation Error"
-            typstErrors = []
-            typstWarnings = []
-            pendingDiagnosticLine = nil
+            diagnosticParser.reset()
             return
         }
 
-        if line.hasPrefix("error: ") || line.hasPrefix("warning: ")
-            || pendingDiagnosticLine != nil
+        if TypstDiagnosticParser.startsBlock(line)
+            || diagnosticParser.isInsideBlock
             || line.trimmingCharacters(in: .whitespaces).isEmpty {
             consumeDiagnosticLine(line)
             return
         }
     }
 
-    /// State machine for one diagnostic block:
-    ///
-    ///     error: unclosed raw text
-    ///       ┌─ file.typ:256:209
-    ///
-    /// The `error:`/`warning:` line is remembered until its location line arrives;
-    /// a blank line ends the block. Location-less diagnostics are dropped (they
-    /// surface through `compilationStatus` instead), matching the previous behavior.
+    /// Feeds one line to `diagnosticParser` and reacts to what it completed:
+    /// queues lenient-fallback rewrites for errors in the shadow file, and
+    /// publishes the batch each time a diagnostic block ends. Diagnostics without
+    /// a location (e.g. "source file must be contained in project root") are
+    /// published too, with no line.
     private func consumeDiagnosticLine(_ line: String) {
-        if line.hasPrefix("error: ") || line.hasPrefix("warning: ") {
-            pendingDiagnosticLine = line
-            return
-        }
-
-        if pendingDiagnosticLine != nil {
-            if let match = CompilerRegex.diagnosticLocation.firstMatch(in: line, options: [], range: NSRange(0..<line.utf16.count)) {
-                let matchStr = (line as NSString).substring(with: match.range)
-                recordDiagnosticLocation(matchStr)
-                pendingDiagnosticLine = nil
-            } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
-                pendingDiagnosticLine = nil
+        switch diagnosticParser.consume(line) {
+        case .located(let index):
+            let diagnostic = diagnosticParser.diagnostics[index]
+            // Only errors in the shadow file itself queue a fallback rewrite.
+            // Warnings don't block output, and rewriting their lines wrapped
+            // valid content (e.g. a list item whose `__x__` triggers "no text
+            // within underscores") in `#raw(...)`. Errors inside an imported
+            // file carry *that* file's line numbers, which must never be used to
+            // rewrite the shadow file.
+            if diagnostic.severity == .error,
+               let location = diagnostic.location,
+               isOpenDocumentPath(location.path, requireShadow: true),
+               !pendingFallbackRawLines.contains(location.line) {
+                pendingFallbackRawLines.append(location.line)
             }
-            return
-        }
-
-        if line.trimmingCharacters(in: .whitespaces).isEmpty {
-            // Blank line ends a diagnostic block — repair anything it flagged.
+        case .blockEnded:
+            rebuildIssuesFromParser()
+            // Repair anything the block flagged.
             flushPendingFallbackFix()
             // Publish the diagnostics collected so far for this cycle, unless a
             // fallback rewrite just modified the shadow file: another compile
@@ -587,54 +671,121 @@ class TypstCompiler: ObservableObject {
             if !pendingFallbackRewrite {
                 publishIssues()
             }
+        case .none:
+            break
+        }
+    }
+
+    /// Ends any diagnostic still open when the compiler's output stops (the
+    /// process exited without a trailing blank line), so it is not lost.
+    private func finishCompilerOutput() {
+        if !pendingOutputBuffer.isEmpty {
+            let rest = pendingOutputBuffer
+            pendingOutputBuffer = ""
+            if TypstDiagnosticParser.startsBlock(rest) || diagnosticParser.isInsideBlock {
+                consumeDiagnosticLine(rest)
+            }
+        }
+        if diagnosticParser.isInsideBlock {
+            consumeDiagnosticLine("")
         }
     }
 
     /// Batch variant of the incremental diagnostic parser for one-shot compile runs
     /// (e.g. exports) where the full compiler output is already in memory.
-    private func parseErrors(from output: String) {
-        for line in output.components(separatedBy: "\n") {
-            consumeDiagnosticLine(line)
+    /// `sourceFileName` is the file that was compiled; its line numbers are used
+    /// as-is (it is not a shadow copy).
+    private func parseErrors(from output: String, sourceFileName: String) {
+        let previousDocument = diagnosticDocument
+        let previousParser = diagnosticParser
+        defer {
+            diagnosticDocument = previousDocument
+            diagnosticParser = previousParser
         }
+        diagnosticDocument = (sourceFileName, false)
+        diagnosticParser.reset()
+        for line in output.components(separatedBy: "\n") {
+            _ = diagnosticParser.consume(line)
+        }
+        rebuildIssuesFromParser()
+        publishIssues()
     }
 
-    /// Records the file location of the pending diagnostic, mapping the shadow-file
-    /// line back to the user's source line. `warning:` diagnostics are kept separate
-    /// from errors: they don't block output but are still surfaced and navigable.
-    private func recordDiagnosticLocation(_ locationMatch: String) {
-        let parts = locationMatch.split(separator: ":")
-        guard let lineNum = parts.first.flatMap({ Int($0) }) else { return }
+    /// True when a path printed by Typst refers to the open document (the
+    /// shadow copy during live preview, or the compiled file during export).
+    private func isOpenDocumentPath(_ path: String, requireShadow: Bool = false) -> Bool {
+        guard let document = diagnosticDocument else { return false }
+        if requireShadow && !document.isShadow { return false }
+        return (path as NSString).lastPathComponent == document.fileName
+    }
 
-        // Only errors queue a fallback rewrite. Warnings don't block output, and
-        // rewriting their lines wrapped valid content (e.g. a list item whose
-        // `__x__` triggers "no text within underscores") in `#raw(...)`.
-        let isWarning = pendingDiagnosticLine?.hasPrefix("warning: ") ?? false
-        if !isWarning, !pendingFallbackRawLines.contains(lineNum) {
-            pendingFallbackRawLines.append(lineNum)
-        }
+    /// Maps a line number Typst reported for the open document to the editor buffer.
+    private func editorLine(forDocumentLine line: Int) -> Int {
+        (diagnosticDocument?.isShadow ?? true) ? sourceLine(forShadowLine: line) : line
+    }
 
-        guard let diagnosticLine = pendingDiagnosticLine else { return }
-        let prefix = isWarning ? "warning: " : "error: "
-        let message = String(diagnosticLine.dropFirst(prefix.count))
-
-        let error = TypstError(
-            line: sourceLine(forShadowLine: lineNum),
-            message: message,
-            severity: isWarning ? .warning : .error
-        )
-        if isWarning {
-            if !typstWarnings.contains(where: { $0.line == error.line && $0.message == message }) {
-                typstWarnings.append(error)
+    /// Replaces `typstErrors` / `typstWarnings` with the parser's current batch.
+    private func rebuildIssuesFromParser() {
+        var errors: [TypstError] = []
+        var warnings: [TypstError] = []
+        for raw in diagnosticParser.diagnostics {
+            let issue = makeIssue(from: raw)
+            let isDuplicate: (TypstError) -> Bool = {
+                $0.line == issue.line && $0.message == issue.message && $0.file == issue.file
             }
-        } else {
-            if !typstErrors.contains(where: { $0.line == error.line && $0.message == message }) {
-                typstErrors.append(error)
+            if issue.severity == .warning {
+                if !warnings.contains(where: isDuplicate) { warnings.append(issue) }
+            } else {
+                if !errors.contains(where: isDuplicate) { errors.append(issue) }
             }
         }
-        // Errors are accumulated here but NOT published yet — they will be
-        // published in bulk once the compile cycle completes (at "compiled
-        // successfully" or "compiled with errors") to avoid the error panel
-        // flickering with transient diagnostics.
+        typstErrors = errors
+        typstWarnings = warnings
+    }
+
+    /// Converts a raw compiler diagnostic into a `TypstError` for the editor:
+    /// shadow-file lines are mapped to the user's source, and diagnostics inside
+    /// another file keep that file's name and line. `warning:` diagnostics are
+    /// kept separate from errors: they don't block output but are still surfaced
+    /// and navigable.
+    private func makeIssue(from raw: RawTypstDiagnostic) -> TypstError {
+        var line: Int? = nil
+        var file: String? = nil
+        var fileLine: Int? = nil
+        if let location = raw.location {
+            if isOpenDocumentPath(location.path) {
+                line = editorLine(forDocumentLine: location.line)
+            } else {
+                file = location.path
+                fileLine = location.line
+            }
+        }
+
+        let trace: [TypstError.TraceEntry] = raw.trace.map { frame in
+            guard let location = frame.location else {
+                return TypstError.TraceEntry(message: frame.message)
+            }
+            if isOpenDocumentPath(location.path) {
+                return TypstError.TraceEntry(message: frame.message, line: editorLine(forDocumentLine: location.line))
+            }
+            return TypstError.TraceEntry(message: frame.message, file: location.path, fileLine: location.line)
+        }
+
+        // An error inside an imported file is still triggered from a line in this
+        // document — the first trace frame here is where clicking should jump.
+        if line == nil, let callSite = trace.first(where: { $0.line != nil })?.line {
+            line = callSite
+        }
+
+        var issue = TypstError(line: line, message: raw.message, severity: raw.severity)
+        issue.snippet = raw.snippet
+        issue.column = raw.caretColumn
+        issue.length = raw.caretLength
+        issue.file = file
+        issue.fileLine = fileLine
+        issue.hints = raw.hints
+        issue.trace = trace
+        return issue
     }
 
     /// Runs the lenient fallback fixer for any diagnostics that completed since the
@@ -1470,7 +1621,7 @@ class TypstCompiler: ObservableObject {
             if process.terminationStatus != 0 {
                 print("[TYPST-EXPORT-ERROR]: \(output)")
                 if output.contains("error:") {
-                    parseErrors(from: output)
+                    parseErrors(from: output, sourceFileName: sourceURL.lastPathComponent)
                 }
                 return (false, output.isEmpty ? "Unknown Typst error (exit code \(process.terminationStatus))" : output)
             }
