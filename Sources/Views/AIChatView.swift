@@ -14,6 +14,7 @@ struct AIChatView: View {
     @ObservedObject private var mcpManager = MCPManager.shared
 
     @State private var draft: String = ""
+    @State private var showYoloConfirm = false
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -25,6 +26,20 @@ struct AIChatView: View {
                 disabledState
             } else {
                 transcript
+                if !chat.plan.isEmpty {
+                    Divider()
+                    planCard
+                }
+                if chat.isCompacting {
+                    Divider()
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Summarizing older turns…").font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                }
                 if let approval = chat.pendingApproval {
                     Divider()
                     approvalCard(approval)
@@ -35,6 +50,12 @@ struct AIChatView: View {
         }
         .background(Color(NSColor.windowBackgroundColor))
         .onAppear { chat.refreshToolSettings() }
+        .alert("Enable YOLO mode?", isPresented: $showYoloConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Enable", role: .destructive) { chat.yoloMode = true }
+        } message: {
+            Text("Every file write, edit, and Python run will execute without asking you first for the rest of this app session. The AI can still only touch files inside this project/notebook. YOLO turns itself off when TypstEdit restarts.")
+        }
     }
 
     // MARK: - Header
@@ -52,6 +73,18 @@ struct AIChatView: View {
             }
             Spacer()
             if aiSettings.chatEnabled {
+                Text("≈\(Self.contextLabel(chat.estimatedContextTokens)) / \(Self.contextLabel(aiSettings.chatContextBudgetTokens))")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(chat.estimatedContextTokens > aiSettings.chatContextBudgetTokens ? .orange : .secondary)
+                    .help("Rough estimate of the conversation context sent with the next message, against the configured budget. Older turns are summarized automatically when this is exceeded.")
+                Button {
+                    Task { await chat.compactHistory() }
+                } label: {
+                    Image(systemName: "rectangle.compress.vertical")
+                }
+                .buttonStyle(.plain)
+                .disabled(chat.isGenerating || chat.isCompacting || chat.messages.isEmpty)
+                .help("Summarize older turns now to free up context")
                 Button {
                     chat.clearHistory()
                 } label: {
@@ -74,6 +107,15 @@ struct AIChatView: View {
 
     private var scopeNoun: String {
         chat.scopeLabel.lowercased().contains("notebook") ? "notebook" : "project"
+    }
+
+    /// `0.8k`-style label that never collapses a small non-zero value to `0k`.
+    private static func contextLabel(_ tokens: Int) -> String {
+        if tokens < 1_000 {
+            return "\(max(0, tokens))"
+        }
+        let thousands = Double(tokens) / 1_000
+        return thousands < 10 ? String(format: "%.1fk", thousands) : "\(Int(thousands.rounded()))k"
     }
 
     // MARK: - Disabled (opt-in) State
@@ -137,30 +179,100 @@ struct AIChatView: View {
 
     @ViewBuilder
     private func messageRow(_ message: ChatMessage) -> some View {
-        switch message.role {
-        case .user:
-            HStack {
-                Spacer(minLength: 30)
-                Text(message.text)
-                    .font(.callout)
-                    .padding(8)
-                    .background(Color.accentColor.opacity(0.85))
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+        Group {
+            switch message.role {
+            case .user:
+                HStack {
+                    Spacer(minLength: 30)
+                    Text(message.text)
+                        .font(.callout)
+                        .padding(8)
+                        .background(Color.accentColor.opacity(0.85))
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                }
+            case .assistant:
+                if message.isSummary {
+                    summaryBubble(message)
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let reasoning = message.reasoning, !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            thinkingDisclosure(reasoning)
+                        }
+                        HStack {
+                            Text(message.text)
+                                .font(.callout)
+                                .textSelection(.enabled)
+                                .padding(8)
+                                .background(Color.secondary.opacity(0.12))
+                                .cornerRadius(10)
+                            Spacer(minLength: 30)
+                        }
+                    }
+                }
+            case .toolCall:
+                toolCallRow(message)
             }
-        case .assistant:
-            HStack {
-                Text(message.text)
-                    .font(.callout)
+        }
+        .opacity(message.isCompacted ? 0.45 : 1)
+    }
+
+    @ViewBuilder
+    private func summaryBubble(_ message: ChatMessage) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Earlier turns summarized", systemImage: "rectangle.compress.vertical")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(message.text.replacingOccurrences(of: "[Summary of earlier conversation]\n\n", with: ""))
+                    .font(.caption)
                     .textSelection(.enabled)
                     .padding(8)
-                    .background(Color.secondary.opacity(0.12))
+                    .background(Color.secondary.opacity(0.07))
                     .cornerRadius(10)
-                Spacer(minLength: 30)
             }
-        case .toolCall:
-            toolCallRow(message)
+            Spacer(minLength: 30)
         }
+    }
+
+    private var planCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "checklist").foregroundColor(.accentColor)
+                Text("Plan").font(.caption.bold())
+                Spacer()
+                Text("\(chat.plan.filter { $0.status == .completed }.count)/\(chat.plan.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(chat.plan) { item in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            switch item.status {
+                            case .completed:
+                                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                            case .inProgress:
+                                Image(systemName: "circle.dotted").foregroundColor(.accentColor)
+                            case .pending:
+                                Image(systemName: "circle").foregroundColor(.secondary)
+                            }
+                            Text(item.content)
+                                .font(.caption)
+                                .foregroundColor(item.status == .completed ? .secondary : .primary)
+                                .strikethrough(item.status == .completed)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .frame(maxHeight: 150)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(0.06))
     }
 
     @ViewBuilder
@@ -180,9 +292,39 @@ struct AIChatView: View {
         } label: {
             HStack(spacing: 6) {
                 statusIcon(message.toolStatus)
+                if message.isSubagent {
+                    Image(systemName: "person.2")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
                 Text(displayName(for: message.toolName ?? "tool"))
                     .font(.caption.monospaced())
+                    .foregroundColor(message.isSubagent ? .secondary : .primary)
             }
+        }
+        .padding(8)
+        .padding(.leading, message.isSubagent ? 18 : 0)
+        .background(Color.secondary.opacity(message.isSubagent ? 0.03 : 0.06))
+        .cornerRadius(8)
+    }
+
+    /// Collapsed-by-default disclosure for whatever reasoning/"thinking"
+    /// content the model returned alongside this answer — only shown when
+    /// there's something to show, since not every model or provider exposes
+    /// it. Expanding doesn't change anything else in the transcript; it's
+    /// purely a window into what the model worked through.
+    @ViewBuilder
+    private func thinkingDisclosure(_ reasoning: String) -> some View {
+        DisclosureGroup {
+            Text(reasoning)
+                .font(.caption2.monospaced())
+                .foregroundColor(.secondary)
+                .textSelection(.enabled)
+                .padding(.top, 4)
+        } label: {
+            Label("Thought process", systemImage: "brain")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
         .padding(8)
         .background(Color.secondary.opacity(0.06))
@@ -218,6 +360,15 @@ struct AIChatView: View {
                         .font(.subheadline.bold())
                 }
                 diffPreview(old: oldContent, new: newContent)
+                    .frame(maxHeight: 180)
+
+            case .fileEdit(let path, let oldSnippet, let newSnippet, let occurrences):
+                HStack(spacing: 6) {
+                    Image(systemName: "pencil.circle.fill").foregroundColor(.orange)
+                    Text("Edit '\(path)'\(occurrences > 1 ? " (\(occurrences) places)" : "")?")
+                        .font(.subheadline.bold())
+                }
+                diffPreview(old: oldSnippet, new: newSnippet)
                     .frame(maxHeight: 180)
 
             case .runPython(let code):
@@ -372,6 +523,22 @@ struct AIChatView: View {
             .menuStyle(.borderlessButton).fixedSize()
 
             Spacer()
+
+            Button {
+                if chat.yoloMode {
+                    chat.yoloMode = false
+                } else {
+                    showYoloConfirm = true
+                }
+            } label: {
+                Label("YOLO", systemImage: chat.yoloMode ? "bolt.shield.fill" : "bolt.shield")
+                    .font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(chat.yoloMode ? .red : .secondary)
+            .help(chat.yoloMode
+                  ? "YOLO mode is ON — every write, edit, and code run is auto-approved for this session. Click to turn off."
+                  : "YOLO mode: auto-approve every write, edit, and code run for the rest of this session (still limited to this project/notebook).")
         }
         .foregroundColor(.secondary)
     }

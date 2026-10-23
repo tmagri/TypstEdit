@@ -115,8 +115,32 @@ fi
 
 
 # Icon Handling
-# Priority: Use existing AppIcon.icns if available, otherwise generate from icon.png
-if [ -f "AppIcon.icns" ]; then
+# Priority: compile the Icon Composer asset (AppIcon.icon) with actool, which
+# produces an adaptive Assets.car (black Dock icon in Dark mode, like
+# FaceTime/Phone/Reminders, blue in Light mode) plus a legacy AppIcon.icns
+# fallback for older macOS. Falls back to a static AppIcon.icns, then
+# icon.png, if actool/Xcode isn't available (e.g. Command Line Tools only).
+ACTOOL_PARTIAL_PLIST="$APP_BUNDLE/Contents/Resources/.actool-partial.plist"
+if [ -d "AppIcon.icon" ] && xcrun --find actool >/dev/null 2>&1; then
+    echo "Compiling AppIcon.icon (Icon Composer) with actool..."
+    if xcrun actool \
+        --compile "$APP_BUNDLE/Contents/Resources" \
+        --platform macosx \
+        --minimum-deployment-target 13.0 \
+        --app-icon AppIcon \
+        --output-partial-info-plist "$ACTOOL_PARTIAL_PLIST" \
+        --enable-icon-stack-fallback-generation=disabled \
+        "AppIcon.icon" > /tmp/typstedit-actool.log 2>&1; then
+        echo "✓ Compiled Assets.car + AppIcon.icns from AppIcon.icon"
+    else
+        echo "⚠️  actool failed to compile AppIcon.icon (see /tmp/typstedit-actool.log); falling back to static icon."
+        cat /tmp/typstedit-actool.log
+        if [ -f "AppIcon.icns" ]; then
+            cp "AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+        fi
+    fi
+    rm -f "$ACTOOL_PARTIAL_PLIST"
+elif [ -f "AppIcon.icns" ]; then
     echo "Using custom AppIcon.icns..."
     cp "AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 elif [ -f "icon.png" ]; then
@@ -157,6 +181,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>CFBundleName</key>
     <string>$APP_NAME</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>

@@ -616,14 +616,36 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Built-in Tools",
             icon: "hammer",
-            description: "Always available to the chat (no MCP server needed): listing/reading/searching files, writing files (always shown to you for approval first), and a Typst compile check."
+            description: "Always available to the chat (no MCP server needed): listing/reading/searching files, precise edits, and a Typst compile check. Anything that changes a file — or runs code — is shown to you for approval first, unless YOLO mode is on."
         ) {
             VStack(alignment: .leading, spacing: 10) {
-                Label("list_files, read_file", systemImage: "doc.text.magnifyingglass").font(.caption)
-                Label("write_file — always requires your approval, with a diff preview", systemImage: "pencil.and.outline").font(.caption)
+                Label("list_files, read_file (paged), grep_project — case-insensitive content search", systemImage: "doc.text.magnifyingglass").font(.caption)
+                Label("edit_file — exact-match replacement, with a diff preview; write_file for whole-file changes", systemImage: "pencil.and.outline").font(.caption)
+                Label("update_plan — a visible task list for multi-step jobs", systemImage: "checklist").font(.caption)
+                Label("delegate_task — a read-only subagent for large research jobs", systemImage: "person.2").font(.caption)
                 Label("run_typst_check — compiles a snippet in an isolated temp folder", systemImage: "checkmark.seal").font(.caption)
             }
             .foregroundColor(.secondary)
+        }
+
+        SettingsCard(
+            title: "Context Budget",
+            icon: "gauge.with.dots.needle.67percent",
+            description: "Long chats eventually overflow any model's context window — which some providers report as an empty response rather than a clear error. When the conversation passes this rough token budget, the chat summarizes older turns automatically. The header shows the current estimate; the compact button summarizes on demand."
+        ) {
+            HStack(spacing: 10) {
+                Text("Summarize past")
+                    .font(.caption)
+                TextField("16000", value: $settings.chatContextBudgetTokens, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+                Text("tokens")
+                    .font(.caption)
+                Spacer()
+            }
+            Text("Raise it for long-context models; lower it for small local models. 16,000 is a safe default for most.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         }
 
         SettingsCard(
@@ -645,7 +667,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Python Execution Tool",
             icon: "exclamationmark.triangle.fill",
-            description: "A separate, extra opt-in on top of AI Chat itself. When on, the model may ask to run a Python 3 script using your Mac's python3, with your full user permissions, no sandbox, and no network isolation — working directory set to the open project/notebook. You are shown the exact code and must approve it every single time; nothing runs silently."
+            description: "A separate, extra opt-in on top of AI Chat itself. When on, the model may ask to run a Python 3 script. You are shown the exact code and must approve it every time (unless YOLO mode is on); nothing runs silently. Sandboxing is on by default: no network access, and writes limited to a throwaway scratch folder."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle("Allow the Run Python Tool", isOn: $settings.chatPythonToolEnabled)
@@ -660,6 +682,19 @@ struct AISettingsView: View {
                             .foregroundColor(.orange)
                     }
                     .padding(.leading, 20)
+
+                    Divider()
+
+                    Toggle("Sandbox Python runs (no network, scratch-folder writes)", isOn: $settings.chatPythonSandboxEnabled)
+                        .font(.body.weight(.regular))
+                        .padding(.leading, 18)
+
+                    Text(settings.chatPythonSandboxEnabled
+                         ? "Runs under macOS sandbox-exec. Scripts can read project files but cannot reach the network or modify anything outside a temporary folder."
+                         : "Sandbox is OFF: scripts run with your full user permissions, no network isolation, and can write anywhere you can.")
+                        .font(.caption)
+                        .foregroundColor(settings.chatPythonSandboxEnabled ? .secondary : .orange)
+                        .padding(.leading, 38)
                 }
             }
         }

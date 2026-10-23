@@ -29,6 +29,26 @@ struct AISkill: Identifiable, Equatable {
     /// Composite so a global and project skill that happen to share a folder
     /// name never collide in a SwiftUI `ForEach`.
     var id: String { "\(scope.rawValue):\(folderName)" }
+
+    /// Supplementary files living alongside `SKILL.md` in the skill's own
+    /// folder — reference docs, templates, examples — the Agent Skills
+    /// convention of shipping material a skill's body can point at without
+    /// it being loaded into every prompt. Read on demand by the AI via the
+    /// `read_skill_file` tool (see `LocalToolExecutor`), not preloaded here.
+    var attachments: [String] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        return entries.compactMap { url -> String? in
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            guard !isDir else { return nil }
+            let name = url.lastPathComponent
+            return name == "SKILL.md" ? nil : name
+        }.sorted()
+    }
 }
 
 @MainActor
@@ -222,6 +242,34 @@ final class SkillsManager: ObservableObject {
 
     func deleteSkill(_ skill: AISkill) {
         try? FileManager.default.removeItem(at: skill.folderURL)
+        refreshAll()
+    }
+
+    // MARK: - Attachments
+
+    /// Copies `sourceURL` into the skill's folder so it sits alongside
+    /// `SKILL.md`, overwriting any existing attachment with the same name.
+    /// Returns false (without throwing) on any filesystem failure, since
+    /// this is driven directly from a file picker and the caller only needs
+    /// to know whether to refresh its list.
+    @discardableResult
+    func addAttachment(to skill: AISkill, from sourceURL: URL) -> Bool {
+        let destination = skill.folderURL.appendingPathComponent(sourceURL.lastPathComponent)
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+        } catch {
+            print("[SkillsManager] Failed to attach '\(sourceURL.lastPathComponent)' to skill '\(skill.name)': \(error)")
+            return false
+        }
+        refreshAll()
+        return true
+    }
+
+    func removeAttachment(_ fileName: String, from skill: AISkill) {
+        try? FileManager.default.removeItem(at: skill.folderURL.appendingPathComponent(fileName))
         refreshAll()
     }
 }

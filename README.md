@@ -1,7 +1,7 @@
 # TypstEdit
 
 <p align="center">
-  <img src="/AppIcon.icns" alt="TypstEdit Icon" width="128" />
+  <img src="/AppIcon.png" alt="TypstEdit Icon" width="128" />
 </p>
 
 <p align="center">
@@ -11,6 +11,7 @@
 <p align="center">
   <a href="#installation">Download</a> • 
   <a href="#features">Features</a> • 
+  <a href="#ai-assistant">AI Assistant</a> • 
   <a href="#building-from-source">Build</a>
 </p>
 
@@ -63,11 +64,52 @@
 * **♿️ Accessibility Features:** Color blindness simulation modes (Protanopia, Deuteranopia, Tritanopia).
 * **📐 Flexible Layout:** Split views vertically or horizontally, editor-only, preview-only, or both panels.
 
-### AI Agents & Command Line
-* **🤖 MCP Server:** AI agents (Claude Code/Desktop, Codex, Cursor, opencode, …) can check, compile and *see* your documents through TypstEdit's built-in Model Context Protocol server.
-* **⌨️ `typstedit` Command:** Compile from any terminal or script with the same compiler and Markdown/Note conversion as the editor — no window opens.
+### AI (100% opt-in)
+* **🤖 Assistant:** Autocomplete, cursor-insertion prompts, selection rewrite/grammar fixes, and a persistent agentic chat panel — each configurable to OpenAI, Anthropic, Gemini, OpenRouter, or a local model.
+* **🧩 Skills, Tools & Search:** Reusable Skills, your own MCP tools, and semantic project search (RAG), enabled per request.
+* **🔒 Safety First:** File edits and code execution always need your approval, with a diff/code preview, unless you opt into YOLO mode — and the AI can't see outside the open project.
+* **🔌 MCP Server & CLI:** Let external agents (Claude Code, Codex, opencode, …) check and compile your documents, or script from the terminal with `typstedit`.
 
-## 🤖 AI Agents & Command Line
+See **[AI Assistant & Agent Integration](#ai-assistant)** below for the full rundown.
+
+<a id="ai-assistant"></a>
+<details>
+<summary><b>🧠 AI Assistant & Agent Integration</b> — click to expand (100% opt-in, every provider/tool is off until you turn it on)</summary>
+
+Pick a provider per task in **Settings → AI** — OpenAI, Anthropic, Google Gemini, OpenRouter, or a local OpenAI-compatible server like Ollama/LM Studio. Nothing talks to a model until you enable it.
+
+### Autocomplete, AI Prompt, Refine & Grammar
+* **Autocomplete** offers inline ghost-text suggestions as you type, using whichever model you've assigned to the *Completion* task (a fast local model works well here).
+* **AI Prompt** (**⌃⌘A**, or Insert → AI Prompt…) generates or rewrites content at the cursor from a single instruction, optionally using enabled **Skills** and **MCP tools**.
+* **Refine Writing** / **Fix Grammar**, from the editor's right-click menu, rewrite the current selection and show a preview you accept or reject.
+
+### AI Chat Panel
+Toggle with **⌘⇧J** (or the status bar icon). Unlike AI Prompt, this is an ongoing, persistent conversation scoped to your whole open **project** — or just the current **notebook**, for notes — with its own agentic tool-calling loop. The chat never sees anything outside that scope: every path a tool touches is checked in code, not just told to behave in the prompt.
+
+Built-in tools (always available, no MCP server required):
+
+| Tool | What it does |
+|---|---|
+| `list_files` | Lists files in the project/notebook. |
+| `read_file` | Reads a file, paged — large files come back a window at a time instead of flooding the conversation. |
+| `grep_project` | Case-insensitive by default; exact-string or regex search across the project, with a glob filter. |
+| `search_project` | Semantic (RAG) search, falling back to a literal scan if nothing semantic matches. |
+| `edit_file` | Precise find-and-replace on a file it has already read — cheaper and safer than rewriting the whole thing. |
+| `write_file` | Creates or overwrites a whole file. |
+| `read_skill_file` | Reads a file attached to a currently enabled Skill. |
+| `run_typst_check` | Compiles a snippet in an isolated temp folder to check for errors, without touching your document. |
+| `run` (Python, opt-in) | Runs a short Python script, sandboxed by default — no network access, writes limited to a scratch folder. |
+
+Anything that changes a file or runs code is shown to you first — a diff for writes/edits, the exact code for Python — and needs your approval, unless you turn on **YOLO mode** (a session-only toggle, with a confirmation dialog) to auto-approve everything for the rest of the session. YOLO never relaxes the project/notebook scope boundary.
+
+For multi-step requests, the chat keeps a visible task checklist (`update_plan`), and can delegate large research jobs to a **read-only subagent** (`delegate_task`) that explores in its own context and reports back only its findings. If the model exposes reasoning/"thinking" content, it's shown collapsed under the reply. A context-size estimate sits in the chat header against a configurable budget; once a conversation grows past it, older turns are automatically (or manually) summarized so the chat keeps working instead of failing with an empty response.
+
+### Skills, MCP Tools & Semantic Search
+* **Skills** are reusable, portable instruction sets — the same idea as Claude Code/OpenCode's Agent Skills — stored as a `SKILL.md` folder, either global or project-scoped (`.typstedit/skills/`, shareable via git), with optional **attachments** the AI reads only when it actually needs them.
+* **MCP Tools:** add your own [MCP](https://modelcontextprotocol.io) servers in **Settings → MCP Servers** and enable them per request to give AI Prompt/Chat extra tools.
+* **Semantic Project Search (RAG):** a local embedding index over your project's files, enriching prompts and powering `search_project`.
+
+### AI Agents & Command Line (TypstEdit as a tool for *other* agents)
 
 Open **Settings → Integrations** and click **Install** to add the `typstedit` command. It then prints ready-to-paste MCP configs for common agents.
 
@@ -91,6 +133,8 @@ claude mcp add --scope user typstedit -- typstedit mcp
 ```
 
 If you skip the install, use the full path `/Applications/TypstEdit.app/Contents/MacOS/TypstEdit` as the command. Tools exposed: `typst_check`, `typst_compile`, `typst_render_preview` (returns page images), `typstedit_open` and `typstedit_info`.
+
+</details>
 
 ## 📥 Installation
 

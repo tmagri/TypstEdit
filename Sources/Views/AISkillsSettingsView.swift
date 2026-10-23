@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Settings UI for AI Skills: portable `SKILL.md` folders (frontmatter
 /// `name`/`description` + a markdown instructions body) that the user can
@@ -89,6 +90,11 @@ struct AISkillsSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(2)
+                if !skill.attachments.isEmpty {
+                    Label("\(skill.attachments.count) attached file\(skill.attachments.count == 1 ? "" : "s")", systemImage: "paperclip")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
             Spacer()
             Button {
@@ -122,10 +128,16 @@ private struct SkillEditorSheet: View {
     @State private var skillDescription: String = ""
     @State private var skillBody: String = ""
     @State private var scope: ConfigScope = .global
+    @State private var attachments: [String] = []
 
     private var isEditing: Bool {
         if case .edit = mode { return true }
         return false
+    }
+
+    private var editingSkill: AISkill? {
+        if case .edit(let skill) = mode { return skill }
+        return nil
     }
 
     private var canUseProjectScope: Bool { skillsManager.projectRoot != nil }
@@ -160,6 +172,14 @@ private struct SkillEditorSheet: View {
                 .cornerRadius(8)
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
 
+            if let skill = editingSkill {
+                attachmentsSection(skill)
+            } else {
+                Text("Save this skill, then reopen it to attach reference files (specs, templates, examples) the AI can pull in on demand without them bloating every prompt.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
             HStack {
                 Button("Cancel") { dismiss() }
                 Spacer()
@@ -173,6 +193,62 @@ private struct SkillEditorSheet: View {
         .onAppear(perform: load)
     }
 
+    @ViewBuilder
+    private func attachmentsSection(_ skill: AISkill) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Attached Files").font(.caption.bold()).foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    addAttachment(to: skill)
+                } label: {
+                    Label("Add Files…", systemImage: "paperclip")
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+            }
+
+            if attachments.isEmpty {
+                Text("None yet. Attachments stay out of the prompt until the AI decides this skill's instructions call for one, then it reads it with a dedicated tool.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(attachments, id: \.self) { fileName in
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.text").foregroundColor(.secondary)
+                            Text(fileName).font(.caption)
+                            Spacer()
+                            Button {
+                                skillsManager.removeAttachment(fileName, from: skill)
+                                attachments = skill.attachments
+                            } label: {
+                                Image(systemName: "trash").foregroundColor(.red)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(8)
+    }
+
+    private func addAttachment(to skill: AISkill) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            skillsManager.addAttachment(to: skill, from: url)
+        }
+        attachments = skill.attachments
+    }
+
     private func load() {
         switch mode {
         case .create(let initialScope):
@@ -182,6 +258,7 @@ private struct SkillEditorSheet: View {
             skillDescription = skill.description
             skillBody = skill.body
             scope = skill.scope
+            attachments = skill.attachments
         }
     }
 

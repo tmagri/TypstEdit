@@ -112,6 +112,14 @@ class AISettingsManager: ObservableObject {
     /// off per session from the chat panel itself; this only controls where
     /// each new session starts from.
     @AppStorage("aiChatRAGToolEnabledDefault") var chatRAGToolEnabledDefault: Bool = true
+    /// Run the Python tool under macOS `sandbox-exec` (no network, writes
+    /// limited to a scratch folder). On by default — turning it off is the
+    /// "full user permissions" behavior the tool used to have.
+    @AppStorage("aiChatPythonSandboxEnabled") var chatPythonSandboxEnabled: Bool = true
+    /// Rough token budget for one chat request before old turns get summarized
+    /// into a compaction summary. Bigger models/local models with long
+    /// contexts can raise this.
+    @AppStorage("aiChatContextBudgetTokens") var chatContextBudgetTokens: Int = 16_000
 
     // MARK: - Per-Task Source Assignment
 

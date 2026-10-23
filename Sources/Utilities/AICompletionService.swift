@@ -136,10 +136,14 @@ enum AIChatMessage {
     case toolResult(AIToolResult)
 }
 
-/// What one turn of a tool-calling conversation produced.
+/// What one turn of a tool-calling conversation produced. Each case carries
+/// along any reasoning/"thinking" content the provider returned natively
+/// for that turn (e.g. `reasoning_content`), separate from the visible
+/// text/tool calls — `fetchCompletionWithTools` collects these across turns
+/// so the whole exchange's thinking can be shown, not just the last turn's.
 enum AIChatStep {
-    case finalText(String)
-    case toolCalls([AIToolCallRequest])
+    case finalText(String, reasoning: String?)
+    case toolCalls([AIToolCallRequest], reasoning: String?)
 }
 
 @MainActor
@@ -150,19 +154,38 @@ class AICompletionService: ObservableObject {
 
     private init() {}
 
-    private func stripThinkingTags(from text: String) -> String {
+    /// Strips `<think>`/`<thought>` tags some local/open models emit inline
+    /// in their content, and returns what was inside them separately rather
+    /// than discarding it — callers surface that as the model's visible
+    /// "thinking" instead of silently dropping it.
+    private func extractThinking(from text: String) -> (clean: String, reasoning: String?) {
         var cleanText = text
         let regexes = [AICompletionRegex.thinkTag, AICompletionRegex.thoughtTag]
+
+        var captured: [String] = []
+        for regex in regexes {
+            let range = NSRange(cleanText.startIndex..<cleanText.endIndex, in: cleanText)
+            for match in regex.matches(in: cleanText, options: [], range: range) {
+                guard let r = Range(match.range, in: cleanText) else { continue }
+                let inner = String(cleanText[r])
+                    .replacingOccurrences(of: "<think>", with: "", options: [.caseInsensitive])
+                    .replacingOccurrences(of: "</think>", with: "", options: [.caseInsensitive])
+                    .replacingOccurrences(of: "<thought>", with: "", options: [.caseInsensitive])
+                    .replacingOccurrences(of: "</thought>", with: "", options: [.caseInsensitive])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !inner.isEmpty { captured.append(inner) }
+            }
+        }
 
         for regex in regexes {
             let range = NSRange(cleanText.startIndex..<cleanText.endIndex, in: cleanText)
             cleanText = regex.stringByReplacingMatches(in: cleanText, options: [], range: range, withTemplate: "")
         }
 
-        return cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (cleanText.trimmingCharacters(in: .whitespacesAndNewlines), captured.isEmpty ? nil : captured.joined(separator: "\n\n"))
     }
 
-    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int? = nil, purpose: AIRequestPurpose = .chat) async throws -> String {
+    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int? = nil, purpose: AIRequestPurpose = .chat, onReasoning: @escaping (String) -> Void = { _ in }, sanitize: Bool = true) async throws -> String {
         isFetching = true
         defer { isFetching = false }
 
@@ -284,6 +307,11 @@ class AICompletionService: ObservableObject {
         }
 
         let rawResult: String
+        // Native reasoning the provider returned as a separate field, e.g.
+        // DeepSeek/Qwen-reasoner-style `reasoning_content`, or OpenRouter's
+        // `reasoning` — distinct from `<think>` tags embedded in `content`,
+        // which `extractThinking` handles further down.
+        var nativeReasoning: String?
 
         // Parse Gemini Response
         if isGemini {
@@ -307,6 +335,10 @@ class AICompletionService: ObservableObject {
                let textBlock = contentArray.first(where: { ($0["type"] as? String) == "text" }),
                let text = textBlock["text"] as? String {
                 rawResult = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let thinkingBlocks = contentArray.filter { ($0["type"] as? String) == "thinking" }
+                if !thinkingBlocks.isEmpty {
+                    nativeReasoning = thinkingBlocks.compactMap { $0["thinking"] as? String }.joined(separator: "\n\n")
+                }
             } else if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
                 throw AIError.apiError("API Error: \(msg)")
             } else {
@@ -320,6 +352,7 @@ class AICompletionService: ObservableObject {
                let message = firstChoice["message"] as? [String: Any],
                let content = message["content"] as? String {
                 rawResult = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                nativeReasoning = (message["reasoning_content"] as? String) ?? (message["reasoning"] as? String)
             } else if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
                 throw AIError.apiError("API Error: \(msg)")
             } else {
@@ -329,8 +362,15 @@ class AICompletionService: ObservableObject {
 
         var finalResult = rawResult
 
-        // Strip out any <think> tags that models might output
-        finalResult = stripThinkingTags(from: finalResult)
+        // Strip out any <think> tags that models might output, but surface
+        // what was inside them (and any natively-returned reasoning field)
+        // rather than throwing it away.
+        let (cleaned, tagReasoning) = extractThinking(from: finalResult)
+        finalResult = cleaned
+        let combinedReasoning = [nativeReasoning, tagReasoning].compactMap { $0 }.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !combinedReasoning.isEmpty {
+            onReasoning(combinedReasoning.joined(separator: "\n\n"))
+        }
 
         if settings.forceCodeOutput {
             let extracted = extractCode(from: finalResult)
@@ -341,7 +381,7 @@ class AICompletionService: ObservableObject {
         // Completion requests return code to insert at the caret, not markdown
         // prose — running the Markdown→Typst sanitizer over it mangles the very
         // syntax it should insert (e.g. `#page` becomes `\#page`).
-        let sanitizedResult = purpose == .completion ? finalResult : sanitizeMarkdownToTypst(finalResult)
+        let sanitizedResult = (purpose == .completion || !sanitize) ? finalResult : sanitizeMarkdownToTypst(finalResult)
 
         print("RAW AI RESULT: '\(rawResult)'")
         print("SANITIZED RESULT: '\(sanitizedResult)'")
@@ -383,10 +423,13 @@ class AICompletionService: ObservableObject {
         tools: [MCPTool],
         maxTurns: Int = 6,
         onToolCall: @escaping (String, String) -> Void = { _, _ in },
+        onReasoning: @escaping (String) -> Void = { _ in },
+        sanitize: Bool = true,
+        contextCharBudget: Int? = nil,
         executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
     ) async throws -> String {
         guard !tools.isEmpty else {
-            return try await fetchCompletion(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, purpose: .chat)
+            return try await fetchCompletion(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, purpose: .chat, onReasoning: onReasoning, sanitize: sanitize)
         }
 
         isFetching = true
@@ -405,24 +448,42 @@ class AICompletionService: ObservableObject {
         }
 
         var messages: [AIChatMessage] = [.system(systemPrompt), .user(prompt)]
+        // Reasoning collected across every turn (including turns that only
+        // made tool calls), so the whole exchange's thinking is available
+        // once a final answer lands — not just whatever the last turn said.
+        var collectedReasoning: [String] = []
 
         for turn in 0..<maxTurns {
+            if let contextCharBudget {
+                Self.elideOldToolOutputs(in: &messages, charBudget: contextCharBudget)
+            }
             let step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens)
 
             switch step {
-            case .finalText(let text):
-                var finalResult = stripThinkingTags(from: text)
+            case .finalText(let text, let stepReasoning):
+                if let stepReasoning, !stepReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    collectedReasoning.append(stepReasoning)
+                }
+                let (cleaned, tagReasoning) = extractThinking(from: text)
+                if let tagReasoning { collectedReasoning.append(tagReasoning) }
+                var finalResult = cleaned
                 if settings.forceCodeOutput {
                     let extracted = extractCode(from: finalResult)
                     finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalResult : extracted
                 }
-                let sanitized = sanitizeMarkdownToTypst(finalResult)
+                let sanitized = sanitize ? sanitizeMarkdownToTypst(finalResult) : finalResult
                 if sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw AIError.apiError("The AI processed the request but returned an empty response. Try rephrasing your prompt.")
                 }
+                if !collectedReasoning.isEmpty {
+                    onReasoning(collectedReasoning.joined(separator: "\n\n"))
+                }
                 return sanitized
 
-            case .toolCalls(let calls):
+            case .toolCalls(let calls, let stepReasoning):
+                if let stepReasoning, !stepReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    collectedReasoning.append(stepReasoning)
+                }
                 messages.append(.assistantToolCalls(calls))
                 for call in calls {
                     onToolCall(call.name, call.argumentsJSON)
@@ -440,6 +501,39 @@ class AICompletionService: ObservableObject {
             }
         }
         throw AIError.apiError("The AI did not produce a response.")
+    }
+
+    /// Keeps a long tool-calling conversation inside a rough character budget
+    /// by replacing the *oldest* tool results with a short placeholder once
+    /// the total gets too big. The two most recent results are always kept —
+    /// those are what the model is actively working from. This is the
+    /// in-loop counterpart to the chat's turn-level compaction: a single
+    /// request can easily rack up 20 large `read_file` results across turns.
+    private static func elideOldToolOutputs(in messages: inout [AIChatMessage], charBudget: Int) {
+        func charCount(_ message: AIChatMessage) -> Int {
+            switch message {
+            case .system(let t), .user(let t), .assistantText(let t): return t.count
+            case .assistantToolCalls(let calls): return calls.reduce(0) { $0 + $1.argumentsJSON.count + $1.name.count }
+            case .toolResult(let r): return r.output.count
+            }
+        }
+
+        var total = messages.reduce(0) { $0 + charCount($1) }
+        guard total > charBudget else { return }
+
+        let toolIndices = messages.indices.filter {
+            if case .toolResult = messages[$0] { return true }
+            return false
+        }
+        let protected = Set(toolIndices.suffix(2))
+
+        for index in toolIndices where !protected.contains(index) {
+            guard case .toolResult(let result) = messages[index] else { continue }
+            let placeholder = "[\(result.output.count) characters of earlier \(result.name) output elided to stay within the context budget. Re-run the tool if you still need it.]"
+            total -= (result.output.count - placeholder.count)
+            messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: placeholder))
+            if total <= charBudget { break }
+        }
     }
 
     /// Sends one turn of a tool-calling conversation and returns either the
@@ -552,6 +646,8 @@ class AICompletionService: ObservableObject {
             throw AIError.parsingError("OpenAI-compatible response missing message.")
         }
 
+        let reasoning = (message["reasoning_content"] as? String) ?? (message["reasoning"] as? String)
+
         if let toolCalls = message["tool_calls"] as? [[String: Any]], !toolCalls.isEmpty {
             let parsed: [AIToolCallRequest] = toolCalls.compactMap { call in
                 guard let id = call["id"] as? String,
@@ -560,10 +656,10 @@ class AICompletionService: ObservableObject {
                 let arguments = function["arguments"] as? String ?? "{}"
                 return AIToolCallRequest(id: id, name: name, argumentsJSON: arguments)
             }
-            if !parsed.isEmpty { return .toolCalls(parsed) }
+            if !parsed.isEmpty { return .toolCalls(parsed, reasoning: reasoning) }
         }
 
-        return .finalText(message["content"] as? String ?? "")
+        return .finalText(message["content"] as? String ?? "", reasoning: reasoning)
     }
 
     // MARK: Provider wire-format conversion (Anthropic)
@@ -619,6 +715,9 @@ class AICompletionService: ObservableObject {
             throw AIError.parsingError("Anthropic response missing content.")
         }
 
+        let thinkingBlocks = contentArray.filter { ($0["type"] as? String) == "thinking" }
+        let reasoning = thinkingBlocks.isEmpty ? nil : thinkingBlocks.compactMap { $0["thinking"] as? String }.joined(separator: "\n\n")
+
         let toolUses = contentArray.filter { ($0["type"] as? String) == "tool_use" }
         if !toolUses.isEmpty {
             let calls: [AIToolCallRequest] = toolUses.compactMap { block in
@@ -627,11 +726,11 @@ class AICompletionService: ObservableObject {
                 let argumentsJSON = (try? JSONSerialization.data(withJSONObject: input)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
                 return AIToolCallRequest(id: id, name: name, argumentsJSON: argumentsJSON)
             }
-            return .toolCalls(calls)
+            return .toolCalls(calls, reasoning: reasoning)
         }
 
         let text = contentArray.first(where: { ($0["type"] as? String) == "text" })?["text"] as? String ?? ""
-        return .finalText(text)
+        return .finalText(text, reasoning: reasoning)
     }
 
     // MARK: - Markdown → Typst conversion (AST pipeline)

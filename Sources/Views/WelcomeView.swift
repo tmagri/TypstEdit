@@ -3,6 +3,7 @@ import SwiftUI
 struct WelcomeView: View {
     @ObservedObject var model: FileSystemModel
     @EnvironmentObject var themeManager: ThemeManager
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var recents = RecentFilesManager.shared
     /// Called when the user taps a recent file. Receives the full RecentFile so the
     /// caller can decide whether to open in project or standalone mode.
@@ -12,19 +13,39 @@ struct WelcomeView: View {
     @State private var showClearConfirmation = false
     @State private var openingFileId: UUID? = nil
     
+    /// Resolves "System" to the actual current appearance so the welcome
+    /// screen's logo always matches the Dock icon's light/dark artwork.
+    private var isDarkTheme: Bool {
+        switch themeManager.appTheme {
+        case .dark: return true
+        case .light: return false
+        case .system: return colorScheme == .dark
+        }
+    }
+    
     private var appIconImage: Image {
+        let resourceName = isDarkTheme ? "AppIconDark" : "AppIcon"
+        
         // Try simple name first (standard Asset Catalog)
-        if let image = NSImage(named: "AppIcon") {
-            print("[DEBUG] WelcomeView: Loaded AppIcon via NSImage(named:)")
+        if let image = NSImage(named: resourceName) {
+            print("[DEBUG] WelcomeView: Loaded \(resourceName) via NSImage(named:)")
             return Image(nsImage: image)
         }
         
         // Try looking in the module bundle specifically (SPM)
-        if let path = ModuleResources.main.path(forResource: "AppIcon", ofType: "png") {
-            if let image = NSImage(contentsOfFile: path) {
-                print("[DEBUG] WelcomeView: Loaded AppIcon via Bundle.module.path (Root)")
-                return Image(nsImage: image)
-            }
+        if let path = ModuleResources.main.path(forResource: resourceName, ofType: "png"),
+           let image = NSImage(contentsOfFile: path) {
+            print("[DEBUG] WelcomeView: Loaded \(resourceName) via Bundle.module.path (Root)")
+            return Image(nsImage: image)
+        }
+        
+        // If the dark artwork is somehow missing, fall back to the light icon
+        // rather than the generic system glyph.
+        if resourceName != "AppIcon",
+           let path = ModuleResources.main.path(forResource: "AppIcon", ofType: "png"),
+           let image = NSImage(contentsOfFile: path) {
+            print("[DEBUG] WelcomeView: \(resourceName) unavailable, fell back to AppIcon")
+            return Image(nsImage: image)
         }
         
         print("[ERROR] WelcomeView: Failed to load AppIcon image from all known locations")
