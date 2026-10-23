@@ -1,6 +1,20 @@
 import XCTest
 @testable import TypstEdit
 
+/// A notification's handler closure can run off the main actor, so a plain
+/// `var` captured by it to record what fired isn't safe to mutate without
+/// this: a small lock-protected box, used only to shuttle a value back out
+/// of `XCTNSNotificationExpectation.handler` in the tests below.
+private final class Captured<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T
+    init(_ value: T) { stored = value }
+    var value: T {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+}
+
 /// Behavior of the built-in chat tools: paged reads, exact-match edits with the
 /// read-before-edit invariant, case-insensitive grep, and the Python sandbox.
 @MainActor
@@ -352,6 +366,62 @@ final class LocalToolExecutorTests: XCTestCase {
         _ = try requireTypst()
         let out = try await run("write_file", ["path": "notes.md", "content": "# Just markdown"])
         XCTAssertFalse(out.contains("Typst check"), out)
+    }
+
+    // MARK: - Open-editor change notification
+    //
+    // `write_file`/`edit_file` post `.aiChatModifiedFile` so any window with
+    // the touched file open can reload it or warn before clobbering unsaved
+    // edits (see `ContentView`'s handler) — these confirm the notification
+    // actually fires, with the right URL, only on a real disk write.
+
+    func testWriteFileOfNewContentPostsAiChatModifiedFile() async throws {
+        try write("notice.typ", "old")
+        _ = try await run("read_file", ["path": "notice.typ"])
+        let expectedURL = workDir.appendingPathComponent("notice.typ")
+
+        let observed = Captured<URL?>(nil)
+        let expectation = XCTNSNotificationExpectation(name: .aiChatModifiedFile, object: nil, notificationCenter: .default)
+        expectation.handler = { notification in
+            observed.value = notification.object as? URL
+            return true
+        }
+        _ = try await run("write_file", ["path": "notice.typ", "content": "new"])
+        await fulfillment(of: [expectation], timeout: 2)
+        XCTAssertEqual(observed.value?.standardizedFileURL.path, expectedURL.standardizedFileURL.path)
+    }
+
+    func testWriteFileNoOpDoesNotPostAiChatModifiedFile() async throws {
+        try write("same.typ", "unchanged")
+        _ = try await run("read_file", ["path": "same.typ"])
+
+        let expectation = XCTNSNotificationExpectation(name: .aiChatModifiedFile, object: nil, notificationCenter: .default)
+        expectation.isInverted = true
+        _ = try await run("write_file", ["path": "same.typ", "content": "unchanged"])
+        await fulfillment(of: [expectation], timeout: 0.3)
+    }
+
+    func testEditFilePostsAiChatModifiedFileWithTheRightURL() async throws {
+        try write("edit-notice.typ", "alpha\nbeta\n")
+        _ = try await run("read_file", ["path": "edit-notice.typ"])
+        let expectedURL = workDir.appendingPathComponent("edit-notice.typ")
+
+        let observed = Captured<URL?>(nil)
+        let expectation = XCTNSNotificationExpectation(name: .aiChatModifiedFile, object: nil, notificationCenter: .default)
+        expectation.handler = { notification in
+            observed.value = notification.object as? URL
+            return true
+        }
+        _ = try await run("edit_file", ["path": "edit-notice.typ", "old_string": "alpha", "new_string": "gamma"])
+        await fulfillment(of: [expectation], timeout: 2)
+        XCTAssertEqual(observed.value?.standardizedFileURL.path, expectedURL.standardizedFileURL.path)
+    }
+
+    func testDeniedWriteDoesNotPostAiChatModifiedFile() async throws {
+        let expectation = XCTNSNotificationExpectation(name: .aiChatModifiedFile, object: nil, notificationCenter: .default)
+        expectation.isInverted = true
+        _ = try? await run("write_file", ["path": "denied.typ", "content": "x"], approve: false)
+        await fulfillment(of: [expectation], timeout: 0.3)
     }
 
     // MARK: - Prompt shaping / plan round-trip

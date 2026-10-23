@@ -38,6 +38,9 @@ struct ContentView: View {
     @State private var currentLoadID: UUID = UUID()
     @State private var isInternalSelectionChange: Bool = false
     @State private var showRecoveryAlert: Bool = false
+    /// Set while `.aiChatModifiedFile` is waiting on the "discard unsaved
+    /// edits?" alert for the currently open file.
+    @State private var externalChangeURL: URL?
     /// The NSWindow hosting this ContentView. Used to ensure only the key
     /// window reacts to broadcast `.menuCommand` notifications (see
     /// `shouldHandleMenuCommand`).
@@ -226,6 +229,25 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
                 guard self.editorController === AppDelegate.shared?.editorController else { return }
                 if let info = notification.object as? [String: URL], let newURL = info["new"] { self.selectedFile = newURL }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .aiChatModifiedFile)) { notification in
+                // Every window's ContentView gets this (not just the main
+                // one) — whichever one actually has the changed file open
+                // reacts, the rest ignore it.
+                guard let changedURL = notification.object as? URL,
+                      let openURL = self.editorController.currentFileURL,
+                      changedURL.resolvingSymlinksInPath().path == openURL.resolvingSymlinksInPath().path else { return }
+
+                if self.editorController.hasUnsavedChanges {
+                    // Reloading now would silently throw away what the user
+                    // was typing — ask instead of guessing.
+                    self.externalChangeURL = changedURL
+                    self.editorController.externalChangeFileName = changedURL.lastPathComponent
+                    self.editorController.showExternalChangeAlert = true
+                } else {
+                    self.loadFile(url: changedURL)
+                    self.editorController.showStatus("Reloaded — AI Chat updated \(changedURL.lastPathComponent)", duration: 3.0)
+                }
             }
     }
 
@@ -903,6 +925,15 @@ struct ContentView: View {
                 .alert("File Not Found", isPresented: $editorController.showFileNotFoundAlert) {
                     Button("OK", role: .cancel) { }
                 } message: { Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.") }
+                .alert("File Changed by AI Chat", isPresented: $editorController.showExternalChangeAlert) {
+                    Button("Reload from Disk", role: .destructive) {
+                        if let url = externalChangeURL { self.loadFile(url: url) }
+                        externalChangeURL = nil
+                    }
+                    Button("Keep My Version", role: .cancel) { externalChangeURL = nil }
+                } message: {
+                    Text("'\(editorController.externalChangeFileName)' was just changed on disk by AI Chat, but you have unsaved edits open here. Reload to see AI Chat's version (discarding your unsaved edits), or keep editing yours — saving will overwrite what AI Chat wrote.")
+                }
                 .alert("Recover Unsaved Changes?", isPresented: $showRecoveryAlert) {
                     Button("Recover") {
                         if let content = recoveryContentToRestore {

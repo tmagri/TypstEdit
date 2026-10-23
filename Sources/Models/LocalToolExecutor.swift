@@ -657,7 +657,17 @@ final class LocalToolExecutor {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+        Self.notifyFileChangedOnDisk(url)
         return "Wrote \(content.utf8.count) bytes to '\(path)'." + (await validationNote(for: url, path: path))
+    }
+
+    /// Tells any open editor window — and the sidebar — that a file just
+    /// changed under them, so the window can reload it (or warn before it
+    /// would clobber unsaved edits) instead of silently drifting from disk.
+    /// Called after every actual `write_file`/`edit_file` write.
+    private static func notifyFileChangedOnDisk(_ url: URL) {
+        NotificationCenter.default.post(name: .aiChatModifiedFile, object: url)
+        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
     }
 
     /// Advisory Typst compile check appended after `edit_file`/`write_file`
@@ -750,6 +760,7 @@ final class LocalToolExecutor {
         let finalText = usesCRLF ? updatedNormalized.replacingOccurrences(of: "\n", with: "\r\n") : updatedNormalized
         try Self.write(text: finalText, to: url, originalData: data, encoding: decoded.encoding)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+        Self.notifyFileChangedOnDisk(url)
 
         let what = occurrences == 1 ? "1 place" : "\(occurrences) places"
         let summary = "Edited '\(path)': replaced \(what) with \(newNormalized.count) character\(newNormalized.count == 1 ? "" : "s") of new text."

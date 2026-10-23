@@ -10,6 +10,11 @@ extension Notification.Name {
     static let openProjectAndFile = Notification.Name("openProjectAndFile")
     static let openStandaloneFile = Notification.Name("openStandaloneFile")
     static let openProjectFolder = Notification.Name("openProjectFolder")
+    /// Posted (object: the file's `URL`) whenever AI Chat's `write_file` or
+    /// `edit_file` tool actually changes a file on disk — so any window with
+    /// that file open can reload it (or warn if it would clobber unsaved
+    /// edits) instead of silently going stale. See `LocalToolExecutor`.
+    static let aiChatModifiedFile = Notification.Name("aiChatModifiedFile")
 }
 
 import CodeEditSourceEditor
@@ -604,8 +609,13 @@ class EditorController: NSObject, ObservableObject {
     @Published var showExportErrorAlert: Bool = false
     @Published var showHelp: Bool = false
     @Published var showFileNotFoundAlert: Bool = false
+    /// Shown when AI Chat changed the open file on disk while there were
+    /// unsaved edits in the editor — reloading automatically would silently
+    /// discard them, so this asks instead. See `.aiChatModifiedFile`.
+    @Published var showExternalChangeAlert: Bool = false
     @Published var lastExportError: String = ""
     @Published var missingFileName: String = ""
+    @Published var externalChangeFileName: String = ""
     @Published var targetLineNumber: String = ""
     @Published var showFoundationEditor: Bool = false
     @Published var showPackageManager: Bool = false
