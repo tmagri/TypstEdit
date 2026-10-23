@@ -11,6 +11,7 @@ struct NotebookSidebarView: View {
     
     @State private var showNewPageAlert = false
     @State private var newPageName = ""
+    @State private var newPageExtension = "note"
     @State private var selectedNotebookForNewPage: Notebook?
     @State private var imageCleanupTarget: ImageCleanupTarget?
     
@@ -34,23 +35,20 @@ struct NotebookSidebarView: View {
                 .buttonStyle(.plain)
                 .help("Refresh Notebooks")
                 
-                Button(action: {
-                    if let firstNotebook = notebookManager.notebooks.first {
-                        selectedNotebookForNewPage = firstNotebook
-                    } else {
-                        // Auto-create default notebook if none exists
-                        notebookManager.createNotebook(name: "My Notes")
-                        if let newlyCreated = notebookManager.notebooks.first {
-                            selectedNotebookForNewPage = newlyCreated
-                        }
+                Menu {
+                    Button(action: { beginNewPage(fileExtension: "note") }) {
+                        Label("New Note Page", systemImage: "note.text")
                     }
-                    showNewPageAlert = true
-                }) {
+                    Button(action: { beginNewPage(fileExtension: "typ") }) {
+                        Label("New Typst Page", systemImage: "doc.text.fill")
+                    }
+                } label: {
                     Image(systemName: "square.and.pencil")
                         .foregroundColor(themeManager.textColor.opacity(0.6))
                 }
-                .buttonStyle(.plain)
-                .help("New Note")
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("New Page")
                 
                 Button(action: { showNewNotebookAlert = true }) {
                     Image(systemName: "folder.badge.plus")
@@ -110,10 +108,14 @@ struct NotebookSidebarView: View {
                                     .environmentObject(themeManager)
                             }
 
-                            Button(action: {
-                                selectedNotebookForNewPage = notebook
-                                showNewPageAlert = true
-                            }) {
+                            Menu {
+                                Button(action: { beginNewPage(in: notebook, fileExtension: "note") }) {
+                                    Label("New Note Page", systemImage: "note.text")
+                                }
+                                Button(action: { beginNewPage(in: notebook, fileExtension: "typ") }) {
+                                    Label("New Typst Page", systemImage: "doc.text.fill")
+                                }
+                            } label: {
                                 HStack {
                                     Image(systemName: "plus")
                                     Text("New Page")
@@ -123,12 +125,11 @@ struct NotebookSidebarView: View {
                                 .foregroundColor(themeManager.textColor.opacity(0.5))
                                 .padding(.vertical, 2)
                             }
-                            .buttonStyle(.plain)
+                            .menuStyle(.borderlessButton)
                             .listRowSeparator(.hidden)
                         } label: {
-                            NotebookRow(notebook: notebook, manager: notebookManager, onAddNote: {
-                                selectedNotebookForNewPage = notebook
-                                showNewPageAlert = true
+                            NotebookRow(notebook: notebook, manager: notebookManager, onAddPage: { ext in
+                                beginNewPage(in: notebook, fileExtension: ext)
                             }, onCleanupUnusedImages: {
                                 imageCleanupTarget = ImageCleanupTarget(url: notebook.url)
                             })
@@ -159,17 +160,21 @@ struct NotebookSidebarView: View {
                 }
             }
         }
-        .alert("New Page", isPresented: $showNewPageAlert) {
+        .alert(newPageExtension == "typ" ? "New Typst Page" : "New Note Page", isPresented: $showNewPageAlert) {
             TextField("Page Name", text: $newPageName)
             Button("Cancel", role: .cancel) { newPageName = "" }
             Button("Create") {
                 if !newPageName.isEmpty, let notebook = selectedNotebookForNewPage {
-                    if let url = notebookManager.createPage(in: notebook, name: newPageName) {
+                    if let url = notebookManager.createPage(in: notebook, name: newPageName, fileExtension: newPageExtension) {
                         selectedFile = url
                     }
                     newPageName = ""
                 }
             }
+        } message: {
+            Text(newPageExtension == "typ"
+                 ? "Strict, standard Typst file (.typ)."
+                 : "Markdown-with-Typst note (.note).")
         }
         .onReceive(NotificationCenter.default.publisher(for: .refreshNotebooks)) { _ in
             notebookManager.loadNotebooks()
@@ -181,6 +186,28 @@ struct NotebookSidebarView: View {
         }
     }
     
+    /// Opens the "New Page" alert for `notebook`, pre-selecting the desired
+    /// file type (`"note"` or `"typ"`).
+    private func beginNewPage(in notebook: Notebook, fileExtension: String) {
+        selectedNotebookForNewPage = notebook
+        newPageExtension = fileExtension
+        showNewPageAlert = true
+    }
+
+    /// Same as above, but defaults to the first notebook (auto-creating one
+    /// if none exist yet). Used by the sidebar header's "New Page" menu.
+    private func beginNewPage(fileExtension: String) {
+        if let firstNotebook = notebookManager.notebooks.first {
+            beginNewPage(in: firstNotebook, fileExtension: fileExtension)
+        } else {
+            // Auto-create default notebook if none exists
+            notebookManager.createNotebook(name: "My Notes")
+            if let newlyCreated = notebookManager.notebooks.first {
+                beginNewPage(in: newlyCreated, fileExtension: fileExtension)
+            }
+        }
+    }
+
     private func importNotebook() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [UTType.zip]
@@ -214,7 +241,8 @@ struct NotebookSidebarView: View {
 struct NotebookRow: View {
     let notebook: Notebook
     let manager: NotebookManager
-    var onAddNote: () -> Void
+    /// Called with `"note"` or `"typ"` when the user requests a new page.
+    var onAddPage: (String) -> Void
     var onCleanupUnusedImages: () -> Void = {}
     @EnvironmentObject var themeManager: ThemeManager
     @State private var showDeleteAlert = false
@@ -232,12 +260,20 @@ struct NotebookRow: View {
                 .lineLimit(1)
             Spacer()
 
-            Button(action: onAddNote) {
+            Menu {
+                Button(action: { onAddPage("note") }) {
+                    Label("New Note Page", systemImage: "note.text")
+                }
+                Button(action: { onAddPage("typ") }) {
+                    Label("New Typst Page", systemImage: "doc.text.fill")
+                }
+            } label: {
                 Image(systemName: "plus")
                     .foregroundColor(themeManager.textColor.opacity(0.6))
             }
-            .buttonStyle(.plain)
-            .help("Add Note")
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Add Page")
         }
         .padding(.vertical, 2)
         .help(notebook.name)
@@ -315,16 +351,19 @@ struct NotebookPageRow: View {
     
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "doc.text.fill")
-                .foregroundColor(.orange)
+            // `.typ` pages (strict, standard Typst) get a distinct icon/color
+            // from `.note` pages (relaxed Markdown-with-Typst notes) so both
+            // kinds are easy to tell apart while listed together.
+            Image(systemName: page.isTypst ? "doc.text.fill" : "note.text")
+                .foregroundColor(page.isTypst ? .blue : .orange)
                 .font(.system(size: 12))
-            Text(explorerAbbreviatedName(page.name))
+            Text(explorerAbbreviatedName("\(page.name).\(page.fileExtension)", pathExtension: page.fileExtension))
                 .font(.system(size: 12))
                 .foregroundColor(isSelected ? .white : themeManager.textColor)
                 .lineLimit(1)
             Spacer()
         }
-        .help(page.name)
+        .help("\(page.name).\(page.fileExtension)")
         .padding(.vertical, 2)
         .padding(.horizontal, 4)
         .background(isSelected ? Color.accentColor.opacity(0.8) : Color.clear)

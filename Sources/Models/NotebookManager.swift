@@ -5,6 +5,14 @@ struct NotebookPage: Identifiable, Hashable {
     var id: URL { url }
     let url: URL
     let name: String
+
+    /// Lowercased file extension ("note" or "typ").
+    var fileExtension: String { url.pathExtension.lowercased() }
+
+    /// `.typ` pages are standard, strict Typst documents (no Markdown
+    /// overlay). `.note` pages are the relaxed Markdown-with-Typst-overlay
+    /// format. Both live side by side inside a notebook.
+    var isTypst: Bool { fileExtension == "typ" }
 }
 
 struct Notebook: Identifiable, Hashable {
@@ -58,6 +66,10 @@ class NotebookManager: ObservableObject {
     
     static let hiddenFolders: Set<String> = ["vectorcaches", "temp", "backups"]
 
+    /// File extensions shown as pages inside a notebook: `.note` (relaxed
+    /// Markdown-with-Typst-overlay) and `.typ` (strict, standard Typst).
+    static let pageExtensions: Set<String> = ["note", "typ"]
+
     func loadNotebooks() {
         var loaded: [Notebook] = []
         do {
@@ -73,7 +85,7 @@ class NotebookManager: ObservableObject {
                 
                 var pages: [NotebookPage] = []
                 if let pageFiles = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-                    for file in pageFiles where file.pathExtension.lowercased() == "note" {
+                    for file in pageFiles where Self.pageExtensions.contains(file.pathExtension.lowercased()) {
                         pages.append(NotebookPage(url: file, name: file.deletingPathExtension().lastPathComponent))
                     }
                 }
@@ -109,15 +121,20 @@ class NotebookManager: ObservableObject {
         }
     }
     
-    func createPage(in notebook: Notebook, name: String) -> URL? {
-        let fileURL = notebook.url.appendingPathComponent(name).appendingPathExtension("note")
+    /// Creates a new page inside `notebook`.
+    /// - Parameter fileExtension: `"note"` for a relaxed Markdown-with-Typst
+    ///   note, or `"typ"` for a strict, standard Typst document. Defaults to
+    ///   `"note"` to preserve existing behavior.
+    func createPage(in notebook: Notebook, name: String, fileExtension: String = "note") -> URL? {
+        let ext = Self.pageExtensions.contains(fileExtension.lowercased()) ? fileExtension.lowercased() : "note"
+        let fileURL = notebook.url.appendingPathComponent(name).appendingPathExtension(ext)
         do {
             let initialContent = "= \(name)\n\n"
             try initialContent.write(to: fileURL, atomically: true, encoding: .utf8)
             loadNotebooks()
             return fileURL
         } catch {
-            print("Error creating note page: \(error)")
+            print("Error creating page: \(error)")
             return nil
         }
     }
@@ -153,7 +170,8 @@ class NotebookManager: ObservableObject {
     }
     
     func renamePage(url: URL, newName: String) -> URL? {
-        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName).appendingPathExtension("note")
+        // Preserve the page's existing extension (.note or .typ) on rename.
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName).appendingPathExtension(url.pathExtension)
         guard !FileManager.default.fileExists(atPath: newURL.path) else {
             print("Error renaming page: A page with that name already exists.")
             return nil
