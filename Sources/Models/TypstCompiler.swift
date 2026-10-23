@@ -27,9 +27,15 @@ enum CompilerRegex {
     // whitespace/punctuation/EOF boundary, so the lookahead does not affect it.
     static let mathRegion = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$(?![A-Za-z0-9])|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
     static let operatorRe = try! NSRegularExpression(pattern: "(?<!\\\\)[@#$<>]")
-    static let webImage = try! NSRegularExpression(pattern: #"#image\(\s*"([^"]*)""#)
+    // `image(...)` only needs its leading `#` when it starts a markup-mode
+    // statement. Nested inside another call — `#figure(image("…"))`,
+    // `#box(image("…"))`, `#grid(image("…"), image("…"))` — it's already in
+    // code mode and is written bare, so matching on `\bimage\(` (like the
+    // import/include regex below already does) catches both forms instead
+    // of only the standalone `#image(...)` case.
+    static let webImage = try! NSRegularExpression(pattern: #"\bimage\(\s*"([^"]*)""#)
     static let relativeImport = try! NSRegularExpression(pattern: #"(\b(?:import|include)\s+")([^/@.][^"]*)(")"#)
-    static let relativeImage = try! NSRegularExpression(pattern: #"(#image\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#)
+    static let relativeImage = try! NSRegularExpression(pattern: #"(\bimage\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#)
     static let fontArgument = try! NSRegularExpression(pattern: #"font\s*:\s*(?:"[^"]*"|\([^()]*\))"#)
     static let quotedString = try! NSRegularExpression(pattern: #""([^"]*)""#)
 }

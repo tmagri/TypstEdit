@@ -270,16 +270,17 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             
-            // Mode Selector
-            Picker("", selection: $sidebarMode) {
-                Text("📁 Projects").tag(0)
-                Text("📓 Notebooks").tag(1)
-            }
-            .pickerStyle(SegmentedPickerStyle())
-            .labelsHidden()
+            // Mode Selector — colour-coded tabs: orange for Projects,
+            // indigo for Notebooks (matching the indigo book icon already
+            // used throughout the notebook list below), with bold text and
+            // a filled icon on the active tab so the state never relies on
+            // colour alone.
+            AccessibleTabStrip(tabs: [
+                AccessibleTab(0, title: "Projects", systemImage: "folder", selectedSystemImage: "folder.fill", color: .orange),
+                AccessibleTab(1, title: "Notebooks", systemImage: "book.closed", selectedSystemImage: "book.closed.fill", color: .indigo),
+            ], selection: $sidebarMode)
             .padding(.horizontal, 10)
             .padding(.top, 10)
-            .padding(.bottom, 5)
             
             if sidebarMode == 0 {
                 // Header & File Tree

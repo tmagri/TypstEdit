@@ -485,6 +485,31 @@ final class MarkdownConversionTests: XCTestCase {
         XCTAssertTrue(rewritten.contains("#image(\"../subfolder/hero.png\")"), "Relative images should be resolved from the source file directory")
     }
 
+    /// Regression test: `image(...)` nested inside `#figure(...)` (or any
+    /// other wrapper call) is written bare, without its own leading `#`,
+    /// because it's already in code mode. The rewriter must still catch it —
+    /// previously it only matched standalone `#image("...")`, so figures
+    /// silently kept their un-rewritten path and Typst looked for the image
+    /// next to the temp/ shadow file instead of the real source directory.
+    func testRelativeImportRewriterHandlesImageNestedInFigure() async {
+        let compiler = TypstCompiler()
+        let content = """
+        #figure(
+          image("agents/examples/mugs/MUG-GD239205/input_reference.png", width: 100%),
+          caption: [Original supplied input],
+        )
+        """
+        let sourceDir = URL(fileURLWithPath: "/Users/example/project")
+        let tempDir = URL(fileURLWithPath: "/Users/example/project/temp")
+
+        let rewritten = await compiler.rewriteRelativeImports(in: content, sourceDirectory: sourceDir, tempDirectory: tempDir)
+
+        XCTAssertTrue(
+            rewritten.contains("image(\"../agents/examples/mugs/MUG-GD239205/input_reference.png\""),
+            "Bare image() calls nested inside figure()/box()/etc. should be rewritten the same as standalone #image(), got: \(rewritten)"
+        )
+    }
+
     // MARK: - Video Links
 
     func testYouTubeNestedImageLink() {

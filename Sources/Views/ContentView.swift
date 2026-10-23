@@ -343,15 +343,12 @@ struct ContentView: View {
     private var sidebarPanel: some View {
         VStack(spacing: 0) {
             if aiSettings.chatEnabled {
-                Picker("", selection: $editorController.sidebarContent) {
-                    Text("📄 Files").tag(EditorController.SidebarContent.files)
-                    Text("💬 AI Chat").tag(EditorController.SidebarContent.aiChat)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                AccessibleTabStrip(tabs: [
+                    AccessibleTab(EditorController.SidebarContent.files, title: "Files", systemImage: "doc.text", selectedSystemImage: "doc.text.fill", color: .blue),
+                    AccessibleTab(EditorController.SidebarContent.aiChat, title: "AI Chat", systemImage: "bubble.left.and.text.bubble.right", selectedSystemImage: "bubble.left.and.text.bubble.right.fill", color: .purple),
+                ], selection: $editorController.sidebarContent)
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
-                .padding(.bottom, 6)
             }
 
             switch editorController.sidebarContent {
