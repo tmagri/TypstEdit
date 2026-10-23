@@ -237,18 +237,70 @@ struct ContentView: View {
                 guard let changedURL = notification.object as? URL,
                       let openURL = self.editorController.currentFileURL,
                       changedURL.resolvingSymlinksInPath().path == openURL.resolvingSymlinksInPath().path else { return }
-
-                if self.editorController.hasUnsavedChanges {
-                    // Reloading now would silently throw away what the user
-                    // was typing — ask instead of guessing.
-                    self.externalChangeURL = changedURL
-                    self.editorController.externalChangeFileName = changedURL.lastPathComponent
-                    self.editorController.showExternalChangeAlert = true
-                } else {
-                    self.loadFile(url: changedURL)
-                    self.editorController.showStatus("Reloaded — AI Chat updated \(changedURL.lastPathComponent)", duration: 3.0)
+                self.handleExternalDiskChange(at: changedURL, userInitiated: false)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                // Catches edits made in another app while this one was in the
+                // background — snappier than waiting for the next poll tick.
+                self.checkForExternalDiskChange()
+            }
+            .task {
+                // Cheap belt-and-suspenders poll for changes from something
+                // that isn't AI Chat (another editor, a sync tool, git) —
+                // AI Chat's own edits are caught instantly via the
+                // notification above instead of waiting on this.
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    self.checkForExternalDiskChange()
                 }
             }
+    }
+
+    /// Stats the open file and flags `externalDiskChangeAvailable` if its
+    /// on-disk modification date has moved past what we last loaded/saved as.
+    /// Never reloads by itself — only `handleExternalDiskChange` decides what
+    /// to do with that, and only once there's actually somewhere to look.
+    private func checkForExternalDiskChange() {
+        guard let url = editorController.currentFileURL,
+              let known = editorController.knownDiskModificationDate,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let mtime = attrs[.modificationDate] as? Date,
+              mtime > known else { return }
+        handleExternalDiskChange(at: url, userInitiated: false)
+    }
+
+    /// The single place that decides what an externally-changed file means
+    /// for the editor right now — shared by the instant AI Chat notification,
+    /// the background poll/refocus check, and the toolbar reload
+    /// button/badge.
+    ///
+    /// - A clean document (no unsaved edits) is always safe to refresh, so it
+    ///   just happens — automatically when detected, or on demand.
+    /// - Unsaved edits make a silent reload destructive, so this only lights
+    ///   up the badge/button; the confirmation to actually discard those
+    ///   edits is shown only when `userInitiated` is true, i.e. the person
+    ///   chose to act on it rather than the app interrupting them mid-edit.
+    private func handleExternalDiskChange(at url: URL, userInitiated: Bool) {
+        guard editorController.hasUnsavedChanges else {
+            loadFile(url: url)
+            editorController.showStatus("Reloaded \(url.lastPathComponent) from disk", duration: 2.0)
+            return
+        }
+
+        externalChangeURL = url
+        editorController.externalChangeFileName = url.lastPathComponent
+        editorController.externalDiskChangeAvailable = true
+        if userInitiated {
+            editorController.showExternalChangeAlert = true
+        }
+    }
+
+    /// The editor toolbar's reload button and the "changed on disk" badge
+    /// both call this — a manual, always-available version of the same
+    /// check, regardless of whether anything was actually detected yet.
+    private func reloadCurrentFileFromDisk() {
+        guard let url = editorController.currentFileURL else { return }
+        handleExternalDiskChange(at: url, userInitiated: true)
     }
 
     @ViewBuilder
@@ -825,6 +877,7 @@ struct ContentView: View {
                 HStack {
                     ToolbarView(controller: editorController).padding(.leading, 44)
                     Spacer()
+                    reloadFromDiskButton
                 }
                .padding(.horizontal, 12).padding(.vertical, 4)
                .background(Color(NSColor.controlBackgroundColor))
@@ -833,6 +886,23 @@ struct ContentView: View {
                .overlay(Divider(), alignment: .top) 
             }
         }
+    }
+
+    /// Manual, always-available reload — the editor-side equivalent of the
+    /// PDF preview's refresh button. Highlights once something (AI Chat,
+    /// another program, a sync tool) is known to have changed the file on
+    /// disk while there were unsaved edits in the way; a plain click at any
+    /// other time just re-reads the file, harmlessly, same as the preview's.
+    private var reloadFromDiskButton: some View {
+        Button(action: reloadCurrentFileFromDisk) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(editorController.externalDiskChangeAvailable ? .orange : themeManager.textColor.opacity(0.7))
+        }
+        .buttonStyle(.plain)
+        .help(editorController.externalDiskChangeAvailable
+              ? "'\(editorController.externalChangeFileName)' changed on disk — click to reload"
+              : "Reload from disk")
     }
 
     private var editorContent: some View {
@@ -925,14 +995,14 @@ struct ContentView: View {
                 .alert("File Not Found", isPresented: $editorController.showFileNotFoundAlert) {
                     Button("OK", role: .cancel) { }
                 } message: { Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.") }
-                .alert("File Changed by AI Chat", isPresented: $editorController.showExternalChangeAlert) {
+                .alert("File Changed on Disk", isPresented: $editorController.showExternalChangeAlert) {
                     Button("Reload from Disk", role: .destructive) {
                         if let url = externalChangeURL { self.loadFile(url: url) }
                         externalChangeURL = nil
                     }
-                    Button("Keep My Version", role: .cancel) { externalChangeURL = nil }
+                    Button("Keep My Version", role: .cancel) { }
                 } message: {
-                    Text("'\(editorController.externalChangeFileName)' was just changed on disk by AI Chat, but you have unsaved edits open here. Reload to see AI Chat's version (discarding your unsaved edits), or keep editing yours — saving will overwrite what AI Chat wrote.")
+                    Text("'\(editorController.externalChangeFileName)' changed on disk — likely AI Chat or another program — but you have unsaved edits open here. Reload to see that version (discarding your unsaved edits), or keep editing yours; the badge stays until you do either, and saving will overwrite what's on disk.")
                 }
                 .alert("Recover Unsaved Changes?", isPresented: $showRecoveryAlert) {
                     Button("Recover") {
@@ -969,6 +1039,33 @@ struct ContentView: View {
                 } message: {
                     Text("Typst was successfully updated\(typstUpdater.completedVersion.map { " to \($0)" } ?? ""). Your documents will be compiled with this version from now on.")
                 }
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            // Non-modal counterpart to the toolbar's reload button: appears
+            // only once there's actually something to decide (an external
+            // change AND unsaved edits in the way — a clean file already
+            // reloaded itself silently). Mirrors the PDF preview's
+            // "Stale preview" badge one panel over.
+            if editorController.externalDiskChangeAvailable {
+                Button(action: reloadCurrentFileFromDisk) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("Changed on disk — tap to reload")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.white.opacity(0.95))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.orange.opacity(0.9))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .help("'\(editorController.externalChangeFileName)' changed on disk while you had unsaved edits. Click to review before it's overwritten.")
+                .padding(10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
@@ -1079,6 +1176,7 @@ struct ContentView: View {
                     RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
                     
                     self.editorController.syncSavedContent(content)
+                    self.editorController.noteDiskState(for: url)
                     // Freshly loaded content has an up-to-date (soon-to-be-built) preview.
                     self.editorController.previewStale = false
                     print("[DEBUG] loadFile: Updating sourceCode")
@@ -1170,6 +1268,7 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 if url == self.selectedFile || fileSystem.isNewUnsavedFile {
                     self.editorController.syncSavedContent(self.editorController.sourceCode)
+                    self.editorController.noteDiskState(for: url)
                     self.scheduleCompilation(with: self.editorController.sourceCode, force: true)
                     self.exportPDF(from: url) // Update clean PDF on disk on save
                     self.lastSaved = Date()

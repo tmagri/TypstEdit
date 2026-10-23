@@ -609,13 +609,39 @@ class EditorController: NSObject, ObservableObject {
     @Published var showExportErrorAlert: Bool = false
     @Published var showHelp: Bool = false
     @Published var showFileNotFoundAlert: Bool = false
-    /// Shown when AI Chat changed the open file on disk while there were
-    /// unsaved edits in the editor — reloading automatically would silently
-    /// discard them, so this asks instead. See `.aiChatModifiedFile`.
+    /// Confirmation before reloading over unsaved edits — only ever shown
+    /// from a user-initiated reload (the toolbar button or the "changed on
+    /// disk" badge), never popped up automatically just because a change was
+    /// detected. See `externalDiskChangeAvailable` below.
     @Published var showExternalChangeAlert: Bool = false
     @Published var lastExportError: String = ""
     @Published var missingFileName: String = ""
     @Published var externalChangeFileName: String = ""
+
+    /// The open file's on-disk modification date as of the last time *we*
+    /// loaded, saved, or reloaded it — the baseline `checkForExternalDiskChange`
+    /// compares against to notice something else (AI Chat, another app, a
+    /// sync tool) touched it. `nil` with no file open or no baseline yet.
+    @Published private(set) var knownDiskModificationDate: Date?
+
+    /// True once the open file's content on disk is known to differ from
+    /// what's loaded, *and* there are unsaved edits so a reload can't just
+    /// happen silently. Drives the toolbar reload button's highlighted state
+    /// and the "changed on disk" badge — never blocks anything by itself.
+    @Published var externalDiskChangeAvailable: Bool = false
+
+    /// Snapshots `url`'s current on-disk modification date as the new
+    /// baseline and clears the pending-change flag. Call after successfully
+    /// loading, saving, or reloading a file — including when `url` is `nil`
+    /// (no file open).
+    func noteDiskState(for url: URL?) {
+        externalDiskChangeAvailable = false
+        guard let url else {
+            knownDiskModificationDate = nil
+            return
+        }
+        knownDiskModificationDate = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
     @Published var targetLineNumber: String = ""
     @Published var showFoundationEditor: Bool = false
     @Published var showPackageManager: Bool = false
