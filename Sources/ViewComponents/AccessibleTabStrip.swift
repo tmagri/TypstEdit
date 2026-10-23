@@ -79,11 +79,22 @@ struct AccessibleTabStrip<Value: Hashable>: View {
                 // actual tab instead of a toggle button.
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(isSelected ? tab.color : Color.clear)
+                    .frame(maxWidth: .infinity)
                     .frame(height: 3)
             }
+            // Giving the *label* itself an explicit, fully-expanded content
+            // shape — rather than tacking .contentShape onto the Button
+            // from the outside — is what actually gets AppKit to treat the
+            // whole painted row as the hit target on macOS. Without this,
+            // the Button's real click region can stay sized to the label's
+            // intrinsic (unexpanded) content and just sit centered inside
+            // the wider frame we draw, which is what made these tabs feel
+            // "sticky": only a click near dead-center registered, and
+            // anything nearer the edges needed a second try.
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .contentShape(Rectangle())
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
         .accessibilityLabel(Text(tab.title))
     }
