@@ -156,8 +156,16 @@ class TypstCompiler: ObservableObject {
     }
 
     var isDarkMode: Bool = false
+    /// Snapshot of the "Keep with Next" setting taken when the current shadow
+    /// source was written. `preambleLineCount` must always describe the file
+    /// that is actually on disk, so this is captured in `updateContent`
+    /// instead of being read live (mirrors `isDarkMode`).
+    private var keepWithNextActive: Bool = false
     private var preambleLineCount: Int {
         var count = 0
+        if keepWithNextActive {
+            count += Self.keepWithNextPreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        }
         if isDarkMode {
             count += darkModePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
         }
@@ -210,6 +218,21 @@ class TypstCompiler: ObservableObject {
   #v(4pt)
   #body
 ]
+""" + "\n"
+
+    /// "Keep with next": a heading must never be the last thing on a page.
+    /// The rule glues every heading's block to whatever follows it
+    /// (`block.sticky`, Typst 0.12+) and makes the heading itself
+    /// unbreakable, so a heading that would be orphaned at the bottom of a
+    /// page moves to the next page together with the start of the paragraph
+    /// after it. Typst already makes headings sticky by default, but
+    /// documents that install their own `#show heading` rule replace that
+    /// default block — re-asserting the styles here covers those documents
+    /// too (as long as their rule produces a block).
+    nonisolated static let keepWithNextPreamble =
+"""
+// TypstEdit keep-with-next: keep headings together with what follows.
+#show heading: set block(sticky: true, breakable: false)
 """ + "\n"
     
     // Check if typst makes sense or we need full path
@@ -368,6 +391,7 @@ class TypstCompiler: ObservableObject {
             // and the watch-output stream state because the user typed new content —
             // start fresh.
             currentFileExtension = ext
+            keepWithNextActive = GeneralSettingsManager.shared.keepWithNextHeadings
             fallbackAttempts = [:]
             pendingFallbackRawLines = []
             diagnosticParser.reset()
@@ -413,6 +437,9 @@ class TypstCompiler: ObservableObject {
             finalSource = Self.substituteMissingFonts(finalSource)
             
             var injectedPreamble = ""
+            if keepWithNextActive {
+                injectedPreamble += Self.keepWithNextPreamble
+            }
             if ext == "note" {
                 injectedPreamble += Self.notePreamble
             }
@@ -1672,6 +1699,12 @@ class TypstCompiler: ObservableObject {
             finalContent = Self.notePreamble + finalContent
         }
 
+        // Match the live preview's "Keep with Next" behavior so exported
+        // pages break in the same places.
+        if GeneralSettingsManager.shared.keepWithNextHeadings {
+            finalContent = Self.keepWithNextPreamble + finalContent
+        }
+
         // Same missing-font substitution the live preview applies (shadow-only).
         finalContent = Self.substituteMissingFonts(finalContent)
 
@@ -1787,6 +1820,12 @@ class TypstCompiler: ObservableObject {
         }
         if ext == "note" {
             finalContent = Self.notePreamble + finalContent
+        }
+
+        // Match the live preview's "Keep with Next" behavior so exported
+        // pages break in the same places.
+        if GeneralSettingsManager.shared.keepWithNextHeadings {
+            finalContent = Self.keepWithNextPreamble + finalContent
         }
 
         // Same missing-font substitution the live preview applies (shadow-only).

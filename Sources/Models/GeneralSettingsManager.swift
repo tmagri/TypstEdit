@@ -16,6 +16,13 @@ class GeneralSettingsManager: ObservableObject {
     @AppStorage("typstUpdateMode") var updateModeString: String = TypstUpdateMode.stableBinary.rawValue
     @AppStorage("checkForTypstUpdatesOnLaunch") var checkForTypstUpdatesOnLaunch: Bool = true
     
+    /// "Keep with next": when on, TypstEdit injects a show rule into the
+    /// compiled source so a heading can never be the last thing on a page.
+    /// If the paragraph after a heading would start on the next page, the
+    /// heading moves to the next page together with it. Requires Typst 0.12+
+    /// (`block.sticky`).
+    @AppStorage("keepWithNextHeadings") var keepWithNextHeadings: Bool = true
+    
     var updateMode: TypstUpdateMode {
         get { TypstUpdateMode(rawValue: updateModeString) ?? .stableBinary }
         set { updateModeString = newValue.rawValue }

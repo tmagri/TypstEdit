@@ -11,6 +11,7 @@ struct ContentView: View {
     @ObservedObject private var aiService = AICompletionService.shared
     @ObservedObject private var aiSettings = AISettingsManager.shared
     @ObservedObject private var typstUpdater = TypstUpdater.shared
+    @ObservedObject private var generalSettings = GeneralSettingsManager.shared
     
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
@@ -397,6 +398,11 @@ struct ContentView: View {
                 }
                 .onChange(of: editorController.isPreviewDarkMode) { newValue in
                     compiler.isDarkMode = newValue
+                    scheduleCompilation()
+                }
+                .onChange(of: generalSettings.keepWithNextHeadings) { _ in
+                    // The preamble injected into the shadow source changes,
+                    // so the preview must be recompiled to match.
                     scheduleCompilation()
                 }
                 .toolbar { appToolbar }

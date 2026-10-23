@@ -1157,7 +1157,7 @@ struct TypstSettingsView: View {
         SettingsCard(
             title: "Configuration",
             icon: "gearshape",
-            description: "Control which Typst binary is used and how updates are handled."
+            description: "Control which Typst binary is used, how updates are handled, and compilation behavior."
         ) {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1175,6 +1175,17 @@ struct TypstSettingsView: View {
                     Toggle("Check for Updates on Launch", isOn: $settings.checkForTypstUpdatesOnLaunch)
                         .font(.body.weight(.medium))
                     Text("Checks for new stable Typst releases each time the app starts. You can re-enable this after choosing \"Don't Ask Again\".")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Keep With Next", isOn: $settings.keepWithNextHeadings)
+                        .font(.body.weight(.medium))
+                    Text("Never leave a heading stranded at the bottom of a page: when the paragraph after it moves to the next page, the heading moves with it. Applies to the preview and exports. Requires Typst 0.12 or newer.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.leading, 20)
