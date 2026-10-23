@@ -901,7 +901,7 @@ class TypstCompiler: ObservableObject {
     /// would break the rest of the document. The original error is surfaced to the user
     /// instead of being swallowed by the fallback.
     /// Parses raw line numbers where Typst reported errors in its stderr output.
-    private func parseRawErrorLines(from output: String) -> [Int] {
+    func parseRawErrorLines(from output: String) -> [Int] {
         var rawLines: [Int] = []
         let lines = output.components(separatedBy: .newlines)
         var currentErrorMsg: String? = nil
@@ -925,7 +925,7 @@ class TypstCompiler: ObservableObject {
     /// Applies the lenient fallback fix (Strategy 1: escape special characters; Strategy 2: wrap in #raw())
     /// to the specified source file URL for the offending error lines. Returns true if file was modified.
     @discardableResult
-    private func applyFallbackFix(to fileURL: URL, rawErrorLines: [Int], attempts: inout [Int: Int], isHybrid: Bool) -> Bool {
+    func applyFallbackFix(to fileURL: URL, rawErrorLines: [Int], attempts: inout [Int: Int], isHybrid: Bool) -> Bool {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return false }
 
         // Group the offending lines by which strategy we should try next.
@@ -1855,7 +1855,7 @@ class TypstCompiler: ObservableObject {
 
     // MARK: - Web Image Resolver
     
-    private func resolveWebImages(in text: String, projectRoot: URL?) async -> String {
+    func resolveWebImages(in text: String, projectRoot: URL?) async -> String {
         let matches = CompilerRegex.webImage.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
         var urlsToFetch: Set<String> = []
         

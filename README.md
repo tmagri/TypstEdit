@@ -63,6 +63,35 @@
 * **♿️ Accessibility Features:** Color blindness simulation modes (Protanopia, Deuteranopia, Tritanopia).
 * **📐 Flexible Layout:** Split views vertically or horizontally, editor-only, preview-only, or both panels.
 
+### AI Agents & Command Line
+* **🤖 MCP Server:** AI agents (Claude Code/Desktop, Codex, Cursor, opencode, …) can check, compile and *see* your documents through TypstEdit's built-in Model Context Protocol server.
+* **⌨️ `typstedit` Command:** Compile from any terminal or script with the same compiler and Markdown/Note conversion as the editor — no window opens.
+
+## 🤖 AI Agents & Command Line
+
+Open **Settings → Integrations** and click **Install** to add the `typstedit` command. It then prints ready-to-paste MCP configs for common agents.
+
+```sh
+typstedit check report.typ            # errors/warnings as file:line:col (exit 1 on errors)
+typstedit check report.typ --json     # machine-readable diagnostics
+typstedit compile report.typ          # → report.pdf
+typstedit compile notes.md out.png --ppi 200   # Markdown/.note files are converted first
+echo '= Hi' | typstedit check -       # source from stdin
+typstedit open report.typ             # show it in the editor
+```
+
+To connect an agent, register an MCP server with command `typstedit` and argument `mcp`, e.g.:
+
+```sh
+claude mcp add --scope user typstedit -- typstedit mcp
+```
+
+```json
+{ "mcpServers": { "typstedit": { "command": "typstedit", "args": ["mcp"] } } }
+```
+
+If you skip the install, use the full path `/Applications/TypstEdit.app/Contents/MacOS/TypstEdit` as the command. Tools exposed: `typst_check`, `typst_compile`, `typst_render_preview` (returns page images), `typstedit_open` and `typstedit_info`.
+
 ## 📥 Installation
 
 TypstEdit is available for both **Apple Silicon** (M1/M2/M3) and **Intel** Macs.

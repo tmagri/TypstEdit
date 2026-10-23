@@ -576,7 +576,8 @@ private struct WindowOpenerInstaller: View {
     }
 }
 
-@main
+// Entry point is `TypstEditMain` (Integration/TypstEditCLI.swift), which runs
+// headless CLI/MCP subcommands and otherwise starts this app.
 struct TypstEditApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var themeManager = ThemeManager()

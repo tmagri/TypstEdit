@@ -24,6 +24,11 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Packages", systemImage: "shippingbox")
                 }
+
+            IntegrationsSettingsView()
+                .tabItem {
+                    Label("Integrations", systemImage: "puzzlepiece.extension")
+                }
         }
         .padding()
         .frame(width: 1024, height: 768)
