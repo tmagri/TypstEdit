@@ -32,20 +32,25 @@ if [ -z "$DEVELOPER_DIR" ]; then
     fi
 fi
 
+# Build each architecture into its OWN scratch directory — a shared scratch
+# makes both builds write the same Products/Release/TypstEdit, so the second
+# overwrites the first and lipo would see one file twice.
 # Build for ARM64 (Apple Silicon)
 echo "Building for ARM64..."
-swift build -c release --arch arm64
+ARM_BIN="$(swift build -c release --arch arm64 --scratch-path "$BUILD_DIR/arch-build/arm64" --show-bin-path)/$APP_NAME"
 
 # Build for x86_64 (Intel)
 echo "Building for x86_64..."
-swift build -c release --arch x86_64
+X86_BIN="$(swift build -c release --arch x86_64 --scratch-path "$BUILD_DIR/arch-build/x86_64" --show-bin-path)/$APP_NAME"
 
-# Create universal binary
 echo "Creating universal binary..."
-lipo -create \
-    "$BUILD_DIR/arm64-apple-macosx/release/$APP_NAME" \
-    "$BUILD_DIR/x86_64-apple-macosx/release/$APP_NAME" \
-    -output "$BUILD_DIR/$APP_NAME-universal"
+for BIN in "$ARM_BIN" "$X86_BIN"; do
+    if [ ! -f "$BIN" ]; then
+        echo "Error: built executable not found at $BIN"
+        exit 1
+    fi
+done
+lipo -create "$ARM_BIN" "$X86_BIN" -output "$BUILD_DIR/$APP_NAME-universal"
 
 echo "Creating App Bundle..."
 rm -rf "$APP_BUNDLE"

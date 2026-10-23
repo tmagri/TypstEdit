@@ -38,6 +38,12 @@ enum CompilerRegex {
     static let relativeImage = try! NSRegularExpression(pattern: #"(\bimage\(\s*")(?!\.\./)(?![/~])(?!https?://)([^"]+)(")"#)
     static let fontArgument = try! NSRegularExpression(pattern: #"font\s*:\s*(?:"[^"]*"|\([^()]*\))"#)
     static let quotedString = try! NSRegularExpression(pattern: #""([^"]*)""#)
+    // Raw-block OPENING fence line: optional indent, a run of 3+ backticks,
+    // optional whitespace, then the language tag. Typst's tag is a single
+    // token — `#`, `+`, `.` and `-` are part of it (hence `c#`, `c++`,
+    // `objective-c`) — and anything after the tag is block CONTENT per
+    // Typst's grammar, not part of the tag.
+    static let rawFenceOpen = try! NSRegularExpression(pattern: #"^(\s*`{3,})(\s*)([A-Za-z0-9_#+.-]+)(.*)$"#)
 }
 
 struct TypstError: Identifiable, Equatable {
@@ -435,6 +441,10 @@ class TypstCompiler: ObservableObject {
             // shadow source renders the preview with the intended metrics.
             // Within-line rewrite, so line numbers still map back to the source.
             finalSource = Self.substituteMissingFonts(finalSource)
+
+            // Map raw-block language tags Typst can't highlight (csharp, ...)
+            // to ones it can, and close up "``` json"-style gaps. Line-preserving.
+            finalSource = Self.normalizeRawLanguages(finalSource)
             
             var injectedPreamble = ""
             if keepWithNextActive {
@@ -1164,6 +1174,98 @@ class TypstCompiler: ObservableObject {
         return mutable as String
     }
 
+    // MARK: - Raw Code-Block Language Normalization
+
+    /// Maps raw-block language tags that the Typst CLI's bundled syntax set
+    /// fails to resolve — verified empirically: each key below renders with NO
+    /// highlighting (and `c#` / `c++` even leak `#` / `++` into the output,
+    /// breaking the fence) — to a tag that DOES highlight. Values were each
+    /// verified to resolve on the bundled Typst binaries.
+    nonisolated static let rawLanguageAliases: [String: String] = [
+        "csharp": "cs",
+        "c#": "cs",
+        "c++": "cpp",
+        "cxx": "cpp",
+        "cc": "cpp",
+        "shell": "bash",
+        "zsh": "bash",
+        "console": "bash",
+        "terminal": "bash",
+        "docker": "dockerfile",
+        "objc": "objective-c",
+        "obj-c": "objective-c",
+        "fsharp": "fs",
+        "json5": "json",
+        "jsonl": "json",
+        "node": "javascript",
+        "nodejs": "javascript",
+        "mjs": "javascript",
+        "cjs": "javascript",
+    ]
+
+    /// Language tags verified to resolve in the bundled Typst syntax set. When
+    /// one of these is separated from its fence by whitespace (`"``` json"`),
+    /// the space is closed up — Typst otherwise treats the tag as the block's
+    /// first content line and the block compiles untagged (no highlighting).
+    nonisolated static let knownRawLanguages: Set<String> = [
+        "bash", "c", "cc", "console", "cpp", "csharp", "css", "cjs", "cs",
+        "dart", "diff", "docker", "dockerfile", "fs", "fsharp", "go",
+        "golang", "html", "javascript", "java", "json", "json5", "jsonc",
+        "jsonl", "js", "kotlin", "lua", "makefile", "mjs", "node", "nodejs",
+        "nix", "objc", "obj-c", "objective-c", "perl", "python", "ruby",
+        "rust", "rb", "scala", "shell", "sh", "sql", "swift", "terminal",
+        "toml", "typescript", "ts", "xml", "yaml", "yml", "zsh",
+        "c#", "c++", "cxx",
+    ]
+
+    /// Rewrites raw-block OPENING fence lines so the language tag is one the
+    /// Typst CLI can actually highlight: alias tags the bundled syntax set
+    /// does not know (`csharp` → `cs`) are mapped, tags that would corrupt
+    /// the fence (`c#`, `c++`) are replaced, and a space between the fence
+    /// and a known tag ("``` json" → "```json") is closed up. Line-for-line
+    /// and within-line only, so shadow-file line numbers still map back to
+    /// the editor source, and code-block CONTENT is never touched — only
+    /// opening fence lines are rewritten. Shadow-source only: the user's
+    /// file itself is never modified.
+    nonisolated static func normalizeRawLanguages(_ source: String) -> String {
+        guard source.contains("`") else { return source }
+        var lines = source.components(separatedBy: "\n")
+        // Backtick length of the raw block currently open; 0 = outside any block.
+        var fenceRun = 0
+        for i in lines.indices {
+            let line = lines[i]
+            if fenceRun > 0 {
+                // Inside a raw block: only a pure backtick run at least as
+                // long as the opener ends it. Content lines are never rewritten.
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty, trimmed.allSatisfy({ $0 == "`" }), trimmed.count >= fenceRun {
+                    fenceRun = 0
+                }
+                continue
+            }
+            let nsLine = line as NSString
+            guard let match = CompilerRegex.rawFenceOpen.firstMatch(
+                in: line, range: NSRange(0..<nsLine.length)
+            ) else { continue }
+            let fence = nsLine.substring(with: match.range(at: 1))
+            let gap = nsLine.substring(with: match.range(at: 2))
+            let tag = nsLine.substring(with: match.range(at: 3))
+            let rest = nsLine.substring(with: match.range(at: 4))
+            let key = tag.lowercased()
+            if let mapped = rawLanguageAliases[key] {
+                lines[i] = fence + mapped + rest
+            } else if !gap.isEmpty, knownRawLanguages.contains(key) {
+                lines[i] = fence + tag + rest
+            }
+            // A second backtick run later in the line means the block opens
+            // and closes on this line ("```rust let x = 1```") — stay outside.
+            if !rest.contains("`") {
+                fenceRun = fence.filter { $0 == "`" }.count
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: - Auto-Fix Broken Syntax (.note)
 
     /// Proactively repairs broken or incomplete syntax in `.note` files prior to compilation,
@@ -1708,6 +1810,10 @@ class TypstCompiler: ObservableObject {
         // Same missing-font substitution the live preview applies (shadow-only).
         finalContent = Self.substituteMissingFonts(finalContent)
 
+        // Same raw-language normalization the live preview applies (shadow-only),
+        // so exported code blocks highlight like the preview does.
+        finalContent = Self.normalizeRawLanguages(finalContent)
+
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
 
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory, tempDirectory: tempDir)
@@ -1830,6 +1936,9 @@ class TypstCompiler: ObservableObject {
 
         // Same missing-font substitution the live preview applies (shadow-only).
         finalContent = Self.substituteMissingFonts(finalContent)
+
+        // Same raw-language normalization the live preview applies (shadow-only).
+        finalContent = Self.normalizeRawLanguages(finalContent)
 
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
 

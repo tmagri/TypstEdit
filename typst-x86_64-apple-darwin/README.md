@@ -5,19 +5,19 @@
 <p align="center">
   <a href="https://typst.app/docs/">
     <img alt="Documentation" src="https://img.shields.io/website?down_message=offline&label=docs&up_color=007aff&up_message=online&url=https%3A%2F%2Ftypst.app%2Fdocs"
-  /></a>
+  ></a>
   <a href="https://typst.app/">
     <img alt="Typst App" src="https://img.shields.io/website?down_message=offline&label=typst.app&up_color=239dad&up_message=online&url=https%3A%2F%2Ftypst.app"
-  /></a>
+  ></a>
   <a href="https://discord.gg/2uDybryKPe">
     <img alt="Discord Server" src="https://img.shields.io/discord/1054443721975922748?color=5865F2&label=discord&labelColor=555"
-  /></a>
+  ></a>
   <a href="https://github.com/typst/typst/blob/main/LICENSE">
     <img alt="Apache-2 License" src="https://img.shields.io/badge/license-Apache%202-brightgreen"
-  /></a>
+  ></a>
   <a href="https://typst.app/jobs/">
     <img alt="Jobs at Typst" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Ftypst.app%2Fassets%2Fdata%2Fshields.json&query=%24.jobs.text&label=jobs&color=%23A561FF&cacheSeconds=1800"
-  /></a>
+  ></a>
 </p>
 
 Typst is a new markup-based typesetting system that is designed to be as powerful
@@ -39,7 +39,7 @@ A [gentle introduction][tutorial] to Typst is available in our documentation.
 However, if you want to see the power of Typst encapsulated in one image, here
 it is:
 <p align="center">
- <img alt="Example" width="900" src="https://user-images.githubusercontent.com/17899797/228031796-ced0e452-fcee-4ae9-92da-b9287764ff25.png"/>
+ <img alt="Example" width="900" src="https://user-images.githubusercontent.com/17899797/228031796-ced0e452-fcee-4ae9-92da-b9287764ff25.png">
 </p>
 
 
@@ -53,7 +53,7 @@ Let's dissect what's going on:
 
 - We insert a heading with the `= Heading` syntax. One equals sign creates a top
   level heading, two create a subheading and so on. Typst has more lightweight
-  markup like this, see the [syntax] reference for a full list.
+  markup like this; see the [syntax] reference for a full list.
 
 - [Mathematical equations][math] are enclosed in dollar signs. By adding extra
   spaces around the contents of an equation, we can put it into a separate block.
@@ -113,7 +113,9 @@ Typst's CLI is available from different sources:
 
 - You can install Typst through different package managers. Note that the
   versions in the package managers might lag behind the latest release.
-  - Linux: View [Typst on Repology][repology]
+  - Linux:
+      - View [Typst on Repology][repology]
+      - View [Typst's Snap][snap]
   - macOS: `brew install typst`
   - Windows: `winget install --id Typst.Typst`
 
@@ -125,8 +127,8 @@ Typst's CLI is available from different sources:
 
 - Nix users can
   - use the `typst` package with `nix-shell -p typst`
-  - build and run a development version with
-    `nix run github:typst/typst -- --version`.
+  - build and run the [Typst flake](https://github.com/typst/typst-flake) with
+    `nix run github:typst/typst-flake -- --version`.
 
 - Docker users can run a prebuilt image with
   `docker run ghcr.io/typst/typst:latest --help`.
@@ -137,7 +139,7 @@ Once you have installed Typst, you can use it like this:
 # Creates `file.pdf` in working directory.
 typst compile file.typ
 
-# Creates PDF file at the desired path.
+# Creates a PDF file at the desired path.
 typst compile path/to/source.typ path/to/output.pdf
 ```
 
@@ -171,26 +173,29 @@ typst help
 typst help watch
 ```
 
-If you prefer an integrated IDE-like experience with autocompletion and instant
-preview, you can also check out [Typst's free web app][app].
+If you prefer an integrated IDE-like experience with autocompletion and instant 
+preview, you can also check out our [free web app][app]. Alternatively, there is 
+a community-created language server called 
+[Tinymist](https://myriad-dreamin.github.io/tinymist/) which is integrated into 
+various editor extensions.
 
 ## Community
-The main place where the community gathers is our [Discord server][discord].
-Feel free to join there to ask questions, help out others, share cool things
-you created with Typst, or just to chat.
+The main places where the community gathers are our [Forum][forum] and our
+[Discord server][discord]. The Forum is a great place to ask questions, help
+others, and share cool things you created with Typst. The Discord server is more
+suitable for quicker questions, discussions about contributing, or just to chat.
+We'd be happy to see you there!
 
-Aside from that there are a few places where you can find things built by
-the community:
-
-- The official [package list](https://typst.app/docs/packages)
-- The [Awesome Typst](https://github.com/qjcg/awesome-typst) repository
+[Typst Universe][universe] is where the community shares templates and packages.
+If you want to share your own creations, you can submit them to our
+[package repository][packages].
 
 If you had a bad experience in our community, please [reach out to us][contact].
 
 ## Contributing
-We would love to see contributions from the community. If you experience bugs,
-feel free to open an issue. If you would like to implement a new feature or bug
-fix, please follow the steps outlined in the [contribution guide][contributing].
+We love to see contributions from the community. If you experience bugs, feel
+free to open an issue. If you would like to implement a new feature or bug fix,
+please follow the steps outlined in the [contribution guide][contributing].
 
 To build Typst yourself, first ensure that you have the
 [latest stable Rust][rust] installed. Then, clone this repository and build the
@@ -238,9 +243,31 @@ instant preview. To achieve these goals, we follow three core design principles:
   Luckily we have [`comemo`], a system for incremental compilation which does
   most of the hard work in the background.
 
+## Acknowledgements
+
+We'd like to thank everyone who is supporting Typst's development, be it via
+[GitHub sponsors] or elsewhere. In particular, special thanks[^1] go to:
+
+- [Posit](https://posit.co/blog/posit-and-typst/) for financing a full-time
+  compiler engineer
+- [NLnet](https://nlnet.nl/) for supporting work on Typst via multiple grants
+  through the [NGI Zero Core](https://nlnet.nl/core) fund:
+  - Work on [HTML export](https://nlnet.nl/project/Typst-HTML/)
+  - Work on [PDF accessibility](https://nlnet.nl/project/Typst-Accessibility/)
+- [Science & Startups](https://www.science-startups.berlin/) for having financed
+  Typst development from January through June 2023 via the Berlin Startup
+  Scholarship
+- [Zerodha](https://zerodha.tech/blog/1-5-million-pdfs-in-25-minutes/) for their
+  generous one-time sponsorship
+
+[^1]: This list only includes contributions for our open-source work that exceed
+    or are expected to exceed €10K.
+
 [docs]: https://typst.app/docs/
 [app]: https://typst.app/
 [discord]: https://discord.gg/2uDybryKPe
+[forum]: https://forum.typst.app/
+[universe]: https://typst.app/universe/
 [tutorial]: https://typst.app/docs/tutorial/
 [show]: https://typst.app/docs/reference/styling/#show-rules
 [math]: https://typst.app/docs/reference/math/
@@ -254,3 +281,5 @@ instant preview. To achieve these goals, we follow three core design principles:
 [contributing]: https://github.com/typst/typst/blob/main/CONTRIBUTING.md
 [packages]: https://github.com/typst/packages/
 [`comemo`]: https://github.com/typst/comemo/
+[snap]: https://snapcraft.io/typst
+[GitHub sponsors]: https://github.com/sponsors/typst/
