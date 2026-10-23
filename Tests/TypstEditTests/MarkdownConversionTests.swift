@@ -791,10 +791,15 @@ final class MarkdownConversionTests: XCTestCase {
         let raw = String(data: data, encoding: .utf8) ?? ""
         // Filter out web-image-not-found errors; those are resolved by TypstCompiler's
         // resolveWebImages() at runtime, not by this isolated conversion test.
+        // Also drop pure `warning:` blocks — newer Typst versions emit forward-
+        // compatibility warnings (e.g. about the fixture's ```c# language tag)
+        // that don't fail the compile; the intent here is "no compile errors".
         let filtered = raw
             .components(separatedBy: "\n\n")
             .filter { block in
-                !block.contains("file not found") && !block.contains("access denied")
+                !block.contains("file not found")
+                    && !block.contains("access denied")
+                    && !block.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("warning:")
             }
             .joined(separator: "\n\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)

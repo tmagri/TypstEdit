@@ -424,6 +424,11 @@ class AICompletionService: ObservableObject {
         maxTurns: Int = 6,
         onToolCall: @escaping (String, String) -> Void = { _, _ in },
         onReasoning: @escaping (String) -> Void = { _ in },
+        /// When non-nil, each turn is requested with streaming enabled and
+        /// every reasoning/"thinking" fragment is forwarded here as it
+        /// arrives — letting the caller show the model's live thinking while
+        /// it works. Passing nil keeps the one-shot request/response behavior.
+        onReasoningDelta: ((String) -> Void)? = nil,
         sanitize: Bool = true,
         contextCharBudget: Int? = nil,
         executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
@@ -460,7 +465,7 @@ class AICompletionService: ObservableObject {
             if let contextCharBudget {
                 Self.elideOldToolOutputs(in: &messages, charBudget: contextCharBudget)
             }
-            let step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens)
+            let step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens, reasoningDelta: onReasoningDelta)
 
             switch step {
             case .finalText(let text, let stepReasoning):
@@ -587,8 +592,11 @@ class AICompletionService: ObservableObject {
     }
 
     /// Sends one turn of a tool-calling conversation and returns either the
-    /// model's final text or the tool calls it wants executed next.
-    private func requestChatStep(ctx: ModelContext, messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int) async throws -> AIChatStep {
+    /// model's final text or the tool calls it wants executed next. When
+    /// `reasoningDelta` is non-nil the request is made with `"stream": true`
+    /// and parsed event-by-event, forwarding reasoning fragments as they
+    /// arrive; the returned step is the same either way.
+    private func requestChatStep(ctx: ModelContext, messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int, reasoningDelta: ((String) -> Void)? = nil) async throws -> AIChatStep {
         let settings = AISettingsManager.shared
         guard let url = URL(string: ctx.chatEndpoint) else { throw AIError.invalidURL }
 
@@ -608,14 +616,38 @@ class AICompletionService: ObservableObject {
             request.addValue("TypstEdit", forHTTPHeaderField: "X-Title")
         }
 
+        let streaming = reasoningDelta != nil
         request.httpBody = ctx.isAnthropic
-            ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools)
-            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools)
+            ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming)
+            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        if !streaming {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
+
+            guard httpResponse.statusCode == 200 else {
+                var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                    parsedErrorMsg = msg
+                }
+                throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
+            }
+
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw AIError.parsingError("Invalid JSON structure returned by provider.")
+            }
+
+            return ctx.isAnthropic ? try Self.parseAnthropicStep(json) : try Self.parseOpenAIStep(json)
+        }
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
 
         guard httpResponse.statusCode == 200 else {
+            // Read the (small) error body so streamed failures report the
+            // same clean message the non-streaming path produces.
+            let data = await Self.collectBytes(bytes, upTo: 1 << 20)
             var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
@@ -624,16 +656,14 @@ class AICompletionService: ObservableObject {
             throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
         }
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw AIError.parsingError("Invalid JSON structure returned by provider.")
-        }
-
-        return ctx.isAnthropic ? try Self.parseAnthropicStep(json) : try Self.parseOpenAIStep(json)
+        return ctx.isAnthropic
+            ? try await Self.parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!)
+            : try await Self.parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!)
     }
 
     // MARK: Provider wire-format conversion (OpenAI-compatible)
 
-    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool]) throws -> Data {
+    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, includeReasoning: Bool = false) throws -> Data {
         var wireMessages: [[String: Any]] = []
         for message in messages {
             switch message {
@@ -669,8 +699,14 @@ class AICompletionService: ObservableObject {
             "messages": wireMessages,
             "max_tokens": maxTokens,
             "temperature": 0.2,
-            "stream": false
+            "stream": stream
         ]
+        // OpenRouter hides reasoning tokens behind an opt-in; without this its
+        // models stream answers but never the thinking. Most other
+        // OpenAI-compatible providers emit `reasoning_content` by default.
+        if stream && includeReasoning {
+            body["reasoning"] = ["enabled": true]
+        }
         if !tools.isEmpty {
             body["tools"] = tools.map { tool in
                 [
@@ -714,7 +750,7 @@ class AICompletionService: ObservableObject {
 
     // MARK: Provider wire-format conversion (Anthropic)
 
-    private static func buildAnthropicBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool]) throws -> Data {
+    private static func buildAnthropicBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false) throws -> Data {
         var systemText = ""
         var wireMessages: [[String: Any]] = []
 
@@ -749,6 +785,9 @@ class AICompletionService: ObservableObject {
             "system": systemText,
             "messages": wireMessages
         ]
+        if stream {
+            body["stream"] = true
+        }
         if !tools.isEmpty {
             body["tools"] = tools.map { tool in
                 ["name": tool.qualifiedName, "description": tool.description, "input_schema": tool.inputSchema]
@@ -781,6 +820,135 @@ class AICompletionService: ObservableObject {
 
         let text = contentArray.first(where: { ($0["type"] as? String) == "text" })?["text"] as? String ?? ""
         return .finalText(text, reasoning: reasoning)
+    }
+
+    /// Reads up to `limit` bytes from a streamed response — used only to
+    /// recover the (small) error body when a streaming request comes back
+    /// with a non-200 status, since the main SSE parsers below assume a
+    /// successful stream of `data:` lines.
+    private static func collectBytes(_ bytes: URLSession.AsyncBytes, upTo limit: Int) async -> Data {
+        var collected = Data()
+        do {
+            for try await byte in bytes {
+                collected.append(byte)
+                if collected.count >= limit { break }
+            }
+        } catch {
+            // Whatever was read before the error is still useful for the message.
+        }
+        return collected
+    }
+
+    // MARK: Provider wire-format conversion (streaming / SSE)
+    //
+    // Only reached when the caller supplies `onReasoningDelta` (currently
+    // just AI Chat): same request the non-streaming path above makes, but
+    // with `"stream": true`, parsed event-by-event so reasoning fragments
+    // reach the UI while the model is still working. Each function
+    // accumulates fragments across the whole response and returns the same
+    // `AIChatStep` shape its non-streaming counterpart does.
+
+    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (String) -> Void) async throws -> AIChatStep {
+        var text = ""
+        var reasoning = ""
+        // Tool-call deltas arrive as fragments keyed by `index`, with id,
+        // name, and argument string each possibly split across many chunks.
+        var fragments: [Int: (id: String, name: String, arguments: String)] = [:]
+
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" { break }
+            guard let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                throw AIError.apiError(msg)
+            }
+
+            guard let choice = (json["choices"] as? [[String: Any]])?.first,
+                  let delta = choice["delta"] as? [String: Any] else { continue }
+
+            if let piece = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String), !piece.isEmpty {
+                reasoning += piece
+                onReasoningDelta(piece)
+            }
+            if let piece = delta["content"] as? String, !piece.isEmpty {
+                text += piece
+            }
+            if let deltas = delta["tool_calls"] as? [[String: Any]] {
+                for fragment in deltas {
+                    let index = fragment["index"] as? Int ?? 0
+                    var entry = fragments[index] ?? ("", "", "")
+                    if let id = fragment["id"] as? String, !id.isEmpty { entry.id = id }
+                    if let function = fragment["function"] as? [String: Any] {
+                        if let name = function["name"] as? String, !name.isEmpty { entry.name = name }
+                        if let piece = function["arguments"] as? String { entry.arguments += piece }
+                    }
+                    fragments[index] = entry
+                }
+            }
+        }
+
+        let calls: [AIToolCallRequest] = fragments.sorted { $0.key < $1.key }.compactMap { _, entry in
+            guard !entry.id.isEmpty, !entry.name.isEmpty else { return nil }
+            return AIToolCallRequest(id: entry.id, name: entry.name, argumentsJSON: entry.arguments.isEmpty ? "{}" : entry.arguments)
+        }
+        let stepReasoning = reasoning.isEmpty ? nil : reasoning
+        if !calls.isEmpty { return .toolCalls(calls, reasoning: stepReasoning) }
+        return .finalText(text, reasoning: stepReasoning)
+    }
+
+    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (String) -> Void) async throws -> AIChatStep {
+        var text = ""
+        var reasoning = ""
+        var fragments: [Int: (id: String, name: String, arguments: String)] = [:]
+
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+            guard let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+
+            switch json["type"] as? String {
+            case "content_block_start":
+                if let block = json["content_block"] as? [String: Any],
+                   block["type"] as? String == "tool_use",
+                   let id = block["id"] as? String,
+                   let name = block["name"] as? String,
+                   let index = json["index"] as? Int {
+                    fragments[index] = (id, name, "")
+                }
+            case "content_block_delta":
+                guard let delta = json["delta"] as? [String: Any] else { continue }
+                switch delta["type"] as? String {
+                case "thinking_delta":
+                    if let piece = delta["thinking"] as? String, !piece.isEmpty {
+                        reasoning += piece
+                        onReasoningDelta(piece)
+                    }
+                case "text_delta":
+                    if let piece = delta["text"] as? String, !piece.isEmpty { text += piece }
+                case "input_json_delta":
+                    if let piece = delta["partial_json"] as? String, let index = json["index"] as? Int {
+                        fragments[index]?.arguments += piece
+                    }
+                default:
+                    break
+                }
+            case "error":
+                if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                    throw AIError.apiError(msg)
+                }
+            default:
+                break
+            }
+        }
+
+        let calls: [AIToolCallRequest] = fragments.sorted { $0.key < $1.key }.compactMap { _, entry in
+            guard !entry.id.isEmpty, !entry.name.isEmpty else { return nil }
+            return AIToolCallRequest(id: entry.id, name: entry.name, argumentsJSON: entry.arguments.isEmpty ? "{}" : entry.arguments)
+        }
+        let stepReasoning = reasoning.isEmpty ? nil : reasoning
+        if !calls.isEmpty { return .toolCalls(calls, reasoning: stepReasoning) }
+        return .finalText(text, reasoning: stepReasoning)
     }
 
     // MARK: - Markdown → Typst conversion (AST pipeline)
@@ -1451,6 +1619,13 @@ struct TypstMarkupVisitor: MarkupVisitor {
     mutating func visitLink(_ link: Link) -> String {
         let destination = link.destination ?? ""
         let inner = renderInline(link.children)
+
+        // `[text]()` — an explicitly empty destination — must not become
+        // `#link("")[text]`: Typst rejects an empty URL outright ("URL must
+        // not be empty"). The text alone is the faithful rendering.
+        guard !destination.isEmpty else {
+            return inner
+        }
         let escapedDestination = AICompletionService.escapeTypstString(destination)
 
         // Links to known video hosts become clickable thumbnail embeds so a

@@ -60,6 +60,11 @@ enum PendingApprovalKind {
     /// whole file, so the diff preview stays readable on a huge document.
     case fileEdit(relativePath: String, oldSnippet: String, newSnippet: String, occurrences: Int)
     case runPython(code: String)
+    /// A `web_fetch` request. The full URL is shown for approval — worth
+    /// glancing at the query string, since a fetch is also a request the
+    /// destination server sees (a compromised page could try to exfiltrate
+    /// project secrets by encoding them into URL parameters).
+    case webFetch(url: String)
 }
 
 struct PendingApproval: Identifiable {

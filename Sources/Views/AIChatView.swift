@@ -17,6 +17,12 @@ struct AIChatView: View {
     @State private var showYoloConfirm = false
     @FocusState private var inputFocused: Bool
 
+    /// Which past messages' "Thought process" disclosures are expanded.
+    @State private var expandedThinkingIDs: Set<UUID> = []
+    /// Whether the live "Thinking…" indicator (shown while generating) is
+    /// expanded to follow the model's reasoning as it streams in.
+    @State private var liveThinkingExpanded = false
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -85,6 +91,16 @@ struct AIChatView: View {
                 .buttonStyle(.plain)
                 .disabled(chat.isGenerating || chat.isCompacting || chat.messages.isEmpty)
                 .help("Summarize older turns now to free up context")
+                if liveThinkingExpanded || !expandedThinkingIDs.isEmpty {
+                    Button {
+                        expandedThinkingIDs = []
+                        liveThinkingExpanded = false
+                    } label: {
+                        Image(systemName: "eye.slash")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Collapse all thinking sections to keep the chat lean")
+                }
                 Button {
                     chat.clearHistory()
                 } label: {
@@ -151,11 +167,7 @@ struct AIChatView: View {
                         messageRow(message).id(message.id)
                     }
                     if chat.isGenerating {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small)
-                            Text("Thinking…").font(.caption).foregroundColor(.secondary)
-                        }
-                        .id("generating-indicator")
+                        generatingRow.id("generating-indicator")
                     }
                     if let error = chat.errorMessage {
                         HStack(alignment: .top, spacing: 6) {
@@ -174,6 +186,49 @@ struct AIChatView: View {
                     withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                 }
             }
+        }
+    }
+
+    /// The live "Thinking…" row shown while a response is being generated.
+    /// Plain spinner until the model actually streams some reasoning text —
+    /// at that point it becomes a disclosure so there's something to open:
+    /// click to follow the thinking live, click again (or "Collapse all
+    /// thinking" in the header) to close it back down to just the spinner.
+    @ViewBuilder
+    private var generatingRow: some View {
+        if chat.liveReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Thinking…").font(.caption).foregroundColor(.secondary)
+            }
+        } else {
+            DisclosureGroup(isExpanded: $liveThinkingExpanded) {
+                ScrollViewReader { innerProxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(chat.liveReasoning)
+                                .font(.caption2.monospaced())
+                                .foregroundColor(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Color.clear.frame(height: 1).id("live-reasoning-end")
+                        }
+                    }
+                    .frame(maxHeight: 180)
+                    .onChange(of: chat.liveReasoning) { _ in
+                        innerProxy.scrollTo("live-reasoning-end", anchor: .bottom)
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Thinking…").font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .padding(8)
+            .background(Color.secondary.opacity(0.06))
+            .cornerRadius(8)
         }
     }
 
@@ -197,7 +252,7 @@ struct AIChatView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 4) {
                         if let reasoning = message.reasoning, !reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            thinkingDisclosure(reasoning)
+                            thinkingDisclosure(reasoning, id: message.id)
                         }
                         HStack {
                             Text(message.text)
@@ -312,10 +367,12 @@ struct AIChatView: View {
     /// content the model returned alongside this answer — only shown when
     /// there's something to show, since not every model or provider exposes
     /// it. Expanding doesn't change anything else in the transcript; it's
-    /// purely a window into what the model worked through.
+    /// purely a window into what the model worked through. Expansion state
+    /// is keyed by message id so "Collapse all thinking" in the header can
+    /// close every one of these at once.
     @ViewBuilder
-    private func thinkingDisclosure(_ reasoning: String) -> some View {
-        DisclosureGroup {
+    private func thinkingDisclosure(_ reasoning: String, id: UUID) -> some View {
+        DisclosureGroup(isExpanded: thinkingBinding(for: id)) {
             Text(reasoning)
                 .font(.caption2.monospaced())
                 .foregroundColor(.secondary)
@@ -329,6 +386,15 @@ struct AIChatView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.06))
         .cornerRadius(8)
+    }
+
+    private func thinkingBinding(for id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { expandedThinkingIDs.contains(id) },
+            set: { isExpanded in
+                if isExpanded { expandedThinkingIDs.insert(id) } else { expandedThinkingIDs.remove(id) }
+            }
+        )
     }
 
     private func displayName(for qualifiedName: String) -> String {
@@ -370,6 +436,24 @@ struct AIChatView: View {
                 }
                 diffPreview(old: oldSnippet, new: newSnippet)
                     .frame(maxHeight: 180)
+
+            case .webFetch(let urlString):
+                HStack(spacing: 6) {
+                    Image(systemName: "globe").foregroundColor(.orange)
+                    Text("Fetch this web page?").font(.subheadline.bold())
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(urlString)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Glance at the URL before approving — the destination server sees this request, so a crafted page could try to encode project data into it. Only public internet addresses can be fetched.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
 
             case .runPython(let code):
                 HStack(spacing: 6) {

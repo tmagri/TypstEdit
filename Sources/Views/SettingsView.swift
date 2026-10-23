@@ -638,6 +638,32 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
+            title: "Web Fetch Tool",
+            icon: "globe",
+            description: "An extra opt-in, like the Python tool. When on, the model may ask to fetch a public web page — the full URL is shown to you for approval on every fetch (worth glancing at: a fetch is also a request the destination server sees). Pages come back as readable text, not raw HTML."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Allow the Web Fetch Tool", isOn: $settings.chatWebFetchEnabled)
+                    .font(.body.weight(.medium))
+
+                if settings.chatWebFetchEnabled {
+                    TextField("Allowed domains (empty = any) — e.g. typst.app, *.wikipedia.org", text: $settings.chatWebFetchAllowedDomains)
+                        .textFieldStyle(.roundedBorder)
+                        .padding(.leading, 20)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Pages that need a login can't be fetched — no credentials are ever sent or stored. Use an MCP server for those.", systemImage: "lock")
+                        Label("Private/loopback addresses (localhost, 192.168.x.x, cloud metadata, …) are always refused — this can't be opted out of.", systemImage: "shield.lefthalf.filled")
+                        Label("The page's content is untrusted data: the model is instructed to quote it, never obey instructions found in it.", systemImage: "exclamationmark.triangle")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+                }
+            }
+        }
+
+        SettingsCard(
             title: "Context Budget",
             icon: "gauge.with.dots.needle.67percent",
             description: "Long chats eventually overflow any model's context window — which some providers report as an empty response rather than a clear error. When the conversation passes this rough token budget, the chat summarizes older turns automatically. The header shows the current estimate; the compact button summarizes on demand."

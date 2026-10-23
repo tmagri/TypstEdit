@@ -121,6 +121,16 @@ class AISettingsManager: ObservableObject {
     /// read-only (compiles to a throwaway temp file) and is the main defense
     /// against a model leaving behind a document with mismatched delimiters.
     @AppStorage("aiChatAutoValidateTypstEdits") var chatAutoValidateTypstEdits: Bool = true
+    /// Extra opt-in for the `web_fetch` tool — network egress is a meaningfully
+    /// higher-risk tier than local file access (a fetch is also a request the
+    /// destination server sees), so it's off by default like the Python tool,
+    /// with a per-call URL approval on every fetch.
+    @AppStorage("aiChatWebFetchEnabled") var chatWebFetchEnabled: Bool = false
+    /// Optional comma-separated allowlist for `web_fetch` (`"typst.app,
+    /// *.wikipedia.org"`), mirroring Claude Code's `WebFetch(domain:…)` rules.
+    /// Empty = any public domain; the SSRF guard (private/loopback addresses
+    /// refused) applies regardless and can't be opted out of.
+    @AppStorage("aiChatWebFetchAllowedDomains") var chatWebFetchAllowedDomains: String = ""
     /// Rough token budget for one chat request before old turns get summarized
     /// into a compaction summary. Bigger models/local models with long
     /// contexts can raise this.
