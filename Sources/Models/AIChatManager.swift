@@ -56,6 +56,10 @@ final class AIChatManager: ObservableObject {
     private let localTools = LocalToolExecutor()
     private var persistenceURL: URL?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
+    /// The child task running the current generation turn (model request,
+    /// tool loop, any subagent) — created in `sendMessage` so `stop()` can
+    /// cancel it and every layer in the chain can observe `Task.isCancelled`.
+    private var generationTask: Task<Void, Never>?
     /// Guards against subagents spawning subagents (each level would multiply
     /// the request count, and the read-only tool set already bounds what a
     /// subagent can usefully do).
@@ -181,11 +185,32 @@ final class AIChatManager: ObservableObject {
         isGenerating = true
         liveReasoning = ""
         errorMessage = nil
+
+        // The turn runs in a child task so `stop()` can cancel it by
+        // reference — the standard library offers no way to fetch the task
+        // you're currently running in. The child inherits the main actor, so
+        // everything stays serialized exactly as before; `await turn.value`
+        // simply waits for it to finish or unwind.
+        let turn = Task { await self.runTurn(trimmed) }
+        generationTask = turn
         defer {
+            // `isGenerating` (set above, cleared here) blocks any other
+            // `sendMessage` from starting a new turn while this one runs, so
+            // `generationTask` is still `turn` when this runs — no comparison
+            // needed, and `Task` is a struct, so there is none to make.
             isGenerating = false
             liveReasoning = ""
+            generationTask = nil
         }
+        await turn.value
+    }
 
+    /// One generation turn: tool setup, the model/tool loop, and the
+    /// cancellation-aware cleanup. Runs in the child task that
+    /// `sendMessage` stores in `generationTask`, so `stop()`'s cancellation
+    /// is what the `Task.isCancelled` checks here (and in the completion
+    /// service) observe.
+    private func runTurn(_ trimmed: String) async {
         // A new turn means a fresh context: the model must look at a file
         // again before changing it, and subagent nesting restarts at zero.
         localTools.beginRequest()
@@ -275,7 +300,35 @@ final class AIChatManager: ObservableObject {
             messages.append(ChatMessage(role: .assistant, text: result, reasoning: capturedReasoning))
             persist()
         } catch {
-            errorMessage = error.localizedDescription
+            if Task.isCancelled || error is CancellationError {
+                // The user pressed Stop. A tool call that was still running
+                // when the cancellation landed gets a `.cancelled` status
+                // (its own catch usually marks it already; this sweeps any
+                // that didn't get the chance) — and no error banner, since a
+                // deliberate stop isn't a failure.
+                for index in messages.indices
+                where messages[index].role == .toolCall && messages[index].toolStatus == .running {
+                    messages[index].toolStatus = .cancelled
+                    messages[index].toolOutput = "Stopped."
+                }
+                persist()
+            } else {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Cancels the in-flight generation, if any: the child turn task
+    /// `sendMessage` is waiting on gets cancelled, and the model request,
+    /// the tool it's running, and any subagent all observe that cancellation
+    /// and unwind. A pending approval is denied at the same time, so a tool
+    /// call suspended on the approval prompt unwinds too instead of waiting
+    /// for a button the user is about to stop caring about.
+    func stop() {
+        guard isGenerating else { return }
+        generationTask?.cancel()
+        if approvalContinuation != nil {
+            resolveApproval(approved: false)
         }
     }
 
@@ -336,17 +389,33 @@ final class AIChatManager: ObservableObject {
         defer { isCompacting = false }
 
         do {
-            let summary = try await AICompletionService.shared.fetchCompletion(
-                prompt: """
-                Summarize this conversation for another pass by the same assistant. Preserve: the user's goal and constraints, decisions made, files read or changed (with paths), facts verified from the documents, and anything still outstanding. Drop pleasantries and superseded details. Write plain prose, no headings.
+            // Token-filter fast path: when a verbatim compressor is
+            // configured (and it fits in half the budget, leaving room for
+            // the new turn), no LLM summary is needed at all — the older
+            // turns survive as *their own words*, which is exactly what
+            // small local models handle best. nil → fall back to the
+            // classic model-written summary.
+            let compressed = await compressedTranscriptIfFits(clipped)
+            let summary: String
+            let summaryLabel: String
+            if let compressed {
+                // Verbatim extract: the transcript's own words, filler removed.
+                summary = compressed
+                summaryLabel = "Earlier conversation kept as a filtered extract (original wording, filler words removed)"
+            } else {
+                summary = try await AICompletionService.shared.fetchCompletion(
+                    prompt: """
+                    Summarize this conversation for another pass by the same assistant. Preserve: the user's goal and constraints, decisions made, files read or changed (with paths), facts verified from the documents, and anything still outstanding. Drop pleasantries and superseded details. Write plain prose, no headings.
 
-                \(clipped)
-                """,
-                systemPrompt: "You compress conversations faithfully and concisely. Never invent facts that aren't in the transcript.",
-                maxTokens: 800,
-                purpose: .chat,
-                sanitize: false
-            )
+                    \(clipped)
+                    """,
+                    systemPrompt: "You compress conversations faithfully and concisely. Never invent facts that aren't in the transcript.",
+                    maxTokens: 800,
+                    purpose: .chat,
+                    sanitize: false
+                )
+                summaryLabel = "Summary of earlier conversation"
+            }
 
             // The request is main-actor and nothing else mutates `messages`
             // while it's in flight, so the original cut index is still valid.
@@ -358,7 +427,7 @@ final class AIChatManager: ObservableObject {
             messages.insert(
                 ChatMessage(
                     role: .assistant,
-                    text: "[Summary of earlier conversation]\n\n\(summary)",
+                    text: "[\(summaryLabel)]\n\n\(summary)",
                     isSummary: true
                 ),
                 at: cutIndex
@@ -368,6 +437,34 @@ final class AIChatManager: ObservableObject {
         } catch {
             errorMessage = "Couldn't compact the conversation: \(error.localizedDescription)"
         }
+    }
+
+    /// Token-filter fast path for `compactHistory`. Compresses the clipped
+    /// transcript verbatim and returns it when the result fits within half
+    /// the context budget (the other half absorbs the turns still to come).
+    /// Returns nil — meaning "use the LLM summary" — when the method is
+    /// llmSummary, no compressor is available, or even the filtered
+    /// transcript is still too large for the configured budget.
+    private func compressedTranscriptIfFits(_ clipped: String) async -> String? {
+        let settings = AISettingsManager.shared
+        let method = settings.chatCompressionMethod
+        guard method != .llmSummary,
+              let resolved = await ChatCompressor.resolve(method: method) else { return nil }
+
+        let targetChars = contextBudgetTokens / 2 * Self.charsPerToken
+        // Deepen the cut when the user's rate wouldn't fit the transcript.
+        let effectiveRate = max(
+            0.1,
+            min(resolved.keepRate, Double(targetChars) / Double(max(clipped.count, 1)))
+        )
+        let isCode = PromptCompression.codeRatio(clipped) > 0.35
+        let compressed = await resolved.compressor.compress(
+            clipped,
+            keepRate: effectiveRate,
+            forceTokens: [],
+            isCode: isCode
+        )
+        return compressed.count <= targetChars ? compressed : nil
     }
 
     // MARK: - Tool Dispatch
@@ -390,16 +487,26 @@ final class AIChatManager: ObservableObject {
 
         do {
             let output = try await performTool(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON)
+            if Task.isCancelled {
+                // The tool finished (or returned early) but the user pressed
+                // Stop in the meantime — record that and unwind the loop.
+                updateToolMessage(id: messageID, status: .cancelled, output: "Stopped.")
+                throw CancellationError()
+            }
             updateToolMessage(id: messageID, status: .succeeded, output: output)
             return output
         } catch {
             let status: ChatMessage.ToolStatus
-            if case LocalToolError.approvalDenied = error {
+            if Task.isCancelled {
+                // A stop pressed mid-tool (including one suspended on the
+                // approval prompt) isn't a failure or a denial.
+                status = .cancelled
+            } else if case LocalToolError.approvalDenied = error {
                 status = .denied
             } else {
                 status = .failed
             }
-            updateToolMessage(id: messageID, status: status, output: error.localizedDescription)
+            updateToolMessage(id: messageID, status: status, output: Task.isCancelled ? "Stopped." : error.localizedDescription)
             throw error
         }
     }

@@ -908,15 +908,26 @@ final class LocalToolExecutor {
             return "Failed to launch Typst: \(error.localizedDescription)"
         }
 
-        return await withCheckedContinuation { continuation in
-            process.terminationHandler = { finishedProcess in
-                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let errText = String(data: errData, encoding: .utf8) ?? ""
-                if finishedProcess.terminationStatus == 0 {
-                    continuation.resume(returning: "Compiled successfully with no errors.")
-                } else {
-                    continuation.resume(returning: "Compile failed:\n\(errText.isEmpty ? "(no error output)" : errText)")
+        // Unlike `runPython` (whose `waitWithTimeout` bounds the wait), this
+        // waits on the process with no timeout — a pathological document could
+        // hang the chat forever. Terminate the process when the surrounding
+        // task is cancelled (the chat's Stop button); the termination handler
+        // then resumes the continuation as usual.
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                process.terminationHandler = { finishedProcess in
+                    let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    let errText = String(data: errData, encoding: .utf8) ?? ""
+                    if finishedProcess.terminationStatus == 0 {
+                        continuation.resume(returning: "Compiled successfully with no errors.")
+                    } else {
+                        continuation.resume(returning: "Compile failed:\n\(errText.isEmpty ? "(no error output)" : errText)")
+                    }
                 }
+            }
+        } onCancel: {
+            if process.isRunning {
+                process.terminate()
             }
         }
     }

@@ -43,6 +43,63 @@ enum ModelTask: String, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Reasoning Effort
+
+/// How much "thinking" a reasoning-capable model should spend on a request.
+///
+/// Mapped to each provider's native control when the request is built:
+/// - OpenAI / OpenRouter / local OpenAI-compatible: `reasoning_effort`
+///   (`none`/`low`/`medium`/`high`/`xhigh`; `.auto` omits the parameter)
+/// - Anthropic: a `thinking` budget derived from the effort level
+/// - Google Gemini: `thinkingLevel` / `thinkingBudget` in `generationConfig`
+///
+/// `.auto` means "don't send anything" — the model or provider decides.
+enum ReasoningEffort: String, CaseIterable, Identifiable {
+    case auto
+    case none
+    case low
+    case medium
+    case high
+    case xhigh
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .auto: return "Auto (model default)"
+        case .none: return "Off"
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        case .xhigh: return "Extra High"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .auto: return "Let the model or provider decide."
+        case .none: return "No reasoning. Fastest and cheapest; a few models reject this and will return an error."
+        case .low: return "Minimal reasoning. Good for simple, latency-sensitive tasks."
+        case .medium: return "Balanced reasoning effort."
+        case .high: return "More thorough reasoning for complex problems."
+        case .xhigh: return "Maximum reasoning effort. Slowest and most expensive."
+        }
+    }
+
+    /// Anthropic `thinking.budget_tokens` for this effort (0 = not enabled).
+    /// The budget counts toward the request's `max_tokens`, so the request
+    /// builder raises `max_tokens` when the budget would exceed it.
+    var anthropicBudgetTokens: Int {
+        switch self {
+        case .auto, .none: return 0
+        case .low: return 1_024
+        case .medium: return 4_096
+        case .high: return 8_192
+        case .xhigh: return 16_384
+        }
+    }
+}
+
 // MARK: - Model Context
 
 /// A fully-resolved configuration for a specific model task.
@@ -54,10 +111,12 @@ struct ModelContext {
     let model: String
     let endpoint: String
     let apiKey: String
+    let reasoningEffort: ReasoningEffort
 
     var isGemini: Bool { source == .gemini }
     var isAnthropic: Bool { source == .anthropic }
     var isLocal: Bool { source.isLocal }
+    var isOpenRouter: Bool { source == .openRouter }
 
     /// The chat completions endpoint for this context.
     var chatEndpoint: String {
@@ -148,6 +207,30 @@ class AISettingsManager: ObservableObject {
     /// off; the service clamps the stored value to a sane range.
     @AppStorage("aiChatAutoContinueAttempts") var chatAutoContinueAttempts: Int = 2
 
+    // MARK: - Context Compression (LLMLingua-style token filtering)
+
+    /// How older context is squeezed back under the budget: the original
+    /// LLM-written summary, a rule-based verbatim token filter, or the
+    /// LLMLingua-2 Core ML classifier (optional download; falls back to the
+    /// token filter until installed). Stored as a raw string for the same
+    /// reason as the reasoning-effort keys above.
+    @AppStorage("aiChatCompressionMethod") private var chatCompressionMethodRaw: String = ChatCompressionMethod.llmSummary.rawValue
+    /// Fraction of words to KEEP when token filtering (LLMLingua-2's `rate`
+    /// semantics). 0.5 keeps the better half; small local models do well
+    /// around 0.3–0.5.
+    @AppStorage("aiChatCompressionKeepRate") var chatCompressionKeepRate: Double = 0.5
+
+    var chatCompressionMethod: ChatCompressionMethod {
+        get { ChatCompressionMethod(rawValue: chatCompressionMethodRaw) ?? .llmSummary }
+        set { chatCompressionMethodRaw = newValue.rawValue }
+    }
+
+    /// Clamped rate actually used by the compressors (a fat-fingered 0 or 1.5
+    /// shouldn't empty or inflate the prompt).
+    var effectiveChatCompressionKeepRate: Double {
+        min(max(chatCompressionKeepRate, 0.1), 0.9)
+    }
+
     // MARK: - Per-Task Source Assignment
 
     @AppStorage("generationSource") private var generationSourceString: String = ModelSource.openAI.rawValue
@@ -169,6 +252,36 @@ class AISettingsManager: ObservableObject {
     @AppStorage("customEndpoint") var generationEndpoint: String = "http://localhost:11434/v1/chat/completions"
     @AppStorage("completionEndpoint") var completionEndpoint: String = "http://localhost:11434/v1/chat/completions"
     @AppStorage("customEmbeddingEndpoint") var embeddingEndpoint: String = "http://localhost:11434/v1/embeddings"
+
+    // MARK: - Per-Task Reasoning Effort
+
+    @AppStorage("aiReasoningEffort.generation") private var generationReasoningEffortRaw: String = ReasoningEffort.auto.rawValue
+    @AppStorage("aiReasoningEffort.completion") private var completionReasoningEffortRaw: String = ReasoningEffort.auto.rawValue
+
+    var generationReasoningEffort: ReasoningEffort {
+        get { ReasoningEffort(rawValue: generationReasoningEffortRaw) ?? .auto }
+        set { generationReasoningEffortRaw = newValue.rawValue }
+    }
+
+    var completionReasoningEffort: ReasoningEffort {
+        get { ReasoningEffort(rawValue: completionReasoningEffortRaw) ?? .auto }
+        set { completionReasoningEffortRaw = newValue.rawValue }
+    }
+
+    func reasoningEffort(for task: ModelTask) -> ReasoningEffort {
+        switch task {
+        case .generation:
+            return generationReasoningEffort
+        case .completion:
+            // Mirror the model fallback: an empty completion model reuses the
+            // generation context, so reuse its reasoning effort too.
+            let trimmed = completionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? generationReasoningEffort : completionReasoningEffort
+        case .embedding:
+            // Embeddings have no reasoning.
+            return .auto
+        }
+    }
 
     // MARK: - Shared API Keys (per cloud source)
 
@@ -335,7 +448,8 @@ class AISettingsManager: ObservableObject {
             source: src,
             model: modelName,
             endpoint: endpoint,
-            apiKey: apiKey(for: src)
+            apiKey: apiKey(for: src),
+            reasoningEffort: reasoningEffort(for: task)
         )
     }
 

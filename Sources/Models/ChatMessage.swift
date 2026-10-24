@@ -17,6 +17,10 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         case succeeded
         case failed
         case denied
+        /// The user pressed Stop while this tool was running. Newer than the
+        /// other cases; a String raw value keeps old persisted transcripts
+        /// (which never contain it) decodable.
+        case cancelled
     }
 
     var id: UUID = UUID()

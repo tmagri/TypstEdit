@@ -316,6 +316,7 @@ enum AISettingsSection: String, CaseIterable, Identifiable {
 
 struct AISettingsView: View {
     @StateObject private var settings = AISettingsManager.shared
+    @ObservedObject private var compressionModel = LLMLingua2Manager.shared
     @State private var selectedSection: AISettingsSection = .autocomplete
     
     @State private var testingTask: ModelTask?
@@ -326,6 +327,27 @@ struct AISettingsView: View {
             get: { settings.source(for: task) },
             set: { settings.setSource($0, for: task) }
         )
+    }
+
+    private func reasoningEffortBinding(for task: ModelTask) -> Binding<ReasoningEffort> {
+        Binding(
+            get: { settings.reasoningEffort(for: task) },
+            set: { effort in
+                switch task {
+                case .generation: settings.generationReasoningEffort = effort
+                case .completion: settings.completionReasoningEffort = effort
+                case .embedding: break
+                }
+            }
+        )
+    }
+
+    /// Caption for the reasoning-effort row, tailored to the task's source.
+    private func reasoningEffortCaption(for task: ModelTask) -> String {
+        if settings.source(for: task).isLocal {
+            return "Sent as `reasoning_effort`. Servers that support it (e.g. Bionic) honor it; others ignore it."
+        }
+        return "How much the model thinks before answering. Only affects reasoning-capable models; other models may reject the request."
     }
 
     var body: some View {
@@ -425,6 +447,15 @@ struct AISettingsView: View {
                 }
 
                 completionSourceFields
+
+                SettingsRow(label: "Reasoning Effort:", caption: reasoningEffortCaption(for: .completion)) {
+                    Picker("Reasoning Effort", selection: reasoningEffortBinding(for: .completion)) {
+                        ForEach(ReasoningEffort.allCases) { effort in
+                            Text(effort.displayName).tag(effort)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
 
                 if settings.completionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     HStack(spacing: 6) {
@@ -585,6 +616,15 @@ struct AISettingsView: View {
 
                 generationSourceFields
 
+                SettingsRow(label: "Reasoning Effort:", caption: reasoningEffortCaption(for: .generation)) {
+                    Picker("Reasoning Effort", selection: reasoningEffortBinding(for: .generation)) {
+                        ForEach(ReasoningEffort.allCases) { effort in
+                            Text(effort.displayName).tag(effort)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+
                 HStack {
                     Spacer().frame(width: 140)
                     testButton(for: .generation)
@@ -681,6 +721,78 @@ struct AISettingsView: View {
             Text("Raise it for long-context models; lower it for small local models. 16,000 is a safe default for most.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
+        }
+
+        SettingsCard(
+            title: "Context Compression",
+            icon: "text.badge.star",
+            description: "How older conversation and large tool outputs are squeezed back under the budget. \"LLM summary\" asks the model to write a prose summary — the original behavior, and the weakest link on small local models, which summarize poorly. The token-filter methods instead drop the least important words and keep the survivors verbatim, so nothing is paraphrased or invented. Compression only affects what is sent to the model — your transcript always keeps the full text."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Method", selection: $settings.chatCompressionMethod) {
+                    ForEach(ChatCompressionMethod.allCases) { method in
+                        Text(method.displayName).tag(method)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                if settings.chatCompressionMethod != .llmSummary {
+                    HStack(spacing: 10) {
+                        Text("Keep about")
+                            .font(.caption)
+                        TextField("0.5", value: $settings.chatCompressionKeepRate, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("of the words (0.3–0.5 suits small local models)")
+                            .font(.caption)
+                        Spacer()
+                    }
+
+                    if settings.chatCompressionMethod == .llmlingua2 {
+                        Divider()
+
+                        HStack(spacing: 10) {
+                            Image(systemName: compressionModel.isInstalled ? "checkmark.circle.fill" : "arrow.down.circle")
+                                .foregroundColor(compressionModel.isInstalled ? .green : .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(compressionModel.isInstalled
+                                     ? "LLMLingua-2 model installed — runs locally on your Mac"
+                                     : "LLMLingua-2 model not installed — using the basic token filter until then")
+                                    .font(.caption)
+                                if !compressionModel.isInstalled {
+                                    Text("Optional \(LLMLingua2Manager.advertisedSize) download; install it from Settings → Typst → Updates, or right here.")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            Spacer()
+                            if !compressionModel.isInstalled {
+                                Button("Download Model") { compressionModel.installModel() }
+                                    .disabled(compressionModel.isWorking)
+                            }
+                        }
+
+                        if compressionModel.isWorking {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(compressionModel.status)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                ProgressView(value: compressionModel.progress)
+                                    .progressViewStyle(.linear)
+                            }
+                        }
+                        if let error = compressionModel.lastError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+
+                Text("Tool outputs (file reads, grep results) are the biggest context consumers; with a token filter they keep roughly the configured share of their content instead of being reduced to an \"elided\" note.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
 
         SettingsCard(
@@ -1133,6 +1245,7 @@ enum TypstSettingsSection: String, CaseIterable, Identifiable {
 struct TypstSettingsView: View {
     @StateObject private var settings = GeneralSettingsManager.shared
     @ObservedObject private var updater = TypstUpdater.shared
+    @ObservedObject private var compressionModel = LLMLingua2Manager.shared
 
     @State private var selectedSection: TypstSettingsSection = .engine
     @State private var hasGit: Bool = false
@@ -1372,6 +1485,55 @@ struct TypstSettingsView: View {
                         .disabled(settings.updateMode == .bleedingEdgeSource && (!hasGit || !hasCargo))
                     }
                 }
+            }
+        }
+
+        // Optional AI compression model — same download-and-store pattern as
+        // the engine above, so the editor bundle itself stays lean.
+        SettingsCard(
+            title: "AI Compression Model (Optional)",
+            icon: "arrow.down.circle.dotted",
+            description: "Core ML build of Microsoft's LLMLingua-2 token classifier, used by AI Chat's \"LLMLingua-2\" context-compression method. Nothing ships inside the app: download it once here (about \(LLMLingua2Manager.advertisedSize)) and it runs fully locally. Until it is installed, that method automatically uses the built-in basic token filter instead."
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                if compressionModel.isWorking {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(compressionModel.status)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        ProgressView(value: compressionModel.progress)
+                            .progressViewStyle(.linear)
+                    }
+                } else {
+                    if let error = compressionModel.lastError {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
+                            Text(error).font(.caption).foregroundColor(.red)
+                        }
+                    }
+
+                    HStack {
+                        Spacer().frame(width: 140)
+                        if compressionModel.isInstalled {
+                            Label("Installed", systemImage: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Spacer()
+                            Button("Remove", role: .destructive) {
+                                compressionModel.removeModel()
+                            }
+                        } else {
+                            Button {
+                                compressionModel.installModel()
+                            } label: {
+                                Label("Download Model", systemImage: "arrow.down.circle")
+                            }
+                        }
+                    }
+                }
+
+                Text("Model: microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank by Microsoft, Apache License 2.0, converted to Core ML by TypstEdit. Full notices in THIRD_PARTY_NOTICES.md in the project repository.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
         }
 

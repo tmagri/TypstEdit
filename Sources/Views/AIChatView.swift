@@ -16,6 +16,7 @@ struct AIChatView: View {
     @State private var draft: String = ""
     @State private var showYoloConfirm = false
     @FocusState private var inputFocused: Bool
+    @State private var shiftEnterMonitor: Any?
 
     /// Which past messages' "Thought process" disclosures are expanded.
     @State private var expandedThinkingIDs: Set<UUID> = []
@@ -55,7 +56,11 @@ struct AIChatView: View {
             }
         }
         .background(Color(NSColor.windowBackgroundColor))
-        .onAppear { chat.refreshToolSettings() }
+        .onAppear {
+            chat.refreshToolSettings()
+            installShiftEnterMonitor()
+        }
+        .onDisappear { removeShiftEnterMonitor() }
         .alert("Enable YOLO mode?", isPresented: $showYoloConfirm) {
             Button("Cancel", role: .cancel) {}
             Button("Enable", role: .destructive) { chat.yoloMode = true }
@@ -408,6 +413,7 @@ struct AIChatView: View {
         case .succeeded: Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
         case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
         case .denied: Image(systemName: "hand.raised.fill").foregroundColor(.red)
+        case .cancelled: Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
         case nil: Image(systemName: "wrench.and.screwdriver").foregroundColor(.secondary)
         }
     }
@@ -541,13 +547,26 @@ struct AIChatView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
                     .disabled(chat.isGenerating || chat.pendingApproval != nil)
 
-                Button {
-                    send()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 24))
+                if chat.isGenerating {
+                    // A sibling of the (disabled) TextEditor, so it stays
+                    // pressable while generation runs — including while an
+                    // approval is pending, since `isGenerating` covers that.
+                    Button {
+                        chat.stop()
+                    } label: {
+                        Image(systemName: "stop.circle.fill").font(.system(size: 24)).foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop generating")
+                } else {
+                    Button {
+                        send()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 24))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.isGenerating || chat.pendingApproval != nil)
                 }
-                .buttonStyle(.plain)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.isGenerating || chat.pendingApproval != nil)
             }
         }
         .padding(10)
@@ -631,5 +650,33 @@ struct AIChatView: View {
         let text = draft
         draft = ""
         Task { await chat.sendMessage(text) }
+    }
+
+    // Shift+Enter submits the draft, like the send button. A local key monitor
+    // (the same pattern EditorController uses for its paste shortcuts) is
+    // installed while the panel is visible and removed when it leaves the
+    // hierarchy, so it never outlives the sidebar tab.
+    private func installShiftEnterMonitor() {
+        guard shiftEnterMonitor == nil else { return }
+        shiftEnterMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak chat = self.chat] event in
+            let isShiftEnter = event.charactersIgnoringModifiers == "\r"
+                && event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.shift]
+            guard isShiftEnter,
+                  let chat,
+                  !chat.isGenerating,
+                  chat.pendingApproval == nil,
+                  self.inputFocused,
+                  !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return event }
+            self.send()
+            return nil // Consume it so the TextEditor doesn't also insert a newline
+        }
+    }
+
+    private func removeShiftEnterMonitor() {
+        if let monitor = shiftEnterMonitor {
+            NSEvent.removeMonitor(monitor)
+            shiftEnterMonitor = nil
+        }
     }
 }

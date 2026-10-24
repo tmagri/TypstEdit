@@ -271,7 +271,7 @@ class AICompletionService: ObservableObject {
 
         // Gemini Body Format
         if isGemini {
-            let body: [String: Any] = [
+            var body: [String: Any] = [
                 "contents": [
                     [
                         "parts": [
@@ -284,11 +284,12 @@ class AICompletionService: ObservableObject {
                     "temperature": 0.2
                 ]
             ]
+            Self.applyReasoningEffort(ctx.reasoningEffort, model: ctx.model, toGemini: &body)
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         // Anthropic Messages API Format
         else if ctx.isAnthropic {
-            let body: [String: Any] = [
+            var body: [String: Any] = [
                 "model": ctx.model,
                 "max_tokens": effectiveMaxTokens,
                 "system": systemPrompt,
@@ -296,6 +297,7 @@ class AICompletionService: ObservableObject {
                     ["role": "user", "content": prompt]
                 ]
             ]
+            Self.applyReasoningEffort(ctx.reasoningEffort, toAnthropic: &body)
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         // OpenAI / Standard Format
@@ -305,13 +307,14 @@ class AICompletionService: ObservableObject {
                 ["role": "user", "content": prompt]
             ]
 
-            let body: [String: Any] = [
+            var body: [String: Any] = [
                 "model": ctx.model,
                 "messages": messages,
                 "max_tokens": effectiveMaxTokens,
                 "temperature": 0.2, // Deterministic
                 "stream": false
             ]
+            Self.applyReasoningEffort(ctx.reasoningEffort, toOpenAI: &body, isOpenRouter: ctx.isOpenRouter)
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
 
@@ -503,9 +506,23 @@ class AICompletionService: ObservableObject {
         let maxAutoContinues = Self.clampedAutoContinueAttempts(settings.chatAutoContinueAttempts)
         var autoContinues = 0
 
+        // Resolved once per request: nil for the LLM-summary method (no
+        // in-loop compression wanted), otherwise the token filter or the
+        // LLMLingua-2 engine — with the filter as the automatic fallback
+        // when the model isn't installed.
+        let compression = await ChatCompressor.resolve(method: settings.chatCompressionMethod)
+
         for turn in 0..<maxTurns {
+            // A cancelled task (the chat's Stop button) unwinds here instead
+            // of burning another model request.
+            try Task.checkCancellation()
             if let contextCharBudget {
-                Self.elideOldToolOutputs(in: &messages, charBudget: contextCharBudget)
+                await Self.elideOldToolOutputs(
+                    in: &messages,
+                    charBudget: contextCharBudget,
+                    compressor: compression?.compressor,
+                    keepRate: compression?.keepRate ?? 0.5
+                )
             }
             let step: AIChatStep
             while true {
@@ -581,11 +598,16 @@ class AICompletionService: ObservableObject {
                 }
                 messages.append(.assistantToolCalls(calls))
                 for call in calls {
+                    try Task.checkCancellation()
                     onToolCall(call.name, call.argumentsJSON)
                     let output: String
                     do {
                         output = try await executeTool(call.name, call.argumentsJSON)
                     } catch {
+                        // A cancelled task must unwind the whole loop, not be
+                        // folded into an "Error: …" result the model would
+                        // just keep working around.
+                        if Task.isCancelled { throw CancellationError() }
                         output = "Error: \(error.localizedDescription)"
                     }
                     messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
@@ -658,13 +680,35 @@ class AICompletionService: ObservableObject {
         return message
     }
 
-    /// Keeps a long tool-calling conversation inside a rough character budget
-    /// by replacing the *oldest* tool results with a short placeholder once
-    /// the total gets too big. The two most recent results are always kept —
-    /// those are what the model is actively working from. This is the
-    /// in-loop counterpart to the chat's turn-level compaction: a single
-    /// request can easily rack up 20 large `read_file` results across turns.
-    private static func elideOldToolOutputs(in messages: inout [AIChatMessage], charBudget: Int) {
+    /// Prefix stamped onto a tool result that pass 1 of
+    /// `elideOldToolOutputs` compressed verbatim. Both tells the model the
+    /// text below is an information-dense extract, and lets the elision pass
+    /// recognize outputs that must not be filtered a second time.
+    static let compressedToolOutputMarker = "[Extract — filler words omitted, kept wording verbatim.]\n"
+
+    /// Keeps a long tool-calling conversation inside a rough character budget.
+    /// Two passes over the *oldest* tool results (the two most recent are
+    /// always kept — those are what the model is actively working from):
+    ///
+    ///   1. When a compressor is configured (token filter or LLMLingua-2),
+    ///      each large result is compressed *verbatim* — the model keeps
+    ///      roughly `keepRate` of the words, in order, instead of losing
+    ///      everything. Compressed outputs carry a marker so they are never
+    ///      squeezed a second time on a later turn.
+    ///   2. Any remaining overflow falls back to the original blunt
+    ///      placeholder, oldest first.
+    ///
+    /// This is the in-loop counterpart to the chat's turn-level compaction:
+    /// a single request can easily rack up 20 large `read_file` results
+    /// across turns.
+    /// Internal (not private) so the compression-first elision rules are
+    /// directly testable, like the transcript-shaping helpers above.
+    static func elideOldToolOutputs(
+        in messages: inout [AIChatMessage],
+        charBudget: Int,
+        compressor: (any PromptCompressor)?,
+        keepRate: Double
+    ) async {
         func charCount(_ message: AIChatMessage) -> Int {
             switch message {
             case .system(let t), .user(let t), .assistantText(let t): return t.count
@@ -682,6 +726,33 @@ class AICompletionService: ObservableObject {
         }
         let protected = Set(toolIndices.suffix(2))
 
+        // Pass 1 — verbatim compression, only while still over budget, so
+        // later (fresher) results keep as much of their content as possible.
+        if let compressor {
+            for index in toolIndices where !protected.contains(index) {
+                guard total > charBudget else { break }
+                guard case .toolResult(let result) = messages[index] else { continue }
+                // Tiny results aren't worth a pass; already-compressed ones
+                // are never squeezed again (repeated filtering would degrade
+                // them turn after turn).
+                guard result.output.count > 800,
+                      !result.output.hasPrefix(Self.compressedToolOutputMarker) else { continue }
+                let isCode = PromptCompression.codeRatio(result.output) > 0.3
+                let compressed = await compressor.compress(
+                    result.output,
+                    keepRate: keepRate,
+                    forceTokens: [],
+                    isCode: isCode
+                )
+                guard compressed.count < result.output.count else { continue }
+                let replacement = Self.compressedToolOutputMarker + compressed
+                total -= (result.output.count - replacement.count)
+                messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: replacement))
+            }
+            guard total > charBudget else { return }
+        }
+
+        // Pass 2 — last resort: drop the whole output to a placeholder.
         for index in toolIndices where !protected.contains(index) {
             guard case .toolResult(let result) = messages[index] else { continue }
             let placeholder = "[\(result.output.count) characters of earlier \(result.name) output elided to stay within the context budget. Re-run the tool if you still need it.]"
@@ -718,8 +789,8 @@ class AICompletionService: ObservableObject {
 
         let streaming = reasoningDelta != nil
         request.httpBody = ctx.isAnthropic
-            ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming)
-            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter)
+            ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, reasoningEffort: ctx.reasoningEffort)
+            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter, reasoningEffort: ctx.reasoningEffort)
 
         if !streaming {
             let data: Data
@@ -734,6 +805,12 @@ class AICompletionService: ObservableObject {
                     idleSeconds: Int(settings.timeoutSeconds),
                     timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
                 )
+            } catch {
+                // A cancelled task can surface as an arbitrary URLSession
+                // error; normalize it so callers can tell a user-initiated
+                // stop apart from a real failure.
+                if Task.isCancelled { throw CancellationError() }
+                throw error
             }
             guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
 
@@ -763,6 +840,10 @@ class AICompletionService: ObservableObject {
                 idleSeconds: Int(settings.timeoutSeconds),
                 timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
             )
+        } catch {
+            // Same normalization as the non-streaming path above.
+            if Task.isCancelled { throw CancellationError() }
+            throw error
         }
         guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
 
@@ -828,9 +909,91 @@ class AICompletionService: ObservableObject {
         max(5.0, configured)
     }
 
+    // MARK: Reasoning effort (provider-specific request parameters)
+
+    /// Applies the configured reasoning effort to an OpenAI-compatible body.
+    ///
+    /// - OpenAI: `reasoning_effort` (`none`/`low`/`medium`/`high`/`xhigh`).
+    ///   A few models reject some values (e.g. `none` on certain GPT-6
+    ///   models) — the API error surfaces to the user as usual.
+    /// - OpenRouter: the `reasoning` object — `{enabled: false}` for off,
+    ///   `{effort: ...}` otherwise.
+    /// - Local OpenAI-compatible servers: best effort; most ignore unknown
+    ///   parameters, so this is harmless for non-reasoning models.
+    static func applyReasoningEffort(_ effort: ReasoningEffort, toOpenAI body: inout [String: Any], isOpenRouter: Bool) {
+        guard effort != .auto else { return }
+        if isOpenRouter {
+            body["reasoning"] = effort == .none ? ["enabled": false] : ["effort": effort.rawValue]
+        } else {
+            body["reasoning_effort"] = effort.rawValue
+        }
+    }
+
+    /// Applies the configured reasoning effort to an Anthropic body.
+    ///
+    /// Claude has no effort enum; the closest control is the extended
+    /// thinking budget. `.none` sends `thinking: {type: disabled}`.
+    /// Anthropic requires `budget_tokens < max_tokens`, so `max_tokens` is
+    /// raised when the budget would exceed it.
+    static func applyReasoningEffort(_ effort: ReasoningEffort, toAnthropic body: inout [String: Any]) {
+        switch effort {
+        case .auto:
+            return
+        case .none:
+            body["thinking"] = ["type": "disabled"]
+        default:
+            let budget = effort.anthropicBudgetTokens
+            body["thinking"] = ["type": "enabled", "budget_tokens": budget]
+            let currentMax = body["max_tokens"] as? Int ?? 0
+            if currentMax <= budget {
+                body["max_tokens"] = budget + 1024
+            }
+        }
+    }
+
+    /// Applies the configured reasoning effort to a Gemini body.
+    ///
+    /// - Gemini 2.5 and earlier: `thinkingBudget` (0 disables, a number caps).
+    /// - Gemini 3/4: `thinkingLevel` (`low`/`medium`/`high`). Thinking cannot
+    ///   be fully disabled there, so `.none` maps to `low`; `xhigh` maps to
+    ///   `high` (the maximum level).
+    static func applyReasoningEffort(_ effort: ReasoningEffort, model: String, toGemini body: inout [String: Any]) {
+        guard effort != .auto else { return }
+        let lowered = model.lowercased()
+        let isLegacy = lowered.contains("gemini-2.") || lowered.contains("gemini-1.")
+        var generationConfig = body["generationConfig"] as? [String: Any] ?? [:]
+        switch effort {
+        case .auto:
+            return // unreachable — the guard above already returned
+        case .none, .low, .medium, .high, .xhigh:
+            if isLegacy {
+                let budget: Int
+                switch effort {
+                case .none: budget = 0
+                case .low: budget = 1_024
+                case .medium: budget = 4_096
+                case .high: budget = 8_192
+                case .xhigh: budget = 16_384
+                case .auto: budget = -1
+                }
+                generationConfig["thinkingBudget"] = budget
+            } else {
+                let level: String
+                switch effort {
+                case .none, .low: level = "low"
+                case .medium: level = "medium"
+                case .high, .xhigh: level = "high"
+                case .auto: level = ""
+                }
+                generationConfig["thinkingLevel"] = level
+            }
+        }
+        body["generationConfig"] = generationConfig
+    }
+
     // MARK: Provider wire-format conversion (OpenAI-compatible)
 
-    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, includeReasoning: Bool = false) throws -> Data {
+    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, includeReasoning: Bool = false, reasoningEffort: ReasoningEffort = .auto) throws -> Data {
         var wireMessages: [[String: Any]] = []
         for message in messages {
             switch message {
@@ -874,6 +1037,8 @@ class AICompletionService: ObservableObject {
         if stream && includeReasoning {
             body["reasoning"] = ["enabled": true]
         }
+        // A configured effort overrides the blanket opt-in above.
+        Self.applyReasoningEffort(reasoningEffort, toOpenAI: &body, isOpenRouter: includeReasoning)
         if !tools.isEmpty {
             body["tools"] = tools.map { tool in
                 [
@@ -917,7 +1082,7 @@ class AICompletionService: ObservableObject {
 
     // MARK: Provider wire-format conversion (Anthropic)
 
-    private static func buildAnthropicBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false) throws -> Data {
+    private static func buildAnthropicBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, reasoningEffort: ReasoningEffort = .auto) throws -> Data {
         var systemText = ""
         var wireMessages: [[String: Any]] = []
 
@@ -955,6 +1120,7 @@ class AICompletionService: ObservableObject {
         if stream {
             body["stream"] = true
         }
+        Self.applyReasoningEffort(reasoningEffort, toAnthropic: &body)
         if !tools.isEmpty {
             body["tools"] = tools.map { tool in
                 ["name": tool.qualifiedName, "description": tool.description, "input_schema": tool.inputSchema]
