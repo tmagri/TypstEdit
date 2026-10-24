@@ -57,6 +57,16 @@ protocol PromptCompressor: Sendable {
 /// word-by-word and a word can never be torn in half.
 enum PromptCompression {
 
+    /// Words that must survive filtering of *reasoning traces*: dropping a
+    /// negation inverts a conclusion, and dropping a pivot ("wait",
+    /// "alternatively") erases exactly the self-corrections that make a
+    /// chain of thought useful. Used by the thinking re-seed feature.
+    static let thinkingForceTokens: [String] = [
+        "not", "no", "never", "cannot", "wait", "but", "however", "actually",
+        "alternatively", "therefore", "so", "because", "hmm", "answer",
+        "wrong", "error", "problem", "solution",
+    ]
+
     /// One whitespace-delimited word plus the whitespace that preceded it.
     /// Keeping the leading run (which may include newlines and indentation)
     /// means a filtered text preserves the original paragraph and code
@@ -326,6 +336,18 @@ struct HeuristicTokenFilter: PromptCompressor {
 /// — just with the simpler scorer.
 @MainActor
 enum ChatCompressor {
+
+    /// Best available compressor regardless of the chat compression method:
+    /// the LLMLingua-2 engine when installed, otherwise the heuristic
+    /// filter. Used by features (like thinking re-seeding) that want
+    /// verbatim filtering without tying behavior to the compression method
+    /// setting.
+    static func bestAvailable() async -> any PromptCompressor {
+        if let engine = await LLMLingua2Manager.shared.loadEngineIfNeeded() {
+            return LLMLingua2Compressor(engine: engine)
+        }
+        return HeuristicTokenFilter()
+    }
 
     /// Returns nil only for `.llmSummary` (no pre-model compression wanted).
     /// The rate comes straight from Settings, already clamped.

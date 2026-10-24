@@ -509,6 +509,17 @@ class AICompletionService: ObservableObject {
         let maxAutoContinues = Self.clampedAutoContinueAttempts(settings.chatAutoContinueAttempts)
         var autoContinues = 0
 
+        // Thought re-seeding (optional): abandoned reasoning is compressed
+        // and handed back as notes on the retry. The compressor is resolved
+        // lazily on first use so a trouble-free turn never loads the model.
+        let reseedEnabled = settings.chatThinkingReseedEnabled
+        let reseedMaxChars = settings.effectiveChatThinkingReseedMaxChars
+        var reseedCompressor: (any PromptCompressor)?
+        // Streaming reasoning deltas of the attempt in flight — what a
+        // stall-time re-seed has to work with (non-streaming requests
+        // deliver reasoning via the step, which lands in collectedReasoning).
+        var attemptReasoning = ""
+
         // Resolved once per request: nil for the LLM-summary method (no
         // in-loop compression wanted), otherwise the token filter or the
         // LLMLingua-2 engine — with the filter as the automatic fallback
@@ -530,8 +541,12 @@ class AICompletionService: ObservableObject {
             }
             let step: AIChatStep
             while true {
+                attemptReasoning = ""
                 do {
-                    step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens, reasoningDelta: onReasoningDelta)
+                    step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens, reasoningDelta: { text in
+                        attemptReasoning += text
+                        onReasoningDelta?(text)
+                    })
                     break
                 } catch AIError.stalledResponse(let idleSeconds, let timeoutSeconds) {
                     // The stream went silent past the stall window and the
@@ -551,7 +566,22 @@ class AICompletionService: ObservableObject {
                     // intact for providers, like Anthropic, that require it —
                     // the interrupted attempt produced nothing usable.
                     messages.append(.assistantText(Self.interruptedReplyPlaceholder))
-                    messages.append(.user(Self.stallContinueMessage(idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds)))
+                    // Optional re-seed: compress the abandoned attempt's own
+                    // thinking and hand it back as continuation notes.
+                    var continueMessage = Self.stallContinueMessage(idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds)
+                    if reseedEnabled, !attemptReasoning.isEmpty {
+                        if reseedCompressor == nil {
+                            reseedCompressor = await ChatCompressor.bestAvailable()
+                        }
+                        if let notes = await Self.thinkingReseedNotes(
+                            from: attemptReasoning,
+                            compressor: reseedCompressor!,
+                            maxChars: reseedMaxChars
+                        ) {
+                            continueMessage = Self.reseedStallContinueMessage(idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds, notes: notes)
+                        }
+                    }
+                    messages.append(.user(continueMessage))
                 }
             }
 
@@ -588,7 +618,26 @@ class AICompletionService: ObservableObject {
                     // user/assistant alternation intact for providers, like
                     // Anthropic, that require it.
                     messages.append(.assistantText("(no response)"))
-                    messages.append(.user(Self.emptyAnswerNudgeMessage(hadReasoning: hadReasoning)))
+                    // Optional re-seed: the abandoned thinking — streamed
+                    // deltas if any, otherwise this step's returned reasoning
+                    // — comes back as compressed notes to answer from.
+                    var nudgeMessage = Self.emptyAnswerNudgeMessage(hadReasoning: hadReasoning)
+                    if reseedEnabled {
+                        let source = attemptReasoning.isEmpty ? (collectedReasoning.last ?? "") : attemptReasoning
+                        if !source.isEmpty {
+                            if reseedCompressor == nil {
+                                reseedCompressor = await ChatCompressor.bestAvailable()
+                            }
+                            if let notes = await Self.thinkingReseedNotes(
+                                from: source,
+                                compressor: reseedCompressor!,
+                                maxChars: reseedMaxChars
+                            ) {
+                                nudgeMessage = Self.reseedEmptyAnswerNudgeMessage(notes: notes)
+                            }
+                        }
+                    }
+                    messages.append(.user(nudgeMessage))
                     turn += 1
                     continue
                 }
@@ -658,6 +707,65 @@ class AICompletionService: ObservableObject {
     /// reasoning is collected separately.
     nonisolated static func stallContinueStatusNote(attempt: Int, maxAttempts: Int, idleSeconds: Int) -> String {
         "\n\n[No output for \(idleSeconds)s — the stalled attempt was abandoned and automatically continued (\(attempt) of \(maxAttempts)).]\n\n"
+    }
+
+    // MARK: Thinking Re-Seeding (interrupted/empty replies)
+
+    /// Keep-rate for compressed thinking notes. Deliberately much higher
+    /// than context compression: reasoning is dense — dropping a negation
+    /// inverts a conclusion — while meeting-style prose tolerates 0.3-0.5.
+    /// `thinkingForceTokens` guards the pivots regardless.
+    nonisolated static let thinkingReseedKeepRate = 0.6
+
+    /// Minimum size of abandoned thinking worth re-seeding. Below this the
+    /// plain nudge/continue message is just as good and costs less.
+    nonisolated static let thinkingReseedMinimumChars = 400
+
+    /// Compresses an abandoned attempt's reasoning into continuation notes.
+    /// Returns nil when there isn't enough thinking to be worth it. The
+    /// tolerance (`maxChars`) is enforced on the tail: the latest reasoning
+    /// state is what a continuation needs, and the task restatement at the
+    /// head is already in the original prompt.
+    nonisolated static func thinkingReseedNotes(
+        from raw: String,
+        compressor: any PromptCompressor,
+        maxChars: Int
+    ) async -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= thinkingReseedMinimumChars else { return nil }
+        let isCode = PromptCompression.codeRatio(trimmed) > 0.35
+        var notes = await compressor.compress(
+            trimmed,
+            keepRate: thinkingReseedKeepRate,
+            forceTokens: PromptCompression.thinkingForceTokens,
+            isCode: isCode
+        )
+        if notes.count > maxChars {
+            notes = "…(earlier notes truncated)\n" + notes.suffix(maxChars)
+        }
+        return notes
+    }
+
+    /// Stall-continue message carrying compressed thinking notes from the
+    /// abandoned attempt — the model resumes from its own (filtered) words
+    /// instead of starting cold.
+    nonisolated static func reseedStallContinueMessage(idleSeconds: Int, timeoutSeconds: Int, notes: String) -> String {
+        """
+        Your previous reply stalled — no output arrived for \(idleSeconds)s (limit: \(timeoutSeconds)s) — and was abandoned. Your compressed thinking notes from that attempt follow below. Treat them as notes: continue from where they leave off, don't repeat them, and re-issue any tool call you were making or write your final answer now.
+
+        \(notes)
+        """
+    }
+
+    /// Empty-answer nudge carrying compressed thinking notes — the model
+    /// spent its whole reply budget on reasoning and never answered; the
+    /// notes let it answer from its own conclusions instead of re-deriving.
+    nonisolated static func reseedEmptyAnswerNudgeMessage(notes: String) -> String {
+        """
+        Your previous reply spent itself on thinking and never wrote an answer. Your compressed thinking notes follow below. Using them, write the actual answer now in plain text — even if the answer is that you couldn't find anything. Don't repeat the notes.
+
+        \(notes)
+        """
     }
 
     /// Shown when every auto-continue attempt stalled too. Points at the

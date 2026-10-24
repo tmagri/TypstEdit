@@ -206,6 +206,25 @@ class AISettingsManager: ObservableObject {
     /// model spent its whole reply budget on reasoning. 0 turns auto-continue
     /// off; the service clamps the stored value to a sane range.
     @AppStorage("aiChatAutoContinueAttempts") var chatAutoContinueAttempts: Int = 2
+
+    /// Thought re-seeding: when a reply is interrupted (stall) or ends empty
+    /// after a long thinking run, the abandoned reasoning is compressed
+    /// verbatim (LLMLingua-2 model if installed, else the heuristic filter)
+    /// and handed back to the model as notes to continue from, instead of
+    /// discarding it. Off = the previous behavior: retries start cold.
+    @AppStorage("aiChatThinkingReseedEnabled") var chatThinkingReseedEnabled: Bool = true
+    /// Tolerance for re-seeding: the maximum number of characters of
+    /// compressed thinking notes injected into a retry prompt (roughly 4
+    /// characters per token). When the compressed notes exceed this, the
+    /// *tail* is kept — the latest reasoning state is what a continuation
+    /// needs; the task restatement at the head is already in the prompt.
+    @AppStorage("aiChatThinkingReseedMaxChars") var chatThinkingReseedMaxChars: Double = 6_000
+
+    /// Clamped tolerance actually enforced (a fat-fingered 0 or 500,000
+    /// shouldn't empty the retry or flood the context).
+    var effectiveChatThinkingReseedMaxChars: Int {
+        Int(min(max(chatThinkingReseedMaxChars, 500), 20_000))
+    }
     /// How many model turns (one model request + the tool calls it makes) a
     /// single chat message may take before the run fails with an error. Much
     /// higher than the old 6 because a real editing job (read → search → plan

@@ -824,6 +824,30 @@ struct AISettingsView: View {
                     Spacer()
                 }
 
+                Divider()
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Re-seed interrupted replies with compressed thinking", isOn: $settings.chatThinkingReseedEnabled)
+                        .font(.body.weight(.medium))
+                    if settings.chatThinkingReseedEnabled {
+                        HStack(spacing: 10) {
+                            Text("Notes tolerance")
+                                .font(.caption)
+                            TextField("6000", value: $settings.chatThinkingReseedMaxChars, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 90)
+                            Text("characters (≈ 4 per token)")
+                                .font(.caption)
+                            Spacer()
+                        }
+                        .padding(.leading, 20)
+                    }
+                    Text("When a reply stalls or comes back empty after a long thinking run, the abandoned reasoning is compressed — verbatim, filler words dropped — and handed back as notes so the retry continues from it instead of starting over. Uses the LLMLingua-2 model if installed, otherwise the built-in token filter. Only works with models that report their reasoning to the app (local models do); providers that hide it offer nothing to compress.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                }
+
                 Text("Defaults: 150 s (2.5 min) and 2 attempts. Each attempt re-prompts the model to finish, so a slow local model may still need a while — but it recovers on its own instead of hanging forever.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
