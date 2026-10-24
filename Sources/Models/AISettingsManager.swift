@@ -135,6 +135,18 @@ class AISettingsManager: ObservableObject {
     /// into a compaction summary. Bigger models/local models with long
     /// contexts can raise this.
     @AppStorage("aiChatContextBudgetTokens") var chatContextBudgetTokens: Int = 16_000
+    /// Seconds of total silence (no new output arriving at all) before an
+    /// in-flight chat response is treated as stalled. Some local reasoning
+    /// models (large Qwen/DeepSeek distills on slow hardware) simply stop
+    /// emitting tokens mid-reply without closing the stream, which would
+    /// otherwise leave "Thinking…" on screen forever.
+    @AppStorage("aiChatStallTimeoutSeconds") var chatStallTimeoutSeconds: Double = 150.0
+    /// How many times a stuck turn is automatically continued before the
+    /// error is surfaced. Covers both triggers: a response that went silent
+    /// past the stall timeout, and a response that ended empty because the
+    /// model spent its whole reply budget on reasoning. 0 turns auto-continue
+    /// off; the service clamps the stored value to a sane range.
+    @AppStorage("aiChatAutoContinueAttempts") var chatAutoContinueAttempts: Int = 2
 
     // MARK: - Per-Task Source Assignment
 

@@ -283,6 +283,16 @@ struct ContentView: View {
     ///   chose to act on it rather than the app interrupting them mid-edit.
     private func handleExternalDiskChange(at url: URL, userInitiated: Bool) {
         guard editorController.hasUnsavedChanges else {
+            // If the bytes on disk are exactly what the editor already shows
+            // (e.g. our own auto-save bumped the mtime without re-baselining),
+            // reloading would be a no-op that still tears down and rebuilds
+            // the preview — the "viewer never stays open" loop. Just adopt the
+            // new disk state instead.
+            if let disk = try? String(contentsOf: url, encoding: .utf8),
+               disk == editorController.sourceCode {
+                editorController.noteDiskState(for: url)
+                return
+            }
             loadFile(url: url)
             editorController.showStatus("Reloaded \(url.lastPathComponent) from disk", duration: 2.0)
             return
@@ -1463,17 +1473,28 @@ struct ContentView: View {
         let shouldCompile = !isNote || effectiveForce || compiler.currentShadowPDFURL == nil
         let newWorkItem = DispatchWorkItem {
             self.pendingCompilationIsForced = false
+            // Auto-save is only needed when the buffer actually holds unsaved
+            // edits; rewriting an unchanged file would pointlessly bump its
+            // modification date (and trip anything watching it).
+            let needsAutoSave = self.editorController.hasUnsavedChanges
             Task {
                 compiler.isDarkMode = isDark
 
                 // Auto-save .note files to prevent data loss
-                if isNote {
+                if isNote, needsAutoSave {
                     do {
                         try await Task.detached {
                             try currentSource.write(to: url, atomically: true, encoding: .utf8)
                         }.value
                         DispatchQueue.main.async {
                             self.editorController.syncSavedContent(currentSource)
+                            // Re-baseline the disk-state snapshot after OUR OWN
+                            // write. Without this, the external-change poller
+                            // sees the new modification date, assumes another
+                            // app edited the file, and silently reloads it —
+                            // which force-recompiles and auto-saves again,
+                            // closing and recreating the PDF viewer forever.
+                            self.editorController.noteDiskState(for: url)
                             AutoRecoveryManager.shared.clearRecovery(for: url)
                         }
                     } catch {

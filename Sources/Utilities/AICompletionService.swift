@@ -80,6 +80,10 @@ enum AIError: LocalizedError {
     case noData
     case parsingError(String)
     case apiError(String)
+    /// The stream went silent for longer than the stall window — treated as
+    /// a stuck response rather than a hard failure, so the agentic loop can
+    /// auto-continue (see `fetchCompletionWithTools`).
+    case stalledResponse(idleSeconds: Int, timeoutSeconds: Int)
 
     var errorDescription: String? {
         switch self {
@@ -87,6 +91,8 @@ enum AIError: LocalizedError {
         case .noData: return "No data received from the AI provider."
         case .parsingError(let details): return "Parsing Error: \(details)"
         case .apiError(let msg): return msg
+        case .stalledResponse(let idleSeconds, let timeoutSeconds):
+            return "The model stopped sending output for \(idleSeconds)s (stall limit: \(timeoutSeconds)s) and the attempt was abandoned."
         }
     }
 }
@@ -144,6 +150,34 @@ enum AIChatMessage {
 enum AIChatStep {
     case finalText(String, reasoning: String?)
     case toolCalls([AIToolCallRequest], reasoning: String?)
+}
+
+/// Thread-safe record of streaming activity for the stall watchdog. The SSE
+/// parsers run on the main actor, but the watchdog polls from a detached
+/// task, so the "when did we last receive anything" timestamp has to be
+/// shared safely between them.
+private final class StreamActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastTouch = Date()
+
+    func touch() {
+        lock.lock()
+        lastTouch = Date()
+        lock.unlock()
+    }
+
+    /// True when nothing has arrived for longer than `timeout` seconds.
+    func isStalled(past timeout: TimeInterval) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return Date().timeIntervalSince(lastTouch) >= timeout
+    }
+
+    var secondsSinceTouch: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return Date().timeIntervalSince(lastTouch)
+    }
 }
 
 @MainActor
@@ -428,7 +462,9 @@ class AICompletionService: ObservableObject {
         /// every reasoning/"thinking" fragment is forwarded here as it
         /// arrives — letting the caller show the model's live thinking while
         /// it works. Passing nil keeps the one-shot request/response behavior.
-        onReasoningDelta: ((String) -> Void)? = nil,
+        /// Main-actor isolated (and therefore implicitly Sendable) so the
+        /// stall watchdog can race the streaming parse in a child task.
+        onReasoningDelta: (@MainActor (String) -> Void)? = nil,
         sanitize: Bool = true,
         contextCharBudget: Int? = nil,
         executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
@@ -457,15 +493,46 @@ class AICompletionService: ObservableObject {
         // made tool calls), so the whole exchange's thinking is available
         // once a final answer lands — not just whatever the last turn said.
         var collectedReasoning: [String] = []
-        // How many times we've nudged the model after it stopped without
-        // writing anything — see the empty-response handling below.
-        var emptyAnswerNudges = 0
+        // Auto-continue budget, shared by both "the turn got stuck" triggers:
+        // a response that went silent mid-stream past the stall timeout
+        // (detected by `requestChatStep` and thrown as `.stalledResponse`),
+        // and a response that ended empty because the model spent its whole
+        // reply budget on reasoning. One counter bounds the total wasted
+        // time — a pathological model can't get a fresh budget from each
+        // trigger. Configured in Settings; 0 turns auto-continue off.
+        let maxAutoContinues = Self.clampedAutoContinueAttempts(settings.chatAutoContinueAttempts)
+        var autoContinues = 0
 
         for turn in 0..<maxTurns {
             if let contextCharBudget {
                 Self.elideOldToolOutputs(in: &messages, charBudget: contextCharBudget)
             }
-            let step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens, reasoningDelta: onReasoningDelta)
+            let step: AIChatStep
+            while true {
+                do {
+                    step = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens, reasoningDelta: onReasoningDelta)
+                    break
+                } catch AIError.stalledResponse(let idleSeconds, let timeoutSeconds) {
+                    // The stream went silent past the stall window and the
+                    // attempt was abandoned. Rather than failing the whole
+                    // exchange, tell the model to pick up where it left off
+                    // — bounded by the configured auto-continue budget.
+                    guard autoContinues < maxAutoContinues else {
+                        throw AIError.apiError(Self.stallFailureMessage(attempts: autoContinues, idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds))
+                    }
+                    autoContinues += 1
+                    // Streaming chat shows a live thinking box — surface why
+                    // it just went quiet and restarted. The note is
+                    // deliberately transient: the saved reasoning comes from
+                    // `onReasoning`, not these deltas.
+                    onReasoningDelta?(Self.stallContinueStatusNote(attempt: autoContinues, maxAttempts: maxAutoContinues, idleSeconds: idleSeconds))
+                    // A placeholder keeps strict user/assistant alternation
+                    // intact for providers, like Anthropic, that require it —
+                    // the interrupted attempt produced nothing usable.
+                    messages.append(.assistantText(Self.interruptedReplyPlaceholder))
+                    messages.append(.user(Self.stallContinueMessage(idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds)))
+                }
+            }
 
             switch step {
             case .finalText(let text, let stepReasoning):
@@ -491,10 +558,10 @@ class AICompletionService: ObservableObject {
                     // nudge it to use what it has instead, a few times, before
                     // giving up. This is the fix for empty responses landing
                     // after a visible trail of successful tool calls.
-                    guard emptyAnswerNudges < Self.maxEmptyAnswerNudges, turn < maxTurns - 1 else {
-                        throw AIError.apiError(Self.emptyAnswerFailureMessage(nudges: emptyAnswerNudges, hadReasoning: hadReasoning))
+                    guard autoContinues < maxAutoContinues, turn < maxTurns - 1 else {
+                        throw AIError.apiError(Self.emptyAnswerFailureMessage(nudges: autoContinues, hadReasoning: hadReasoning))
                     }
-                    emptyAnswerNudges += 1
+                    autoContinues += 1
                     // A placeholder (never literally empty) keeps strict
                     // user/assistant alternation intact for providers, like
                     // Anthropic, that require it.
@@ -531,17 +598,50 @@ class AICompletionService: ObservableObject {
         throw AIError.apiError("The AI did not produce a response.")
     }
 
-    /// At most this many times, an empty final answer gets a nudge instead
-    /// of an immediate failure — bounded well below `maxTurns` so a model
-    /// that's truly stuck still gives up in a reasonable number of turns.
-    /// `nonisolated` (and not private): pure value, no instance state, and
-    /// directly unit-testable without hopping onto the main actor.
-    nonisolated static let maxEmptyAnswerNudges = 2
+    /// Upper bound for the Settings-configured auto-continue attempts, so a
+    /// fat-fingered value can't make a stuck model burn dozens of requests —
+    /// bounded well below `maxTurns` for the same reason. `nonisolated` (and
+    /// not private): pure value, no instance state, and directly
+    /// unit-testable without hopping onto the main actor.
+    nonisolated static func clampedAutoContinueAttempts(_ raw: Int) -> Int {
+        min(max(raw, 0), 5)
+    }
 
     nonisolated static func emptyAnswerNudgeMessage(hadReasoning: Bool) -> String {
         hadReasoning
             ? "You thought that through but didn't write an answer — the reply was empty. Using what you already found above, write the actual answer now in plain text."
             : "That reply came back empty. Using what you've already found above, write the actual answer now in plain text — even if the answer is that you couldn't find anything."
+    }
+
+    /// Transcript message sent after a stalled attempt was abandoned: tells
+    /// the model its previous reply was cut off mid-stream so it resumes
+    /// instead of starting over as if nothing happened.
+    nonisolated static func stallContinueMessage(idleSeconds: Int, timeoutSeconds: Int) -> String {
+        "Your previous reply stalled — no output arrived for \(idleSeconds)s (limit: \(timeoutSeconds)s) — and nothing from it was kept. Pick up where you left off: re-issue any tool call you were making, or write your final answer now."
+    }
+
+    /// Placeholder for the abandoned attempt in the transcript, mirroring the
+    /// "(no response)" placeholder used by the empty-answer nudge.
+    nonisolated static let interruptedReplyPlaceholder = "(reply interrupted)"
+
+    /// Note pushed into the live thinking box when a stalled attempt is
+    /// abandoned, so an automatically continued turn doesn't look like the
+    /// model merely started over for no reason. Never persisted — the saved
+    /// reasoning is collected separately.
+    nonisolated static func stallContinueStatusNote(attempt: Int, maxAttempts: Int, idleSeconds: Int) -> String {
+        "\n\n[No output for \(idleSeconds)s — the stalled attempt was abandoned and automatically continued (\(attempt) of \(maxAttempts)).]\n\n"
+    }
+
+    /// Shown when every auto-continue attempt stalled too. Points at the
+    /// local server rather than the prompt — a stream that keeps going
+    /// silent is a server problem, not a wording problem.
+    nonisolated static func stallFailureMessage(attempts: Int, idleSeconds: Int, timeoutSeconds: Int) -> String {
+        var message = "The model went silent for \(idleSeconds)s (stall limit: \(timeoutSeconds)s)"
+        if attempts > 0 {
+            message += " and \(attempts) automatic continue attempt\(attempts == 1 ? "" : "s") also stalled"
+        }
+        message += ". The AI server may be overloaded or hung — check it, retry, or raise the stall timeout in Settings → AI Assistant → AI Chat."
+        return message
     }
 
     nonisolated static func emptyAnswerFailureMessage(nudges: Int, hadReasoning: Bool) -> String {
@@ -596,7 +696,7 @@ class AICompletionService: ObservableObject {
     /// `reasoningDelta` is non-nil the request is made with `"stream": true`
     /// and parsed event-by-event, forwarding reasoning fragments as they
     /// arrive; the returned step is the same either way.
-    private func requestChatStep(ctx: ModelContext, messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int, reasoningDelta: ((String) -> Void)? = nil) async throws -> AIChatStep {
+    private func requestChatStep(ctx: ModelContext, messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int, reasoningDelta: (@MainActor (String) -> Void)? = nil) async throws -> AIChatStep {
         let settings = AISettingsManager.shared
         guard let url = URL(string: ctx.chatEndpoint) else { throw AIError.invalidURL }
 
@@ -622,7 +722,19 @@ class AICompletionService: ObservableObject {
             : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter)
 
         if !streaming {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await URLSession.shared.data(for: request)
+            } catch let error as URLError where error.code == .timedOut {
+                // No complete reply within the request timeout — funnel into
+                // the same stall recovery as the streaming path below, so a
+                // hung server costs a continue attempt instead of the turn.
+                throw AIError.stalledResponse(
+                    idleSeconds: Int(settings.timeoutSeconds),
+                    timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
+                )
+            }
             guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
 
             guard httpResponse.statusCode == 200 else {
@@ -641,7 +753,17 @@ class AICompletionService: ObservableObject {
             return ctx.isAnthropic ? try Self.parseAnthropicStep(json) : try Self.parseOpenAIStep(json)
         }
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let (bytes, response): (URLSession.AsyncBytes, URLResponse)
+        do {
+            (bytes, response) = try await URLSession.shared.bytes(for: request)
+        } catch let error as URLError where error.code == .timedOut {
+            // The server never even started responding within the request
+            // timeout — same stall recovery as a mid-stream hang.
+            throw AIError.stalledResponse(
+                idleSeconds: Int(settings.timeoutSeconds),
+                timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
+            )
+        }
         guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
 
         guard httpResponse.statusCode == 200 else {
@@ -656,9 +778,54 @@ class AICompletionService: ObservableObject {
             throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
         }
 
-        return ctx.isAnthropic
-            ? try await Self.parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!)
-            : try await Self.parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!)
+        // Streaming parse under a stall watchdog. Some local servers stop
+        // emitting tokens mid-reply without ever closing the stream (seen
+        // with large reasoning models like Qwen on slow hardware), which
+        // would otherwise leave the chat panel on "Thinking…" forever. The
+        // parse races a watchdog child task that polls a thread-safe
+        // activity clock — touched on every received SSE line — and throws
+        // `.stalledResponse` once the silence passes the configured stall
+        // window. Losing the race cancels the parse (and with it the
+        // underlying URLSession transfer), and `fetchCompletionWithTools`
+        // can auto-continue from there.
+        let stallTimeout = Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds)
+        let pollNanoseconds: UInt64 = 1_000_000_000
+        let isAnthropic = ctx.isAnthropic
+        let activity = StreamActivity()
+        return try await withThrowingTaskGroup(of: AIChatStep.self) { group in
+            group.addTask {
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: pollNanoseconds)
+                    } catch {
+                        // Cancelled because the parse won the race — exit
+                        // quietly so the group can return its result.
+                        return .finalText("", reasoning: nil)
+                    }
+                    if activity.isStalled(past: stallTimeout) {
+                        throw AIError.stalledResponse(
+                            idleSeconds: Int(activity.secondsSinceTouch),
+                            timeoutSeconds: Int(stallTimeout)
+                        )
+                    }
+                }
+                return .finalText("", reasoning: nil)
+            }
+            group.addTask {
+                try await isAnthropic
+                    ? Self.parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!, onActivity: { activity.touch() })
+                    : Self.parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!, onActivity: { activity.touch() })
+            }
+            guard let first = try await group.next() else { throw AIError.noData }
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// The stall window actually enforced, with a floor so a zero/negative
+    /// Settings value can't cancel every request the moment it starts.
+    nonisolated private static func effectiveStallTimeout(from configured: Double) -> TimeInterval {
+        max(5.0, configured)
     }
 
     // MARK: Provider wire-format conversion (OpenAI-compatible)
@@ -848,7 +1015,7 @@ class AICompletionService: ObservableObject {
     // accumulates fragments across the whole response and returns the same
     // `AIChatStep` shape its non-streaming counterpart does.
 
-    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (String) -> Void) async throws -> AIChatStep {
+    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: @MainActor (String) -> Void, onActivity: @Sendable () -> Void = {}) async throws -> AIChatStep {
         var text = ""
         var reasoning = ""
         // Tool-call deltas arrive as fragments keyed by `index`, with id,
@@ -856,6 +1023,7 @@ class AICompletionService: ObservableObject {
         var fragments: [Int: (id: String, name: String, arguments: String)] = [:]
 
         for try await line in bytes.lines {
+            onActivity()
             guard line.hasPrefix("data:") else { continue }
             let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
             if payload == "[DONE]" { break }
@@ -897,12 +1065,13 @@ class AICompletionService: ObservableObject {
         return .finalText(text, reasoning: stepReasoning)
     }
 
-    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (String) -> Void) async throws -> AIChatStep {
+    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: @MainActor (String) -> Void, onActivity: @Sendable () -> Void = {}) async throws -> AIChatStep {
         var text = ""
         var reasoning = ""
         var fragments: [Int: (id: String, name: String, arguments: String)] = [:]
 
         for try await line in bytes.lines {
+            onActivity()
             guard line.hasPrefix("data:") else { continue }
             let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
             guard let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }

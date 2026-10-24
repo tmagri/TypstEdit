@@ -684,6 +684,41 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
+            title: "Stalled Responses & Auto-Continue",
+            icon: "hourglass.bottomhalf.filled",
+            description: "Local reasoning models (large Qwen and DeepSeek distills in particular) sometimes go quiet mid-reply — the panel shows \"Thinking…\" for minutes and nothing more ever arrives. After this many seconds of total silence the stuck attempt is abandoned and the model is asked to pick up where it left off, up to the number of attempts below. The same budget also covers replies that come back empty after a long thinking run. 0 attempts turns auto-continue off."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Text("Stall after")
+                        .font(.caption)
+                    TextField("150", value: $settings.chatStallTimeoutSeconds, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("seconds of silence")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                HStack(spacing: 10) {
+                    Text("Auto-continue attempts")
+                        .font(.caption)
+                    Stepper(value: $settings.chatAutoContinueAttempts, in: 0...5) {
+                        Text("\(settings.chatAutoContinueAttempts)")
+                            .font(.caption.monospacedDigit())
+                            .frame(minWidth: 16)
+                    }
+                    .frame(width: 230, alignment: .leading)
+                    Spacer()
+                }
+
+                Text("Defaults: 150 s (2.5 min) and 2 attempts. Each attempt re-prompts the model to finish, so a slow local model may still need a while — but it recovers on its own instead of hanging forever.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+
+        SettingsCard(
             title: "Project Search (RAG) Tool",
             icon: "magnifyingglass.circle",
             description: "The chat's search_project tool reuses the same semantic index AI Prompt searches. Independent of read_file/write_file — turn it off if you'd rather the AI only work from files it opens explicitly."
