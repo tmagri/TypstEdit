@@ -178,6 +178,34 @@ final class PromptCompressionTests: XCTestCase {
         settings.chatCompressionKeepRate = 0.35
         XCTAssertEqual(settings.effectiveChatCompressionKeepRate, 0.35)
     }
+
+    func testChatMaxTurnsZeroMeansUnlimitedAndClampsFatFingers() {
+        let settings = AISettingsManager.shared
+        let originalMax = settings.chatMaxTurns
+        let originalSubagentMax = settings.chatSubagentMaxTurns
+        defer {
+            settings.chatMaxTurns = originalMax
+            settings.chatSubagentMaxTurns = originalSubagentMax
+        }
+
+        // 0 = unlimited → nil (the tool loop runs until the model answers).
+        settings.chatMaxTurns = 0
+        XCTAssertNil(settings.effectiveChatMaxTurns)
+        // Negative values are treated as unlimited too, not as "zero turns".
+        settings.chatMaxTurns = -5
+        XCTAssertNil(settings.effectiveChatMaxTurns)
+        // Positive values pass through, capped at 500.
+        settings.chatMaxTurns = 24
+        XCTAssertEqual(settings.effectiveChatMaxTurns, 24)
+        settings.chatMaxTurns = 999_999
+        XCTAssertEqual(settings.effectiveChatMaxTurns, 500)
+
+        // The subagent limit follows the same rule.
+        settings.chatSubagentMaxTurns = 0
+        XCTAssertNil(settings.effectiveChatSubagentMaxTurns)
+        settings.chatSubagentMaxTurns = 12
+        XCTAssertEqual(settings.effectiveChatSubagentMaxTurns, 12)
+    }
 }
 
 // MARK: - Tool Output Elision

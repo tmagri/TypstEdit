@@ -206,6 +206,27 @@ class AISettingsManager: ObservableObject {
     /// model spent its whole reply budget on reasoning. 0 turns auto-continue
     /// off; the service clamps the stored value to a sane range.
     @AppStorage("aiChatAutoContinueAttempts") var chatAutoContinueAttempts: Int = 2
+    /// How many model turns (one model request + the tool calls it makes) a
+    /// single chat message may take before the run fails with an error. Much
+    /// higher than the old 6 because a real editing job (read → search → plan
+    /// → several edits → verify) is routinely more than a dozen steps.
+    /// 0 = unlimited.
+    @AppStorage("aiChatMaxTurns") var chatMaxTurns: Int = 24
+    /// The same limit for the read-only `delegate_task` subagent, which does
+    /// less per turn and so needs fewer. 0 = unlimited.
+    @AppStorage("aiChatSubagentMaxTurns") var chatSubagentMaxTurns: Int = 12
+
+    /// Resolved limit for the main chat loop: 0 → `nil` (unlimited); positive
+    /// values clamped so a fat-fingered 10⁶ can't turn a stuck model into an
+    /// unbounded request loop.
+    var effectiveChatMaxTurns: Int? {
+        chatMaxTurns <= 0 ? nil : min(chatMaxTurns, 500)
+    }
+
+    /// Resolved limit for the read-only subagent (same 0 = unlimited rule).
+    var effectiveChatSubagentMaxTurns: Int? {
+        chatSubagentMaxTurns <= 0 ? nil : min(chatSubagentMaxTurns, 500)
+    }
 
     // MARK: - Context Compression (LLMLingua-style token filtering)
 

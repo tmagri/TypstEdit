@@ -65,11 +65,14 @@ final class AIChatManager: ObservableObject {
     /// subagent can usefully do).
     private var delegateDepth = 0
 
-    /// How many model turns one user message may take. Much higher than the
-    /// old 6 because a real editing job (read → grep → plan → several edits →
-    /// verify) is routinely more than six steps.
-    private static let maxTurns = 24
-    private static let subagentMaxTurns = 12
+    /// How many model turns one user message may take (`nil` = unlimited) —
+    /// from Settings (`chatMaxTurns`, where 0 means unlimited). The default
+    /// of 24 is much higher than the old 6 because a real editing job
+    /// (read → grep → plan → several edits → verify) is routinely more than
+    /// six steps; long tool-calling jobs can raise it further.
+    private var maxTurns: Int? { AISettingsManager.shared.effectiveChatMaxTurns }
+    /// Same limit for the read-only `delegate_task` subagent.
+    private var subagentMaxTurns: Int? { AISettingsManager.shared.effectiveChatSubagentMaxTurns }
     /// Rough chars-per-token for budget math. Not exact, but stable enough to
     /// decide when to compact and when to elide tool output.
     static let charsPerToken = 4
@@ -284,7 +287,7 @@ final class AIChatManager: ObservableObject {
                 systemPrompt: systemPrompt,
                 maxTokens: AISettingsManager.shared.maxTokens,
                 tools: tools,
-                maxTurns: Self.maxTurns,
+                maxTurns: maxTurns,
                 onReasoning: { capturedReasoning = $0 },
                 onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
                 // Chat replies are shown as plain prose in the panel, so the
@@ -605,7 +608,7 @@ final class AIChatManager: ObservableObject {
             systemPrompt: systemPrompt,
             maxTokens: AISettingsManager.shared.maxTokens,
             tools: subTools,
-            maxTurns: Self.subagentMaxTurns,
+            maxTurns: subagentMaxTurns,
             onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
             sanitize: false,
             contextCharBudget: contextBudgetTokens * Self.charsPerToken,

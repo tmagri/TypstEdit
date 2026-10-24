@@ -831,6 +831,40 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
+            title: "Tool-Calling Turn Limits",
+            icon: "arrow.triangle.2.circlepath",
+            description: "One turn = one model request plus any tool calls it makes. A real editing job (read → search → plan → several edits → verify) routinely takes a dozen or more turns, and hitting the limit mid-job fails the whole message with an error. Raise it for long tool-calling runs, or set 0 for unlimited."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Text("Max turns per message")
+                        .font(.caption)
+                    TextField("24", value: $settings.chatMaxTurns, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("turns (0 = unlimited)")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                HStack(spacing: 10) {
+                    Text("Max turns per subagent")
+                        .font(.caption)
+                    TextField("12", value: $settings.chatSubagentMaxTurns, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("turns (0 = unlimited)")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                Text("Defaults: 24 for the main chat, 12 for the read-only delegate_task subagent. Positive values are capped at 500; 0 removes the limit entirely — a model that keeps calling tools will keep going until it answers or you press Stop.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+
+        SettingsCard(
             title: "Project Search (RAG) Tool",
             icon: "magnifyingglass.circle",
             description: "The chat's search_project tool reuses the same semantic index AI Prompt searches. Independent of read_file/write_file — turn it off if you'd rather the AI only work from files it opens explicitly."

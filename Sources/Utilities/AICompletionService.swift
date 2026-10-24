@@ -458,7 +458,10 @@ class AICompletionService: ObservableObject {
         systemPrompt: String,
         maxTokens: Int,
         tools: [MCPTool],
-        maxTurns: Int = 6,
+        /// Maximum number of model turns (a turn = one model request plus any
+        /// tool calls it makes). `nil` = unlimited — the loop then ends only
+        /// when the model produces a final answer or the task is cancelled.
+        maxTurns: Int? = 6,
         onToolCall: @escaping (String, String) -> Void = { _, _ in },
         onReasoning: @escaping (String) -> Void = { _ in },
         /// When non-nil, each turn is requested with streaming enabled and
@@ -512,7 +515,8 @@ class AICompletionService: ObservableObject {
         // when the model isn't installed.
         let compression = await ChatCompressor.resolve(method: settings.chatCompressionMethod)
 
-        for turn in 0..<maxTurns {
+        var turn = 0
+        while true {
             // A cancelled task (the chat's Stop button) unwinds here instead
             // of burning another model request.
             try Task.checkCancellation()
@@ -575,7 +579,8 @@ class AICompletionService: ObservableObject {
                     // nudge it to use what it has instead, a few times, before
                     // giving up. This is the fix for empty responses landing
                     // after a visible trail of successful tool calls.
-                    guard autoContinues < maxAutoContinues, turn < maxTurns - 1 else {
+                    guard autoContinues < maxAutoContinues,
+                          maxTurns.map { turn < $0 - 1 } ?? true else {
                         throw AIError.apiError(Self.emptyAnswerFailureMessage(nudges: autoContinues, hadReasoning: hadReasoning))
                     }
                     autoContinues += 1
@@ -584,6 +589,7 @@ class AICompletionService: ObservableObject {
                     // Anthropic, that require it.
                     messages.append(.assistantText("(no response)"))
                     messages.append(.user(Self.emptyAnswerNudgeMessage(hadReasoning: hadReasoning)))
+                    turn += 1
                     continue
                 }
 
@@ -612,12 +618,12 @@ class AICompletionService: ObservableObject {
                     }
                     messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
                 }
-                if turn == maxTurns - 1 {
+                if let maxTurns, turn == maxTurns - 1 {
                     throw AIError.apiError("The AI kept calling tools without producing a final answer after \(maxTurns) turns.")
                 }
+                turn += 1
             }
         }
-        throw AIError.apiError("The AI did not produce a response.")
     }
 
     /// Upper bound for the Settings-configured auto-continue attempts, so a
