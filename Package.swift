@@ -34,7 +34,8 @@ let package = Package(
                 .process("Resources/EquationEditor.html"),
                 .process("Resources/AppIcon.png"),
                 .process("Resources/AppIconDark.png"),
-                .process("Resources/Vendor")
+                .process("Resources/Vendor"),
+                .copy("Resources/Skills")
             ]
         ),
         .testTarget(

@@ -87,6 +87,10 @@ final class MCPManager: ObservableObject {
 
     private func configURL(for scope: ConfigScope) -> URL {
         switch scope {
+        case .builtin:
+            // MCP servers have no built-in scope; park any request in a config
+            // nobody reads from, like the missing-project fallback below.
+            return FileManager.default.temporaryDirectory.appendingPathComponent("typstedit-no-builtin-mcp.json")
         case .global:
             return MCPConfigStore.globalConfigURL()
         case .project:

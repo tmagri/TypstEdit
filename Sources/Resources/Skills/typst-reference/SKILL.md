@@ -1,0 +1,111 @@
+---
+name: Typst Reference
+description: "Accurate Typst 0.13–0.15 syntax reference. Use when writing or fixing Typst markup, math, set/show rules, tables, or code-mode scripting — consult before guessing syntax, and read cheatsheet.md/function-catalog.md via read_skill_file for details."
+---
+
+# Typst Reference
+
+Built into TypstEdit (bundled skill, read-only — it updates with the app).
+You have three attached reference files, readable on demand with
+`read_skill_file` (skill: "typst-reference"):
+
+- **`cheatsheet.md`** — full syntax cheat sheet: layout, tables, figures,
+  math, scripting, a document skeleton, and the common-mistakes list. Read it
+  when you need anything beyond the core below.
+- **`function-catalog.md`** — ~580 functions with signatures, examples and
+  parameters, extracted from the official manual. Search it for exact
+  parameter names and call syntax (e.g. before using an uncommon function).
+- **`styling-recipes.md`** — custom-formatting cookbook: breakable tables,
+  restyling raw blocks without losing syntax highlighting, ToC/outline entry
+  styling, page-break-per-heading guards, title pages, custom lists of
+  figures, and context/counter patterns. Read it before writing any
+  transformational `#show` rule or custom layout.
+
+## Core syntax (what most documents need)
+
+Typst mixes three modes. Which mode you are in decides what syntax means —
+most generated-document errors are mode errors.
+
+| Mode | Entered by | `#` means | Bare words mean |
+|---|---|---|---|
+| Markup (default) | start of file, content blocks `[...]` | starts a code expression | literal text |
+| Code | after `#`, inside `{...}`, `(...)` | — (a literal `#` is an error) | identifiers/expressions |
+| Math | `$...$` | starts a code expression | variables/math symbols |
+
+```typst
+= Heading        == Heading 2        // levels 1–5
+*strong*         _emph_              `inline code`
+- bullet list    + numbered list     / Term: definition
+#set text(font: "New Computer Modern", size: 11pt)
+#set par(justify: true)
+#set heading(numbering: "1.1.")
+#show link: set text(fill: blue)          // show-set rule
+#show heading.where(level: 1): it => upper(it.body)
+
+#let x = 3                          // binding
+#let f(a, b: 2) = a + b             // function with named default
+#let double = x => x * 2            // closure
+#if x > 0 [ positive ] else [ non-positive ]
+#for v in (1, 2, 3) [#v ]
+#(1 + 2)                            // parenthesized expression prints
+```
+
+Escapes in markup: `\#  \$  \_  \*  \[  \]  \\  ~` (non-breaking space is `~`).
+Line break: `\`. Labels: `… <intro>` then reference with `@intro`.
+
+## The mistakes that cause most compile errors
+
+All facts below are validated against the `typst` compiler (see
+`Docs/tools/validate_reference_corpus.py` for the executable corpus).
+
+### Delimiter emergencies — read the FIRST error
+
+Every unclosed `[`, `{`, `(`, string, or `$` math reports exactly
+`error: unclosed delimiter`, and **everything after it is misparsed**, so one
+broken line can flood the panel with hundreds of follow-on "expected
+expression" errors. The fix lives at the TOP of the cascade, not the bottom:
+read the first error, balance that opening delimiter, and ignore the rest
+until the next compile.
+
+| Compiler says | Usual cause | Fix |
+|---|---|---|
+| `unclosed delimiter` | an unclosed `[`/`{`/`(`, string, or `$…$` (often multi-line content the model left open) | close the opener at/near the reported line |
+| `unexpected closing bracket` | a stray `]` with no opener | delete it or open a block |
+| `the character '#' is not valid in code` | Markdown headings (`###### x`) or `##set` | headings are `=`, `==`, … |
+| `the character '|' is not valid in code` | Rust closure `\|x\| …` | closures are `x => …` |
+| `the character '?' is not valid in code` | C/JS ternary `c ? a : b` | `#if c { a } else { b }` |
+| `expected expression` | `# let` (space after `#`) or a Python-style `# comment` line | `#let`; comments are `// …` |
+| `expected comma` | named arg missing its colon (`#text(size 20pt)`) | `size: 20pt` |
+| `unexpected colon` | Python dict braces `{"a": 1}` | Typst dicts: `(a: 1)` |
+| `unknown variable: True/None/len/print` | Python/Rust habits | `true`, `none`, `arr.len()` (no global `len`/`print`) |
+| `expected semicolon or line break` | type annotations (`let x: int = 3`) | Typst has none — drop them |
+| `unknown variable: rac` / `lpha` | LaTeX in math (`\frac`, `\alpha` — the `\` eats one char) | `frac(a, b)`, `alpha` |
+| `label '<x>' does not exist in the document` | `@ref` with no matching `<x>`, or `@` in an email (`user@example.com`) | add the label or escape: `user\@example.com` |
+
+### Silent failures — compiles, renders wrong
+
+These produce **no error**, so check for them by eye:
+
+- Missing `#` — `let x = 3`, `set text(…)`, `table(…)` render as literal text.
+- `**bold**` renders literally — Typst emphasis is `*bold*` / `_emph_`.
+- `elif` renders as literal text — chains are `#if … [..] else if … [..] else [..]`.
+- `[text](url)` renders literally — links are `#link("url")[text]`.
+- `<div>` silently becomes a label named `div`.
+- `snake_case_words` in prose — `_` toggles emphasis; escape as `snake\_case`.
+- A stray `;` after `#let x = 3;` renders as text.
+
+### Type rules worth knowing
+
+- Strings auto-convert to content: `#emph("text")` and `#([a] + "b")` work.
+- Named params are typed: `font:` wants a string (`"Arial"`), `stroke:` wants
+  a stroke/length/color — `stroke: 3` fails.
+- A single-element array needs a trailing comma: `#(1,)` — `#(1)` is an int.
+- Dashed identifiers are legal, so `dict.a-b` works; quoted keys need
+  `dict.at("a-b")`.
+- Duplicate labels compile; a *reference* to a missing label does not.
+- `7 / 2` is `3.5`; integer division is `calc.quot(7, 2)`.
+- Labels `<x>` attach to the *previous* element; put them right after it.
+- Reading `counter`/`state`/`page`/`today` requires `context`:
+  `#context counter(page).display()`.
+- `table.header(...)` repeats across page breaks; `table.cell(colspan: 2)`
+  counts columns.

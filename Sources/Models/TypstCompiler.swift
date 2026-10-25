@@ -155,8 +155,23 @@ class TypstCompiler: ObservableObject {
     /// notifies observers. Real compile errors are listed first (they block output);
     /// warnings follow. Compile diagnostics are cleared on a successful recompile;
     /// `.note` delimiting warnings persist until the source changes.
+    ///
+    /// The list is capped at `maxPublishedIssues` with a trailing "… N more"
+    /// marker: every observer is O(list) per update, and a rough conversion can
+    /// produce thousands of diagnostics that no UI should render at once.
     private func publishIssues() {
-        let combined = typstErrors + typstWarnings + noteWarnings
+        var combined = typstErrors + typstWarnings + noteWarnings
+        if combined.count > Self.maxPublishedIssues {
+            let hidden = combined.count - Self.maxPublishedIssues
+            combined.removeLast(hidden)
+            combined.append(
+                TypstError(
+                    line: nil,
+                    message: "… \(hidden) more issue\(hidden == 1 ? "" : "s") not shown — the document has too many diagnostics to display.",
+                    severity: .warning
+                )
+            )
+        }
         self.errors = combined
         NotificationCenter.default.post(name: .typstErrorsUpdated, object: combined)
     }
@@ -295,6 +310,32 @@ class TypstCompiler: ObservableObject {
     private var pendingFallbackRawLines: [Int] = []   // shadow-file error lines awaiting a fallback fix
     private var pendingFallbackRewrite: Bool = false    // true while a fallback rewrite is in-flight and another compile cycle is expected
 
+    // Flood protection for the diagnostic pipeline. A healthy document produces
+    // a handful of diagnostics per cycle; a rough Markdown conversion can
+    // produce thousands. Reacting per diagnostic block is then quadratic on the
+    // main thread (O(n) rebuild + O(n) UI publish per block), and the lenient
+    // fallback fixer rewrites the shadow file on every cycle, each rewrite
+    // triggering a recompile whose fresh errors cascade — a self-sustaining
+    // freeze. These gates keep per-block work for healthy documents and fold
+    // flooded batches into a single debounced, capped pass instead.
+    /// Diagnostics per compile cycle above which the cycle is treated as a
+    /// flood: no per-block rebuilding/publishing, no line-by-line repair.
+    private static let diagnosticFloodLimit = 100
+    /// Consecutive fix→recompile cycles the fallback fixer may chase before it
+    /// gives up on the current content. Reset when the source changes or a
+    /// compile succeeds.
+    private static let fallbackCycleLimit = 3
+    private var batchDiagnosticCount = 0
+    private var fallbackCycleCount = 0
+    /// Debounces issue publication so a batch is published once, after its
+    /// diagnostic stream pauses, instead of once per block.
+    private var publishTask: Task<Void, Never>?
+    private static let publishDebounceNanos: UInt64 = 250_000_000
+    /// Hard cap on the issue list handed to the UI. Panel, highlights and
+    /// context menus are O(displayed) per update; internally the full lists
+    /// (typstErrors / typstWarnings) stay intact.
+    private static let maxPublishedIssues = 250
+
     // Watch-output stream state. `typst watch` diagnostics can be split across
     // arbitrary pipe chunks, so output is buffered until a complete line arrives;
     // complete lines are assembled into diagnostics by `diagnosticParser`.
@@ -323,6 +364,11 @@ class TypstCompiler: ObservableObject {
         // Drop any partially-buffered watch output so the next watch starts clean.
         pendingOutputBuffer = ""
         diagnosticParser.reset()
+        publishTask?.cancel()
+        publishTask = nil
+        batchDiagnosticCount = 0
+        pendingFallbackRewrite = false
+        fallbackCycleCount = 0
         pendingFallbackRawLines = []
         // We do not clear fallback tracking here because updateContent() sets them
         // up just before cleanUp() is called to switch processes.
@@ -402,6 +448,11 @@ class TypstCompiler: ObservableObject {
             pendingFallbackRawLines = []
             diagnosticParser.reset()
             pendingOutputBuffer = ""
+            publishTask?.cancel()
+            publishTask = nil
+            batchDiagnosticCount = 0
+            pendingFallbackRewrite = false
+            fallbackCycleCount = 0
 
             // Operator-delimiting warnings for `.note` files (computed alongside
             // sanitization below, committed to `noteWarnings` once we publish).
@@ -549,6 +600,11 @@ class TypstCompiler: ObservableObject {
         self.diagnosticParser.reset()
         self.diagnosticDocument = (sourceURL.lastPathComponent, true)
         self.pendingOutputBuffer = ""
+        self.publishTask?.cancel()
+        self.publishTask = nil
+        self.batchDiagnosticCount = 0
+        self.pendingFallbackRewrite = false
+        self.fallbackCycleCount = 0
         self.pendingFallbackRawLines = []
         self.publishIssues()
         
@@ -584,6 +640,12 @@ class TypstCompiler: ObservableObject {
                 // contained in project root"), sometimes without the blank line
                 // that ends a diagnostic block — publish whatever it printed.
                 self.finishCompilerOutput()
+                // The final batch has no following `compiling …` marker to end
+                // it: publish synchronously instead of waiting for the debounce.
+                self.publishTask?.cancel()
+                self.publishTask = nil
+                self.rebuildIssuesFromParser()
+                self.publishIssues()
                 self.compilationStatus = exitCode == 0
                     ? "Watch process ended."
                     : "Error: the Typst compiler stopped (exit code \(exitCode))."
@@ -634,6 +696,13 @@ class TypstCompiler: ObservableObject {
         print("[TYPST-OUTPUT]: \(line)")
 
         if line.contains("compiling ...") {
+            // This marker also ENDS the previous cycle's diagnostic batch:
+            // typst prints its status marker before that batch's diagnostics,
+            // and the batch has no other end delimiter. Finalize it, and cancel
+            // any debounced publish this synchronous pass replaces.
+            publishTask?.cancel()
+            publishTask = nil
+            finalizeDiagnosticBatch()
             isCompiling = true
             compilationStatus = "Compiling..."
             pendingFallbackRewrite = false
@@ -655,9 +724,15 @@ class TypstCompiler: ObservableObject {
             // A successful compile clears stale compile diagnostics, but keeps the
             // `.note` operator-delimiting warnings, which stay valid until the
             // source changes.
+            publishTask?.cancel()
+            publishTask = nil
             typstErrors = []
             typstWarnings = []
             diagnosticParser.reset()
+            batchDiagnosticCount = 0
+            // The previous fixes (if any) compiled: the fallback fixer earned a
+            // fresh chase budget for the next broken cycle.
+            fallbackCycleCount = 0
             publishIssues()
             return
         }
@@ -670,7 +745,10 @@ class TypstCompiler: ObservableObject {
             // list stays on screen until the new blocks arrive (no flicker).
             isCompiling = false
             compilationStatus = "Compilation Error"
+            publishTask?.cancel()
+            publishTask = nil
             diagnosticParser.reset()
+            batchDiagnosticCount = 0
             return
         }
 
@@ -687,35 +765,94 @@ class TypstCompiler: ObservableObject {
     /// publishes the batch each time a diagnostic block ends. Diagnostics without
     /// a location (e.g. "source file must be contained in project root") are
     /// published too, with no line.
+    ///
+    /// When the cycle is a diagnostic flood (more than `diagnosticFloodLimit`
+    /// diagnostics), per-block work is skipped entirely: rebuilding, publishing
+    /// and repairing are all O(batch), and thousands of blocks would make the
+    /// cycle quadratic on the main thread. A flooded batch is folded into one
+    /// debounced pass instead (see `scheduleFloodPublish`).
     private func consumeDiagnosticLine(_ line: String) {
         switch diagnosticParser.consume(line) {
         case .located(let index):
             let diagnostic = diagnosticParser.diagnostics[index]
+            batchDiagnosticCount += 1
             // Only errors in the shadow file itself queue a fallback rewrite.
             // Warnings don't block output, and rewriting their lines wrapped
             // valid content (e.g. a list item whose `__x__` triggers "no text
             // within underscores") in `#raw(...)`. Errors inside an imported
             // file carry *that* file's line numbers, which must never be used to
-            // rewrite the shadow file.
-            if diagnostic.severity == .error,
+            // rewrite the shadow file. Queuing stops once the cycle floods —
+            // the flush gate would refuse to repair it anyway, and this keeps
+            // the duplicate check bounded.
+            if batchDiagnosticCount <= Self.diagnosticFloodLimit,
+               diagnostic.severity == .error,
                let location = diagnostic.location,
                isOpenDocumentPath(location.path, requireShadow: true),
                !pendingFallbackRawLines.contains(location.line) {
                 pendingFallbackRawLines.append(location.line)
             }
         case .blockEnded:
-            rebuildIssuesFromParser()
-            // Repair anything the block flagged.
-            flushPendingFallbackFix()
-            // Publish the diagnostics collected so far for this cycle, unless a
-            // fallback rewrite just modified the shadow file: another compile
-            // cycle is then expected, and showing transient errors would make
-            // the panel flash.
-            if !pendingFallbackRewrite {
-                publishIssues()
+            if batchDiagnosticCount > Self.diagnosticFloodLimit {
+                // Flooded cycle: one debounced rebuild + capped publish for the
+                // whole batch, no per-block repair.
+                scheduleFloodPublish()
+            } else {
+                rebuildIssuesFromParser()
+                // Repair anything the block flagged — as before, small documents
+                // are fixed as fast as typst reports their errors.
+                flushPendingFallbackFix()
+                scheduleBatchPublish()
             }
         case .none:
             break
+        }
+    }
+
+    /// Synchronously ends the current diagnostic batch: closes any open block,
+    /// folds it into the displayed issue lists and applies one (and only one)
+    /// lenient-fallback pass for the whole batch. Called when the batch ends —
+    /// at the next cycle's `compiling …` marker and, via the termination
+    /// handler, when the compiler stops — since the last batch of a session has
+    /// no following marker to end it.
+    private func finalizeDiagnosticBatch() {
+        if diagnosticParser.isInsideBlock {
+            consumeDiagnosticLine("")
+        }
+        guard batchDiagnosticCount > 0 || !pendingFallbackRawLines.isEmpty else { return }
+        rebuildIssuesFromParser()
+        flushPendingFallbackFix()
+        if !pendingFallbackRewrite {
+            publishIssues()
+        }
+    }
+
+    /// Debounced issue publication for healthy (non-flooded) batches: the lists
+    /// are already rebuilt, so this only coalesces the UI update. Skipped when a
+    /// fallback rewrite just queued a recompile — the post-fix cycle publishes
+    /// the real state, and showing the transient pre-fix errors would flash.
+    private func scheduleBatchPublish() {
+        publishTask?.cancel()
+        publishTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.publishDebounceNanos)
+            guard !Task.isCancelled, let self else { return }
+            self.publishTask = nil
+            guard !self.pendingFallbackRewrite else { return }
+            self.publishIssues()
+        }
+    }
+
+    /// Debounced pass for flooded batches: a single O(batch) rebuild plus one
+    /// capped publish after the diagnostic stream pauses. No repair — flood
+    /// gate in `flushPendingFallbackFix` would refuse it anyway.
+    private func scheduleFloodPublish() {
+        publishTask?.cancel()
+        publishTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.publishDebounceNanos)
+            guard !Task.isCancelled, let self else { return }
+            self.publishTask = nil
+            self.rebuildIssuesFromParser()
+            guard !self.pendingFallbackRewrite else { return }
+            self.publishIssues()
         }
     }
 
@@ -741,12 +878,15 @@ class TypstCompiler: ObservableObject {
     private func parseErrors(from output: String, sourceFileName: String) {
         let previousDocument = diagnosticDocument
         let previousParser = diagnosticParser
+        let previousBatchCount = batchDiagnosticCount
         defer {
             diagnosticDocument = previousDocument
             diagnosticParser = previousParser
+            batchDiagnosticCount = previousBatchCount
         }
         diagnosticDocument = (sourceFileName, false)
         diagnosticParser.reset()
+        batchDiagnosticCount = 0
         for line in output.components(separatedBy: "\n") {
             _ = diagnosticParser.consume(line)
         }
@@ -768,18 +908,22 @@ class TypstCompiler: ObservableObject {
     }
 
     /// Replaces `typstErrors` / `typstWarnings` with the parser's current batch.
+    /// Deduplication is set-keyed: a `contains(where:)` scan per diagnostic made
+    /// each rebuild O(n²), and with thousands of diagnostics per cycle that
+    /// alone saturated the main thread.
     private func rebuildIssuesFromParser() {
+        var errorKeys = Set<String>()
+        var warningKeys = Set<String>()
         var errors: [TypstError] = []
         var warnings: [TypstError] = []
+        errors.reserveCapacity(diagnosticParser.diagnostics.count)
         for raw in diagnosticParser.diagnostics {
             let issue = makeIssue(from: raw)
-            let isDuplicate: (TypstError) -> Bool = {
-                $0.line == issue.line && $0.message == issue.message && $0.file == issue.file
-            }
+            let key = "\(issue.line ?? -1)|\(issue.file ?? "-")|\(issue.message)"
             if issue.severity == .warning {
-                if !warnings.contains(where: isDuplicate) { warnings.append(issue) }
+                if warningKeys.insert(key).inserted { warnings.append(issue) }
             } else {
-                if !errors.contains(where: isDuplicate) { errors.append(issue) }
+                if errorKeys.insert(key).inserted { errors.append(issue) }
             }
         }
         typstErrors = errors
@@ -842,12 +986,28 @@ class TypstCompiler: ObservableObject {
         pendingFallbackRawLines = []
         guard !rawLines.isEmpty else { return }
         guard currentFileExtension == "note" || currentFileExtension == "md" else { return }
+        // Flood gate 1: a cycle with this many diagnostics cannot be repaired
+        // line-by-line — the rewrites cascade into fresh errors and the
+        // fix→recompile loop never converges. Leave the document alone and
+        // surface the errors instead.
+        guard batchDiagnosticCount <= Self.diagnosticFloodLimit else {
+            print("[FallbackFix] Diagnostic flood (\(batchDiagnosticCount) diagnostics this cycle) — skipping line-by-line repair.")
+            return
+        }
+        // Flood gate 2: cap the fix→recompile chase so an oscillating cascade
+        // cannot rewrite the shadow file cycle after cycle. Budget resets when
+        // the source changes or a compile succeeds.
+        guard fallbackCycleCount < Self.fallbackCycleLimit else {
+            print("[FallbackFix] Fix chase budget exhausted (\(fallbackCycleCount) recompile cycles) — skipping repair until the source changes or compiles.")
+            return
+        }
         attemptFallbackFix(rawErrorLines: rawLines)
         // If the fallback modified the shadow file, typst watch will recompile.
         // Mark that we're mid-fix so the error panel doesn't flash transient errors.
         if currentShadowSourceURL != nil,
            fallbackAttempts.values.contains(where: { $0 > 0 }) {
             pendingFallbackRewrite = true
+            fallbackCycleCount += 1
         }
     }
 
@@ -2169,6 +2329,43 @@ class TypstCompiler: ObservableObject {
         if relativePrefix.isEmpty { return trimmed }
         return relativePrefix + trimmed
     }
+
+    // MARK: - Testing Hooks (DEBUG)
+
+    #if DEBUG
+    /// Lets `DiagnosticFloodTests` drive the watch-output pipeline with
+    /// synthetic `typst watch` output and aim the diagnostics at a fake shadow
+    /// document, without launching a `typst` process.
+    func setDiagnosticDocumentForTesting(fileName: String) {
+        diagnosticDocument = (fileName, true)
+        currentFileExtension = "md"
+    }
+
+    func setShadowURLForTesting(_ url: URL?) {
+        currentShadowSourceURL = url
+    }
+
+    func feedWatchOutputForTesting(_ text: String) {
+        handleCompilerOutput(text, outputURL: currentShadowPDFURL ?? URL(fileURLWithPath: "/tmp/typstedit-tests.pdf"))
+    }
+
+    /// Observability for the flood gates (asserted on in tests).
+    struct FloodGuardDebugState {
+        var batchDiagnosticCount: Int
+        var fallbackCycleCount: Int
+        var pendingRewrite: Bool
+        var pendingFallbackLineCount: Int
+    }
+
+    var floodGuardDebugState: FloodGuardDebugState {
+        FloodGuardDebugState(
+            batchDiagnosticCount: batchDiagnosticCount,
+            fallbackCycleCount: fallbackCycleCount,
+            pendingRewrite: pendingFallbackRewrite,
+            pendingFallbackLineCount: pendingFallbackRawLines.count
+        )
+    }
+    #endif
 } // End of TypstCompiler class
 
 // MARK: - Web Image Caching Actor

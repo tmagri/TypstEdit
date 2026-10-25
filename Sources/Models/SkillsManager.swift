@@ -1,15 +1,26 @@
 import Foundation
 import Combine
 
-/// Where a skill (or MCP server) definition lives. Global ones are managed in
-/// Settings and apply to every project; project ones live in the project's
-/// `.typstedit/` folder and are shareable via git.
+/// Where a skill (or MCP server) definition lives. Built-in ones ship inside
+/// the app bundle and are read-only; global ones are managed in Settings and
+/// apply to every project; project ones live in the project's `.typstedit/`
+/// folder and are shareable via git.
 enum ConfigScope: String, Codable, CaseIterable, Identifiable {
+    case builtin
     case global
     case project
 
     var id: String { rawValue }
-    var label: String { self == .global ? "Global" : "Project" }
+    var label: String {
+        switch self {
+        case .builtin: "Built-in"
+        case .global: "Global"
+        case .project: "Project"
+        }
+    }
+    /// Built-in skills ship with the app and cannot be created, edited or
+    /// deleted; only global/project scopes are user-manageable.
+    var isUserManageable: Bool { self != .builtin }
 }
 
 /// An AI Skill: a folder containing `SKILL.md` with YAML-style frontmatter
@@ -55,6 +66,10 @@ struct AISkill: Identifiable, Equatable {
 final class SkillsManager: ObservableObject {
     static let shared = SkillsManager()
 
+    /// Skills shipped inside the app bundle (`Sources/Resources/Skills/…`).
+    /// Read-only: they can be enabled per chat like any other skill, but the
+    /// user cannot edit or delete them, and app updates refresh them.
+    @Published private(set) var builtinSkills: [AISkill] = []
     @Published private(set) var globalSkills: [AISkill] = []
     @Published private(set) var projectSkills: [AISkill] = []
     /// The active project's root, so the Settings window (which has no
@@ -63,10 +78,11 @@ final class SkillsManager: ObservableObject {
     @Published private(set) var projectRoot: URL?
 
     private init() {
+        refreshBuiltin()
         refreshGlobal()
     }
 
-    var allSkills: [AISkill] { globalSkills + projectSkills }
+    var allSkills: [AISkill] { builtinSkills + globalSkills + projectSkills }
 
     func skill(withID id: String) -> AISkill? {
         allSkills.first { $0.id == id }
@@ -83,6 +99,15 @@ final class SkillsManager: ObservableObject {
     func refreshAll() {
         refreshGlobal()
         refreshProject()
+    }
+
+    private func refreshBuiltin() {
+        builtinSkills = Self.builtinSkillsDirectory.map {
+            Self.loadSkills(in: $0, scope: .builtin)
+        } ?? []
+        if builtinSkills.isEmpty {
+            print("[SkillsManager] No built-in skills found in the app bundle.")
+        }
     }
 
     private func refreshGlobal() {
@@ -102,6 +127,44 @@ final class SkillsManager: ObservableObject {
     static var globalSkillsDirectory: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport.appendingPathComponent("TypstEdit/Skills", isDirectory: true)
+    }
+
+    /// The bundled skills folder inside the SwiftPM resource bundle
+    /// (`Sources/Resources/Skills/`, declared as `.copy` in Package.swift so
+    /// the `typst-reference/…` folder layout survives verbatim). Several
+    /// candidate roots are probed because the resource bundle's location
+    /// differs per environment: inside the installed app, next to the
+    /// `swift run` executable, and beside the `swift test` runner bundle.
+    static var builtinSkillsDirectory: URL? {
+        let resourceBundleName = "TypstEdit_TypstEdit.bundle"
+        var bundles: [Bundle] = [ModuleResources.main, .main, Bundle(for: SkillsManager.self)]
+        for bundle in bundles {
+            var bases = [bundle.resourceURL, bundle.bundleURL].compactMap({ $0 })
+            // The resource bundle usually sits NEXT to the executable or test
+            // runner bundle (`.build/<config>/TypstEdit_TypstEdit.bundle`).
+            if let siblingRoot = bundle.bundleURL.deletingLastPathComponent() as URL? {
+                bases.append(siblingRoot)
+            }
+            for base in bases {
+                // Direct …/Skills layout.
+                let dir = base.appendingPathComponent("Skills", isDirectory: true)
+                if FileManager.default.fileExists(atPath: dir.path) {
+                    return dir
+                }
+                // …/TypstEdit_TypstEdit.bundle(/Contents/Resources)/Skills.
+                let nested = base.appendingPathComponent(resourceBundleName, isDirectory: true)
+                for nestedRoot in [nested.appendingPathComponent("Skills", isDirectory: true),
+                                   nested.appendingPathComponent("Contents/Resources/Skills", isDirectory: true)] {
+                    if FileManager.default.fileExists(atPath: nestedRoot.path) {
+                        return nestedRoot
+                    }
+                }
+            }
+            if let url = bundle.url(forResource: "Skills", withExtension: nil, subdirectory: "Skills") {
+                return url.deletingLastPathComponent()
+            }
+        }
+        return nil
     }
 
     // MARK: - Discovery
@@ -203,8 +266,11 @@ final class SkillsManager: ObservableObject {
 
     @discardableResult
     func createSkill(name: String, description: String, body: String, scope: ConfigScope, projectRoot: URL?) -> AISkill? {
+        guard scope.isUserManageable else { return nil }
         let baseDir: URL
         switch scope {
+        case .builtin:
+            return nil
         case .global:
             baseDir = Self.globalSkillsDirectory
         case .project:
@@ -235,12 +301,14 @@ final class SkillsManager: ObservableObject {
     }
 
     func updateSkill(_ skill: AISkill, name: String, description: String, body: String) {
+        guard skill.scope.isUserManageable else { return }
         let content = Self.render(name: name, description: description, body: body)
         try? content.write(to: skill.folderURL.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
         refreshAll()
     }
 
     func deleteSkill(_ skill: AISkill) {
+        guard skill.scope.isUserManageable else { return }
         try? FileManager.default.removeItem(at: skill.folderURL)
         refreshAll()
     }
@@ -254,6 +322,7 @@ final class SkillsManager: ObservableObject {
     /// to know whether to refresh its list.
     @discardableResult
     func addAttachment(to skill: AISkill, from sourceURL: URL) -> Bool {
+        guard skill.scope.isUserManageable else { return false }
         let destination = skill.folderURL.appendingPathComponent(sourceURL.lastPathComponent)
         do {
             if FileManager.default.fileExists(atPath: destination.path) {
@@ -269,6 +338,7 @@ final class SkillsManager: ObservableObject {
     }
 
     func removeAttachment(_ fileName: String, from skill: AISkill) {
+        guard skill.scope.isUserManageable else { return }
         try? FileManager.default.removeItem(at: skill.folderURL.appendingPathComponent(fileName))
         refreshAll()
     }

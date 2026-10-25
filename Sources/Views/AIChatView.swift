@@ -58,6 +58,12 @@ struct AIChatView: View {
         .background(Color(NSColor.windowBackgroundColor))
         .onAppear {
             chat.refreshToolSettings()
+            // Covers launches where no file or project was ever opened: the
+            // `EditorController` observers that normally call `updateContext`
+            // only fire on value *changes*, so the one-time skill seeding
+            // would otherwise never run. Same-scope calls are no-ops once
+            // seeded, so this is safe to call on every appearance.
+            chat.updateContext(projectRoot: controller.projectRootURL, currentFileURL: controller.currentFileURL)
             installShiftEnterMonitor()
         }
         .onDisappear { removeShiftEnterMonitor() }
@@ -112,7 +118,7 @@ struct AIChatView: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.plain)
-                .help("Clear chat history")
+                .help("Clear chat history — starts a new chat, so skills reset to their \"on by default\" settings")
             }
             Button {
                 controller.sidebarContent = .files

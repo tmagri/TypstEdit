@@ -44,7 +44,18 @@ final class AIChatManager: ObservableObject {
     /// Skill/MCP server selections, mirroring `EditorController`'s AI Prompt
     /// selections but kept independent since chat and prompt requests can
     /// reasonably want different tools enabled.
+    ///
+    /// The skill set is re-seeded from the user's per-skill "on by default"
+    /// settings (`AISettingsManager.chatDefaultSkillIDs`) whenever a *new
+    /// session* begins — on scope change, on Clear History, and once at
+    /// launch — but never mid-session, so in-session toggles from the chat
+    /// panel's Skills menu are preserved.
     @Published var selectedSkillIDs: Set<String> = []
+    /// Whether `selectedSkillIDs` has been seeded from the default-skill
+    /// settings for the current session. Same-scope `updateContext` calls
+    /// (which fire on unrelated context changes) must not clobber the
+    /// user's in-session toggles, so they only re-seed when this is false.
+    private var skillSelectionSeeded = false
     @Published var selectedMCPServerIDs: Set<String> = []
     /// Per-session override for the built-in `search_project` (RAG) tool,
     /// toggleable right from the chat panel. Starts from
@@ -86,20 +97,29 @@ final class AIChatManager: ObservableObject {
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
         let newScope = Self.resolveScope(projectRoot: projectRoot, currentFileURL: currentFileURL)
-        guard newScope != localTools.scope else { return }
+        let scopeChanged = newScope != localTools.scope
+        // Re-seed the skill selection exactly once per session: on a scope
+        // change, or on the very first context update after launch (the
+        // scope may already be `.none`, in which case no switch occurs).
+        guard scopeChanged || !skillSelectionSeeded else { return }
 
-        persist() // flush the outgoing scope's transcript before switching
+        if scopeChanged {
+            persist() // flush the outgoing scope's transcript before switching
 
-        // Any approval still pending from the previous scope is moot now.
-        approvalContinuation?.resume(returning: false)
-        approvalContinuation = nil
-        pendingApproval = nil
+            // Any approval still pending from the previous scope is moot now.
+            approvalContinuation?.resume(returning: false)
+            approvalContinuation = nil
+            pendingApproval = nil
 
-        localTools.scope = newScope
-        persistenceURL = Self.persistenceURL(for: newScope)
-        messages = Self.loadMessages(from: persistenceURL)
-        plan = AgentHarnessTools.plan(from: messages)
-        scopeLabel = newScope.label
+            localTools.scope = newScope
+            persistenceURL = Self.persistenceURL(for: newScope)
+            messages = Self.loadMessages(from: persistenceURL)
+            plan = AgentHarnessTools.plan(from: messages)
+            scopeLabel = newScope.label
+        }
+
+        selectedSkillIDs = defaultSkillIDs()
+        skillSelectionSeeded = true
     }
 
     /// Re-reads the Python-tool opt-in from Settings — called when the chat
@@ -113,6 +133,27 @@ final class AIChatManager: ObservableObject {
             .components(separatedBy: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    // MARK: - Skill Defaults
+
+    /// The skill IDs a new session starts with: the user's per-skill "on by
+    /// default" settings (Settings → AI Assistant → Skills) restricted to
+    /// skills that currently exist, so stale IDs from deleted skills are
+    /// dropped here rather than at write time.
+    func defaultSkillIDs() -> Set<String> {
+        Self.filteredDefaultSkillIDs(
+            AISettingsManager.shared.chatDefaultSkillIDs,
+            available: SkillsManager.shared.allSkills
+        )
+    }
+
+    /// Pure intersection of the persisted default-skill IDs with the IDs of
+    /// the skills currently available — factored out of `defaultSkillIDs()`
+    /// so the filtering rule is unit-testable without the singletons.
+    static func filteredDefaultSkillIDs(_ defaults: [String], available: [AISkill]) -> Set<String> {
+        let availableIDs = Set(available.map(\.id))
+        return Set(defaults.filter { availableIDs.contains($0) })
     }
 
     private static func resolveScope(projectRoot: URL?, currentFileURL: URL?) -> LocalToolExecutor.Scope {
@@ -174,6 +215,10 @@ final class AIChatManager: ObservableObject {
         if let persistenceURL {
             try? FileManager.default.removeItem(at: persistenceURL)
         }
+        // A cleared transcript is a new session: start from the user's
+        // per-skill defaults again.
+        selectedSkillIDs = defaultSkillIDs()
+        skillSelectionSeeded = true
     }
 
     // MARK: - Sending Messages

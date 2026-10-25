@@ -171,6 +171,25 @@ class AISettingsManager: ObservableObject {
     /// off per session from the chat panel itself; this only controls where
     /// each new session starts from.
     @AppStorage("aiChatRAGToolEnabledDefault") var chatRAGToolEnabledDefault: Bool = true
+
+    /// Skills that start enabled in new AI chats. Persisted as a
+    /// comma-separated list of skill IDs (`scope:folderName`). Empty by
+    /// default — new chats start with no skills enabled until the user
+    /// turns one on. The AI Chat re-seeds its skill selection from this
+    /// list whenever a new session begins (see `AIChatManager`).
+    @AppStorage("aiChatDefaultSkillIDs") private var chatDefaultSkillIDsRaw: String = ""
+    var chatDefaultSkillIDs: [String] {
+        get {
+            chatDefaultSkillIDsRaw
+                .split(separator: ",")
+                .map { String($0) }
+                .filter { !$0.isEmpty }
+        }
+        set {
+            chatDefaultSkillIDsRaw = newValue.joined(separator: ",")
+        }
+    }
+
     /// Run the Python tool under macOS `sandbox-exec` (no network, writes
     /// limited to a scratch folder). On by default — turning it off is the
     /// "full user permissions" behavior the tool used to have.

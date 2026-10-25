@@ -8,6 +8,7 @@ import AppKit
 /// project and are git-shareable with collaborators.
 struct AISkillsSettingsView: View {
     @ObservedObject private var skillsManager = SkillsManager.shared
+    @ObservedObject private var aiSettings = AISettingsManager.shared
     @State private var editingSkill: AISkill?
     @State private var isCreatingNew = false
     @State private var newSkillScope: ConfigScope = .global
@@ -18,11 +19,12 @@ struct AISkillsSettingsView: View {
                 SettingsCard(
                     title: "What are Skills?",
                     icon: "sparkles.square.filled.on.square",
-                    description: "A skill is a reusable set of instructions (formatting conventions, citation styles, house rules) the AI follows when you enable it for a request in the AI Prompt panel. Only the name and description are shown while browsing — the full instructions are only sent to the model once you turn a skill on."
+                    description: "A skill is a reusable set of instructions (formatting conventions, citation styles, house rules) the AI follows when you enable it for a request in the AI Prompt panel. Only the name and description are shown while browsing — the full instructions are only sent to the model once you turn a skill on. Tick \"On by default\" to have new AI chats start with a skill enabled; by default no skills start on, and toggles made in a chat apply for the rest of that session."
                 ) {
                     EmptyView()
                 }
 
+                skillsCard(title: "Built-in Skills", scope: .builtin, skills: skillsManager.builtinSkills)
                 skillsCard(title: "Global Skills", scope: .global, skills: skillsManager.globalSkills)
 
                 if let projectRoot = skillsManager.projectRoot {
@@ -52,7 +54,7 @@ struct AISkillsSettingsView: View {
     private func skillsCard(title: String, scope: ConfigScope, skills: [AISkill], subtitle: String? = nil) -> some View {
         SettingsCard(
             title: title,
-            icon: scope == .global ? "globe" : "folder",
+            icon: scope == .builtin ? "shippingbox" : (scope == .global ? "globe" : "folder"),
             description: subtitle
         ) {
             VStack(alignment: .leading, spacing: 10) {
@@ -69,13 +71,20 @@ struct AISkillsSettingsView: View {
                     }
                 }
 
-                Button {
-                    newSkillScope = scope
-                    isCreatingNew = true
-                } label: {
-                    Label("Add Skill…", systemImage: "plus.circle")
+                if scope.isUserManageable {
+                    Button {
+                        newSkillScope = scope
+                        isCreatingNew = true
+                    } label: {
+                        Label("Add Skill…", systemImage: "plus.circle")
+                    }
+                    .padding(.top, 4)
+                } else {
+                    Text("Built into TypstEdit — enable them from the Skills menu in the AI panel. They update with the app.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.top, 4)
                 }
-                .padding(.top, 4)
             }
         }
     }
@@ -96,21 +105,44 @@ struct AISkillsSettingsView: View {
                         .foregroundColor(.secondary)
                 }
             }
+            Toggle("On by default", isOn: defaultEnabledBinding(for: skill))
+                .toggleStyle(.checkbox)
+                .help("When checked, new AI chats start with this skill enabled. Toggles made in a chat apply for the rest of that session. Note: project skills are matched by folder name, so same-named skills in different projects share one default.")
             Spacer()
-            Button {
-                editingSkill = skill
-            } label: {
-                Image(systemName: "pencil")
+            if skill.scope.isUserManageable {
+                Button {
+                    editingSkill = skill
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.plain)
+                Button {
+                    skillsManager.deleteSkill(skill)
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-            Button {
-                skillsManager.deleteSkill(skill)
-            } label: {
-                Image(systemName: "trash")
-                    .foregroundColor(.red)
-            }
-            .buttonStyle(.plain)
         }
+    }
+
+    /// Reads/writes membership in the per-skill "on by default" list
+    /// (`AISettingsManager.chatDefaultSkillIDs`) — the list new AI chats
+    /// start from.
+    private func defaultEnabledBinding(for skill: AISkill) -> Binding<Bool> {
+        Binding(
+            get: { aiSettings.chatDefaultSkillIDs.contains(skill.id) },
+            set: { isOn in
+                var ids = aiSettings.chatDefaultSkillIDs
+                if isOn {
+                    if !ids.contains(skill.id) { ids.append(skill.id) }
+                } else {
+                    ids.removeAll { $0 == skill.id }
+                }
+                aiSettings.chatDefaultSkillIDs = ids
+            }
+        )
     }
 }
 
