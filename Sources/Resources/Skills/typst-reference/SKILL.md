@@ -20,6 +20,10 @@ You have three attached reference files, readable on demand with
   styling, page-break-per-heading guards, title pages, custom lists of
   figures, and context/counter patterns. Read it before writing any
   transformational `#show` rule or custom layout.
+- **`dates-and-times.md`** — date printing patterns and traps: the display
+  grammar (component + modifiers), why `datetime.now()` and `strftime` don't
+  exist, why `datetime.today()` is date-only, and date math/comparison
+  recipes. Read it before printing, parsing or comparing dates.
 
 ## Core syntax (what most documents need)
 
@@ -105,7 +109,9 @@ These produce **no error**, so check for them by eye:
 - Duplicate labels compile; a *reference* to a missing label does not.
 - `7 / 2` is `3.5`; integer division is `calc.quot(7, 2)`.
 - Labels `<x>` attach to the *previous* element; put them right after it.
-- Reading `counter`/`state`/`page`/`today` requires `context`:
-  `#context counter(page).display()`.
+- Reading `counter`/`state`/`page` requires `context`:
+  `#context counter(page).display()`. Dates are different:
+  `datetime.today()` needs no context and is **date-only** (no wall-clock
+  `now()`); see `dates-and-times.md`.
 - `table.header(...)` repeats across page breaks; `table.cell(colspan: 2)`
   counts columns.

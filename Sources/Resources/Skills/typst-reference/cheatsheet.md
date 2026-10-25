@@ -270,11 +270,13 @@ $ 5 != 4 equiv 3 $                             // relations
 #metadata(42) <meta> #query(<meta>)
 #eval("1 + 1")
 #numbering("I", 3)                      // "III"; also "1.1", "a", "い" …
-#context today.display("[day] [month] [year]")
+#datetime.today().display("[month repr:long] [day], [year]")
 ```
 
 `context` expressions re-run when layout state is available; anything reading
-`counter`/`state`/`page`/`here`/`today` needs `context` (Typst 0.11+).
+`counter`/`state`/`page`/`here` needs `context` (Typst 0.11+).
+`datetime.today()` is NOT context state — it works anywhere, but is
+**date-only**: Typst has no wall-clock time (no `datetime.now()`).
 
 ## 10. Common mistakes (guard against these)
 
