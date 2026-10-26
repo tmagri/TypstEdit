@@ -345,6 +345,14 @@ struct SidebarView: View {
                                 }) {
                                     Label("New Markdown File", systemImage: "doc.text.fill") 
                                 }
+
+                                Button(action: {
+                                    if let newFile = model.createProjectFile(extension: "tcalc") {
+                                        selectedFile = newFile // Opens in the Calculator panel
+                                    }
+                                }) {
+                                    Label("New Calculation", systemImage: "function")
+                                }
                             } label: {
                                 Image(systemName: "plus")
                                     .foregroundColor(themeManager.textColor.opacity(0.6))

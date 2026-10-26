@@ -36,6 +36,7 @@
 
 ### Visual Editors
 * **🧮 Visual Equation Editor:** Interactive equation editor with live LaTeX preview for mathematical expressions.
+* **🖥️ Calculator Mode:** TI-89 style CAS home screen (solve, factor, d, ∫, Σ, matrices, exact/approx, ans recall) powered by the bundled Giac engine — right-click any result to insert it into your document as Typst math, and save sessions as `.tcalc` files. See `Docs/calculator.md`.
 * **🖼️ Figure Editor:** Visual interface for inserting and editing figures with captions and references.
 * **🔧 Foundation Item Picker:** Drill-down navigation for Typst foundation items (arrays, strings, datetime, calc, etc.) with searchable methods and properties.
 * **🎯 Contextual Editing:** Smart "Edit at Cursor" feature that detects and opens appropriate editors for tables, links, equations, and more.

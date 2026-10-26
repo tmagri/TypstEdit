@@ -425,17 +425,18 @@ struct ContentView: View {
         }
     }
     
-    /// The left panel swaps between the file browser and AI Chat — rather
-    /// than giving chat its own column — to keep the real estate focused on
-    /// the editor and preview. The segmented toggle only appears once chat
-    /// is enabled in Settings; otherwise this is just the file browser, as
-    /// before.
+    /// The left panel swaps between the file browser, AI Chat and the
+    /// Calculator — rather than giving each its own column — to keep the
+    /// real estate focused on the editor and preview. The segmented toggle
+    /// appears once chat is enabled in Settings or the calculator has been
+    /// used; otherwise this is just the file browser, as before.
     private var sidebarPanel: some View {
         VStack(spacing: 0) {
-            if aiSettings.chatEnabled {
+            if aiSettings.chatEnabled || editorController.sidebarContent != .files {
                 AccessibleTabStrip(tabs: [
                     AccessibleTab(EditorController.SidebarContent.files, title: "Files", systemImage: "doc.text", selectedSystemImage: "doc.text.fill", color: .blue),
                     AccessibleTab(EditorController.SidebarContent.aiChat, title: "AI Chat", systemImage: "bubble.left.and.text.bubble.right", selectedSystemImage: "bubble.left.and.text.bubble.right.fill", color: .purple),
+                    AccessibleTab(EditorController.SidebarContent.calculator, title: "Calculator", systemImage: "function", selectedSystemImage: "function", color: .green),
                 ], selection: $editorController.sidebarContent)
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
@@ -450,12 +451,16 @@ struct ContentView: View {
                 } else {
                     SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
                 }
+            case .calculator:
+                CalculatorView(session: editorController.calculatorSession, editorController: editorController)
             }
         }
         .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
         .onAppear { editorController.projectRootURL = fileSystem.currentFolder }
         .onChange(of: aiSettings.chatEnabled) { enabled in
-            if !enabled { editorController.sidebarContent = .files }
+            if !enabled && editorController.sidebarContent == .aiChat {
+                editorController.sidebarContent = .files
+            }
         }
     }
 
@@ -581,6 +586,16 @@ struct ContentView: View {
                             .buttonStyle(.plain)
                             .help("Toggle AI Chat")
                         }
+
+                        Button(action: {
+                            withAnimation { editorController.toggleCalculatorPanel() }
+                        }) {
+                            Image(systemName: "function")
+                                .font(.system(size: 11))
+                                .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? .accentColor : themeManager.textColor.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Toggle Calculator")
                     }
                     
                     Divider().frame(height: 12).padding(.horizontal, 4)
@@ -1157,12 +1172,25 @@ struct ContentView: View {
         print("[DEBUG] loadFile: Starting load for \(url.lastPathComponent)")
         let loadID = UUID()
         self.currentLoadID = loadID
-        
+
         // 1. Do NOT clear state here. Wait for new content.
-        
+
         // 2. Pre-check file type for non-textual files to avoid delay
         // Check extension manually since editorController.currentFileURL isn't updated yet
         let ext = url.pathExtension.lowercased()
+
+        // Calculator sessions open in the Calculator panel, not the editor.
+        if ext == CalculatorDocument.fileExtension {
+            editorController.currentFileURL = url
+            editorController.calculatorSession.load(from: url)
+            withAnimation {
+                editorController.isSidebarVisible = true
+                editorController.sidebarContent = .calculator
+            }
+            RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
+            return
+        }
+
         let isTextual = ["typ", "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg", "lyx", "note"].contains(ext)
 
         if !isTextual && ext != "pdf" && ext != "png" && ext != "jpg" { // Basic check

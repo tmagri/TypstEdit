@@ -556,8 +556,14 @@ class EditorController: NSObject, ObservableObject {
     enum SidebarContent {
         case files
         case aiChat
+        case calculator
     }
     @Published var sidebarContent: SidebarContent = .files
+
+    /// The Calculator panel's session (history, modes, saved file). Kept on
+    /// the controller — not in the view — so switching to Files or AI Chat
+    /// doesn't wipe the history, like a TI-89's home screen.
+    let calculatorSession = CalculatorSession()
 
     /// Reveals AI Chat in the left panel (showing the sidebar if it was
     /// hidden), or switches back to the file browser if chat is already
@@ -569,6 +575,18 @@ class EditorController: NSObject, ObservableObject {
         } else {
             isSidebarVisible = true
             sidebarContent = .aiChat
+        }
+    }
+
+    /// Reveals the Calculator in the left panel (showing the sidebar if it
+    /// was hidden), or switches back to the file browser if it is already
+    /// showing. Always available — no Settings opt-in, unlike AI Chat.
+    func toggleCalculatorPanel() {
+        if isSidebarVisible && sidebarContent == .calculator {
+            sidebarContent = .files
+        } else {
+            isSidebarVisible = true
+            sidebarContent = .calculator
         }
     }
     @Published var shouldCopyImages: Bool = true

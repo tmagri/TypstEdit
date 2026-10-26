@@ -525,6 +525,11 @@ struct AppMenuCommands: Commands {
                 }
                 .keyboardShortcut("j", modifiers: [.command, .shift])
             }
+
+            Button(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? "Show Files" : "Show Calculator") {
+                editorController.toggleCalculatorPanel()
+            }
+            .keyboardShortcut("u", modifiers: [.command, .shift])
             
             Toggle("Preview Dark Mode", isOn: $editorController.isPreviewDarkMode)
             

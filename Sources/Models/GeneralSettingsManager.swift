@@ -22,7 +22,29 @@ class GeneralSettingsManager: ObservableObject {
     /// heading moves to the next page together with it. Requires Typst 0.12+
     /// (`block.sticky`).
     @AppStorage("keepWithNextHeadings") var keepWithNextHeadings: Bool = true
-    
+
+    // MARK: Calculator defaults (used when a session starts or opens without
+    // its own modes — each session's own modes override these once saved).
+
+    /// Default angle unit for new calculator sessions ("RAD"/"DEG").
+    @AppStorage("calcAngleMode") var calcAngleModeString: String = CASAngleMode.radians.rawValue
+    /// Default exact/approx mode for new calculator sessions.
+    @AppStorage("calcExactMode") var calcExactModeString: String = CASExactMode.auto.rawValue
+    /// Displayed significant digits, like the TI-89's Digits setting.
+    @AppStorage("calcDisplayDigits") var calcDisplayDigits: Int = 12
+    /// Seconds before a running CAS evaluation is interrupted.
+    @AppStorage("calcTimeout") var calcTimeout: Double = 10
+
+    var calcAngleMode: CASAngleMode {
+        get { CASAngleMode(rawValue: calcAngleModeString) ?? .radians }
+        set { calcAngleModeString = newValue.rawValue }
+    }
+
+    var calcExactMode: CASExactMode {
+        get { CASExactMode(rawValue: calcExactModeString) ?? .auto }
+        set { calcExactModeString = newValue.rawValue }
+    }
+
     var updateMode: TypstUpdateMode {
         get { TypstUpdateMode(rawValue: updateModeString) ?? .stableBinary }
         set { updateModeString = newValue.rawValue }

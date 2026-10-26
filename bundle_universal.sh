@@ -97,6 +97,18 @@ else
     exit 1
 fi
 
+# Copy the universal CAS helper (Calculator mode). Built by
+# Tools/cas/build_cas.sh --arch universal.
+echo "Bundling Universal CAS helper..."
+if [ -f "build/cas/typstedit-cas" ]; then
+    cp "build/cas/typstedit-cas" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+    chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+    codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
+    echo "✓ Universal CAS helper bundled"
+else
+    echo "⚠️  Warning: build/cas/typstedit-cas not found — Calculator mode will be unavailable. Run Tools/cas/build_cas.sh --arch universal."
+fi
+
 # Icon Handling
 # Priority: compile the Icon Composer asset (AppIcon.icon) with actool, which
 # produces an adaptive Assets.car (black Dock icon in Dark mode, like

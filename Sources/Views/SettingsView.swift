@@ -40,6 +40,7 @@ struct SettingsView: View {
 enum GeneralSettingsSection: String, CaseIterable, Identifiable {
     case appearance = "Appearance"
     case files = "Files & Backups"
+    case calculator = "Calculator"
 
     var id: String { rawValue }
 
@@ -47,6 +48,7 @@ enum GeneralSettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .appearance: return "paintbrush"
         case .files:      return "folder"
+        case .calculator: return "function"
         }
     }
 }
@@ -79,6 +81,7 @@ struct GeneralSettingsView: View {
                     switch selectedSection {
                     case .appearance: appearanceSection
                     case .files:      filesSection
+                    case .calculator: calculatorSection
                     }
                 }
                 .padding(24)
@@ -109,6 +112,69 @@ struct GeneralSettingsView: View {
     }
 
     // MARK: - Files & Backups
+
+    // MARK: - Calculator
+
+    @ObservedObject private var generalSettings = GeneralSettingsManager.shared
+
+    @ViewBuilder
+    private var calculatorSection: some View {
+        SettingsCard(
+            title: "Calculator Defaults",
+            icon: "function",
+            description: "Starting modes for new calculator sessions. A saved .tcalc file keeps its own modes."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Angle", selection: $generalSettings.calcAngleMode) {
+                    ForEach(CASAngleMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 200)
+
+                Picker("Exact", selection: $generalSettings.calcExactMode) {
+                    ForEach(CASExactMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 260)
+
+                Picker("Displayed digits", selection: $generalSettings.calcDisplayDigits) {
+                    ForEach([6, 9, 12, 15], id: \.self) { n in
+                        Text("\(n)").tag(n)
+                    }
+                }
+                .frame(width: 200)
+            }
+        }
+
+        SettingsCard(
+            title: "CAS Engine",
+            icon: "gearshape.2",
+            description: "The calculator runs the bundled Giac CAS as a helper program."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                if CASEngine.isAvailable {
+                    Label("Helper installed (\(CASEngine.locateHelperBinary() ?? ""))", systemImage: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.callout)
+                } else {
+                    Label("Helper not found — build it with Tools/cas/build_cas.sh", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                        .font(.callout)
+                }
+                HStack {
+                    Text("Evaluation timeout")
+                    Spacer()
+                    Text("\(Int(generalSettings.calcTimeout)) s")
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $generalSettings.calcTimeout, in: 3...60, step: 1)
+            }
+        }
+    }
 
     @ViewBuilder
     private var filesSection: some View {

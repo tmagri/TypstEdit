@@ -53,6 +53,15 @@ struct HelpView: View {
                         }
                     }
                     
+                    HelpSection(title: "Calculator Mode") {
+                        Text("The left panel's Calculator tab is a TI-89 style CAS powered by Giac. Type a line (e.g. solve(x^2-4=0,x) or ∫(x^2,x,0,1)), press ↩, and the result appears typeset in the history.")
+                        Text("⌥↩ forces a decimal result, ↑/↓ recall past entries, and the F2/F3/F4 rows insert algebra and calculus templates. Right-click a result to insert it into the document as inline or block math, and save sessions as .tcalc files from the panel header.")
+                        CodeSnippet(code: "solve(x^2-4=0,x)", description: "Solve an equation")
+                        CodeSnippet(code: "d(x^3,x)", description: "Differentiate")
+                        CodeSnippet(code: "∫(x^2,x,0,1)", description: "Definite integral")
+                        CodeSnippet(code: "5→a", description: "Store in a variable")
+                    }
+
                     HelpSection(title: "Useful Links") {
                         LinkCard(title: "Official Typst Documentation", url: "https://typst.app/docs")
                         LinkCard(title: "Typst Tutorial", url: "https://typst.app/docs/tutorial/")

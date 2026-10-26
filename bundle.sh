@@ -113,6 +113,18 @@ else
     echo "⚠️  Warning: Typst executable not found. App will require system Typst installation."
 fi
 
+# Copy the CAS helper (Calculator mode) into the bundle. Built by
+# Tools/cas/build_cas.sh into build/cas/typstedit-cas.
+echo "Bundling CAS helper..."
+if [ -f "build/cas/typstedit-cas" ]; then
+    cp "build/cas/typstedit-cas" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+    chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+    codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
+    echo "✓ CAS helper bundled"
+else
+    echo "⚠️  Warning: build/cas/typstedit-cas not found — Calculator mode will be unavailable. Run Tools/cas/build_cas.sh."
+fi
+
 
 # Icon Handling
 # Priority: compile the Icon Composer asset (AppIcon.icon) with actool, which

@@ -7,6 +7,9 @@ the license text itself (collected at the end of this file).
 | Component | Role in TypstEdit | License |
 |---|---|---|
 | Typst engine (`typst` binary) | Bundled compiler, also updated in-app | Apache 2.0 |
+| Giac CAS (`typstedit-cas` helper) | Bundled CAS engine for Calculator mode | **GPL-3.0** (separate program) |
+| GMP (`libgmp`) | Linked into the `typstedit-cas` helper only | LGPL-3.0 (statically linked) |
+| MPFR (`libmpfr`) | Linked into the `typstedit-cas` helper only | LGPL-3.0 (statically linked) |
 | CodeEditSourceEditor | Editor component | MIT |
 | CodeEditTextView | Editor component | MIT |
 | CodeEditLanguages | Syntax highlighting (tree-sitter grammars) | *see note* — grammars are MIT/BSD upstream |
@@ -33,6 +36,29 @@ The bundled `typst` binary (`Contents/Resources/bin/typst`) is built from
 [typst/typst](https://github.com/typst/typst), © The Typst Authors,
 **Apache License 2.0** (full text at the end of this file). The in-app
 updater replaces it with official release builds of the same project.
+
+## CAS helper (Calculator mode)
+
+The bundled `typstedit-cas` helper (`Contents/Resources/bin/typstedit-cas`)
+embeds [Giac](https://www-fourier.ujf-grenoble.fr/~parisse/giac/),
+© Bernard Parisse and others, **GNU GPL-3.0-or-later**. TypstEdit talks to it
+as a separate program over stdin/stdout (see `Tools/cas/typstedit-cas.cpp`,
+the helper's source, and `Tools/cas/build_cas.sh`, which fetches and builds
+Giac plus GMP and MPFR from pinned sources). Because Giac runs as its own
+process, this file, and TypstEdit itself, remain under MIT; the GPL applies
+to the helper program.
+
+- **Giac** — GPL-3.0-or-later. Full text: <https://www.gnu.org/licenses/gpl-3.0.html>
+- **GMP** (statically linked into the helper only) — LGPL-3.0. Full text:
+  <https://www.gnu.org/licenses/lgpl-3.0.html>
+- **MPFR** (statically linked into the helper only) — LGPL-3.0.
+- macOS **Accelerate** framework (system, not distributed).
+
+Source-code offers: the exact Giac/GMP/MPFR versions used are pinned and
+downloaded by `Tools/cas/build_cas.sh` (Giac commit
+`5295d5d9144e3b9837cd257ec36a83c07a0ddbbe`, GMP 6.3.0, MPFR 4.2.2), so the
+complete corresponding source for the bundled helper can be produced with:
+`Tools/cas/build_cas.sh fetch && Tools/cas/build_cas.sh`.
 
 ## Editor components
 
