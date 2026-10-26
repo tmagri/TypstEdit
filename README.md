@@ -90,12 +90,16 @@ Built-in tools (always available, no MCP server required):
 
 | Tool | What it does |
 |---|---|
-| `list_files` | Lists files in the project/notebook. |
+| `list_files` | Lists files in the project/notebook; folders appear with a trailing `/`, so even an empty delivery folder can be confirmed. |
 | `read_file` | Reads a file, paged — large files come back a window at a time instead of flooding the conversation. |
 | `grep_project` | Case-insensitive by default; exact-string or regex search across the project, with a glob filter. |
 | `search_project` | Semantic (RAG) search, falling back to a literal scan if nothing semantic matches. |
 | `edit_file` | Precise find-and-replace on a file it has already read — cheaper and safer than rewriting the whole thing. Automatically compiles the `.typ` file it just touched and reports the result (success or the compiler error) in its own output, so a mismatched delimiter gets caught immediately instead of left behind. |
 | `write_file` | Creates or overwrites a whole file — same automatic compile check as `edit_file` for `.typ` files. |
+| `export_document` | Compiles a `.typ`/`.md`/`.note` document to PDF, PNG or SVG with the same pipeline as the editor's Export As. Output stays in the project/notebook scope and is approved first. |
+| `export_markdown` | Converts a `.typ`/`.note` document to a Markdown copy with the editor's own converter (or copies an `.md` through), showing the diff before writing. |
+| `create_folder` | Creates an empty delivery/evidence folder (and missing parents) inside the scope. |
+| `copy_files` | Copies related files or folders into a delivery folder in one approved batch, preserving names; existing items are only replaced with `overwrite: true`. |
 | `convert_markdown_to_typst` | Runs text through the same Markdown→Typst converter the editor uses when you paste — lets the AI write in Markdown instead of guessing at Typst syntax it's unsure of. |
 | `read_skill_file` | Reads a file attached to a currently enabled Skill. |
 | `run_typst_check` | Compiles a snippet, or an existing file in place, to check for errors on demand — without touching your document. |

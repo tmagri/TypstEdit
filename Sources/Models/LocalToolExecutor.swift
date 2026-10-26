@@ -177,7 +177,7 @@ final class LocalToolExecutor {
             tools.append(MCPTool(
                 serverName: Self.namespace,
                 name: "list_files",
-                description: "List files under the current \(scope.noun). Optionally filter by extension.",
+                description: "List files under the current \(scope.noun). Folders are shown with a trailing slash, so you can confirm that an empty delivery/evidence folder exists. Optionally filter by extension.",
                 inputSchema: [
                     "type": "object",
                     "properties": [
@@ -257,6 +257,65 @@ final class LocalToolExecutor {
                         "content": ["type": "string"]
                     ],
                     "required": ["path", "content"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "export_document",
+                description: "Compile a .typ, .md or .note document to PDF, PNG or SVG with TypstEdit's own compiler and Markdown/Note pipeline — the same result as the editor's Export As. `output` is relative to the \(scope.noun) root and defaults to the source file's name with the format's extension; a folder is allowed, and PNG/SVG write one numbered file per page. The user reviews the destination and approves before anything is written. Use this for deliverables: a PDF to email or a page image for slides.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Source file relative to the \(scope.noun) root (.typ, .md or .note)."],
+                        "format": ["type": "string", "enum": ["pdf", "png", "svg"], "description": "Output format. Default: from `output`'s extension, else pdf."],
+                        "output": ["type": "string", "description": "Optional output path relative to the \(scope.noun) root. A folder is allowed; the source name is used inside it. Its extension must match `format`."],
+                        "pages": ["type": "string", "description": "Optional page selection in Typst syntax, e.g. \"1\" or \"2,4-6\"."],
+                        "ppi": ["type": "integer", "description": "PNG resolution in pixels per inch (default 144)."]
+                    ],
+                    "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "export_markdown",
+                description: "Convert a Typst (.typ) or Note (.note) document into a Markdown copy with TypstEdit's own Typst→Markdown converter, and write it as a real .md file (default: alongside the source, same name). A .md source is copied through unchanged. Local image references are kept as written, so use copy_files too if the copy will live in another folder. The user sees the Markdown diff and approves before it's written. Use this for a handoff/email copy, or when another tool or person needs Markdown instead of Typst.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Source file relative to the \(scope.noun) root (.typ, .note or .md)."],
+                        "output": ["type": "string", "description": "Optional output path relative to the \(scope.noun) root. A folder is allowed; defaults to the source name with a .md extension."]
+                    ],
+                    "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "copy_files",
+                description: "Copy one or more files or folders into a destination folder inside the \(scope.noun) root, keeping their names. Creates the destination folder if needed. Existing items are left untouched unless overwrite is true. The user approves the complete list before anything is copied. Use this to gather related evidence, images or attachments into a delivery/deploy folder.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "sources": [
+                            "type": "array",
+                            "items": ["type": "string"],
+                            "description": "Files or folders to copy, each relative to the \(scope.noun) root."
+                        ],
+                        "destination": ["type": "string", "description": "Destination folder relative to the \(scope.noun) root. It is created if missing."],
+                        "overwrite": ["type": "boolean", "description": "Replace items that already exist in the destination. Default false."]
+                    ],
+                    "required": ["sources", "destination"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "create_folder",
+                description: "Create a folder (and any missing parent folders) inside the \(scope.noun) root. The user approves first. Use this for an empty delivery/evidence folder, or before copying files into it.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Folder path relative to the \(scope.noun) root, e.g. \"deploy/evidence\"."]
+                    ],
+                    "required": ["path"]
                 ]
             ))
         }
@@ -362,6 +421,10 @@ final class LocalToolExecutor {
         case "write_file": return try await writeFile(arguments, requestApproval: requestApproval)
         case "run_typst_check": return await runTypstCheck(arguments)
         case "convert_markdown_to_typst": return convertMarkdownToTypst(arguments)
+        case "export_document": return try await exportDocument(arguments, requestApproval: requestApproval)
+        case "export_markdown": return try await exportMarkdown(arguments, requestApproval: requestApproval)
+        case "copy_files": return try await copyFiles(arguments, requestApproval: requestApproval)
+        case "create_folder": return try await createFolder(arguments, requestApproval: requestApproval)
         case "web_fetch": return try await webFetch(arguments, requestApproval: requestApproval)
         case "run": return try await runPython(arguments, requestApproval: requestApproval)
         default: throw LocalToolError.invalidArguments("Unknown built-in tool '\(toolName)'")
@@ -415,7 +478,15 @@ final class LocalToolExecutor {
             let name = url.lastPathComponent
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             if isDir {
-                if excludedDirs.contains(name) { enumerator.skipDescendants() }
+                if excludedDirs.contains(name) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                if extensions == nil || extensions?.isEmpty == true {
+                    let relative = url.standardizedFileURL.path.replacingOccurrences(of: rootPath + "/", with: "")
+                    results.append(relative + "/")
+                    if results.count >= 500 { break }
+                }
                 continue
             }
             if let extensions, !extensions.isEmpty, !extensions.contains(url.pathExtension.lowercased()) {
@@ -943,6 +1014,382 @@ final class LocalToolExecutor {
         }
         let hybrid = (arguments["hybrid"] as? Bool) ?? false
         return AICompletionService.shared.sanitizeMarkdownToTypst(markdown, isHybrid: hybrid)
+    }
+
+    // MARK: - Export & Delivery
+
+    /// Compiles a document to PDF/PNG/SVG with the same headless service the
+    /// CLI and MCP server use (so `.md`/`.note` conversion and diagnostics
+    /// match), writing inside the current scope. Output is always approved
+    /// first: it's a real file, even when the format has no text diff to show.
+    private func exportDocument(
+        _ arguments: [String: Any],
+        requestApproval: @escaping (PendingApprovalKind) async -> Bool
+    ) async throws -> String {
+        let fm = FileManager.default
+        guard let path = arguments["path"] as? String,
+              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LocalToolError.invalidArguments("path is required")
+        }
+        let sourceURL = try resolvePath(path)
+        var sourceIsDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: sourceURL.path, isDirectory: &sourceIsDirectory) else {
+            throw LocalToolError.fileNotFound(path)
+        }
+        guard !sourceIsDirectory.boolValue else {
+            throw LocalToolError.invalidArguments("'\(path)' is a folder. Pass the document file to export.")
+        }
+
+        let sourceExtension = sourceURL.pathExtension.lowercased()
+        guard ["typ", "md", "markdown", "note"].contains(sourceExtension) else {
+            throw LocalToolError.invalidArguments("Can't export '\(path)' — expected a .typ, .md or .note document.")
+        }
+
+        let rawFormat = (arguments["format"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let rawOutput = (arguments["output"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func requestedFormat() throws -> AgentOutputFormat? {
+            guard let rawFormat, !rawFormat.isEmpty else { return nil }
+            guard let format = AgentOutputFormat(rawValue: rawFormat) else {
+                throw LocalToolError.invalidArguments("Unsupported export format '\(rawFormat)'. Use pdf, png or svg.")
+            }
+            return format
+        }
+
+        let format: AgentOutputFormat
+        let outputURL: URL
+
+        if let rawOutput, !rawOutput.isEmpty {
+            let requestedOutput = try resolvePath(rawOutput)
+            var outputIsDirectory: ObjCBool = false
+            let outputExists = fm.fileExists(atPath: requestedOutput.path, isDirectory: &outputIsDirectory)
+            let looksLikeFolder = rawOutput.hasSuffix("/") || (outputExists && outputIsDirectory.boolValue)
+
+            if looksLikeFolder {
+                let resolvedFormat = try requestedFormat() ?? .pdf
+                format = resolvedFormat
+                let baseName = sourceURL.deletingPathExtension().lastPathComponent
+                outputURL = requestedOutput
+                    .appendingPathComponent("\(baseName).\(resolvedFormat.rawValue)")
+                    .standardizedFileURL
+            } else {
+                let outputExtension = requestedOutput.pathExtension.lowercased()
+                if let explicitFormat = try requestedFormat() {
+                    guard outputExtension.isEmpty || outputExtension == explicitFormat.rawValue else {
+                        throw LocalToolError.invalidArguments(
+                            "Output '\(rawOutput)' has a .\(outputExtension) extension but format is '\(explicitFormat.rawValue)'. Use a .\(explicitFormat.rawValue) path or change format."
+                        )
+                    }
+                    format = explicitFormat
+                    outputURL = outputExtension.isEmpty
+                        ? requestedOutput.appendingPathExtension(explicitFormat.rawValue)
+                        : requestedOutput
+                } else if !outputExtension.isEmpty {
+                    guard let inferred = AgentOutputFormat(rawValue: outputExtension) else {
+                        throw LocalToolError.invalidArguments(
+                            "Output '\(rawOutput)' has an unsupported extension. Use .pdf, .png or .svg, or pass format explicitly."
+                        )
+                    }
+                    format = inferred
+                    outputURL = requestedOutput
+                } else {
+                    format = .pdf
+                    outputURL = requestedOutput.appendingPathExtension("pdf")
+                }
+            }
+        } else {
+            format = try requestedFormat() ?? .pdf
+            outputURL = sourceURL
+                .deletingPathExtension()
+                .appendingPathExtension(format.rawValue)
+        }
+
+        let destination = relativePath(for: outputURL)
+        let approved = await requestApproval(.documentExport(
+            relativePath: relativePath(for: sourceURL),
+            format: format.rawValue,
+            destination: destination,
+            existingFile: fm.fileExists(atPath: outputURL.path)
+        ))
+        guard approved else { throw LocalToolError.approvalDenied }
+
+        var request = AgentCompileRequest()
+        request.inputPath = sourceURL.path
+        request.outputPath = outputURL.path
+        request.format = format
+        request.root = scope.root?.path
+        if let pages = arguments["pages"] as? String, !pages.isEmpty {
+            request.pages = pages
+        } else if let pages = Self.intValue(arguments["pages"]) {
+            request.pages = String(pages)
+        }
+        if let ppi = Self.intValue(arguments["ppi"]) {
+            request.ppi = max(1, ppi)
+        }
+
+        let result = await AgentCompileService.shared.compile(request)
+        guard result.success else {
+            return "Export failed — nothing was kept in '\(destination)'.\n\n\(result.summary)"
+        }
+
+        for output in result.outputs {
+            Self.notifyFileChangedOnDisk(URL(fileURLWithPath: output))
+        }
+        Self.notifyProjectFilesChanged()
+
+        let written = result.outputs.isEmpty
+            ? "  \(destination)"
+            : result.outputs
+                .map { "  \(relativePath(for: URL(fileURLWithPath: $0)))" }
+                .joined(separator: "\n")
+        return "Exported '\(relativePath(for: sourceURL))' to \(format.rawValue.uppercased()).\n\(written)\n\(result.summary)"
+    }
+
+    /// Converts a `.typ`/`.note` file to Markdown with the editor's own
+    /// converter and writes the `.md` copy. Markdown sources are copied
+    /// through unchanged (useful when the job is "put a copy in the deploy
+    /// folder"). Text output means the normal diff approval applies.
+    private func exportMarkdown(
+        _ arguments: [String: Any],
+        requestApproval: @escaping (PendingApprovalKind) async -> Bool
+    ) async throws -> String {
+        let fm = FileManager.default
+        guard let path = arguments["path"] as? String,
+              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LocalToolError.invalidArguments("path is required")
+        }
+        let sourceURL = try resolvePath(path)
+        guard fm.fileExists(atPath: sourceURL.path) else {
+            throw LocalToolError.fileNotFound(path)
+        }
+        guard !Self.isDirectory(sourceURL) else {
+            throw LocalToolError.invalidArguments("'\(path)' is a folder. Pass a document file to export.")
+        }
+
+        let sourceExtension = sourceURL.pathExtension.lowercased()
+        guard ["typ", "md", "markdown", "note"].contains(sourceExtension) else {
+            throw LocalToolError.invalidArguments("Can't convert '\(path)' to Markdown — expected a .typ, .note or .md document.")
+        }
+        let isAlreadyMarkdown = sourceExtension == "md" || sourceExtension == "markdown"
+
+        let sourceText: String
+        do {
+            sourceText = try TextFileEncoding.string(from: sourceURL).text
+        } catch {
+            throw LocalToolError.invalidArguments("Could not read '\(path)': \(error.localizedDescription)")
+        }
+
+        let markdown: String
+        if isAlreadyMarkdown {
+            markdown = sourceText
+        } else {
+            do {
+                markdown = try TypstToMarkdownConverter(fileLoader: markdownFileLoader(for: sourceURL))
+                    .convert(source: sourceText)
+            } catch {
+                throw LocalToolError.invalidArguments("Couldn't convert '\(path)' to Markdown: \(error.localizedDescription)")
+            }
+        }
+
+        let rawOutput = (arguments["output"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceBase = sourceURL.deletingPathExtension().lastPathComponent
+        let outputURL: URL
+        if let rawOutput, !rawOutput.isEmpty {
+            let requested = try resolvePath(rawOutput)
+            var outputIsDirectory: ObjCBool = false
+            let exists = fm.fileExists(atPath: requested.path, isDirectory: &outputIsDirectory)
+            if rawOutput.hasSuffix("/") || (exists && outputIsDirectory.boolValue) {
+                outputURL = requested.appendingPathComponent("\(sourceBase).md").standardizedFileURL
+            } else if requested.pathExtension.isEmpty {
+                outputURL = requested.appendingPathExtension("md")
+            } else {
+                outputURL = requested
+            }
+        } else {
+            outputURL = sourceURL.deletingPathExtension().appendingPathExtension("md")
+        }
+
+        let destination = relativePath(for: outputURL)
+        guard outputURL.standardizedFileURL.path != sourceURL.standardizedFileURL.path else {
+            if isAlreadyMarkdown {
+                return "'\(path)' is already Markdown — nothing to convert. Pass output to write a separate copy."
+            }
+            throw LocalToolError.invalidArguments("Output would overwrite the source document. Pass a different output path.")
+        }
+
+        let exists = fm.fileExists(atPath: outputURL.path)
+        let oldContent = exists ? ((try? TextFileEncoding.string(from: outputURL).text) ?? "") : ""
+        if exists && oldContent == markdown {
+            return "No changes — '\(destination)' already has this Markdown."
+        }
+
+        let approved = await requestApproval(.fileWrite(
+            relativePath: destination,
+            oldContent: oldContent,
+            newContent: markdown,
+            isNewFile: !exists
+        ))
+        guard approved else { throw LocalToolError.approvalDenied }
+
+        try fm.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try markdown.write(to: outputURL, atomically: true, encoding: .utf8)
+        Self.notifyFileChangedOnDisk(outputURL)
+        return "Exported '\(relativePath(for: sourceURL))' as Markdown to '\(destination)' (\(markdown.utf8.count) bytes)."
+    }
+
+    /// Copies one or more files/folders into a delivery folder in one approved
+    /// batch. Everything stays inside the scope, and an existing destination
+    /// item is only replaced when the caller explicitly asks for `overwrite`.
+    private func copyFiles(
+        _ arguments: [String: Any],
+        requestApproval: @escaping (PendingApprovalKind) async -> Bool
+    ) async throws -> String {
+        let fm = FileManager.default
+        guard let rawSources = arguments["sources"] as? [String], !rawSources.isEmpty else {
+            throw LocalToolError.invalidArguments("sources is required and must contain at least one file or folder.")
+        }
+        guard let destinationArgument = arguments["destination"] as? String,
+              !destinationArgument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LocalToolError.invalidArguments("destination is required")
+        }
+        let overwrite = (arguments["overwrite"] as? Bool) ?? false
+
+        let destinationFolder = try resolvePath(destinationArgument)
+        var destinationIsDirectory: ObjCBool = false
+        if fm.fileExists(atPath: destinationFolder.path, isDirectory: &destinationIsDirectory),
+           !destinationIsDirectory.boolValue {
+            throw LocalToolError.invalidArguments("'\(destinationArgument)' is a file. Pass a folder path as the destination.")
+        }
+
+        var sources: [URL] = []
+        for raw in rawSources {
+            let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { continue }
+            let url = try resolvePath(cleaned)
+            guard fm.fileExists(atPath: url.path) else {
+                throw LocalToolError.fileNotFound(cleaned)
+            }
+            sources.append(url)
+        }
+        guard !sources.isEmpty else {
+            throw LocalToolError.invalidArguments("sources must contain at least one existing file or folder.")
+        }
+
+        let names = sources.map(\.lastPathComponent)
+        guard Set(names).count == names.count else {
+            throw LocalToolError.invalidArguments("Two sources have the same name (\(names.joined(separator: ", "))). Copy them separately or rename one first.")
+        }
+
+        let resolvedDestination = destinationFolder.standardizedFileURL.resolvingSymlinksInPath()
+        var plans: [(source: URL, destination: URL, existed: Bool)] = []
+        for source in sources {
+            let target = destinationFolder.appendingPathComponent(source.lastPathComponent).standardizedFileURL
+            let resolvedSource = source.standardizedFileURL.resolvingSymlinksInPath()
+            let resolvedTarget = target.standardizedFileURL.resolvingSymlinksInPath()
+
+            if resolvedSource.path == resolvedTarget.path {
+                throw LocalToolError.invalidArguments("'\(relativePath(for: source))' is already in '\(relativePath(for: destinationFolder))'.")
+            }
+            if Self.isDirectory(source),
+               resolvedDestination.path == resolvedSource.path
+                || resolvedDestination.path.hasPrefix(resolvedSource.path + "/") {
+                throw LocalToolError.invalidArguments("Can't copy the folder '\(relativePath(for: source))' into itself.")
+            }
+
+            let existed = fm.fileExists(atPath: target.path)
+            if existed && !overwrite {
+                throw LocalToolError.invalidArguments("'\(relativePath(for: target))' already exists. Pass overwrite: true to replace it, or pick another destination.")
+            }
+            plans.append((source, target, existed))
+        }
+
+        let approved = await requestApproval(.fileCopy(
+            sources: sources.map { relativePath(for: $0) },
+            destination: relativePath(for: destinationFolder),
+            overwrite: overwrite
+        ))
+        guard approved else { throw LocalToolError.approvalDenied }
+
+        try fm.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        for plan in plans {
+            if plan.existed {
+                try fm.removeItem(at: plan.destination)
+            }
+            try fm.copyItem(at: plan.source, to: plan.destination)
+            Self.notifyFileChangedOnDisk(plan.destination)
+        }
+
+        let copied = plans.map { "  \(relativePath(for: $0.destination))" }.joined(separator: "\n")
+        return "Copied \(plans.count) item\(plans.count == 1 ? "" : "s") into '\(relativePath(for: destinationFolder))':\n\(copied)"
+    }
+
+    private func createFolder(
+        _ arguments: [String: Any],
+        requestApproval: @escaping (PendingApprovalKind) async -> Bool
+    ) async throws -> String {
+        let fm = FileManager.default
+        guard let path = arguments["path"] as? String,
+              !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LocalToolError.invalidArguments("path is required")
+        }
+        let folderURL = try resolvePath(path)
+        var isDirectory: ObjCBool = false
+        if fm.fileExists(atPath: folderURL.path, isDirectory: &isDirectory) {
+            if isDirectory.boolValue {
+                return "Folder '\(relativePath(for: folderURL))' already exists."
+            }
+            throw LocalToolError.invalidArguments("'\(path)' already exists as a file, not a folder.")
+        }
+
+        let approved = await requestApproval(.createFolder(relativePath: relativePath(for: folderURL)))
+        guard approved else { throw LocalToolError.approvalDenied }
+
+        try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        Self.notifyProjectFilesChanged()
+        return "Created folder '\(relativePath(for: folderURL))'."
+    }
+
+    /// Loader passed to `TypstToMarkdownConverter` so `#include`/`#import`
+    /// targets resolve relative to the source file — but never outside the
+    /// current scope.
+    private func markdownFileLoader(for sourceURL: URL) -> ((String) -> String?)? {
+        guard let root = scope.root else { return nil }
+        let baseDirectory = sourceURL.deletingLastPathComponent()
+        let resolvedRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+        return { filename in
+            let cleaned = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { return nil }
+            let candidate = cleaned.hasPrefix("/")
+                ? URL(fileURLWithPath: cleaned)
+                : baseDirectory.appendingPathComponent(cleaned)
+            let resolved = candidate.standardizedFileURL.resolvingSymlinksInPath()
+            guard resolved.path == resolvedRoot.path || resolved.path.hasPrefix(resolvedRoot.path + "/") else {
+                return nil
+            }
+            return (try? TextFileEncoding.string(from: resolved))?.text
+        }
+    }
+
+    private static func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+    }
+
+    /// Displays a path relative to the scope root when it's inside it, and the
+    /// absolute path otherwise (never expected for a tool result, but safe).
+    private func relativePath(for url: URL) -> String {
+        guard let root = scope.root else { return url.path }
+        let rootPath = root.standardizedFileURL.path
+        let candidate = url.standardizedFileURL.path
+        guard candidate.hasPrefix(rootPath + "/") else { return candidate }
+        return String(candidate.dropFirst(rootPath.count + 1))
+    }
+
+    private static func notifyProjectFilesChanged() {
+        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
     }
 
     // MARK: - Web Fetch

@@ -467,6 +467,63 @@ struct AIChatView: View {
                 .background(Color.black.opacity(0.06))
                 .cornerRadius(6)
 
+            case .documentExport(let path, let format, let destination, let existingFile):
+                HStack(spacing: 6) {
+                    Image(systemName: "square.and.arrow.up").foregroundColor(.orange)
+                    Text("Export '\(path)' to \(format.uppercased())?").font(.subheadline.bold())
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(destination)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if existingFile {
+                        Text("This replaces the existing file.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+
+            case .fileCopy(let sources, let destination, let overwrite):
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.on.doc").foregroundColor(.orange)
+                    Text("Copy \(sources.count) item\(sources.count == 1 ? "" : "s") into '\(destination)'?")
+                        .font(.subheadline.bold())
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(sources.prefix(20)), id: \.self) { source in
+                            Text(source)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if sources.count > 20 {
+                            Text("… and \(sources.count - 20) more")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        if overwrite {
+                            Text("Existing items in the destination will be replaced.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .frame(maxHeight: 140)
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+
+            case .createFolder(let path):
+                HStack(spacing: 6) {
+                    Image(systemName: "folder.badge.plus").foregroundColor(.orange)
+                    Text("Create folder '\(path)'?").font(.subheadline.bold())
+                }
+
             case .runPython(let code):
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)

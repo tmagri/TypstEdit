@@ -66,6 +66,16 @@ enum PendingApprovalKind {
     /// destination server sees (a compromised page could try to exfiltrate
     /// project secrets by encoding them into URL parameters).
     case webFetch(url: String)
+    /// Compiling a document to PDF/PNG/SVG. The output is binary (or several
+    /// page files), so there's no text diff to show — the destination and
+    /// format are the useful details.
+    case documentExport(relativePath: String, format: String, destination: String, existingFile: Bool)
+    /// Copying files or folders into a delivery/evidence folder. Listed as a
+    /// batch so a multi-file handoff needs one approval, not one per copy.
+    case fileCopy(sources: [String], destination: String, overwrite: Bool)
+    /// Creating a folder (for an empty delivery/evidence folder, or before
+    /// copying into it).
+    case createFolder(relativePath: String)
 }
 
 struct PendingApproval: Identifiable {

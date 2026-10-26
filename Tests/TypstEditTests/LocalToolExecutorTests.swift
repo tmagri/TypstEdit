@@ -335,6 +335,207 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(out.contains("File not found"), out)
     }
 
+    // MARK: - Export & delivery
+
+    func testToolDescriptorsExposeDeliveryTools() {
+        let names = Set(executor.toolDescriptors().map(\.name))
+        for expected in ["export_document", "export_markdown", "create_folder", "copy_files"] {
+            XCTAssertTrue(names.contains(expected), "missing \(expected) in \(names.sorted())")
+        }
+    }
+
+    func testCreateFolderCreatesNestedFolderWithApproval() async throws {
+        var seen: PendingApprovalKind?
+        let out = try await executor.execute(toolName: "create_folder", arguments: [
+            "path": "deploy/evidence"
+        ]) { kind in
+            seen = kind
+            return true
+        }
+
+        XCTAssertTrue(out.contains("Created folder"), out)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: workDir.appendingPathComponent("deploy/evidence").path
+        ))
+        guard case .createFolder(let path)? = seen else {
+            return XCTFail("expected a .createFolder approval, got \(String(describing: seen))")
+        }
+        XCTAssertEqual(path, "deploy/evidence")
+    }
+
+    func testDeniedCreateFolderLeavesNothingBehind() async throws {
+        await assertThrows({ if case .approvalDenied = $0 { return true }; return false }) {
+            try await self.run("create_folder", ["path": "deploy"], approve: false)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workDir.appendingPathComponent("deploy").path))
+    }
+
+    func testListFilesShowsEmptyFolders() async throws {
+        _ = try await run("create_folder", ["path": "deploy/evidence"])
+        let out = try await run("list_files", [:])
+        XCTAssertTrue(out.contains("deploy/"), out)
+        XCTAssertTrue(out.contains("deploy/evidence/"), out)
+    }
+
+    func testExportMarkdownWritesConvertedCopy() async throws {
+        try write("Mugs.typ", "= Mugs\n\nSome **bold** text.\n")
+        var seen: PendingApprovalKind?
+        let out = try await executor.execute(toolName: "export_markdown", arguments: [
+            "path": "Mugs.typ", "output": "deploy/Mugs.md"
+        ]) { kind in
+            seen = kind
+            return true
+        }
+
+        let markdown = try read("deploy/Mugs.md")
+        XCTAssertTrue(out.contains("Exported"), out)
+        XCTAssertTrue(markdown.contains("# Mugs"), markdown)
+        XCTAssertTrue(markdown.contains("**bold**"), markdown)
+        XCTAssertFalse(markdown.contains("= Mugs"), markdown)
+        guard case .fileWrite(let path, _, let newContent, let isNewFile)? = seen else {
+            return XCTFail("expected a .fileWrite approval, got \(String(describing: seen))")
+        }
+        XCTAssertEqual(path, "deploy/Mugs.md")
+        XCTAssertTrue(isNewFile)
+        XCTAssertEqual(newContent, markdown)
+    }
+
+    func testExportMarkdownOfMarkdownSourceCopiesItThrough() async throws {
+        try write("notes.md", "# Notes\n\nPlain **markdown**.\n")
+        _ = try await run("export_markdown", ["path": "notes.md", "output": "deploy/notes.md"])
+        XCTAssertEqual(try read("deploy/notes.md"), "# Notes\n\nPlain **markdown**.\n")
+    }
+
+    func testExportMarkdownOfMarkdownSourceToItselfIsANoOp() async throws {
+        try write("notes.md", "# Notes\n")
+        let out = try await run("export_markdown", ["path": "notes.md", "output": "notes.md"])
+        XCTAssertTrue(out.contains("already Markdown"), out)
+        XCTAssertEqual(try read("notes.md"), "# Notes\n")
+    }
+
+    func testCopyFilesGathersRelatedFilesAndCreatesFolder() async throws {
+        try write("Mugs.typ", "= Mugs\n")
+        try write("evidence/photo.txt", "image placeholder")
+        try write("evidence/receipt.txt", "receipt")
+
+        var seen: PendingApprovalKind?
+        let out = try await executor.execute(toolName: "copy_files", arguments: [
+            "sources": ["Mugs.typ", "evidence/photo.txt", "evidence/receipt.txt"],
+            "destination": "deploy/evidence"
+        ]) { kind in
+            seen = kind
+            return true
+        }
+
+        XCTAssertTrue(out.contains("Copied 3 items"), out)
+        XCTAssertEqual(try read("deploy/evidence/Mugs.typ"), "= Mugs\n")
+        XCTAssertEqual(try read("deploy/evidence/photo.txt"), "image placeholder")
+        XCTAssertEqual(try read("deploy/evidence/receipt.txt"), "receipt")
+        guard case .fileCopy(let sources, let destination, let overwrite)? = seen else {
+            return XCTFail("expected a .fileCopy approval, got \(String(describing: seen))")
+        }
+        XCTAssertEqual(sources, ["Mugs.typ", "evidence/photo.txt", "evidence/receipt.txt"])
+        XCTAssertEqual(destination, "deploy/evidence")
+        XCTAssertFalse(overwrite)
+    }
+
+    func testCopyFilesRefusesExistingDestinationWithoutOverwrite() async throws {
+        try write("new.txt", "new")
+        try write("deploy/new.txt", "old")
+
+        await assertThrows({ if case .invalidArguments = $0 { return true }; return false }) {
+            try await self.run("copy_files", ["sources": ["new.txt"], "destination": "deploy"])
+        }
+        XCTAssertEqual(try read("deploy/new.txt"), "old")
+    }
+
+    func testCopyFilesOverwritesWhenAsked() async throws {
+        try write("new.txt", "new")
+        try write("deploy/new.txt", "old")
+
+        _ = try await run("copy_files", [
+            "sources": ["new.txt"], "destination": "deploy", "overwrite": true
+        ])
+        XCTAssertEqual(try read("deploy/new.txt"), "new")
+    }
+
+    func testCopyFilesRejectsEscapingTheScope() async throws {
+        let outside = workDir.deletingLastPathComponent()
+            .appendingPathComponent("outside-\(UUID().uuidString).txt")
+        try "secret".write(to: outside, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        await assertThrows({ if case .pathEscapesScope = $0 { return true }; return false }) {
+            try await self.run("copy_files", [
+                "sources": ["../\(outside.lastPathComponent)"],
+                "destination": "deploy"
+            ])
+        }
+    }
+
+    func testExportDocumentRejectsMismatchedOutputExtension() async throws {
+        try write("Mugs.typ", "= Mugs\n")
+        await assertThrows({ if case .invalidArguments = $0 { return true }; return false }) {
+            try await self.run("export_document", [
+                "path": "Mugs.typ", "format": "pdf", "output": "deploy/Mugs.md"
+            ])
+        }
+    }
+
+    func testExportDocumentCompilesPDFIntoDeliveryFolder() async throws {
+        _ = try requireTypst()
+        try write("Mugs.typ", "= Mugs\n\nFinal copy.\n")
+
+        var seen: PendingApprovalKind?
+        let out = try await executor.execute(toolName: "export_document", arguments: [
+            "path": "Mugs.typ", "format": "pdf", "output": "deploy/Mugs"
+        ]) { kind in
+            seen = kind
+            return true
+        }
+
+        let pdf = workDir.appendingPathComponent("deploy/Mugs.pdf")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: pdf.path), out)
+        XCTAssertTrue(out.contains("Exported"), out)
+        guard case .documentExport(let path, let format, let destination, let existingFile)? = seen else {
+            return XCTFail("expected a .documentExport approval, got \(String(describing: seen))")
+        }
+        XCTAssertEqual(path, "Mugs.typ")
+        XCTAssertEqual(format, "pdf")
+        XCTAssertEqual(destination, "deploy/Mugs.pdf")
+        XCTAssertFalse(existingFile)
+    }
+
+    /// The full "make a deploy folder with the PDF, a Markdown copy and
+    /// related evidence" job from the sample prompt — proving the agent can
+    /// do it with built-in tools, no Python and no manual steps.
+    func testDeployPackageWorkflowBuildsPDFMarkdownAndEvidence() async throws {
+        _ = try requireTypst()
+        try write("Mugs.typ", "= Mugs\n\nFinal approved copy.\n")
+        try write("evidence/order-confirmation.txt", "Order 1234")
+        try write("evidence/shipping-label.txt", "Label data")
+
+        _ = try await run("create_folder", ["path": "deploy"])
+        _ = try await run("export_document", [
+            "path": "Mugs.typ", "format": "pdf", "output": "deploy/Mugs.pdf"
+        ])
+        _ = try await run("export_markdown", [
+            "path": "Mugs.typ", "output": "deploy/Mugs.md"
+        ])
+        _ = try await run("copy_files", [
+            "sources": ["evidence/order-confirmation.txt", "evidence/shipping-label.txt"],
+            "destination": "deploy/evidence"
+        ])
+
+        let listing = try await run("list_files", [:])
+        for expected in ["deploy/", "deploy/Mugs.pdf", "deploy/Mugs.md", "deploy/evidence/"] {
+            XCTAssertTrue(listing.contains(expected), "missing \(expected) in:\n\(listing)")
+        }
+        XCTAssertTrue(listing.contains("deploy/evidence/order-confirmation.txt"), listing)
+        XCTAssertTrue(listing.contains("deploy/evidence/shipping-label.txt"), listing)
+        XCTAssertTrue(try read("deploy/Mugs.md").contains("# Mugs"))
+    }
+
     // MARK: - Automatic post-edit validation
 
     func testEditFileAppendsPassingValidationNote() async throws {
