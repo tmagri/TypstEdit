@@ -12,9 +12,7 @@ struct CalculatorView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.colorScheme) private var colorScheme
 
-    @State private var showSavePanel = false
     @State private var showOpenPanel = false
-    @State private var showExportPanel = false
     @State private var showNewAlert = false
     @State private var entryFocusTrigger = UUID()
 
@@ -37,8 +35,6 @@ struct CalculatorView: View {
                 session.load(from: url)
             }
         }
-        .sheet(isPresented: $showSavePanel) { saveSheet }
-        .sheet(isPresented: $showExportPanel) { exportSheet }
         .alert("Start a new calculation?", isPresented: $showNewAlert) {
             Button("New Session", role: .destructive) { session.newSession() }
             Button("Cancel", role: .cancel) {}
@@ -87,7 +83,7 @@ struct CalculatorView: View {
                 if session.documentURL != nil {
                     try? session.save(to: session.documentURL!)
                 } else {
-                    showSavePanel = true
+                    saveSessionAs()
                 }
             } label: {
                 Image(systemName: "square.and.arrow.down")
@@ -96,8 +92,8 @@ struct CalculatorView: View {
             .help("Save session")
 
             Menu {
-                Button("Save As…") { showSavePanel = true }
-                Button("Export as .typ…") { showExportPanel = true }
+                Button("Save As…") { saveSessionAs() }
+                Button("Export as .typ…") { exportTypst() }
                 Divider()
                 Menu("Forget stored variable") {
                     if session.storedVariables.isEmpty {
@@ -395,34 +391,48 @@ struct CalculatorView: View {
         editorController.insertText(text)
     }
 
-    // MARK: - Save / export sheets
+    // MARK: - Save / export panels
 
-    private var saveSheet: some View {
-        SavePanelHost(
+    /// Runs a save panel and hands the chosen URL back.
+    private func chooseSaveURL(nameFieldLabel: String,
+                               message: String,
+                               extension ext: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.nameFieldLabel = nameFieldLabel
+        panel.message = message
+        panel.allowedContentTypes = [UTType(filenameExtension: ext) ?? .data]
+        if let projectRoot = editorController.projectRootURL {
+            panel.directoryURL = projectRoot
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        if url.pathExtension.lowercased() != ext {
+            return url.appendingPathExtension(ext)
+        }
+        return url
+    }
+
+    private func saveSessionAs() {
+        guard let url = chooseSaveURL(
             nameFieldLabel: "Save calculation",
             message: "Sessions are saved as .tcalc files in your project.",
-            allowedExtensions: [CalculatorDocument.fileExtension],
-            initialDirectory: editorController.projectRootURL) { url in
-            var finalURL = url
-            if finalURL.pathExtension.lowercased() != CalculatorDocument.fileExtension {
-                finalURL.appendPathExtension(CalculatorDocument.fileExtension)
-            }
-            try? session.save(to: finalURL)
+            extension: CalculatorDocument.fileExtension) else { return }
+        do {
+            try session.save(to: url)
+        } catch {
+            session.lastStatus = "Could not save: \(error.localizedDescription)"
         }
     }
 
-    private var exportSheet: some View {
-        SavePanelHost(
+    private func exportTypst() {
+        guard let url = chooseSaveURL(
             nameFieldLabel: "Export as Typst",
             message: "Exports the history as display equations.",
-            allowedExtensions: ["typ"],
-            initialDirectory: editorController.projectRootURL) { url in
-            var finalURL = url
-            if finalURL.pathExtension.lowercased() != "typ" {
-                finalURL.appendPathExtension("typ")
-            }
-            let exported = session.exportTypst()
-            try? exported.write(to: finalURL, atomically: true, encoding: .utf8)
+            extension: "typ") else { return }
+        do {
+            try session.exportTypst().write(to: url, atomically: true, encoding: .utf8)
+            session.lastStatus = "Exported \(url.lastPathComponent)"
+        } catch {
+            session.lastStatus = "Could not export: \(error.localizedDescription)"
         }
     }
 }
@@ -465,44 +475,6 @@ struct MathImageView: View {
             } else {
                 failed = true
             }
-        }
-    }
-}
-
-// MARK: - NSSavePanel shim
-
-/// SwiftUI has no native save panel wrapper; this hosts one via a sheet.
-struct SavePanelHost: NSViewRepresentable {
-    let nameFieldLabel: String
-    let message: String
-    let allowedExtensions: [String]
-    let initialDirectory: URL?
-    let onChoose: (URL) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            let panel = NSSavePanel()
-            panel.nameFieldLabel = nameFieldLabel
-            panel.message = message
-            panel.allowedContentTypes = Self.contentTypes(for: allowedExtensions)
-            if let initialDirectory {
-                panel.directoryURL = initialDirectory
-            }
-            panel.beginSheetModal(for: view.window!) { response in
-                if response == .OK, let url = panel.url {
-                    onChoose(url)
-                }
-            }
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private static func contentTypes(for extensions: [String]) -> [UTType] {
-        extensions.compactMap { ext in
-            UTType(filenameExtension: ext) ?? .data
         }
     }
 }
