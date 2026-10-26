@@ -26,12 +26,7 @@ actor CASMathRenderer {
         }
         guard let typstPath = Self.resolveTypstPath() else { return nil }
 
-        let fill = dark ? "ffffff" : "000000"
-        let source = """
-        #set page(width: auto, height: auto, margin: 4pt)
-        #set text(fill: rgb("\(fill)"), size: 12pt)
-        $ \(math) $
-        """
+        let source = Self.documentSource(math: math, dark: dark)
 
         let work = scratchRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
@@ -59,6 +54,17 @@ actor CASMathRenderer {
 
         cache.setObject(image, forKey: key)
         return image
+    }
+
+    /// The page must be transparent: Typst's default white SVG page hides
+    /// the white equation glyphs used in dark mode.
+    nonisolated static func documentSource(math: String, dark: Bool) -> String {
+        let fill = dark ? "ffffff" : "000000"
+        return """
+        #set page(width: auto, height: auto, margin: 4pt, fill: none)
+        #set text(fill: rgb("\(fill)"), size: 12pt)
+        $ \(math) $
+        """
     }
 
     /// Mirrors TypstCompiler's lookup so both always use the same binary.
