@@ -13,8 +13,10 @@ Tools/cas/build_cas.sh --arch universal # arm64 + x86_64, merged with lipo
 Tools/cas/build_cas.sh fetch            # just download/verify pinned sources
 ```
 
-The script (needs Xcode CLT, plus Homebrew `autoconf automake libtool bash`
-on macOS) downloads pinned sources of GMP 6.3.0, MPFR 4.2.2 and Giac (Debian
+The bundle scripts build the helper automatically if it is missing or does
+not include the requested architecture. The script (needs Xcode CLT, plus
+Homebrew `autoconf automake libtool bash` on macOS) downloads pinned sources
+of GMP 6.3.0, MPFR 4.2.2 and Giac (Debian
 salsa commit `5295d5d`), applies Debian's build patches, builds static
 libraries per architecture under `build/cas/prefix-<arch>`, and links the
 helper from `typstedit-cas.cpp` into `build/cas/typstedit-cas`. `bundle.sh`
@@ -22,6 +24,8 @@ copies that binary into `Contents/Resources/bin/`.
 
 First build takes roughly 20–40 minutes per architecture (GMP + MPFR + Giac).
 Incremental rebuilds after editing `typstedit-cas.cpp` take seconds.
+When running the app directly from Xcode or SwiftPM, build the helper once
+with the command above so it can be found under `build/cas`.
 
 ## How TypstEdit uses it
 

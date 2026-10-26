@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="TypstEdit"
 BUILD_DIR=".build"
 APP_BUNDLE="$APP_NAME.app"
@@ -97,17 +98,25 @@ else
     exit 1
 fi
 
-# Copy the universal CAS helper (Calculator mode). Built by
-# Tools/cas/build_cas.sh --arch universal.
+# Build the universal CAS helper if it is missing or incomplete.
 echo "Bundling Universal CAS helper..."
-if [ -f "build/cas/typstedit-cas" ]; then
-    cp "build/cas/typstedit-cas" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
-    chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
-    codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
-    echo "✓ Universal CAS helper bundled"
-else
-    echo "⚠️  Warning: build/cas/typstedit-cas not found — Calculator mode will be unavailable. Run Tools/cas/build_cas.sh --arch universal."
+CAS_HELPER="build/cas/typstedit-cas"
+if [ ! -x "$CAS_HELPER" ] \
+    || ! lipo -verify_arch arm64 "$CAS_HELPER" >/dev/null 2>&1 \
+    || ! lipo -verify_arch x86_64 "$CAS_HELPER" >/dev/null 2>&1; then
+    echo "Building universal CAS helper (the first build can take 20–40 minutes per architecture)..."
+    "$SCRIPT_DIR/Tools/cas/build_cas.sh" --arch universal
 fi
+if [ ! -x "$CAS_HELPER" ] \
+    || ! lipo -verify_arch arm64 "$CAS_HELPER" >/dev/null 2>&1 \
+    || ! lipo -verify_arch x86_64 "$CAS_HELPER" >/dev/null 2>&1; then
+    echo "Error: CAS helper was not built for both arm64 and x86_64."
+    exit 1
+fi
+cp "$CAS_HELPER" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
+echo "✓ Universal CAS helper bundled"
 
 # Icon Handling
 # Priority: compile the Icon Composer asset (AppIcon.icon) with actool, which

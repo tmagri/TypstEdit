@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="TypstEdit"
 
 CONFIG=${1:-release}
@@ -113,17 +114,21 @@ else
     echo "⚠️  Warning: Typst executable not found. App will require system Typst installation."
 fi
 
-# Copy the CAS helper (Calculator mode) into the bundle. Built by
-# Tools/cas/build_cas.sh into build/cas/typstedit-cas.
+# Build the CAS helper if it is missing or does not include this architecture.
 echo "Bundling CAS helper..."
-if [ -f "build/cas/typstedit-cas" ]; then
-    cp "build/cas/typstedit-cas" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
-    chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
-    codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
-    echo "✓ CAS helper bundled"
-else
-    echo "⚠️  Warning: build/cas/typstedit-cas not found — Calculator mode will be unavailable. Run Tools/cas/build_cas.sh."
+CAS_HELPER="build/cas/typstedit-cas"
+if [ ! -x "$CAS_HELPER" ] || ! lipo -verify_arch "$ARCH" "$CAS_HELPER" >/dev/null 2>&1; then
+    echo "Building CAS helper for $ARCH (the first build can take 20–40 minutes)..."
+    "$SCRIPT_DIR/Tools/cas/build_cas.sh" --arch "$ARCH"
 fi
+if [ ! -x "$CAS_HELPER" ] || ! lipo -verify_arch "$ARCH" "$CAS_HELPER" >/dev/null 2>&1; then
+    echo "Error: CAS helper was not built with the required $ARCH architecture."
+    exit 1
+fi
+cp "$CAS_HELPER" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
+echo "✓ CAS helper bundled"
 
 
 # Icon Handling

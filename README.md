@@ -176,11 +176,17 @@ If you want to contribute or build the app yourself:
     `typst-x86_64-apple-darwin/typst` for Intel.
 
 3.  **Bundle and Build:**
-    Use the included script to compile and create the bundle:
+    Use the included script to compile and create the bundle. It also builds
+    the Calculator's CAS helper automatically the first time (allow 20–40
+    minutes per architecture):
     ```bash
     chmod +x bundle.sh
     ./bundle.sh
     ```
+    The CAS build requires macOS with Xcode Command Line Tools and Homebrew
+    `autoconf`, `automake`, `libtool`, and `bash`. To build the helper manually
+    before launching TypstEdit directly from Xcode or SwiftPM, run
+    `Tools/cas/build_cas.sh`.
 
 4.  **Create Installer (Optional):**
     To generate the `.dmg` file:
