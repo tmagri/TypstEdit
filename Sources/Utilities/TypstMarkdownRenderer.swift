@@ -63,6 +63,8 @@ final class MarkdownRenderer {
             return "\n---\n\n"
         case "outline":
             return "\n[TOC]\n\n"
+        case "figure":
+            return renderFigure(args: args)
         case "link":
             return renderLink(args: args)
         case "image":
@@ -135,6 +137,33 @@ final class MarkdownRenderer {
             }
         }
         return "![image](\(imagePath))\n\n"
+    }
+
+    // MARK: Figures
+
+    /// `#figure(image("a.png"), caption: [A caption])` — Markdown has no numbered
+    /// figure element, so the body renders as-is and the caption becomes an
+    /// italic line below it. Numbering (`Figure 1:`), supplements, placement, and
+    /// gaps cannot survive the conversion and are dropped.
+    private func renderFigure(args: [TypstArg]) -> String {
+        var parts: [String] = []
+        for arg in args where arg.name == nil {
+            let rendered = render(content: arg.value.display())
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rendered.isEmpty {
+                parts.append(rendered)
+            }
+        }
+        if let caption = args.first(where: { $0.name == "caption" }) {
+            let rendered = render(content: caption.value.display())
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\n", with: " ")
+            if !rendered.isEmpty {
+                parts.append("*\(rendered)*")
+            }
+        }
+        guard !parts.isEmpty else { return "" }
+        return parts.joined(separator: "\n\n") + "\n\n"
     }
 
     // MARK: Payload extraction

@@ -428,6 +428,109 @@ final class MarkdownConversionTests: XCTestCase {
         XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "Typst")
     }
 
+    // MARK: - Element selectors inside content blocks
+
+    /// Regression test: a `#block[...]` wrapping a figure outline must compile to
+    /// its content, never to raw source. `figure.where(kind: image)` reaches field
+    /// access through the lenient unbound-name fallback (a string), so the lookup
+    /// used to throw and the snippet-level recovery leaked the whole block into the
+    /// Markdown — the exact shape of the List of Figures block in Mugs.typ.
+    func testBlockWithFigureWhereOutlineCompiles() {
+        let input = """
+        #block[
+          #show outline.entry: it => {
+            set text(weight: "regular", style: "normal")
+            let figure-number = counter(figure.where(kind: image)).at(it.element.location()).first()
+            let short-name = figure-list-titles.at(figure-number - 1)
+            link(
+              it.element.location(),
+              it.indented(it.prefix(), [
+                #short-name #box(width: 1fr, it.fill) #it.page()
+              ]),
+            )
+          }
+          #outline(title: [List of Figures], target: figure.where(kind: image))
+        ]
+        """
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "[TOC]")
+        XCTAssertFalse(output.contains("#block["), "block source must not leak: \(output)")
+        XCTAssertFalse(output.contains("where("), "selector source must not leak: \(output)")
+    }
+
+    /// `figure.where(...)` / `heading.where(...)` are selectors: their only visible
+    /// effect is styling, counting, or listing. They drop silently, and selector
+    /// refinements chain on that silence instead of failing the snippet.
+    func testSelectorValuesDropSilently() {
+        let input = """
+        #let figures = figure.where(kind: image).and(heading.where(level: 1))
+        #outline(title: [Figures], target: figures)
+
+        After
+        """
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertTrue(output.contains("[TOC]"), "outline must still render: \(output)")
+        XCTAssertTrue(output.contains("After"), "following text must survive: \(output)")
+        XCTAssertFalse(output.contains("where("), "selector source must not leak: \(output)")
+    }
+
+    /// A dictionary key named like a selector method stays an ordinary value; the
+    /// selector rule must not swallow stored keys.
+    func testDictKeyNamedWhereStillResolves() {
+        let input = "#let d = (where: \"stored\")\n#d.where"
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "stored")
+    }
+
+    // MARK: - Figures
+
+    /// Regression test: `#figure(...)` used to leak its whole call as raw source
+    /// (`#figure(![image](a.png)\n, caption: …)`), leaving a dangling `#figure(`
+    /// wrapper and an unclosed paren in the Markdown. The body must render
+    /// natively with the caption as an italic line below it — Markdown has no
+    /// numbered figure element, so numbering and supplements cannot survive.
+    func testFigureWithImageAndCaptionRendersNatively() {
+        let input = """
+        #figure(
+          image("evidence/MUG-GD239205/input_reference.png", width: 100%),
+          caption: [Original supplied input PDF, before rotation or imposition.],
+        )
+        """
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertEqual(
+            output.trimmingCharacters(in: .whitespacesAndNewlines),
+            """
+            ![image](evidence/MUG-GD239205/input_reference.png)
+
+            *Original supplied input PDF, before rotation or imposition.*
+            """
+        )
+        XCTAssertFalse(output.contains("#figure("), "figure wrapper must not leak: \(output)")
+    }
+
+    func testFigureWithoutCaptionRendersBodyOnly() {
+        let input = "#figure(image(\"a.png\"))"
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "![image](a.png)")
+    }
+
+    /// A table inside a figure keeps its row structure; only the caption collapses
+    /// to a single italic line.
+    func testFigureWithTableKeepsTableIntact() {
+        let input = """
+        #figure(
+          table(columns: 2, [a], [b], [1], [2]),
+          caption: [Measured values],
+        )
+        """
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(trimmed.contains("| a | b |"), "table rows must survive: \(trimmed)")
+        XCTAssertTrue(trimmed.contains("| 1 | 2 |"), "table rows must survive: \(trimmed)")
+        XCTAssertTrue(trimmed.hasSuffix("*Measured values*"), "caption must be italic and last: \(trimmed)")
+        XCTAssertFalse(trimmed.contains("#figure("), "figure wrapper must not leak: \(trimmed)")
+    }
+
     func testTypstImportAndConditionalEvaluation() {
         let input = """
 #import "lib.typ"

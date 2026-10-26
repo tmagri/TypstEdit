@@ -18,6 +18,19 @@ extension TypstInterpreter {
            let function = TypstBuiltins.typeFunction(typeName, field) {
             return function
         }
+        // Selector methods (`figure.where(kind: image)`, and the `.and`/`.or`
+        // refinements) have no Markdown meaning, so they evaluate to none and any
+        // further chain stays silent. The base is an element-function name
+        // (`figure`, `outline.entry`), never a value, so it must not be evaluated —
+        // a dotted base like `outline.entry` would otherwise fail before the
+        // selector is seen. A dict may store a key with a selector's name; check
+        // that first so real values still resolve.
+        if TypstBuiltins.selectorMethods.contains(field) {
+            if let resolvedBase = try? eval(expr: base), case .dict = resolvedBase {
+                return try fieldOf(resolvedBase, field)
+            }
+            return .none
+        }
         let baseValue = try eval(expr: base)
         return try fieldOf(baseValue, field)
     }
@@ -80,6 +93,10 @@ extension TypstInterpreter {
 
         // Method desugaring: `items.len()` ≡ `array.len(items)`.
         if case .fieldAccess(let base, let field) = callee {
+            // Selector methods already resolved to none above; re-evaluating a
+            // dotted element name (`outline.entry.where(…), table.cell.where(…)`)
+            // would throw because the name itself is not a value.
+            if TypstBuiltins.selectorMethods.contains(field) { return .none }
             let receiver = try eval(expr: base)
             if case .function(.dropped) = receiver { return .none }
             if case .none = receiver { return .none }

@@ -20,6 +20,17 @@ enum TypstBuiltins {
         "style", "luma", "rgb", "cmyk", "oklab", "oklch", "color",
     ]
 
+    /// Selector methods: `figure.where(kind: image)`, `heading.where(level: 1)`
+    /// and the refinements `.and`/`.or`/`.before`/`.after`/`.within`. A selector
+    /// only names elements to style, count, or list, and Markdown has no selector.
+    /// Element functions like `figure` are not bound in this interpreter, so they
+    /// reach field access as a lenient string and the lookup would otherwise throw,
+    /// leaking the whole enclosing snippet — a `#block[…]` wrapping
+    /// `#outline(target: figure.where(kind: image))` rendered its own source.
+    static let selectorMethods: Set<String> = [
+        "where", "and", "or", "before", "after", "within",
+    ]
+
     // MARK: Registries
 
     static func globalFunction(_ name: String) -> TypstValue? {
