@@ -144,6 +144,7 @@ build_arch() {
                         configure.ac Makefile.am \
           && sed -i.bak2 '/^AC_OUTPUT(\[/,$ { /^doc\//d; /^intl\//d; /^po\//d; /^examples\//d; /^debian/d; /^micropython/d; /^check\//d; }' configure.ac \
           && rm -rf doc check intl po debianold debian examples \
+          && touch src/js.h src/js.c \
           && ( ./autogen.sh 2>/dev/null || autoreconf -fi ) \
           && CONFIG_SHELL="$BREW_BASH" "$BREW_BASH" ./configure --prefix="$prefix" \
                 --disable-fltk --disable-cocoa --disable-ao --disable-gsl \
