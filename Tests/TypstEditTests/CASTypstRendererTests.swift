@@ -142,6 +142,20 @@ final class CASTypstRendererTests: XCTestCase {
         ])), "vec(vec(a, b), vec(c))")
     }
 
+    func testTypstSpecificFallbacks() {
+        // giac prints reciprocals as inv(x); Typst has no `inv`.
+        XCTAssertEqual(render(fn("inv", .number(value: "2", approx: nil))), "1/(2)")
+        // Boolean results from predicates must not break Typst math.
+        XCTAssertEqual(render(.constant("true")), "\"true\"")
+        XCTAssertEqual(render(.constant("false")), "\"false\"")
+    }
+
+    func testBooleanNumberNodesRenderAsText() {
+        // isPrime and comparisons arrive as numeric leaves.
+        XCTAssertEqual(render(.number(value: "true", approx: nil)), "\"true\"")
+        XCTAssertEqual(render(.number(value: "false", approx: nil)), "\"false\"")
+    }
+
     func testSequence() {
         XCTAssertEqual(render(.sequence([.symbol("a"), .symbol("b"), .symbol("c")])), "a, b, c")
     }

@@ -47,6 +47,11 @@ app sends SIGINT; giac's handler aborts the running eval, which comes back as
 - TI-89 spellings giac doesn't carry (`d(` → `diff(`, `→` → `►`,
   `cSolve(` → `csolve(`, `ans`/`entry(n)` recall) are handled in Swift by
   `TISyntax.swift`.
+- `approx` mode approximates numeric leaves but keeps equations and `or`
+  solution sets intact — evaluating those would collapse them to booleans.
+- AI Chat's `evaluate_math` tool runs a fresh, sandboxed helper per call
+  (no network, no file reads or writes, no child processes) with a math-only
+  input allowlist, so it cannot touch the panel's variables or your files.
 
 ## Licensing
 

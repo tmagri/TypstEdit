@@ -14,6 +14,7 @@ struct CalculatorView: View {
 
     @State private var showOpenPanel = false
     @State private var showNewAlert = false
+    @State private var showFunctionCatalog = false
     @State private var entryFocusTrigger = UUID()
 
     var body: some View {
@@ -34,6 +35,16 @@ struct CalculatorView: View {
             if case let .success(urls) = result, let url = urls.first {
                 session.load(from: url)
             }
+        }
+        .sheet(isPresented: $showFunctionCatalog) {
+            CalculatorFunctionCatalogView { example in
+                // Replace the entry line with the chosen example, ready to
+                // edit or evaluate, like picking a catalogue item on the
+                // TI-89.
+                session.entryLine = example
+                entryFocusTrigger = UUID()
+            }
+            .environmentObject(themeManager)
         }
         .alert("Start a new calculation?", isPresented: $showNewAlert) {
             Button("New Session", role: .destructive) { session.newSession() }
@@ -95,6 +106,8 @@ struct CalculatorView: View {
                 Button("Save As…") { saveSessionAs() }
                 Button("Export as .typ…") { exportTypst() }
                 Divider()
+                Button("Function Catalog…") { showFunctionCatalog = true }
+                Divider()
                 Menu("Forget stored variable") {
                     if session.storedVariables.isEmpty {
                         Text("None stored")
@@ -124,6 +137,15 @@ struct CalculatorView: View {
             templateMenu("F3 Calc", items: TICommands.calculus)
             templateMenu("F4 Other", items: TICommands.other)
             Spacer(minLength: 0)
+            Button {
+                showFunctionCatalog = true
+            } label: {
+                Image(systemName: "book.pages")
+                    .font(.system(size: 11))
+                    .foregroundColor(themeManager.textColor.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help("Function catalog")
             modeMenu
         }
         .padding(.horizontal, 12)
@@ -178,8 +200,13 @@ struct CalculatorView: View {
     }
 
     /// Puts template text on the entry line and moves the caret inside it,
-    /// like picking a TI-89 menu item.
+    /// like picking a TI-89 menu item. A template of `__catalog__` opens the
+    /// function catalogue instead.
     private func insertTemplate(_ template: String, at cursorOffset: Int) {
+        guard template != "__catalog__" else {
+            showFunctionCatalog = true
+            return
+        }
         let base = session.entryLine
         session.entryLine = base + template
         entryFocusTrigger = UUID()
@@ -526,6 +553,7 @@ enum TICommands {
     ]
 
     static let other: [TICommand] = [
+        TICommand("Browse all functions…", "__catalog__", caretOffset: 0),
         TICommand("2×2 matrix", "[[1,2][3,4]]", caretOffset: 2),
         TICommand("det( determinant", "det(", caretOffset: 4),
         TICommand("transpose(", "transpose(", caretOffset: 10),

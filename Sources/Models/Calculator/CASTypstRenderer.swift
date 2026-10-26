@@ -51,6 +51,11 @@ enum CASTypstRenderer {
 
     private static func renderNumber(value: String, approx: String?) -> String {
         var text = value
+        // Giac reports booleans (isPrime, comparisons) as numeric leaves.
+        // Typst math would read the bare words as unknown variables.
+        if text == "true" || text == "false" || text == "undef" {
+            return "\"\(text)\""
+        }
         // Powers of ten like 1.5e-7 or 2E+12: Typst math would read `e` as
         // a variable, so typeset scientific notation explicitly.
         if let match = scientificRange(in: text) {
@@ -108,9 +113,10 @@ enum CASTypstRenderer {
         case "i": return "i"
         case "infinity", "inf", "+infinity": return "oo"
         case "-infinity": return "-oo"
-        case "true": return "true"
-        case "false": return "false"
-        case "undef": return "undef"
+        // Typst math has no boolean literals; show the words as text.
+        case "true": return "\"true\""
+        case "false": return "\"false\""
+        case "undef": return "\"undef\""
         default: return renderSymbol(name)
         }
     }
@@ -247,6 +253,9 @@ enum CASTypstRenderer {
             return "root(\(render(args[0])), \(render(args[1])))"
         case "abs" where args.count == 1:
             return "abs(\(render(args[0])))"
+        case "inv" where args.count == 1:
+            // giac prints reciprocals as inv(x); Typst has no `inv`.
+            return "1/(\(render(args[0])))"
         case "exp" where args.count == 1:
             // The TI-89 prints exp(x) as e^x.
             return "e^(\(render(args[0])))"

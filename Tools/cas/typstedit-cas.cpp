@@ -386,6 +386,12 @@ static std::string genToJSON(const gen & g, GIAC_CONTEXT) {
     case _SYMB: {
         const char * raw = g._SYMBptr->sommet.ptr()->s;
         std::string name = raw ? std::string(raw) : std::string();
+        // Program/function-definition echoes are not math. Send their printed
+        // form as text so the app shows it verbatim instead of typesetting a
+        // meaningless call.
+        if (name == "program" || name == "lastprog") {
+            return "{\"t\":\"str\",\"v\":" + jsonStr(sanitizeText(g.print(contextptr))) + "}";
+        }
         gen feuille = g._SYMBptr->feuille;
         std::string args;
         // Multi-argument heads carry their args in a _SEQ__VECT vecteur;

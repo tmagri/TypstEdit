@@ -294,11 +294,20 @@ actor CASEngine {
                 resultTree = try? CASExpressionDecoder.decode(raw)
             }
             let resultText = dict["resultText"] as? String ?? ""
+            // A string result (e.g. a function-definition echo) is not math:
+            // leave resultTypst empty so the history shows plain monospace
+            // text instead of a quoted Typst string.
+            var resultTypst = ""
+            if let tree = resultTree, case .string = tree {
+                resultTypst = ""
+            } else {
+                resultTypst = resultTree.map { CASTypstRenderer.typst($0) } ?? ""
+            }
             continuation.resume(returning: CASEvalResult(
                 inputTree: inputTree,
                 resultTree: resultTree,
                 resultText: resultText,
-                resultTypst: resultTree.map { CASTypstRenderer.typst($0) } ?? "",
+                resultTypst: resultTypst,
                 inputTypst: inputTree.map { CASTypstRenderer.typst($0) } ?? "",
                 errorMessage: "",
                 ok: true))

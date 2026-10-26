@@ -257,19 +257,9 @@ final class CalculatorFunctionCatalogTests: XCTestCase {
             throw XCTSkip("typst binary not found — skipping converter smoke test")
         }
 
-        // Known renderer gaps (reported, not fixed here; CASTypstRenderer
-        // is outside this change):
-        // - giac's internal reciprocal prints as `inv(...)` and Typst has
-        //   no `inv` function ("unknown variable: inv"). This affects any
-        //   result with a reciprocal of a compound expression.
-        // - `true` / `false` constants render as bare words, which Typst
-        //   math reads as unknown variables.
-        // - Define's program echo renders as `program(...)`.
-        // These entries still fall back to plain text in the calculator.
-        let knownRendererGaps: Set<String> = [
-            "define", "propfrac", "taylor", "trig-inverse", "tcollect",
-            "eigvl", "isprime",
-        ]
+        // A function definition returns a program echo, which arrives as a
+        // string and is shown as plain text, not typeset math.
+        let knownRendererGaps: Set<String> = ["define"]
 
         var failures: [String] = []
         for guide in CalculatorFunctionCatalog.entries
@@ -280,11 +270,13 @@ final class CalculatorFunctionCatalogTests: XCTestCase {
                 failures.append("\(guide.id): evaluation failed")
                 continue
             }
+            // Documented gaps are asserted separately by
+            // testKnownGapsBehaveAsDocumented.
+            guard !knownRendererGaps.contains(guide.id) else { continue }
             guard !result.resultTypst.isEmpty else {
                 failures.append("\(guide.id): no Typst result")
                 continue
             }
-            guard !knownRendererGaps.contains(guide.id) else { continue }
             if !compiles(result.resultTypst, with: typstPath) {
                 failures.append("\(guide.id): Typst compile failed for \(result.resultTypst)")
             }
