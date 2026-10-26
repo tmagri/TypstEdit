@@ -375,10 +375,12 @@ enum CASTypstRenderer {
     private static func renderVector(_ items: [CASExpression]) -> String {
         // A row/column vector: `vec(a, b, c)`. A matrix (vector of vectors)
         // becomes `mat(...)` rows.
-        if items.allSatisfy({ item in
-            if case .vector = item { return true }
-            return false
-        }), items.count > 1 {
+        if let first = items.first, case let .vector(cells) = first,
+           !cells.isEmpty, items.allSatisfy({ item in
+               if case let .vector(row) = item { return row.count == cells.count }
+               return false
+           }) {
+            // One row is still a matrix, not a vector containing a vector.
             return renderMatrix([.vector(items)])
         }
         return "vec(" + items.map { render($0) }.joined(separator: ", ") + ")"

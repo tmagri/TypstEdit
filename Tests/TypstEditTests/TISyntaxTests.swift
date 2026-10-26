@@ -38,6 +38,28 @@ final class TISyntaxTests: XCTestCase {
         XCTAssertEqual(TISyntax.preprocess("cZeros(x^2-1,x)"), "cZeros(x^2-1,x)")
     }
 
+    func testAdjacentTIMatrixRows() {
+        XCTAssertEqual(TISyntax.preprocess("[[1,2][3,4]]"), "[[1,2],[3,4]]")
+        XCTAssertEqual(TISyntax.preprocess("[ [1,2] [3,4] [5,6] ]"), "[ [1,2], [3,4], [5,6] ]")
+        XCTAssertEqual(TISyntax.preprocess("det([[a,0][0,b]])"), "det([[a,0],[0,b]])")
+        XCTAssertEqual(TISyntax.preprocess("[[1,2][3,4]]→m"), "[[1,2],[3,4]]►m")
+        XCTAssertEqual(TISyntax.preprocess("[[f([1,2]),3][4,5]]"), "[[f([1,2]),3],[4,5]]")
+    }
+
+    func testMatrixNormalizationPreservesExistingSyntax() {
+        for input in ["[[1,2],[3,4]]", "[[1,2];[3,4]]", "[1,2;3,4]", "[[1,2]]", "[[1],[2]]"] {
+            XCTAssertEqual(TISyntax.preprocess(input), input)
+        }
+    }
+
+    func testMatrixNormalizationDoesNotChangeIndexingOrStrings() {
+        for input in ["m[1][2]", "[1,2][1]", "f(x)[1][2]", "a[[1,2][3,4]]",
+                      "[[1,2] + [3,4]]", "[[1,2][3,4]", "\"[[1,2][3,4]]\""] {
+            XCTAssertEqual(TISyntax.preprocess(input), input)
+        }
+        XCTAssertEqual(TISyntax.preprocess("[[1,2][3,4]][1][2]"), "[[1,2],[3,4]][1][2]")
+    }
+
     func testDefineStatement() {
         XCTAssertEqual(TISyntax.preprocess("define f(x)=x^2"), "f(x):=x^2")
         XCTAssertEqual(TISyntax.preprocess("Define g(a,b)=a*b"), "g(a,b):=a*b")

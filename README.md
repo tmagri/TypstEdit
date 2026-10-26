@@ -104,6 +104,7 @@ Built-in tools (always available, no MCP server required):
 | `convert_markdown_to_typst` | Runs text through the same Markdown→Typst converter the editor uses when you paste — lets the AI write in Markdown instead of guessing at Typst syntax it's unsure of. |
 | `read_skill_file` | Reads a file attached to a currently enabled Skill. |
 | `run_typst_check` | Compiles a snippet, or an existing file in place, to check for errors on demand — without touching your document. |
+| `evaluate_math` | Evaluates one math expression with the bundled Giac CAS, exact or approximate: arithmetic, algebra, calculus, matrices. Returns plain text and Typst math. No project, Python, file, or network access is needed. |
 | `web_fetch` (opt-in) | Fetches a public web page as readable text. Private/loopback/internal addresses are always refused (even via a redirect), no credentials are ever sent, and every fetch needs its own approval showing the full URL. |
 | `run` (Python, opt-in) | Runs a short Python script, sandboxed by default — no network access, writes limited to a scratch folder. |
 

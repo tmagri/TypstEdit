@@ -197,7 +197,9 @@ struct CalculatorView: View {
                     if session.entries.isEmpty {
                         emptyHistory
                     }
-                    ForEach(Array(session.entries.enumerated().reversed()), id: \.element.id) { index, entry in
+                    // Entries are appended in chronological order. Keep
+                    // the latest calculation at the bottom, near the input.
+                    ForEach(Array(session.entries.enumerated()), id: \.element.id) { index, entry in
                         historyRow(entry, index: index)
                             .id(entry.id)
                         Divider().opacity(0.4)
@@ -206,10 +208,14 @@ struct CalculatorView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
             }
-            .onChange(of: session.entries.count) { _ in
-                if let last = session.entries.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
+            .task(id: session.entries.last?.id) {
+                guard let last = session.entries.last else { return }
+                // Give SwiftUI a layout pass before scrolling to the newly
+                // appended row. Also show the end when reopening the panel
+                // or loading a session with the same number of entries.
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                proxy.scrollTo(last.id, anchor: .bottom)
             }
         }
     }
@@ -520,6 +526,10 @@ enum TICommands {
     ]
 
     static let other: [TICommand] = [
+        TICommand("2×2 matrix", "[[1,2][3,4]]", caretOffset: 2),
+        TICommand("det( determinant", "det(", caretOffset: 4),
+        TICommand("transpose(", "transpose(", caretOffset: 10),
+        TICommand("rref( row reduction", "rref(", caretOffset: 5),
         TICommand("define f(x)=", "define f(x)=", caretOffset: 12),
         TICommand("5→a  (store)", "5→", caretOffset: 2),
         TICommand("|  with", " | ", caretOffset: 2),

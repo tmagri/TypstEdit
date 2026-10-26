@@ -64,6 +64,41 @@ final class CASEngineTests: XCTestCase {
         XCTAssertFalse(result.resultText.contains("\u{A1}"))
     }
 
+    func testMatrixInputAndArithmetic() async throws {
+        guard CASEngine.isAvailable else { throw XCTSkip("helper not built") }
+        let cases: [(String, String)] = [
+            ("[[1,2][3,4]]", "mat(1, 2; 3, 4)"),
+            ("[1,2;3,4]", "mat(1, 2; 3, 4)"),
+            ("[[1,2];[3,4]]", "mat(1, 2; 3, 4)"),
+            ("2*[[1,2][3,4]]", "mat(2, 4; 6, 8)"),
+            ("[[1,2][3,4]]+[[1,0][0,1]]", "mat(2, 2; 3, 5)"),
+            ("[[1,2][3,4]]*[[2,0][0,2]]", "mat(2, 4; 6, 8)"),
+            ("det([[1,2][3,4]])", "-2"),
+            ("transpose([[1,2][3,4]])", "mat(1, 3; 2, 4)"),
+            ("[[1,2][3,4]]^(-1)", "mat(-2, 1; 3/2, -1/2)"),
+            ("rref([[1,2][3,4]])", "mat(1, 0; 0, 1)"),
+            ("[[1,2]]", "mat(1, 2)"),
+            ("[[1][2]]", "mat(1; 2)"),
+            ("[[1]]", "mat(1)")
+        ]
+        for (input, expected) in cases {
+            let result = await eval(input)
+            XCTAssertTrue(result.ok, "\(input): \(result.errorMessage)")
+            XCTAssertEqual(result.resultTypst, expected, input)
+        }
+    }
+
+    func testStoredMatrixCanBeReused() async throws {
+        guard CASEngine.isAvailable else { throw XCTSkip("helper not built") }
+        let store = await eval("[[1,2][3,4]]→matrix_test")
+        XCTAssertTrue(store.ok, store.errorMessage)
+        XCTAssertEqual(store.resultTypst, "mat(1, 2; 3, 4)")
+        let result = await eval("matrix_test*2")
+        XCTAssertTrue(result.ok, result.errorMessage)
+        XCTAssertEqual(result.resultTypst, "mat(2, 4; 6, 8)")
+        _ = await eval("delVar(matrix_test)")
+    }
+
     func testErrorPath() async throws {
         guard CASEngine.isAvailable else { throw XCTSkip("helper not built") }
         // giac's parser auto-closes truncation, so exercise the error path

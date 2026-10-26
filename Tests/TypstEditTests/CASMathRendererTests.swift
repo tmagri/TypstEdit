@@ -22,9 +22,26 @@ final class CASMathRendererTests: XCTestCase {
         try verifySVG(dark: false, foreground: "#000000")
     }
 
+    func testMatrixResultsCompileInBothAppearances() throws {
+        let matrices: [CASExpression] = [
+            .vector([.vector([.symbol("a"), .symbol("b")])]),
+            .vector([.vector([.symbol("a")]), .vector([.symbol("b")])]),
+            .vector([.vector([.symbol("a")])]),
+            .vector([
+                .vector([.number(value: "-2", approx: nil), .number(value: "1", approx: nil)]),
+                .vector([.number(value: "3/2", approx: nil), .number(value: "-1/2", approx: nil)])
+            ])
+        ]
+        for matrix in matrices {
+            let math = CASTypstRenderer.typst(matrix)
+            try verifySVG(dark: true, foreground: "#ffffff", math: math)
+            try verifySVG(dark: false, foreground: "#000000", math: math)
+        }
+    }
+
     /// Compile the same source the history renderer uses. A white page
     /// rectangle previously covered dark-mode glyphs, making answers blank.
-    private func verifySVG(dark: Bool, foreground: String) throws {
+    private func verifySVG(dark: Bool, foreground: String, math: String = "x = -2") throws {
         guard let typstPath = CASMathRenderer.resolveTypstPath() else {
             throw XCTSkip("Typst is not installed")
         }
@@ -35,7 +52,7 @@ final class CASMathRendererTests: XCTestCase {
 
         let input = directory.appendingPathComponent("equation.typ")
         let output = directory.appendingPathComponent("equation.svg")
-        try CASMathRenderer.documentSource(math: "x = -2", dark: dark)
+        try CASMathRenderer.documentSource(math: math, dark: dark)
             .write(to: input, atomically: true, encoding: .utf8)
 
         let process = Process()

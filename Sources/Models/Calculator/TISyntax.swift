@@ -40,7 +40,72 @@ enum TISyntax {
         // TI `Define f(x)=x^2` → giac `f(x):=x^2`.
         text = defineStatementToAssignment(text)
 
+        // TI-89 matrices have adjacent rows: [[1,2][3,4]]. Giac reads
+        // that as indexing unless a comma separates the rows.
+        text = normalizeMatrixRows(text)
+
         return text
+    }
+
+    /// Add missing row separators only inside bracketed matrix literals.
+    /// Preserve quoted text, bracketed expressions and chained indexing.
+    private static func normalizeMatrixRows(_ text: String) -> String {
+        let characters = Array(text)
+        var openings: [Int] = []
+        var closingBrackets: [Int: Int] = [:]
+        var quoted = false
+        var escaped = false
+        for (index, character) in characters.enumerated() {
+            if quoted {
+                if escaped { escaped = false }
+                else if character == "\\" { escaped = true }
+                else if character == "\"" { quoted = false }
+                continue
+            }
+            if character == "\"" { quoted = true; continue }
+            if character == "[" { openings.append(index) }
+            if character == "]", let opening = openings.popLast() {
+                closingBrackets[opening] = index
+            }
+        }
+
+        var separators: Set<Int> = []
+        for (opening, closing) in closingBrackets {
+            // A bracket after a name, number, or closing delimiter is an
+            // index, not a literal (e.g. a[[1,2][3,4]]).
+            if let previous = characters[..<opening].last(where: { !$0.isWhitespace }),
+               previous.isLetter || previous.isNumber || previous == "_" || previous == "]" || previous == ")" {
+                continue
+            }
+            var cursor = opening + 1
+            var rows = 0
+            var missing: [Int] = []
+            while cursor < closing {
+                while cursor < closing && characters[cursor].isWhitespace { cursor += 1 }
+                guard cursor < closing, characters[cursor] == "[",
+                      let rowEnd = closingBrackets[cursor], rowEnd < closing else { break }
+                rows += 1
+                cursor = rowEnd + 1
+                while cursor < closing && characters[cursor].isWhitespace { cursor += 1 }
+                if cursor < closing && (characters[cursor] == "," || characters[cursor] == ";") {
+                    cursor += 1
+                } else if cursor < closing && characters[cursor] == "[" {
+                    missing.append(rowEnd + 1)
+                }
+            }
+            // The entire outer bracket must consist of rows, not an
+            // expression containing adjacent subscripts somewhere within it.
+            if cursor == closing && rows > 1 {
+                separators.formUnion(missing)
+            }
+        }
+        guard !separators.isEmpty else { return text }
+        var result = ""
+        for (index, character) in characters.enumerated() {
+            if separators.contains(index) { result.append(",") }
+            result.append(character)
+        }
+        return result
     }
 
     /// Replaces `name(` calls where giac uses a different command name.

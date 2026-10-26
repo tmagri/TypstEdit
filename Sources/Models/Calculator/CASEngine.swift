@@ -9,6 +9,44 @@ import Foundation
 actor CASEngine {
     static let shared = CASEngine()
 
+    /// AI math calls use a fresh, restricted engine, never the panel's
+    /// persistent context. Refuse to run if the OS sandbox is unavailable.
+    private let sandboxed: Bool
+
+    init(sandboxed: Bool = false) {
+        self.sandboxed = sandboxed
+    }
+
+    nonisolated static var sandboxAvailable: Bool {
+        FileManager.default.isExecutableFile(atPath: "/usr/bin/sandbox-exec")
+    }
+
+    /// AI math needs system libraries and frameworks, so this is
+    /// default-allow with targeted denials: no network, no writes, no child
+    /// processes, and no reads of user data (projects, home, temporary
+    /// folders, configuration). A deny-all read policy prevents dyld from
+    /// starting the helper.
+    nonisolated static func sandboxProfile(helperPath: String) -> String {
+        let escaped = helperPath.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return """
+        (version 1)
+        (allow default)
+        (deny network*)
+        (deny file-write*)
+        (allow file-write* (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr"))
+        (deny file-read*
+            (subpath "/Users") (subpath "/Volumes")
+            (subpath "/tmp") (subpath "/private/tmp")
+            (subpath "/etc") (subpath "/private/etc")
+            (subpath "/private/var/folders")
+            (subpath "/opt") (subpath "/usr/local"))
+        (deny process-exec)
+        (allow process-exec (literal "\(escaped)"))
+        (deny process-fork)
+        """
+    }
+
     /// Read-side of the helper's stdout, pulled from a detached reader task.
     /// Only touched from that one task, hence `@unchecked Sendable`.
     private final class LineReader: @unchecked Sendable {
@@ -91,7 +129,18 @@ actor CASEngine {
             throw CASEngineError.helperMissing
         }
         let process2 = Process()
-        process2.executableURL = URL(fileURLWithPath: path)
+        if sandboxed {
+            guard Self.sandboxAvailable else { throw CASEngineError.sandboxUnavailable }
+            let helperPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+            process2.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+            process2.arguments = ["-p", Self.sandboxProfile(helperPath: helperPath), helperPath]
+            process2.currentDirectoryURL = URL(fileURLWithPath: "/")
+            // Do not inherit project paths, credentials or dynamic-loader
+            // overrides from the editor's environment.
+            process2.environment = ["PATH": "/usr/bin:/bin", "HOME": "/", "LANG": "en_US.UTF-8"]
+        } else {
+            process2.executableURL = URL(fileURLWithPath: path)
+        }
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         process2.standardInput = stdinPipe
@@ -286,12 +335,15 @@ actor CASEngine {
 
 enum CASEngineError: LocalizedError {
     case helperMissing
+    case sandboxUnavailable
     case launchFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .helperMissing:
             return "The CAS helper (typstedit-cas) isn't installed. Build it with Tools/cas/build_cas.sh — see Docs/calculator.md."
+        case .sandboxUnavailable:
+            return "The OS sandbox is unavailable. AI math evaluation cannot run without it."
         case let .launchFailed(detail):
             return "Could not start the CAS helper: \(detail)"
         }

@@ -288,12 +288,19 @@ struct SidebarView: View {
                     if let folderName = model.currentFolder?.lastPathComponent {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text(folderName.uppercased())
-                                .font(.system(size: 11, weight: .bold))
-                                .tracking(1)
-                                .foregroundColor(themeManager.textColor.opacity(0.6))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                            // Scale the folder name down as the sidebar gets
+                            // thinner: full name, then a shortened name, then
+                            // nothing. Letting the row squeeze it produced a
+                            // lone last letter ("s"), which reads as a glitch.
+                            // The icon buttons keep their room throughout, and
+                            // the full name stays available as a tooltip.
+                            ViewThatFits(in: .horizontal) {
+                                folderTitle(folderName.uppercased())
+                                folderTitle(shortFolderName(folderName))
+                                Color.clear
+                                    .frame(width: 0, height: 0)
+                            }
+                            .help(folderName)
                             
                             Spacer()
                             
@@ -470,6 +477,25 @@ struct SidebarView: View {
                 NotebookManager.shared.loadNotebooks()
             }
         }
+    }
+
+    /// The folder name in the sidebar header, at one consistent style.
+    private func folderTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .bold))
+            .tracking(1)
+            .foregroundColor(themeManager.textColor.opacity(0.6))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// Head of a long folder name plus an ellipsis, used when the full name no
+    /// longer fits next to the header buttons but a hint of it still does.
+    private func shortFolderName(_ name: String) -> String {
+        let limit = 12
+        let upper = name.uppercased()
+        guard upper.count > limit else { return upper }
+        return String(upper.prefix(limit)) + "…"
     }
 }
 

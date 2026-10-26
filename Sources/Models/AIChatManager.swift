@@ -290,7 +290,7 @@ final class AIChatManager: ObservableObject {
             + mcpTools
 
         var systemPrompt = """
-        You are the AI Chat assistant embedded in TypstEdit, a Typst/Markdown editor. Unlike a single-insertion prompt, you are having an ongoing conversation about the user's \(localTools.scope.noun) as a whole.
+        You are the AI Chat assistant embedded in TypstEdit, a Typst/Markdown editor. Unlike a single-insertion prompt, you are having an ongoing conversation about \(localTools.scope == .none ? "the user's open work, with no project or notebook scope" : "the user's \(localTools.scope.noun) as a whole").
 
         Work like a careful editor:
         - Read before you change. edit_file/write_file only work on a file you've read in this request, and edit_file needs old_string copied exactly from what you read. Prefer edit_file for localized changes — write_file replaces the whole file.
@@ -298,6 +298,7 @@ final class AIChatManager: ObservableObject {
         - If you're not confident of Typst's exact syntax for something (bold, headings, lists, links, tables, math), write it in Markdown and run it through convert_markdown_to_typst first rather than guessing at delimiters. Use run_typst_check on a snippet (or an existing path) any time you want to double-check before or after writing.
         - For a finished document or handoff package, use the export tools instead of Python: export_document compiles to PDF/PNG/SVG, export_markdown writes a .md copy with the editor's own converter, create_folder makes a delivery folder, and copy_files gathers related files/evidence into it in one approved batch. A typical request ("make a deploy folder with the PDF, a Markdown copy and related evidence") is: create_folder, export_document, export_markdown, then copy_files for the evidence — all inside the current scope.
         - Use grep_project for exact lookups (a symbol, a phrase, a heading) before reading whole files, and read_file's offset/limit to page through a large document instead of pulling it in at once.
+        - Use evaluate_math for exact or approximate math. It returns plain text and Typst math. Do not use Python for arithmetic or algebra.
         - For a job with several distinct steps, call update_plan first and keep it current.
         - If understanding a large document or several files would flood this conversation, use delegate_task: a read-only subagent explores and reports back just the facts and quotes you ask for.
         - Explain briefly what you're about to do before calling a tool that changes anything.
@@ -579,7 +580,9 @@ final class AIChatManager: ObservableObject {
         if namespace == AgentHarnessTools.namespace {
             return try await performAgentTool(toolName: toolName, arguments: arguments)
         }
-        if namespace == LocalToolExecutor.namespace || namespace == LocalToolExecutor.pythonNamespace {
+        if namespace == LocalToolExecutor.namespace
+            || namespace == LocalToolExecutor.pythonNamespace
+            || namespace == CalculatorTool.namespace {
             return try await localTools.execute(toolName: toolName, arguments: arguments) { [weak self] kind in
                 guard let self else { return false }
                 return await self.requestApproval(kind, toolCallName: qualifiedName)
@@ -624,6 +627,13 @@ final class AIChatManager: ObservableObject {
     /// write-up. Its tool calls still land in the transcript (marked
     /// `isSubagent`) so you can see what it looked at, but the raw file
     /// contents never enter this conversation.
+    /// Tools a read-only subagent may use. Extracted so a test can assert the
+    /// list never gains a writer, runner, or delegate.
+    static let subagentReadOnlyToolNames: Set<String> = [
+        "list_files", "read_file", "grep_project", "search_project",
+        "read_skill_file", "web_fetch", CalculatorTool.name
+    ]
+
     private func runSubagent(task: String, files: [String]) async throws -> String {
         guard delegateDepth == 0 else {
             throw LocalToolError.invalidArguments("Subagents can't delegate further. Do the remaining work yourself.")
@@ -631,8 +641,9 @@ final class AIChatManager: ObservableObject {
         delegateDepth += 1
         defer { delegateDepth -= 1 }
 
-        let readOnlyNames: Set<String> = ["list_files", "read_file", "grep_project", "search_project", "read_skill_file", "web_fetch"]
-        let subTools = localTools.toolDescriptors().filter { readOnlyNames.contains($0.name) }
+        let subTools = localTools.toolDescriptors().filter {
+            Self.subagentReadOnlyToolNames.contains($0.name)
+        }
 
         var prompt = "Task: \(task)"
         if !files.isEmpty {
@@ -642,7 +653,7 @@ final class AIChatManager: ObservableObject {
         let systemPrompt = """
         You are a read-only research subagent working inside TypstEdit. A larger chat delegated this job to you, but you cannot see its conversation — everything you need is in the task brief.
 
-        Use the available tools to read and search files. You cannot write, edit, run code, or delegate. Stop as soon as you can answer the brief.
+        Use the available tools to read and search files, and to evaluate math. You cannot write, edit, run Python, or delegate. Stop as soon as you can answer the brief.
 
         Reply with findings only: verified facts, short verbatim quotes where exact wording matters, and the file paths they came from. Be concise. If you couldn't find something, say so plainly instead of guessing.
 

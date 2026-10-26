@@ -365,6 +365,9 @@ final class LocalToolExecutor {
             ]
         ))
 
+        // Math needs neither a project root nor the optional Python tool.
+        tools.append(CalculatorTool.descriptor)
+
         if webFetchToolEnabled {
             let domainNote = allowedWebFetchDomains.isEmpty
                 ? "Any public website."
@@ -411,6 +414,9 @@ final class LocalToolExecutor {
         arguments: [String: Any],
         requestApproval: @escaping (PendingApprovalKind) async -> Bool
     ) async throws -> String {
+        if toolName == CalculatorTool.name {
+            return try await CalculatorTool.evaluate(arguments)
+        }
         switch toolName {
         case "list_files": return try listFiles(arguments)
         case "read_file": return try readFile(arguments)

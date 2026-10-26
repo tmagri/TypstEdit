@@ -722,11 +722,12 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Built-in Tools",
             icon: "hammer",
-            description: "Always available to the chat (no MCP server needed): listing/reading/searching files, precise edits, Typst compile checks, Markdown↔Typst conversion, and delivery tools for exporting a document or gathering related files. Anything that changes a file — or runs code — is shown to you for approval first, unless YOLO mode is on."
+            description: "Always available to the chat (no MCP server needed): listing/reading/searching files, precise edits, Typst compile checks, Markdown↔Typst conversion, delivery tools for exporting a document or gathering related files, and evaluate_math for exact or approximate math with the bundled CAS. Anything that changes a file — or runs code — is shown to you for approval first, unless YOLO mode is on."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 Label("list_files, read_file (paged), grep_project — case-insensitive content search", systemImage: "doc.text.magnifyingglass").font(.caption)
                 Label("edit_file — exact-match replacement, with a diff preview; write_file for whole-file changes", systemImage: "pencil.and.outline").font(.caption)
+                Label("evaluate_math — exact or approximate math with the bundled CAS; no files, Python, or network", systemImage: "function").font(.caption)
                 Label("convert_markdown_to_typst — the same converter used when pasting Markdown into the editor", systemImage: "arrow.left.arrow.right").font(.caption)
                 Label("export_markdown — writes a Typst→Markdown copy with the editor's own converter", systemImage: "doc.richtext").font(.caption)
                 Label("export_document — compiles to PDF, PNG or SVG with the editor's export pipeline", systemImage: "square.and.arrow.up").font(.caption)

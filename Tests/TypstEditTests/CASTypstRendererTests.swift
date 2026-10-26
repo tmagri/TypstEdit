@@ -130,6 +130,18 @@ final class CASTypstRendererTests: XCTestCase {
         XCTAssertEqual(render(matrix), "mat(1, 2; 3, 4)")
     }
 
+    func testSingleRowColumnAndScalarMatrices() {
+        XCTAssertEqual(render(.vector([.vector([.symbol("a"), .symbol("b")])])), "mat(a, b)")
+        XCTAssertEqual(render(.vector([.vector([.symbol("a")]), .vector([.symbol("b")])])), "mat(a; b)")
+        XCTAssertEqual(render(.vector([.vector([.symbol("a")])])), "mat(a)")
+    }
+
+    func testRaggedRowsRemainNestedVectors() {
+        XCTAssertEqual(render(.vector([
+            .vector([.symbol("a"), .symbol("b")]), .vector([.symbol("c")])
+        ])), "vec(vec(a, b), vec(c))")
+    }
+
     func testSequence() {
         XCTAssertEqual(render(.sequence([.symbol("a"), .symbol("b"), .symbol("c")])), "a, b, c")
     }

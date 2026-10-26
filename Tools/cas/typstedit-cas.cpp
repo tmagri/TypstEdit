@@ -319,6 +319,47 @@ static bool isOperatorName(const std::string & name) {
     return false;
 }
 
+// Approximate numeric expressions while preserving equations and logical
+// solution sets. Evaluating an `or` of equations would return a boolean.
+static gen approximateTree(const gen & g, GIAC_CONTEXT) {
+    switch (g.type) {
+    case _INT_: case _ZINT: case _FRAC: case _DOUBLE_: case _REAL:
+    case _CPLX: case _FLOAT_: case _IDNT:
+        return evalf(g, 1, contextptr);
+    case _VECT: {
+        vecteur v = *g._VECTptr;
+        for (size_t i = 0; i < v.size(); ++i)
+            v[i] = approximateTree(v[i], contextptr);
+        return gen(v, g.subtype);
+    }
+    case _SYMB: {
+        const char * raw = g._SYMBptr->sommet.ptr()->s;
+        std::string name = raw ? std::string(raw) : std::string();
+        static const char * relational[] = {"=", "==", "<", ">", "<=", ">=", "!=", "or", "and"};
+        bool keepStructure = false;
+        for (const char * r : relational)
+            if (name == r) { keepStructure = true; break; }
+        gen feuille = g._SYMBptr->feuille;
+        if (keepStructure) {
+            if (feuille.type == _VECT) {
+                vecteur v = *feuille._VECTptr;
+                for (size_t i = 0; i < v.size(); ++i)
+                    v[i] = approximateTree(v[i], contextptr);
+                return symbolic(g._SYMBptr->sommet, gen(v, feuille.subtype));
+            }
+            return symbolic(g._SYMBptr->sommet, approximateTree(feuille, contextptr));
+        }
+        try {
+            return evalf(g, 1, contextptr);
+        } catch (std::exception &) {
+            return g;
+        }
+    }
+    default:
+        return g;
+    }
+}
+
 static std::string genToJSON(const gen & g, GIAC_CONTEXT) {
     switch (g.type) {
     case _INT_: case _DOUBLE_: case _ZINT: case _REAL: case _CPLX: case _FRAC: case _FLOAT_: {
@@ -449,6 +490,8 @@ static std::string handleEval(const JSONValue & req, context * ctx) {
         // re-parses output would evaluate `x=-2 or x=2` solution forms as
         // booleans.
         gen r = e.eval(20, ctx);
+        if (approx)
+            r = approximateTree(r, ctx);
         std::string resultTree = genToJSON(r, ctx);
         std::string resultText = sanitizeText(r.print(ctx));
         return makeReply(id, true, inputTree, resultTree, resultText, "", "");
