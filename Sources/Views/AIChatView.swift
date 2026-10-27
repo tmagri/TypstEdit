@@ -81,17 +81,30 @@ struct AIChatView: View {
         HStack(spacing: 10) {
             Image(systemName: "bubble.left.and.text.bubble.right.fill")
                 .foregroundColor(.accentColor)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("AI Chat").font(.subheadline.bold())
-                Text(chat.scopeLabel)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+            // Same squeeze rule as the sidebar section titles: the title and
+            // scope line stay on single lines, truncating the scope label
+            // with an ellipsis while there's room, and the whole block
+            // disappears once even "AI Chat" no longer fits — instead of
+            // wrapping into fragments that grow the header.
+            ViewThatFits(in: .horizontal) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("AI Chat")
+                        .font(.subheadline.bold())
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(chat.scopeLabel)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Color.clear
+                    .frame(width: 0, height: 0)
             }
             Spacer()
             if aiSettings.chatEnabled {
                 Text("≈\(Self.contextLabel(chat.estimatedContextTokens)) / \(Self.contextLabel(aiSettings.chatContextBudgetTokens))")
                     .font(.caption2.monospacedDigit())
+                    .lineLimit(1)
                     .foregroundColor(chat.estimatedContextTokens > aiSettings.chatContextBudgetTokens ? .orange : .secondary)
                     .help("Rough estimate of the conversation context sent with the next message, against the configured budget. Older turns are summarized automatically when this is exceeded.")
                 Button {
@@ -635,81 +648,147 @@ struct AIChatView: View {
         .padding(10)
     }
 
+    // The picker row adapts as the panel narrows instead of overflowing —
+    // the menus and the model chip are fixed-size, so the old single line
+    // clipped on both edges ("…lls ⌄", "qwen3.8-27b-splas…", YOLO off
+    // screen). Candidates are tried in order:
+    //   1. all controls with labels, one line
+    //   2. labels kept, model chip moved to its own second line
+    //   3. icon-only controls on one line (tooltips carry the names)
+    //   4. icon-only controls + the named model chip on its own line —
+    //      compact enough for the sidebar's 150pt minimum width.
     private var pickersRow: some View {
-        HStack(spacing: 10) {
-            Button {
-                chat.ragToolEnabled.toggle()
-            } label: {
-                Label("RAG", systemImage: chat.ragToolEnabled ? "magnifyingglass.circle.fill" : "magnifyingglass.circle")
-                    .font(.caption2)
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(chat.ragToolEnabled ? .accentColor : .secondary)
-            .help(chat.ragToolEnabled ? "Project search (RAG) is available to the AI. Click to turn off for this session." : "Project search (RAG) is off for this session. Click to turn back on.")
-
-            Menu {
-                if skillsManager.allSkills.isEmpty {
-                    Text("No skills configured yet.")
-                } else {
-                    ForEach(skillsManager.allSkills) { skill in
-                        Toggle(isOn: Binding(
-                            get: { chat.selectedSkillIDs.contains(skill.id) },
-                            set: { isOn in
-                                if isOn { chat.selectedSkillIDs.insert(skill.id) } else { chat.selectedSkillIDs.remove(skill.id) }
-                            }
-                        )) {
-                            Text("\(skill.name) · \(skill.scope.label)")
-                        }
-                    }
-                }
-            } label: {
-                Label("Skills", systemImage: "sparkles.square.filled.on.square").font(.caption2)
-            }
-            .menuStyle(.borderlessButton).fixedSize()
-
-            Menu {
-                let servers = mcpManager.allServers.filter { $0.config.isConfigured }
-                if servers.isEmpty {
-                    Text("No MCP servers configured yet.")
-                } else {
-                    ForEach(servers) { server in
-                        Toggle(isOn: Binding(
-                            get: { chat.selectedMCPServerIDs.contains(server.id) },
-                            set: { isOn in
-                                if isOn { chat.selectedMCPServerIDs.insert(server.id) } else { chat.selectedMCPServerIDs.remove(server.id) }
-                            }
-                        )) {
-                            Text("\(server.config.name) · \(server.scope.label)")
-                        }
-                    }
-                }
-            } label: {
-                Label("Tools", systemImage: "wrench.and.screwdriver").font(.caption2)
-            }
-            .menuStyle(.borderlessButton).fixedSize()
-
-            AIModelPickerMenu(feature: .chat)
-                .disabled(chat.isGenerating)
-
-            Spacer()
-
-            Button {
-                if chat.yoloMode {
-                    chat.yoloMode = false
-                } else {
-                    showYoloConfirm = true
-                }
-            } label: {
-                Label("YOLO", systemImage: chat.yoloMode ? "bolt.shield.fill" : "bolt.shield")
-                    .font(.caption2)
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(chat.yoloMode ? .red : .secondary)
-            .help(chat.yoloMode
-                  ? "YOLO mode is ON — every write, edit, and code run is auto-approved for this session. Click to turn off."
-                  : "YOLO mode: auto-approve every write, edit, and code run for the rest of this session (still limited to this project/notebook).")
+        ViewThatFits(in: .horizontal) {
+            pickersLine(modelOnOwnRow: false, iconOnly: false)
+            pickersLine(modelOnOwnRow: true, iconOnly: false)
+            pickersLine(modelOnOwnRow: false, iconOnly: true)
+            pickersLine(modelOnOwnRow: true, iconOnly: true)
         }
         .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private func pickersLine(modelOnOwnRow: Bool, iconOnly: Bool) -> some View {
+        if modelOnOwnRow {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    ragToggle(iconOnly: iconOnly)
+                    skillsMenu(iconOnly: iconOnly)
+                    toolsMenu(iconOnly: iconOnly)
+                    Spacer(minLength: 0)
+                    yoloToggle(iconOnly: iconOnly)
+                }
+                // On its own line the chip always has room for the name.
+                HStack(spacing: 10) {
+                    AIModelPickerMenu(feature: .chat)
+                        .disabled(chat.isGenerating)
+                    Spacer(minLength: 0)
+                }
+            }
+        } else {
+            HStack(spacing: 10) {
+                ragToggle(iconOnly: iconOnly)
+                skillsMenu(iconOnly: iconOnly)
+                toolsMenu(iconOnly: iconOnly)
+                AIModelPickerMenu(feature: .chat, showsName: !iconOnly)
+                    .disabled(chat.isGenerating)
+                Spacer(minLength: 0)
+                yoloToggle(iconOnly: iconOnly)
+            }
+        }
+    }
+
+    /// Icon, plus the text label only when the row variant has room for it.
+    private func pickerLabel(_ text: String, systemImage: String, iconOnly: Bool) -> some View {
+        Group {
+            if iconOnly {
+                Image(systemName: systemImage)
+            } else {
+                Label(text, systemImage: systemImage)
+            }
+        }
+        .font(.caption2)
+    }
+
+    private func ragToggle(iconOnly: Bool) -> some View {
+        Button {
+            chat.ragToolEnabled.toggle()
+        } label: {
+            pickerLabel(
+                "RAG",
+                systemImage: chat.ragToolEnabled ? "magnifyingglass.circle.fill" : "magnifyingglass.circle",
+                iconOnly: iconOnly
+            )
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(chat.ragToolEnabled ? .accentColor : .secondary)
+        .help(chat.ragToolEnabled ? "Project search (RAG) is available to the AI. Click to turn off for this session." : "Project search (RAG) is off for this session. Click to turn back on.")
+    }
+
+    private func skillsMenu(iconOnly: Bool) -> some View {
+        Menu {
+            if skillsManager.allSkills.isEmpty {
+                Text("No skills configured yet.")
+            } else {
+                ForEach(skillsManager.allSkills) { skill in
+                    Toggle(isOn: Binding(
+                        get: { chat.selectedSkillIDs.contains(skill.id) },
+                        set: { isOn in
+                            if isOn { chat.selectedSkillIDs.insert(skill.id) } else { chat.selectedSkillIDs.remove(skill.id) }
+                        }
+                    )) {
+                        Text("\(skill.name) · \(skill.scope.label)")
+                    }
+                }
+            }
+        } label: {
+            pickerLabel("Skills", systemImage: "sparkles.square.filled.on.square", iconOnly: iconOnly)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose which skills are available to the AI for this session")
+    }
+
+    private func toolsMenu(iconOnly: Bool) -> some View {
+        Menu {
+            let servers = mcpManager.allServers.filter { $0.config.isConfigured }
+            if servers.isEmpty {
+                Text("No MCP servers configured yet.")
+            } else {
+                ForEach(servers) { server in
+                    Toggle(isOn: Binding(
+                        get: { chat.selectedMCPServerIDs.contains(server.id) },
+                        set: { isOn in
+                            if isOn { chat.selectedMCPServerIDs.insert(server.id) } else { chat.selectedMCPServerIDs.remove(server.id) }
+                        }
+                    )) {
+                        Text("\(server.config.name) · \(server.scope.label)")
+                    }
+                }
+            }
+        } label: {
+            pickerLabel("Tools", systemImage: "wrench.and.screwdriver", iconOnly: iconOnly)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose which MCP tool servers are available to the AI for this session")
+    }
+
+    private func yoloToggle(iconOnly: Bool) -> some View {
+        Button {
+            if chat.yoloMode {
+                chat.yoloMode = false
+            } else {
+                showYoloConfirm = true
+            }
+        } label: {
+            pickerLabel("YOLO", systemImage: chat.yoloMode ? "bolt.shield.fill" : "bolt.shield", iconOnly: iconOnly)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(chat.yoloMode ? .red : .secondary)
+        .help(chat.yoloMode
+              ? "YOLO mode is ON — every write, edit, and code run is auto-approved for this session. Click to turn off."
+              : "YOLO mode: auto-approve every write, edit, and code run for the rest of this session (still limited to this project/notebook).")
     }
 
     private func send() {

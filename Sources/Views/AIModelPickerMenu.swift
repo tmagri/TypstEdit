@@ -8,6 +8,9 @@ import AppKit
 struct AIModelPickerMenu: View {
     let feature: AIFeature
     var font: Font = .caption2
+    /// `false` collapses the chip to its icon for tight panel rows; the
+    /// model name stays available through the tooltip and the menu itself.
+    var showsName: Bool = true
 
     @ObservedObject private var settings = AISettingsManager.shared
 
@@ -39,9 +42,14 @@ struct AIModelPickerMenu: View {
                 NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
             }
         } label: {
-            Label(settings.activeModelShortName(for: feature), systemImage: "cpu")
-                .font(font)
-                .lineLimit(1)
+            if showsName {
+                Label(settings.activeModelShortName(for: feature), systemImage: "cpu")
+                    .font(font)
+                    .lineLimit(1)
+            } else {
+                Image(systemName: "cpu")
+                    .font(font)
+            }
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
