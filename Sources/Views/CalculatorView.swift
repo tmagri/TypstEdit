@@ -165,27 +165,88 @@ struct CalculatorView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Template row (the TI-89's F-row menus)
+    // MARK: - Template row
 
+    /// One template menu: its name and its items.
+    private struct TemplateGroup {
+        let name: String
+        let items: [TICommand]
+    }
+
+    private let templateGroups: [TemplateGroup] = [
+        .init(name: "Algebra", items: TICommands.algebra),
+        .init(name: "Calc", items: TICommands.calculus),
+        .init(name: "Other", items: TICommands.other),
+    ]
+
+    // The row adapts as the panel narrows instead of overflowing. The menus
+    // are fixed-size, so a single layout clips on both edges in a narrow
+    // sidebar. Candidates are tried in order:
+    //   1. all menus on one line
+    //   2. two lines (templates above, controls below)
+    //   3. one compact "ƒx" menu holding all three groups as submenus —
+    //      small enough for the sidebar's 150pt minimum width.
     private var templateRow: some View {
-        HStack(spacing: 6) {
-            templateMenu("F2 Algebra", items: TICommands.algebra)
-            templateMenu("F3 Calc", items: TICommands.calculus)
-            templateMenu("F4 Other", items: TICommands.other)
-            Spacer(minLength: 0)
-            Button {
-                showFunctionCatalog = true
-            } label: {
-                Image(systemName: "book.pages")
-                    .font(.system(size: 11))
-                    .foregroundColor(themeManager.textColor.opacity(0.7))
-            }
-            .buttonStyle(.plain)
-            .help("Function catalog")
-            modeMenu
+        ViewThatFits(in: .horizontal) {
+            oneLineTemplateRow
+            twoLineTemplateRow
+            compactTemplateRow
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    private var oneLineTemplateRow: some View {
+        HStack(spacing: 6) {
+            templateMenus
+            Spacer(minLength: 0)
+            catalogButton
+            modeMenu
+        }
+    }
+
+    private var twoLineTemplateRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                templateMenus
+            }
+            HStack(spacing: 6) {
+                catalogButton
+                modeMenu
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// Last resort for extreme widths: everything folds into a single menu,
+    /// keeping the group names as submenu titles.
+    private var compactTemplateRow: some View {
+        HStack(spacing: 6) {
+            Menu {
+                ForEach(templateGroups, id: \.name) { group in
+                    Menu(group.name) {
+                        ForEach(group.items) { item in
+                            Button(item.label) { insertTemplate(item.template, at: item.cursorOffset) }
+                        }
+                    }
+                }
+            } label: {
+                pillLabel(Text("ƒx"))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Template menus")
+
+            Spacer(minLength: 0)
+            catalogButton
+            modeMenu
+        }
+    }
+
+    private var templateMenus: some View {
+        ForEach(templateGroups, id: \.name) { group in
+            templateMenu(group.name, items: group.items)
+        }
     }
 
     private func templateMenu(_ label: String, items: [TICommand]) -> some View {
@@ -194,15 +255,32 @@ struct CalculatorView: View {
                 Button(item.label) { insertTemplate(item.template, at: item.cursorOffset) }
             }
         } label: {
-            Text(label)
-                .font(.system(size: 11, weight: .medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.06))
-                .cornerRadius(5)
+            pillLabel(Text(label))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+
+    /// The shared pill background for the row's menu buttons.
+    private func pillLabel(_ text: Text) -> some View {
+        text
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.06))
+            .cornerRadius(5)
+    }
+
+    private var catalogButton: some View {
+        Button {
+            showFunctionCatalog = true
+        } label: {
+            Image(systemName: "book.pages")
+                .font(.system(size: 11))
+                .foregroundColor(themeManager.textColor.opacity(0.7))
+        }
+        .buttonStyle(.plain)
+        .help("Function catalog")
     }
 
     private var modeMenu: some View {
@@ -224,12 +302,7 @@ struct CalculatorView: View {
                 }
             }
         } label: {
-            Text("MODE")
-                .font(.system(size: 11, weight: .medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.06))
-                .cornerRadius(5)
+            pillLabel(Text("MODE"))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -550,7 +623,7 @@ struct MathImageView: View {
 
 // MARK: - TI-89 menu contents
 
-/// One item of the F2/F3/F4 template rows: label + the text placed on the
+/// One item of the template menus: label + the text placed on the
 /// entry line + where the caret lands inside it.
 struct TICommand: Identifiable {
     let label: String
