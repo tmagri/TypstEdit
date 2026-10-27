@@ -789,8 +789,7 @@ struct AISettingsView: View {
             }
 
             SettingsRow(label: "Model:", caption: value.source == .portkey ? portkeyModelCaption : nil) {
-                TextField(modelPlaceholder(for: value.source), text: profile.model)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: modelPlaceholder(for: value.source), text: profile.model, source: value.source, localEndpoint: value.endpoint)
             }
 
             SettingsRow(label: "Reasoning Effort:") {
@@ -1390,8 +1389,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. gpt-4o", text: $settings.generationModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. gpt-4o", text: $settings.generationModel, source: .openAI)
             }
         case .openRouter:
             SettingsRow(label: "API Key:") {
@@ -1399,8 +1397,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. anthropic/claude-3-5-sonnet", text: $settings.generationModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. anthropic/claude-3-5-sonnet", text: $settings.generationModel, source: .openRouter)
             }
         case .anthropic:
             SettingsRow(label: "API Key:") {
@@ -1408,8 +1405,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. claude-sonnet-4-20250514", text: $settings.generationModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. claude-sonnet-4-20250514", text: $settings.generationModel, source: .anthropic)
             }
         case .gemini:
             SettingsRow(label: "API Key:") {
@@ -1417,8 +1413,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. gemini-1.5-flash", text: $settings.generationModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. gemini-1.5-flash", text: $settings.generationModel, source: .gemini)
             }
         case .portkey:
             SettingsRow(label: "API Key:") {
@@ -1426,8 +1421,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:", caption: portkeyModelCaption) {
-                TextField("e.g. @openai-prod/gpt-4o", text: $settings.generationModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. @openai-prod/gpt-4o", text: $settings.generationModel, source: .portkey)
             }
         case .local:
             SettingsRow(label: "Endpoint URL:") {
@@ -1439,8 +1433,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. llama3", text: $settings.generationModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. llama3", text: $settings.generationModel, source: .local, localEndpoint: settings.generationEndpoint)
             }
         }
     }
@@ -1455,8 +1448,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. gpt-4o-mini", text: $settings.completionModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. gpt-4o-mini", text: $settings.completionModel, source: .openAI)
             }
         case .openRouter:
             SettingsRow(label: "API Key:") {
@@ -1464,8 +1456,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. anthropic/claude-3-5-haiku", text: $settings.completionModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. anthropic/claude-3-5-haiku", text: $settings.completionModel, source: .openRouter)
             }
         case .anthropic:
             SettingsRow(label: "API Key:") {
@@ -1473,8 +1464,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. claude-3-5-haiku-20241022", text: $settings.completionModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. claude-3-5-haiku-20241022", text: $settings.completionModel, source: .anthropic)
             }
         case .gemini:
             SettingsRow(label: "API Key:") {
@@ -1482,8 +1472,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. gemini-1.5-flash", text: $settings.completionModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. gemini-1.5-flash", text: $settings.completionModel, source: .gemini)
             }
         case .portkey:
             SettingsRow(label: "API Key:") {
@@ -1491,8 +1480,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:", caption: portkeyModelCaption) {
-                TextField("e.g. @openai-prod/gpt-4o-mini", text: $settings.completionModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. @openai-prod/gpt-4o-mini", text: $settings.completionModel, source: .portkey)
             }
         case .local:
             SettingsRow(label: "Endpoint URL:") {
@@ -1504,8 +1492,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. qwen2.5-coder:1.5b", text: $settings.completionModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. qwen2.5-coder:1.5b", text: $settings.completionModel, source: .local, localEndpoint: settings.completionEndpoint)
             }
         }
     }
@@ -1519,8 +1506,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. text-embedding-3-small", text: $settings.openAIEmbeddingModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. text-embedding-3-small", text: $settings.openAIEmbeddingModel, source: .openAI, kind: .embedding)
             }
         case .local:
             SettingsRow(label: "Endpoint URL:") {
@@ -1532,8 +1518,7 @@ struct AISettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                TextField("e.g. nomic-embed-text", text: $settings.embeddingModel)
-                    .textFieldStyle(.roundedBorder)
+                ModelNameField(placeholder: "e.g. nomic-embed-text", text: $settings.embeddingModel, source: .local, localEndpoint: settings.embeddingEndpoint, kind: .embedding)
             }
         default:
             HStack(spacing: 8) {
