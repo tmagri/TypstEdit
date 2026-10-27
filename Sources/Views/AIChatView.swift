@@ -688,6 +688,9 @@ struct AIChatView: View {
             }
             .menuStyle(.borderlessButton).fixedSize()
 
+            AIModelPickerMenu(feature: .chat)
+                .disabled(chat.isGenerating)
+
             Spacer()
 
             Button {

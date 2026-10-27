@@ -4170,12 +4170,17 @@ class EditorController: NSObject, ObservableObject {
 
         self.aiToolActivityLog = []
 
+        // The saved model picked for AI Prompt (Settings, or the model menu
+        // in the prompt sheet); the default Chat & Actions model otherwise.
+        let promptModel = AISettingsManager.shared.modelContext(for: .prompt)
+
         let result: String
         if tools.isEmpty {
             result = try await AICompletionService.shared.fetchCompletion(
                 prompt: finalPrompt,
                 systemPrompt: systemPrompt,
-                maxTokens: AISettingsManager.shared.maxTokens
+                maxTokens: AISettingsManager.shared.maxTokens,
+                model: promptModel
             )
         } else {
             result = try await AICompletionService.shared.fetchCompletionWithTools(
@@ -4186,6 +4191,7 @@ class EditorController: NSObject, ObservableObject {
                 onToolCall: { [weak self] qualifiedName, argumentsJSON in
                     self?.aiToolActivityLog.append("Called \(qualifiedName.replacingOccurrences(of: "__", with: " → ")) with \(argumentsJSON)")
                 },
+                model: promptModel,
                 executeTool: { qualifiedName, argumentsJSON in
                     guard let separatorRange = qualifiedName.range(of: "__") else {
                         throw MCPError.toolNotFound(qualifiedName)
@@ -4275,7 +4281,7 @@ class EditorController: NSObject, ObservableObject {
     /// result is shown in a preview sheet where the user can accept or reject it.
     func refineSelection(_ action: AIRefineAction) {
         let settings = AISettingsManager.shared
-        let ctx = settings.modelContext(for: .generation)
+        let ctx = settings.modelContext(for: .refine)
         if !ctx.isLocal && ctx.apiKey.isEmpty {
             showStatus("Configure AI in Settings to use this feature")
             return
@@ -4334,7 +4340,8 @@ class EditorController: NSObject, ObservableObject {
                 let result = try await AICompletionService.shared.fetchCompletion(
                     prompt: userPrompt,
                     systemPrompt: systemPrompt,
-                    maxTokens: maxTokens
+                    maxTokens: maxTokens,
+                    model: ctx
                 )
                 await MainActor.run {
                     self.aiRefineResultText = result

@@ -219,7 +219,10 @@ class AICompletionService: ObservableObject {
         return (cleanText.trimmingCharacters(in: .whitespacesAndNewlines), captured.isEmpty ? nil : captured.joined(separator: "\n\n"))
     }
 
-    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int? = nil, purpose: AIRequestPurpose = .chat, onReasoning: @escaping (String) -> Void = { _ in }, sanitize: Bool = true) async throws -> String {
+    /// - Parameter model: An explicit model to use (e.g. a saved model chosen
+    ///   for AI Prompt or Refine). `nil` resolves the model configured for
+    ///   `purpose` in Settings, as before.
+    func fetchCompletion(prompt: String, systemPrompt: String = "You are a precise code completion engine. Output ONLY the code to insert at the cursor. Do NOT output any thinking, reasoning, explanations, or XML tags.", maxTokens: Int? = nil, purpose: AIRequestPurpose = .chat, model: ModelContext? = nil, onReasoning: @escaping (String) -> Void = { _ in }, sanitize: Bool = true) async throws -> String {
         isFetching = true
         defer { isFetching = false }
 
@@ -236,7 +239,7 @@ class AICompletionService: ObservableObject {
         }
 
         // Resolve the full model context for this task (source, model, endpoint, key).
-        let ctx = settings.modelContext(for: purpose.modelTask)
+        let ctx = model ?? settings.modelContext(for: purpose.modelTask)
 
         // Only require API key for cloud providers
         if !ctx.isLocal && ctx.apiKey.isEmpty {
@@ -473,17 +476,20 @@ class AICompletionService: ObservableObject {
         onReasoningDelta: (@MainActor (String) -> Void)? = nil,
         sanitize: Bool = true,
         contextCharBudget: Int? = nil,
+        /// An explicit model to use (e.g. the saved model chosen for AI Chat).
+        /// `nil` = the default Chat & Actions model.
+        model: ModelContext? = nil,
         executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
     ) async throws -> String {
         guard !tools.isEmpty else {
-            return try await fetchCompletion(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, purpose: .chat, onReasoning: onReasoning, sanitize: sanitize)
+            return try await fetchCompletion(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, purpose: .chat, model: model, onReasoning: onReasoning, sanitize: sanitize)
         }
 
         isFetching = true
         defer { isFetching = false }
 
         let settings = AISettingsManager.shared
-        let ctx = settings.modelContext(for: .generation)
+        let ctx = model ?? settings.modelContext(for: .generation)
 
         if !ctx.isLocal && ctx.apiKey.isEmpty {
             throw AIError.apiError("API Key is missing for \(ctx.source.rawValue)")

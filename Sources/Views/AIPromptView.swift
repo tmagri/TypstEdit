@@ -72,6 +72,9 @@ struct AIPromptView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
 
+            AIModelPickerMenu(feature: .prompt, font: .caption)
+                .disabled(controller.isAIGenerating)
+
             Spacer()
         }
         .foregroundColor(.secondary)

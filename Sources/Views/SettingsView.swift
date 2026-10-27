@@ -387,6 +387,8 @@ struct AISettingsView: View {
     
     @State private var testingTask: ModelTask?
     @State private var testResults: [ModelTask: (success: Bool, message: String)] = [:]
+    @State private var testingProfileID: UUID?
+    @State private var profileTestResults: [UUID: (success: Bool, message: String)] = [:]
 
     private func sourceBinding(for task: ModelTask) -> Binding<ModelSource> {
         Binding(
@@ -666,9 +668,9 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
-            title: "Chat Model & Provider",
+            title: "Default Model & Provider",
             icon: "server.rack",
-            description: "Select the AI service for general text generation and rewriting."
+            description: "The default model for AI Chat, AI Prompt, and Refine. Any feature without its own choice below uses this one."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 SettingsRow(label: "Source:") {
@@ -694,6 +696,210 @@ struct AISettingsView: View {
                 HStack {
                     Spacer().frame(width: 140)
                     testButton(for: .generation)
+                }
+            }
+        }
+
+        savedModelsCard
+
+        featureModelsCard
+    }
+
+    // MARK: - Saved Models
+
+    private func profileBinding(_ id: UUID) -> Binding<AIModelProfile> {
+        Binding(
+            get: { settings.modelProfile(id: id) ?? AIModelProfile(id: id) },
+            set: { settings.updateModelProfile($0) }
+        )
+    }
+
+    private func featureModelBinding(_ feature: AIFeature) -> Binding<UUID?> {
+        Binding(
+            get: { settings.modelProfileID(for: feature) },
+            set: { settings.setModelProfileID($0, for: feature) }
+        )
+    }
+
+    private func modelPlaceholder(for source: ModelSource) -> String {
+        switch source {
+        case .openAI: return "e.g. gpt-4o-mini"
+        case .openRouter: return "e.g. anthropic/claude-3-5-sonnet"
+        case .anthropic: return "e.g. claude-sonnet-4-20250514"
+        case .gemini: return "e.g. gemini-1.5-flash"
+        case .local: return "e.g. llama3"
+        }
+    }
+
+    @ViewBuilder
+    private var savedModelsCard: some View {
+        SettingsCard(
+            title: "Saved Models",
+            icon: "square.stack.3d.up",
+            description: "Save extra models, from any provider, to pick per feature below or to switch on the fly from the model menu in the AI Chat panel and the AI Prompt sheet. API keys are shared per provider (API Keys & Limits tab)."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                if settings.modelProfiles.isEmpty {
+                    Text("No saved models yet. Everything uses the default model above.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(settings.modelProfiles) { profile in
+                        savedModelEditor(profileBinding(profile.id))
+                        Divider()
+                    }
+                }
+
+                Button {
+                    settings.addModelProfile()
+                } label: {
+                    Label("Add Model", systemImage: "plus.circle")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func savedModelEditor(_ profile: Binding<AIModelProfile>) -> some View {
+        let value = profile.wrappedValue
+        VStack(alignment: .leading, spacing: 10) {
+            SettingsRow(label: "Name:") {
+                TextField("Optional — e.g. Fast drafts", text: profile.name)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            SettingsRow(label: "Source:") {
+                Picker("", selection: profile.source) {
+                    ForEach(ModelSource.allCases) { source in
+                        Text(source.rawValue).tag(source)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            if value.source.isLocal {
+                SettingsRow(label: "Endpoint URL:") {
+                    TextField(AIModelProfile.defaultLocalEndpoint, text: profile.endpoint)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            SettingsRow(label: "Model:") {
+                TextField(modelPlaceholder(for: value.source), text: profile.model)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            SettingsRow(label: "Reasoning Effort:") {
+                Picker("Reasoning Effort", selection: profile.reasoningEffort) {
+                    ForEach(ReasoningEffort.allCases) { effort in
+                        Text(effort.displayName).tag(effort)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            if !value.source.isLocal && settings.apiKey(for: value.source).isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text("No \(value.source.rawValue) API key set — add one in the API Keys & Limits tab.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.leading, 152)
+            }
+
+            if value.source == .gemini {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(.secondary)
+                    Text("Gemini can't be used with tools yet, so it won't work for AI Chat or for AI Prompt with MCP tools on.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.leading, 152)
+            }
+
+            HStack(spacing: 12) {
+                Spacer().frame(width: 140)
+                profileTestButton(for: value)
+                Spacer()
+                Button(role: .destructive) {
+                    settings.removeModelProfile(id: value.id)
+                    profileTestResults[value.id] = nil
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var featureModelsCard: some View {
+        SettingsCard(
+            title: "Model per Feature",
+            icon: "arrow.triangle.branch",
+            description: "Choose which model each feature uses. You can also change this from the model menu in the AI Chat panel and the AI Prompt sheet."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(AIFeature.allCases) { feature in
+                    SettingsRow(label: "\(feature.displayName):", caption: feature.description) {
+                        Picker("", selection: featureModelBinding(feature)) {
+                            Text("Default — \(settings.defaultModelDisplayName)").tag(UUID?.none)
+                            ForEach(settings.modelProfiles) { profile in
+                                Text(profile.detailedName).tag(Optional(profile.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+            }
+        }
+    }
+
+    private func testProfile(_ profile: AIModelProfile) {
+        testingProfileID = profile.id
+        profileTestResults[profile.id] = nil
+
+        Task {
+            do {
+                let response = try await AICompletionService.shared.fetchCompletion(
+                    prompt: "Hello. Respond with exactly the word 'OK'.",
+                    purpose: .chat,
+                    model: settings.modelContext(for: profile)
+                )
+                profileTestResults[profile.id] = (true, "Success: '\(response)'")
+            } catch {
+                profileTestResults[profile.id] = (false, error.localizedDescription)
+            }
+            testingProfileID = nil
+        }
+    }
+
+    @ViewBuilder
+    private func profileTestButton(for profile: AIModelProfile) -> some View {
+        HStack(spacing: 12) {
+            Button(action: { testProfile(profile) }) {
+                HStack(spacing: 6) {
+                    if testingProfileID == profile.id {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "bolt.fill")
+                    }
+                    Text("Test Connection")
+                }
+            }
+            .disabled(testingProfileID != nil || profile.trimmedModel.isEmpty)
+
+            if let result = profileTestResults[profile.id] {
+                HStack(spacing: 4) {
+                    Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(result.success ? .green : .red)
+                    Text(result.message)
+                        .font(.caption)
+                        .foregroundColor(result.success ? .green : .red)
+                        .lineLimit(1)
                 }
             }
         }

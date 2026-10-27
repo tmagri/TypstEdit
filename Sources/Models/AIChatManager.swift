@@ -84,6 +84,11 @@ final class AIChatManager: ObservableObject {
     private var maxTurns: Int? { AISettingsManager.shared.effectiveChatMaxTurns }
     /// Same limit for the read-only `delegate_task` subagent.
     private var subagentMaxTurns: Int? { AISettingsManager.shared.effectiveChatSubagentMaxTurns }
+    /// The model chat requests go to: the saved model picked for AI Chat
+    /// (Settings, or the model menu in the chat panel), else the default
+    /// Chat & Actions model. Read per request, so switching takes effect on
+    /// the next message.
+    private var chatModelContext: ModelContext { AISettingsManager.shared.modelContext(for: .chat) }
     /// Rough chars-per-token for budget math. Not exact, but stable enough to
     /// decide when to compact and when to elide tool output.
     static let charsPerToken = 4
@@ -342,6 +347,7 @@ final class AIChatManager: ObservableObject {
                 // into a .typ document) would only mangle them here.
                 sanitize: false,
                 contextCharBudget: contextBudgetTokens * Self.charsPerToken,
+                model: chatModelContext,
                 executeTool: { [weak self] qualifiedName, argumentsJSON in
                     guard let self else { throw LocalToolError.invalidArguments("Chat session ended") }
                     return try await self.trackedToolCall(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON)
@@ -462,6 +468,7 @@ final class AIChatManager: ObservableObject {
                     systemPrompt: "You compress conversations faithfully and concisely. Never invent facts that aren't in the transcript.",
                     maxTokens: 800,
                     purpose: .chat,
+                    model: chatModelContext,
                     sanitize: false
                 )
                 summaryLabel = "Summary of earlier conversation"
@@ -669,6 +676,7 @@ final class AIChatManager: ObservableObject {
             onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
             sanitize: false,
             contextCharBudget: contextBudgetTokens * Self.charsPerToken,
+            model: chatModelContext,
             executeTool: { [weak self] qualifiedName, argumentsJSON in
                 guard let self else { throw LocalToolError.invalidArguments("Chat session ended") }
                 return try await self.trackedToolCall(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON, isSubagent: true)

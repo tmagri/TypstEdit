@@ -4,7 +4,7 @@ import Combine
 // MARK: - Model Source
 
 /// Represents where a model runs — either a cloud provider or a local server.
-enum ModelSource: String, CaseIterable, Identifiable {
+enum ModelSource: String, CaseIterable, Identifiable, Codable {
     case openAI = "OpenAI"
     case openRouter = "OpenRouter"
     case anthropic = "Anthropic"
@@ -54,7 +54,7 @@ enum ModelTask: String, CaseIterable, Identifiable {
 /// - Google Gemini: `thinkingLevel` / `thinkingBudget` in `generationConfig`
 ///
 /// `.auto` means "don't send anything" — the model or provider decides.
-enum ReasoningEffort: String, CaseIterable, Identifiable {
+enum ReasoningEffort: String, CaseIterable, Identifiable, Codable {
     case auto
     case none
     case low
@@ -135,6 +135,105 @@ struct ModelContext {
         case .openAI: return "https://api.openai.com/v1/embeddings"
         case .local: return endpoint
         default: return endpoint
+        }
+    }
+}
+
+// MARK: - Saved Model Profiles
+
+/// A named, user-saved model configuration (source + model + endpoint +
+/// reasoning effort). Users can save as many as they like in Settings →
+/// AI Assistant → Chat & Actions and then pick one per feature (AI Chat,
+/// AI Prompt, Refine) or switch on the fly from the chat panel / prompt sheet.
+///
+/// API keys are deliberately *not* part of a profile: they stay shared per
+/// provider (Settings → API Keys & Limits), so adding a second OpenAI model
+/// doesn't mean pasting the key twice.
+struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
+    var id: UUID
+    /// Optional friendly label ("Fast drafts", "Claude for review"). Empty →
+    /// the model name is shown instead.
+    var name: String
+    var source: ModelSource
+    var model: String
+    /// Only used for `.local` sources (OpenAI-compatible chat endpoint).
+    var endpoint: String
+    var reasoningEffort: ReasoningEffort
+
+    static let defaultLocalEndpoint = "http://localhost:11434/v1/chat/completions"
+
+    init(
+        id: UUID = UUID(),
+        name: String = "",
+        source: ModelSource = .openAI,
+        model: String = "",
+        endpoint: String = AIModelProfile.defaultLocalEndpoint,
+        reasoningEffort: ReasoningEffort = .auto
+    ) {
+        self.id = id
+        self.name = name
+        self.source = source
+        self.model = model
+        self.endpoint = endpoint
+        self.reasoningEffort = reasoningEffort
+    }
+
+    /// Lenient decoding: an unknown source/effort raw value (e.g. from a
+    /// future version) falls back to a sane default instead of discarding the
+    /// whole saved list.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        name = (try? c.decode(String.self, forKey: .name)) ?? ""
+        let sourceRaw = (try? c.decode(String.self, forKey: .source)) ?? ""
+        source = ModelSource(rawValue: sourceRaw) ?? .openAI
+        model = (try? c.decode(String.self, forKey: .model)) ?? ""
+        endpoint = (try? c.decode(String.self, forKey: .endpoint)) ?? Self.defaultLocalEndpoint
+        let effortRaw = (try? c.decode(String.self, forKey: .reasoningEffort)) ?? ""
+        reasoningEffort = ReasoningEffort(rawValue: effortRaw) ?? .auto
+    }
+
+    var trimmedModel: String { model.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Label used in pickers: the friendly name if set, else the model name.
+    var displayName: String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty { return trimmedName }
+        return trimmedModel.isEmpty ? "Untitled model" : trimmedModel
+    }
+
+    /// `displayName · source` (plus the model when a friendly name hides it).
+    var detailedName: String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty, !trimmedModel.isEmpty {
+            return "\(trimmedName) — \(trimmedModel) · \(source.rawValue)"
+        }
+        return "\(displayName) · \(source.rawValue)"
+    }
+}
+
+/// Features that can each be pointed at a different saved model. Anything
+/// without an explicit choice uses the default Chat & Actions model.
+enum AIFeature: String, CaseIterable, Identifiable {
+    case chat
+    case prompt
+    case refine
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .chat: return "AI Chat"
+        case .prompt: return "AI Prompt (Insert)"
+        case .refine: return "Refine & Grammar"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .chat: return "The chat panel, its delegate_task subagent, and history compaction."
+        case .prompt: return "The AI Prompt sheet that generates content to insert at the cursor (including Fix with AI)."
+        case .refine: return "Refine Writing and Fix Grammar on a selection."
         }
     }
 }
@@ -510,6 +609,142 @@ class AISettingsManager: ObservableObject {
             apiKey: apiKey(for: src),
             reasoningEffort: reasoningEffort(for: task)
         )
+    }
+
+    // MARK: - Saved Model Profiles
+
+    /// JSON-encoded `[AIModelProfile]`. Stored as a string (like the other
+    /// raw-backed settings here) so it lives alongside them in UserDefaults.
+    @AppStorage("aiModelProfiles") private var modelProfilesRaw: String = ""
+
+    /// Per-feature model choice: a profile UUID string, or "" for the default
+    /// Chat & Actions model.
+    @AppStorage("aiFeatureModel.chat") private var chatModelProfileIDRaw: String = ""
+    @AppStorage("aiFeatureModel.prompt") private var promptModelProfileIDRaw: String = ""
+    @AppStorage("aiFeatureModel.refine") private var refineModelProfileIDRaw: String = ""
+
+    /// Every saved model, in the order the user added them.
+    var modelProfiles: [AIModelProfile] {
+        get { Self.decodeProfiles(modelProfilesRaw) }
+        set {
+            objectWillChange.send()
+            modelProfilesRaw = Self.encodeProfiles(newValue)
+        }
+    }
+
+    static func decodeProfiles(_ raw: String) -> [AIModelProfile] {
+        guard !raw.isEmpty, let data = raw.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([AIModelProfile].self, from: data)) ?? []
+    }
+
+    static func encodeProfiles(_ profiles: [AIModelProfile]) -> String {
+        guard !profiles.isEmpty,
+              let data = try? JSONEncoder().encode(profiles),
+              let string = String(data: data, encoding: .utf8) else { return "" }
+        return string
+    }
+
+    func modelProfile(id: UUID) -> AIModelProfile? {
+        modelProfiles.first { $0.id == id }
+    }
+
+    /// Adds a new saved model, seeded from the current default Chat & Actions
+    /// model so the common "same provider, different model" case is one edit.
+    @discardableResult
+    func addModelProfile() -> AIModelProfile {
+        let src = source(for: .generation)
+        let profile = AIModelProfile(
+            source: src,
+            model: "",
+            endpoint: src.isLocal ? generationEndpoint : AIModelProfile.defaultLocalEndpoint,
+            reasoningEffort: generationReasoningEffort
+        )
+        modelProfiles.append(profile)
+        return profile
+    }
+
+    func updateModelProfile(_ profile: AIModelProfile) {
+        var profiles = modelProfiles
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        guard profiles[index] != profile else { return }
+        profiles[index] = profile
+        modelProfiles = profiles
+    }
+
+    /// Removes a saved model. Features that pointed at it fall back to the
+    /// default model.
+    func removeModelProfile(id: UUID) {
+        modelProfiles.removeAll { $0.id == id }
+        for feature in AIFeature.allCases where storedModelProfileIDRaw(for: feature) == id.uuidString {
+            setModelProfileID(nil, for: feature)
+        }
+    }
+
+    private func storedModelProfileIDRaw(for feature: AIFeature) -> String {
+        switch feature {
+        case .chat: return chatModelProfileIDRaw
+        case .prompt: return promptModelProfileIDRaw
+        case .refine: return refineModelProfileIDRaw
+        }
+    }
+
+    /// The saved model chosen for a feature, or `nil` for the default model.
+    /// A stale ID (profile since deleted) also resolves to `nil`.
+    func modelProfileID(for feature: AIFeature) -> UUID? {
+        guard let id = UUID(uuidString: storedModelProfileIDRaw(for: feature)),
+              modelProfile(id: id) != nil else { return nil }
+        return id
+    }
+
+    func setModelProfileID(_ id: UUID?, for feature: AIFeature) {
+        objectWillChange.send()
+        let raw = id?.uuidString ?? ""
+        switch feature {
+        case .chat: chatModelProfileIDRaw = raw
+        case .prompt: promptModelProfileIDRaw = raw
+        case .refine: refineModelProfileIDRaw = raw
+        }
+    }
+
+    func modelProfile(for feature: AIFeature) -> AIModelProfile? {
+        modelProfileID(for: feature).flatMap { modelProfile(id: $0) }
+    }
+
+    /// Resolves a saved model into a request-ready context. API keys come
+    /// from the shared per-provider keys.
+    func modelContext(for profile: AIModelProfile) -> ModelContext {
+        ModelContext(
+            task: .generation,
+            source: profile.source,
+            model: profile.trimmedModel,
+            endpoint: profile.endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKey: apiKey(for: profile.source),
+            reasoningEffort: profile.reasoningEffort
+        )
+    }
+
+    /// The context a feature should send its requests with: its chosen saved
+    /// model, or the default Chat & Actions model.
+    func modelContext(for feature: AIFeature) -> ModelContext {
+        if let profile = modelProfile(for: feature) {
+            return modelContext(for: profile)
+        }
+        return modelContext(for: .generation)
+    }
+
+    /// Short label for the default Chat & Actions model, e.g. `gpt-4o · OpenAI`.
+    var defaultModelDisplayName: String {
+        let trimmed = generationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(trimmed.isEmpty ? "No model set" : trimmed) · \(source(for: .generation).rawValue)"
+    }
+
+    /// Compact label for the model a feature currently uses (for menu buttons).
+    func activeModelShortName(for feature: AIFeature) -> String {
+        if let profile = modelProfile(for: feature) {
+            return profile.displayName
+        }
+        let trimmed = generationModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Default model" : trimmed
     }
 
     /// Returns the completion model if set, otherwise falls back to the chat model.
