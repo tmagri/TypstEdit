@@ -521,8 +521,9 @@ class AICompletionService: ObservableObject {
         // Resolved once per request: nil for the LLM-summary method (no
         // in-loop compression wanted), otherwise the token filter or the
         // LLMLingua-2 engine — with the filter as the automatic fallback
-        // when the model isn't installed.
-        let compression = await ChatCompressor.resolve(method: settings.chatCompressionMethod)
+        // when the model isn't installed. Per model: a saved model may override
+        // the global method, and "Automatic" depends on cloud vs. local.
+        let compression = await ChatCompressor.resolve(method: settings.effectiveCompressionMethod(for: ctx))
 
         var turn = 0
         while true {

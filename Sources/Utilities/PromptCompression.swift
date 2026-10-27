@@ -16,7 +16,13 @@ import Foundation
 ///   locally through Core ML (an optional download — see
 ///   `LLMLingua2Manager`). Falls back to `tokenFilter` when the model isn't
 ///   installed, so every setting remains usable out of the box.
-enum ChatCompressionMethod: String, CaseIterable, Identifiable {
+/// - `automatic`: picks per model — `llmSummary` for cloud (paid) models,
+///   which summarize well, and `llmlingua2` (→ `tokenFilter` fallback) for
+///   local models, which summarize poorly. Resolved against the model in use
+///   by `AISettingsManager.effectiveCompressionMethod(for:)`; never reaches
+///   `ChatCompressor.resolve` unresolved.
+enum ChatCompressionMethod: String, CaseIterable, Identifiable, Codable {
+    case automatic
     case llmSummary
     case tokenFilter
     case llmlingua2
@@ -25,10 +31,28 @@ enum ChatCompressionMethod: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
+        case .automatic: return "Automatic (by model)"
         case .llmSummary: return "LLM summary (default)"
         case .tokenFilter: return "Token filter (basic, offline)"
         case .llmlingua2: return "LLMLingua-2 (Core ML model)"
         }
+    }
+
+    /// Short name without the "(default)" marker, for per-model pickers.
+    var shortName: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .llmSummary: return "LLM summary"
+        case .tokenFilter: return "Token filter"
+        case .llmlingua2: return "LLMLingua-2"
+        }
+    }
+
+    /// Concrete method for a model: `automatic` → LLM summary for cloud
+    /// models, offline verbatim filtering for local ones.
+    func resolved(isLocal: Bool) -> ChatCompressionMethod {
+        guard self == .automatic else { return self }
+        return isLocal ? .llmlingua2 : .llmSummary
     }
 }
 
@@ -355,7 +379,10 @@ enum ChatCompressor {
         let settings = AISettingsManager.shared
         let rate = settings.effectiveChatCompressionKeepRate
         switch method {
-        case .llmSummary:
+        case .llmSummary, .automatic:
+            // `.automatic` is resolved per model before getting here; if it
+            // ever arrives unresolved, the safe choice is the original
+            // behavior (LLM summary, no pre-model compression).
             return nil
         case .tokenFilter:
             return (HeuristicTokenFilter(), rate)

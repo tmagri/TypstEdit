@@ -732,6 +732,43 @@ struct AISettingsView: View {
         }
     }
 
+    // MARK: - Compaction helpers
+
+    /// Every compaction method currently configured: the global setting plus
+    /// any saved-model overrides.
+    private var configuredCompressionMethods: [ChatCompressionMethod] {
+        [settings.chatCompressionMethod] + settings.modelProfiles.compactMap(\.compressionMethod)
+    }
+
+    /// Show the keep-rate field when any configuration can token-filter.
+    private var compressionMayUseFilter: Bool {
+        configuredCompressionMethods.contains { $0 != .llmSummary }
+    }
+
+    /// Show the LLMLingua-2 download when any configuration can use it.
+    private var compressionMayUseLLMLingua: Bool {
+        configuredCompressionMethods.contains { $0 == .llmlingua2 || $0 == .automatic }
+    }
+
+    private func compressionLabel(_ method: ChatCompressionMethod) -> String {
+        if method == .llmlingua2 && !compressionModel.isInstalled {
+            return "LLMLingua-2 (token filter until installed)"
+        }
+        return method.shortName
+    }
+
+    private var effectiveChatCompressionLabel: String {
+        compressionLabel(settings.effectiveCompressionMethod(for: settings.modelContext(for: .chat)))
+    }
+
+    private func profileCompressionCaption(_ profile: AIModelProfile) -> String {
+        let effective = settings.effectiveCompressionMethod(for: settings.modelContext(for: profile))
+        let base = profile.source.isLocal
+            ? "Local models summarize poorly, so offline filtering usually works better."
+            : "Cloud (paid) models write good summaries, so the LLM summary usually works best."
+        return "\(base) Used for this model: \(compressionLabel(effective))."
+    }
+
     /// Shown under Portkey model fields: how model strings route.
     private let portkeyModelCaption = "Use a Model Catalog name, @provider-slug/model (e.g. @openai-prod/gpt-4o). A plain model name also works when a default provider or config is set in the API Keys & Limits tab."
 
@@ -796,6 +833,16 @@ struct AISettingsView: View {
                 Picker("Reasoning Effort", selection: profile.reasoningEffort) {
                     ForEach(ReasoningEffort.allCases) { effort in
                         Text(effort.displayName).tag(effort)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            SettingsRow(label: "Chat Compaction:", caption: profileCompressionCaption(value)) {
+                Picker("Chat Compaction", selection: profile.compressionMethod) {
+                    Text("Use AI Chat setting (\(settings.chatCompressionMethod.shortName))").tag(ChatCompressionMethod?.none)
+                    ForEach(ChatCompressionMethod.allCases) { method in
+                        Text(method.shortName).tag(Optional(method))
                     }
                 }
                 .pickerStyle(.menu)
@@ -1005,7 +1052,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Context Compression",
             icon: "text.badge.star",
-            description: "How older conversation and large tool outputs are squeezed back under the budget. \"LLM summary\" asks the model to write a prose summary — the original behavior, and the weakest link on small local models, which summarize poorly. The token-filter methods instead drop the least important words and keep the survivors verbatim, so nothing is paraphrased or invented. Compression only affects what is sent to the model — your transcript always keeps the full text."
+            description: "How older conversation and large tool outputs are squeezed back under the budget. \"LLM summary\" asks the model to write a prose summary — the original behavior, and the weakest link on small local models, which summarize poorly. The token-filter methods instead drop the least important words and keep the survivors verbatim, so nothing is paraphrased or invented. \"Automatic\" uses the LLM summary for cloud (paid) models and offline filtering for local ones. Saved models can override this (Chat & Actions → Saved Models). Compression only affects what is sent to the model — your transcript always keeps the full text."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 Picker("Method", selection: $settings.chatCompressionMethod) {
@@ -1015,7 +1062,21 @@ struct AISettingsView: View {
                 }
                 .pickerStyle(.menu)
 
-                if settings.chatCompressionMethod != .llmSummary {
+                if settings.chatCompressionMethod == .automatic {
+                    Text("Automatic: cloud models (OpenAI, Anthropic, Gemini, OpenRouter, Portkey) → LLM summary. Local models → LLMLingua-2, or the token filter until the model is installed.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle").foregroundColor(.secondary)
+                    Text("AI Chat now: \(settings.activeModelShortName(for: .chat)) → \(effectiveChatCompressionLabel)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                if compressionMayUseFilter {
                     HStack(spacing: 10) {
                         Text("Keep about")
                             .font(.caption)
@@ -1027,7 +1088,7 @@ struct AISettingsView: View {
                         Spacer()
                     }
 
-                    if settings.chatCompressionMethod == .llmlingua2 {
+                    if compressionMayUseLLMLingua {
                         Divider()
 
                         HStack(spacing: 10) {

@@ -147,6 +147,9 @@ struct ModelContext {
     let reasoningEffort: ReasoningEffort
     /// Extra provider-specific request headers (e.g. Portkey routing headers).
     var extraHeaders: [String: String] = [:]
+    /// Chat compaction override from a saved model; `nil` = the global
+    /// setting. Resolve with `AISettingsManager.effectiveCompressionMethod(for:)`.
+    var compressionMethod: ChatCompressionMethod? = nil
 
     var isGemini: Bool { source == .gemini }
     var isAnthropic: Bool { source == .anthropic }
@@ -222,6 +225,9 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     /// Only used for `.local` sources (OpenAI-compatible chat endpoint).
     var endpoint: String
     var reasoningEffort: ReasoningEffort
+    /// How AI Chat compacts long conversations while this model is in use.
+    /// `nil` = follow the global setting (AI Chat → Context Compression).
+    var compressionMethod: ChatCompressionMethod?
 
     static let defaultLocalEndpoint = "http://localhost:11434/v1/chat/completions"
 
@@ -231,7 +237,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         source: ModelSource = .openAI,
         model: String = "",
         endpoint: String = AIModelProfile.defaultLocalEndpoint,
-        reasoningEffort: ReasoningEffort = .auto
+        reasoningEffort: ReasoningEffort = .auto,
+        compressionMethod: ChatCompressionMethod? = nil
     ) {
         self.id = id
         self.name = name
@@ -239,6 +246,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         self.model = model
         self.endpoint = endpoint
         self.reasoningEffort = reasoningEffort
+        self.compressionMethod = compressionMethod
     }
 
     /// Lenient decoding: an unknown source/effort raw value (e.g. from a
@@ -254,6 +262,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         endpoint = (try? c.decode(String.self, forKey: .endpoint)) ?? Self.defaultLocalEndpoint
         let effortRaw = (try? c.decode(String.self, forKey: .reasoningEffort)) ?? ""
         reasoningEffort = ReasoningEffort(rawValue: effortRaw) ?? .auto
+        // Missing (older saved models) or unknown → follow the global setting.
+        compressionMethod = (try? c.decode(String.self, forKey: .compressionMethod)).flatMap(ChatCompressionMethod.init(rawValue:))
     }
 
     var trimmedModel: String { model.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -699,7 +709,7 @@ class AISettingsManager: ObservableObject {
 
     /// A Portkey request context: the shared gateway URL, Portkey key, and
     /// optional default provider/config routing headers.
-    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort) -> ModelContext {
+    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort, compressionMethod: ChatCompressionMethod? = nil) -> ModelContext {
         ModelContext(
             task: task,
             source: .portkey,
@@ -707,8 +717,16 @@ class AISettingsManager: ObservableObject {
             endpoint: portkeyBaseURL,
             apiKey: portkeyApiKey,
             reasoningEffort: reasoningEffort,
-            extraHeaders: portkeyRoutingHeaders
+            extraHeaders: portkeyRoutingHeaders,
+            compressionMethod: compressionMethod
         )
+    }
+
+    /// The concrete compaction method to use with a model: its saved-model
+    /// override, else the global setting — with `automatic` resolved to LLM
+    /// summary for cloud (paid) models and offline filtering for local ones.
+    func effectiveCompressionMethod(for ctx: ModelContext) -> ChatCompressionMethod {
+        (ctx.compressionMethod ?? chatCompressionMethod).resolved(isLocal: ctx.isLocal)
     }
 
     // MARK: - Saved Model Profiles
@@ -814,7 +832,7 @@ class AISettingsManager: ObservableObject {
     /// from the shared per-provider keys.
     func modelContext(for profile: AIModelProfile) -> ModelContext {
         if profile.source == .portkey {
-            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort)
+            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort, compressionMethod: profile.compressionMethod)
         }
         return ModelContext(
             task: .generation,
@@ -822,7 +840,8 @@ class AISettingsManager: ObservableObject {
             model: profile.trimmedModel,
             endpoint: profile.endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKey(for: profile.source),
-            reasoningEffort: profile.reasoningEffort
+            reasoningEffort: profile.reasoningEffort,
+            compressionMethod: profile.compressionMethod
         )
     }
 

@@ -504,7 +504,9 @@ final class AIChatManager: ObservableObject {
     /// transcript is still too large for the configured budget.
     private func compressedTranscriptIfFits(_ clipped: String) async -> String? {
         let settings = AISettingsManager.shared
-        let method = settings.chatCompressionMethod
+        // The chat model's own choice (saved-model override, or the global
+        // setting with "Automatic" resolved for cloud vs. local).
+        let method = settings.effectiveCompressionMethod(for: chatModelContext)
         guard method != .llmSummary,
               let resolved = await ChatCompressor.resolve(method: method) else { return nil }
 

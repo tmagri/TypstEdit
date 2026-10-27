@@ -104,6 +104,53 @@ final class AIModelProfileTests: XCTestCase {
         }
     }
 
+    // MARK: - Per-model compaction
+
+    func testAutomaticCompactionPicksBySource() {
+        XCTAssertEqual(ChatCompressionMethod.automatic.resolved(isLocal: false), .llmSummary, "paid/cloud models summarize well")
+        XCTAssertEqual(ChatCompressionMethod.automatic.resolved(isLocal: true), .llmlingua2, "local models get verbatim filtering")
+        for method in [ChatCompressionMethod.llmSummary, .tokenFilter, .llmlingua2] {
+            XCTAssertEqual(method.resolved(isLocal: true), method)
+            XCTAssertEqual(method.resolved(isLocal: false), method)
+        }
+    }
+
+    func testOlderSavedModelsWithoutCompactionFollowTheGlobalSetting() {
+        let raw = """
+        [{"id":"\(UUID().uuidString)","name":"","source":"OpenAI","model":"gpt-4o","endpoint":"","reasoningEffort":"auto"}]
+        """
+        XCTAssertNil(AISettingsManager.decodeProfiles(raw).first?.compressionMethod)
+    }
+
+    func testCompactionOverrideSurvivesEncoding() {
+        let profile = AIModelProfile(source: .local, model: "llama3", compressionMethod: .tokenFilter)
+        let decoded = AISettingsManager.decodeProfiles(AISettingsManager.encodeProfiles([profile]))
+        XCTAssertEqual(decoded.first?.compressionMethod, .tokenFilter)
+    }
+
+    func testEffectiveCompressionMethodForModels() {
+        let settings = AISettingsManager.shared
+        let original = settings.chatCompressionMethod
+        defer { settings.chatCompressionMethod = original }
+
+        let cloud = AIModelProfile(source: .anthropic, model: "claude")
+        let local = AIModelProfile(source: .local, model: "llama3")
+        let pinned = AIModelProfile(source: .openAI, model: "gpt-4o-mini", compressionMethod: .tokenFilter)
+        let pinnedAuto = AIModelProfile(source: .local, model: "qwen", compressionMethod: .automatic)
+
+        settings.chatCompressionMethod = .automatic
+        XCTAssertEqual(settings.effectiveCompressionMethod(for: settings.modelContext(for: cloud)), .llmSummary)
+        XCTAssertEqual(settings.effectiveCompressionMethod(for: settings.modelContext(for: local)), .llmlingua2)
+        XCTAssertEqual(settings.effectiveCompressionMethod(for: settings.modelContext(for: pinned)), .tokenFilter, "a saved-model override wins")
+
+        settings.chatCompressionMethod = .llmSummary
+        XCTAssertEqual(settings.effectiveCompressionMethod(for: settings.modelContext(for: local)), .llmSummary, "no override → global setting")
+        XCTAssertEqual(settings.effectiveCompressionMethod(for: settings.modelContext(for: pinnedAuto)), .llmlingua2, "a per-model Automatic resolves by source")
+
+        let portkey = AIModelProfile(source: .portkey, model: "@openai-prod/gpt-4o", compressionMethod: .tokenFilter)
+        XCTAssertEqual(settings.effectiveCompressionMethod(for: settings.modelContext(for: portkey)), .tokenFilter, "Portkey models keep their override")
+    }
+
     func testStaleChoiceResolvesToDefault() {
         withCleanProfiles { settings in
             settings.setModelProfileID(UUID(), for: .chat)
