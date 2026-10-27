@@ -19,11 +19,11 @@ struct NotebookSidebarView: View {
         VStack(spacing: 0) {
             // Header
             HStack(spacing: 8) {
-                Text("NOTEBOOKS")
-                    .font(.system(size: 11, weight: .bold))
-                    .tracking(1)
-                    .foregroundColor(themeManager.textColor.opacity(0.6))
-                
+                // Hides itself once the sidebar is too narrow, instead of
+                // wrapping into a second line (see SidebarSectionTitle).
+                SidebarSectionTitle(text: "NOTEBOOKS")
+                    .environmentObject(themeManager)
+
                 Spacer()
                 
                 Button(action: {

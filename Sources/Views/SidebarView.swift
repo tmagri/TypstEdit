@@ -24,6 +24,13 @@ class FileSystemModel: ObservableObject {
     @Published var currentFolder: URL?
     @Published var expandedFolders: Set<URL> = []
     @Published var isNewUnsavedFile: Bool = false
+    /// Bumped whenever a reload observes an actual change in the tree. The
+    /// file List uses it as its identity so SwiftUI rebuilds rows outright.
+    /// Without it, `List(_:children:)` sometimes diffs the new data to "no
+    /// visual change" and keeps stale rows — the glitch where a refresh only
+    /// took effect after switching to Notebooks and back (which recreated the
+    /// List, and is exactly what this rebuild mimics).
+    @Published var refreshGeneration: Int = 0
     
     // ADD THIS METHOD:
     func openFile() {
@@ -48,14 +55,62 @@ class FileSystemModel: ObservableObject {
         }
     }
     
+    /// The toolbar Refresh button: rescans and always rebuilds the List, even
+    /// when the scan comes back identical — an identical result can't be
+    /// trusted to undo a List that's already showing stale rows, which is
+    /// exactly the glitch this is meant to recover from.
+    func forceRefresh() {
+        refreshGeneration += 1
+        loadFiles()
+    }
+
     func loadFiles() {
         guard let folder = currentFolder else { return }
-        self.rootNodes = loadDirectory(at: folder)
-        
+        let fresh = refreshedTree(at: folder)
+
+        // Only touch state when the tree really changed: no flicker on
+        // no-op refreshes, and a guaranteed rebuild when files appeared,
+        // disappeared, or moved.
+        if fresh != rootNodes {
+            self.rootNodes = fresh
+            refreshGeneration += 1
+        }
+
         Task(priority: .background) {
             print("[DEBUG] Triggering RAG Indexer for folder: \(folder.lastPathComponent)")
             await RAGManager.shared.indexProject(at: folder)
         }
+    }
+
+    /// Loads the top level of `folder` and re-fills every folder the user
+    /// already expanded, so nested changes show up in the same pass instead
+    /// of lingering stale until the user collapses and re-expands.
+    ///
+    /// URLs are processed shallowest-first: a subfolder only becomes visible
+    /// in the tree after its parent has been refilled, so parents must be
+    /// handled before their children.
+    private func refreshedTree(at folder: URL) -> [FileNode] {
+        var tree = loadDirectory(at: folder)
+        let expanded = expandedFolders.sorted {
+            $0.pathComponents.count < $1.pathComponents.count
+        }
+        for url in expanded {
+            guard findNode(with: url, in: tree) != nil else { continue }
+            let children = loadDirectory(at: url)
+            tree = tree.map { updateChildren(in: $0, target: url, children: children) }
+        }
+        return tree
+    }
+
+    /// Depth-first search for the node with `url` in the (lazily loaded) tree.
+    private func findNode(with url: URL, in nodes: [FileNode]) -> FileNode? {
+        for node in nodes {
+            if node.url == url { return node }
+            if let children = node.children, let hit = findNode(with: url, in: children) {
+                return hit
+            }
+        }
+        return nil
     }
     
     // Auto-generated directories that shouldn't clutter the project sidebar.
@@ -159,20 +214,31 @@ class FileSystemModel: ObservableObject {
     
     func createProjectFile(extension fileExtension: String) -> URL? {
         guard let folder = currentFolder else { return nil }
-        
+        return createFile(in: folder, fileExtension: fileExtension)
+    }
+
+    /// Creates a uniquely-named file of `fileExtension` inside `folder`
+    /// ("Untitled", "Untitled 2", …) and refreshes the tree.
+    ///
+    /// Used by the header "New File" menu (project root) and the folder
+    /// context menu ("New File Here", any folder in the tree).
+    /// `.note` files start with a heading, matching how notebook pages are
+    /// created; every other kind starts empty.
+    @discardableResult
+    func createFile(in folder: URL, fileExtension: String) -> URL? {
         let baseName = "Untitled"
-        var targetURL = folder.appendingPathComponent("\(baseName).\(fileExtension)")
+        var targetURL = folder.appendingPathComponent(baseName).appendingPathExtension(fileExtension)
         var counter = 1
-        
+
         // Find a unique filename
         while FileManager.default.fileExists(atPath: targetURL.path) {
-            targetURL = folder.appendingPathComponent("\(baseName) \(counter).\(fileExtension)")
+            targetURL = folder.appendingPathComponent("\(baseName) \(counter)").appendingPathExtension(fileExtension)
             counter += 1
         }
-        
+
         do {
-            // Create an empty file
-            try "".write(to: targetURL, atomically: true, encoding: .utf8)
+            let initialContent = fileExtension.lowercased() == "note" ? "= Untitled\n\n" : ""
+            try initialContent.write(to: targetURL, atomically: true, encoding: .utf8)
             loadFiles()
             return targetURL
         } catch {
@@ -288,19 +354,17 @@ struct SidebarView: View {
                     if let folderName = model.currentFolder?.lastPathComponent {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            // Scale the folder name down as the sidebar gets
-                            // thinner: full name, then a shortened name, then
-                            // nothing. Letting the row squeeze it produced a
-                            // lone last letter ("s"), which reads as a glitch.
-                            // The icon buttons keep their room throughout, and
-                            // the full name stays available as a tooltip.
-                            ViewThatFits(in: .horizontal) {
-                                folderTitle(folderName.uppercased())
-                                folderTitle(shortFolderName(folderName))
-                                Color.clear
-                                    .frame(width: 0, height: 0)
-                            }
-                            .help(folderName)
+                            // Same squeeze rule as the "NOTEBOOKS" header:
+                            // full name, then a shortened name, then nothing.
+                            // Letting the row squeeze it produced a lone last
+                            // letter ("s"), which reads as a glitch. The icon
+                            // buttons keep their room throughout, and the
+                            // full name stays available as a tooltip.
+                            SidebarSectionTitle(
+                                text: folderName.uppercased(),
+                                fallbackText: shortFolderName(folderName)
+                            )
+                            .environmentObject(themeManager)
                             
                             Spacer()
                             
@@ -330,11 +394,12 @@ struct SidebarView: View {
                                 }
                             }
                             
-                            Button(action: { model.loadFiles() }) {
+                            Button(action: { model.forceRefresh() }) {
                                 Image(systemName: "arrow.clockwise")
                                     .foregroundColor(themeManager.textColor.opacity(0.6))
                             }
                             .buttonStyle(.plain)
+                            .help("Refresh Files")
                             
                             Menu {
                                 Button(action: {
@@ -344,7 +409,15 @@ struct SidebarView: View {
                                 }) {
                                     Label("New Typst File", systemImage: "doc.text")
                                 }
-                                
+
+                                Button(action: {
+                                    if let newFile = model.createProjectFile(extension: "note") {
+                                        selectedFile = newFile // Opens the file immediately
+                                    }
+                                }) {
+                                    Label("New Note File", systemImage: "note.text")
+                                }
+
                                 Button(action: {
                                     if let newFile = model.createProjectFile(extension: "md") {
                                         selectedFile = newFile // Opens the file immediately
@@ -426,6 +499,10 @@ struct SidebarView: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .environment(\.defaultMinListRowHeight, 22)
+                // Rebuilding the List on generation changes is the reliable
+                // fix for the stale-refresh glitch; identity-diffing alone
+                // can leave old rows on screen (see FileSystemModel).
+                .id(model.refreshGeneration)
             } // Close VStack
             } else {
                 NotebookSidebarView(selectedFile: $selectedFile)
@@ -460,7 +537,10 @@ struct SidebarView: View {
             if newMode == 1 {
                 NotebookManager.shared.loadNotebooks()
             } else {
-                model.loadFiles()
+                // Coming back from Notebooks used to be the only way to fix
+                // a stale file list — keep that recovery, but make it
+                // explicit: switch rebuilds the List through forceRefresh.
+                model.forceRefresh()
             }
         }
         .onChange(of: model.currentFolder) { newValue in
@@ -477,16 +557,6 @@ struct SidebarView: View {
                 NotebookManager.shared.loadNotebooks()
             }
         }
-    }
-
-    /// The folder name in the sidebar header, at one consistent style.
-    private func folderTitle(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 11, weight: .bold))
-            .tracking(1)
-            .foregroundColor(themeManager.textColor.opacity(0.6))
-            .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
     }
 
     /// Head of a long folder name plus an ellipsis, used when the full name no
@@ -556,6 +626,22 @@ struct SidebarRow: View {
             if node.isDirectory {
                 Divider()
 
+                // Create documents directly inside this folder, the same way
+                // the header "+" menu does for the project root.
+                Menu {
+                    Button("Typst File (.typ)") {
+                        createFileHere("typ")
+                    }
+                    Button("Note (.note)") {
+                        createFileHere("note")
+                    }
+                    Button("Markdown File (.md)") {
+                        createFileHere("md")
+                    }
+                } label: {
+                    Label("New File Here", systemImage: "square.and.pencil")
+                }
+
                 Button("Cleanup Unused Images…") {
                     onCleanupFolder(node.url)
                 }
@@ -581,12 +667,23 @@ struct SidebarRow: View {
         }
     }
     
+    /// Creates a new file inside this folder and opens it immediately.
+    private func createFileHere(_ fileExtension: String) {
+        if let url = fileSystemModel.createFile(in: node.url, fileExtension: fileExtension) {
+            selectedFile = url
+        }
+    }
+
     func iconName(for node: FileNode) -> String {
         if node.isDirectory {
             return "folder.fill"
         }
         if node.name.hasSuffix(".typ") {
             return "doc.text.fill"
+        }
+        // `.note` = Markdown-with-Typst note; same icon as notebook pages.
+        if node.name.hasSuffix(".note") {
+            return "note.text"
         }
         if node.name.hasSuffix(".pdf") {
             return "doc.text" // PDF icon? 
@@ -600,6 +697,10 @@ struct SidebarRow: View {
         }
         if node.name.hasSuffix(".typ") {
             return .orange
+        }
+        // Indigo matches the notebook styling used for notes elsewhere.
+        if node.name.hasSuffix(".note") {
+            return .indigo
         }
         return themeManager.textColor // Match text color for better visibility in light mode
     }
