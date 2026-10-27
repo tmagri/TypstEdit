@@ -63,10 +63,19 @@ struct CalculatorView: View {
         HStack(spacing: 8) {
             Image(systemName: "function")
                 .foregroundColor(.accentColor)
-            Text("CALCULATOR")
-                .font(.system(size: 11, weight: .bold))
-                .tracking(1)
-                .foregroundColor(themeManager.textColor.opacity(0.6))
+            // Hide the title as the panel narrows rather than letting it
+            // wrap vertically (same treatment as the sidebar folder name).
+            // The icon buttons keep their room throughout, and the title
+            // stays available as a tooltip.
+            ViewThatFits(in: .horizontal) {
+                Text("CALCULATOR")
+                    .font(.system(size: 11, weight: .bold))
+                    .tracking(1)
+                    .foregroundColor(themeManager.textColor.opacity(0.6))
+                Color.clear
+                    .frame(width: 0, height: 0)
+            }
+            .help("CALCULATOR")
             if session.hasUnsavedChanges {
                 Circle()
                     .fill(Color.orange)
