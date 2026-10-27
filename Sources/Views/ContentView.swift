@@ -665,6 +665,26 @@ struct ContentView: View {
                                 .foregroundColor(.secondary)
                                 .transition(.opacity)
                         }
+
+                        // Non-portable Typst badge: shown while the document uses
+                        // TypstEdit calculator features (#calc, calc-param, plot,
+                        // BesselJ …). Notes are exempt — they are TypstEdit-native.
+                        if compiler.usesNonPortableCalcFeatures {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                Text("Non-portable Typst")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.12))
+                            .clipShape(Capsule())
+                            .help(compiler.calcFeatureSummaryText.map {
+                                "Uses TypstEdit calculator features (\($0)). This document will not compile in standard Typst. Notes are exempt."
+                            } ?? "Uses TypstEdit calculator features that standard Typst does not have.")
+                        }
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 4)
@@ -1337,8 +1357,7 @@ struct ContentView: View {
             let exportDestination = TypstCompiler.exportDestinationURL(for: format, requested: dest)
             Task {
                 let ext = url.pathExtension.lowercased()
-                let isNoteOrMd = (ext == "note" || ext == "md")
-                
+
                 if format == "pdf" {
                     let cleanResult = await compiler.compileClean(content: editorController.sourceCode,
                                                                  fileExtension: ext,
@@ -1382,7 +1401,11 @@ struct ContentView: View {
                         editorController.lastExportError = cleanResult.error ?? "Failed to export PDF"
                         editorController.showExportErrorAlert = true
                     }
-                } else if isNoteOrMd {
+                } else {
+                    // Every image export (PNG/SVG) goes through the same
+                    // pipeline as the preview — Markdown/Note conversion when
+                    // needed, calculator static compilation, preambles — and
+                    // uses the editor buffer, like PDF export.
                     let result = await compiler.exportFormatted(content: editorController.sourceCode,
                                                                fileExtension: ext,
                                                                originalFileURL: url,
@@ -1399,18 +1422,34 @@ struct ContentView: View {
                             editorController.showExportErrorAlert = true
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// File ▸ Export As ▸ Standard Typst: a .typ that compiles without TypstEdit.
+    func handleExportStandardTypst() {
+        guard let url = selectedFile else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export as Standard Typst"
+        panel.message = "Calculator values are inlined; runtime calculator functions are bundled next to the file."
+        panel.allowedContentTypes = [UTType(filenameExtension: "typ") ?? .plainText]
+        panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + "-standard.typ"
+        panel.directoryURL = url.deletingLastPathComponent()
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        Task {
+            let result = await compiler.exportStandardTypst(
+                content: editorController.sourceCode,
+                fileExtension: url.pathExtension,
+                destination: destination)
+            await MainActor.run {
+                if result.success {
+                    NSWorkspace.shared.activateFileViewerSelecting(result.files)
+                    editorController.showStatus(result.notes.last ?? "Exported standard Typst", duration: 4)
+                    if let root = editorController.projectRootURL, destination.path.hasPrefix(root.path) { fileSystem.loadFiles() }
                 } else {
-                    let result = await compiler.export(sourceURL: url, outputURL: exportDestination, format: format, projectRoot: editorController.projectRootURL)
-                    await MainActor.run {
-                        if result.success {
-                            let openedURL = TypstCompiler.firstGeneratedExportURL(for: exportDestination) ?? exportDestination
-                            NSWorkspace.shared.open(openedURL)
-                            if let root = editorController.projectRootURL, openedURL.path.hasPrefix(root.path) { fileSystem.loadFiles() }
-                        } else {
-                            editorController.lastExportError = result.error ?? "Unknown error"
-                            editorController.showExportErrorAlert = true
-                        }
-                    }
+                    editorController.lastExportError = ([result.error ?? "Export failed"] + result.notes).joined(separator: "\n\n")
+                    editorController.showExportErrorAlert = true
                 }
             }
         }
@@ -1745,6 +1784,7 @@ struct ContentView: View {
 
         // Markdown export / share
         case "exportAsMarkdown": handleExportAsMarkdown()
+        case "exportStandardTypst": handleExportStandardTypst()
         case "shareAsPDF":       handleShareAsPDF()
         case "shareAsMarkdown":  handleShareAsMarkdown()
         case "copyAsMarkdown":   editorController.copyAsMarkdown()

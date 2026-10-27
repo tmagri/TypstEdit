@@ -68,6 +68,12 @@ class OfflineCompletionService {
 
         var suggestions: [String] = []
 
+        // Calculator strings: names inside calc-call("…") / calc-fn("…") and
+        // CAS functions inside #calc("…").
+        if let calculator = calculatorStringCompletions(text: text, cursorIndex: cursorIndex, prefix: prefix) {
+            return calculator
+        }
+
         // Context Check: Are we after #set or #show?
         let prevWord = getPreviousWord(text: text, cursorIndex: cursorIndex - prefix.count)
         if prevWord == "#set" || prevWord == "#show" {
@@ -82,8 +88,9 @@ class OfflineCompletionService {
             let term = prefix.lowercased()
             var paramSuggestions: [String] = []
 
-            // Try specific function parameters first
-            if let specificParams = functionParameters[enclosingFunc] {
+            // Try specific function parameters first (the calculator bridge's
+            // own signatures, e.g. plot's samples:/y-min:, come from bridge.typ)
+            if let specificParams = functionParameters[enclosingFunc] ?? CalcPlugin.bridgeSignatures[enclosingFunc] {
                 paramSuggestions.append(contentsOf: specificParams.filter { $0.hasPrefix(term) })
             }
 
@@ -120,10 +127,58 @@ class OfflineCompletionService {
         return suggestions
     }
 
+    /// Calculator functions offered after `#`: the bridge's public functions
+    /// (parsed from bridge.typ) plus the compile-time `calc-table`.
+    private var calculatorFunctions: [String] {
+        let bridge = CalcPlugin.bridgeSignatures.keys.filter { !$0.hasPrefix("_") }
+        return (bridge + ["calc-table"]).sorted()
+    }
+
+    private static let calcCallString = try! NSRegularExpression(pattern: #"calc-(?:call|fn)\(\s*"([A-Za-z0-9]*)$"#)
+    private static let calcExpressionString = try! NSRegularExpression(pattern: #"#calc(?:-table)?\(\s*"([^"\n]*)$"#)
+
+    /// Completions inside the calculator's string arguments, or nil when the
+    /// cursor is not in one. Suggestions keep the typed prefix (including the
+    /// opening quote), so the editor replaces exactly what was typed.
+    private func calculatorStringCompletions(text: String, cursorIndex: Int, prefix: String) -> [String]? {
+        let ns = text as NSString
+        let end = min(max(cursorIndex, 0), ns.length)
+        let lineStart = ns.range(of: "\n", options: .backwards, range: NSRange(location: 0, length: end)).upperBound
+        let before = ns.substring(with: NSRange(location: lineStart == NSNotFound ? 0 : lineStart, length: end - (lineStart == NSNotFound ? 0 : lineStart)))
+        let range = NSRange(location: 0, length: (before as NSString).length)
+
+        if let match = Self.calcCallString.firstMatch(in: before, range: range) {
+            let partial = (before as NSString).substring(with: match.range(at: 1)).lowercased()
+            let lead = String(prefix.dropLast(partial.count))
+            return CalcPlugin.registryFunctions
+                .filter { $0.name.hasPrefix(partial) }
+                .map { lead + $0.name + ($0.arity > 1 || before.contains("calc-call") ? "\", " : "\")") }
+        }
+        if let match = Self.calcExpressionString.firstMatch(in: before, range: range) {
+            let content = (before as NSString).substring(with: match.range(at: 1))
+            // Only complete the identifier being typed at the end of the expression.
+            guard let identifier = content.range(of: #"[A-Za-z][A-Za-z0-9_]*$"#, options: .regularExpression) else { return [] }
+            let partial = String(content[identifier])
+            let lead = String(prefix.dropLast(partial.count))
+            let casNames = Set(CalculatorFunctionCatalog.entries.compactMap { entry -> String? in
+                guard entry.category != .documents,
+                      let name = entry.title.range(of: #"^[A-Za-z][A-Za-z0-9]*(?=\()"#, options: .regularExpression) else { return nil }
+                return String(entry.title[name])
+            })
+            return casNames.filter { $0.lowercased().hasPrefix(partial.lowercased()) && $0 != partial }
+                .sorted()
+                .map { lead + $0 + "(" }
+        }
+        return nil
+    }
+
     /// Maps function names to insertable completions. Keywords stay bare,
     /// parameterless functions get `()`, everything else gets `(`.
     private func functionCompletions(matching term: String, includeMarker: Bool) -> [String] {
-        let matches = typstFunctions.filter { $0.hasPrefix(term) }
+        var matches = typstFunctions.filter { $0.hasPrefix(term) }
+        for name in calculatorFunctions where name.lowercased().hasPrefix(term) && !matches.contains(name) {
+            matches.append(name)
+        }
 
         // Keywords that should NOT have parenthesis
         let keywords = ["set", "show", "let", "import", "include", "as", "from", "return", "auto", "none"]

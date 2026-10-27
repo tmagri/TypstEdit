@@ -166,6 +166,9 @@ final class CalculatorFunctionCatalogTests: XCTestCase {
         where guide.compatibility != .notYetVerified {
             // ans/entry recall needs a seeded history; covered separately.
             guard guide.id != "recall" else { continue }
+            // "In documents" entries are Typst code (#calc, plot, BesselJ …),
+            // not calculator input; they are covered by CalcBridgeTests.
+            guard guide.category != .documents else { continue }
             let result = await eval(guide.example)
             let preprocessed = TISyntax.preprocess(guide.example)
             if !result.ok {
@@ -265,6 +268,9 @@ final class CalculatorFunctionCatalogTests: XCTestCase {
         for guide in CalculatorFunctionCatalog.entries
         where guide.compatibility != .notYetVerified {
             guard guide.id != "recall" else { continue }
+            // Typst-side helpers are not calculator input; CalcBridgeTests
+            // compiles them against the real plugin instead.
+            guard guide.category != .documents else { continue }
             let result = await eval(guide.example)
             guard result.ok else {
                 failures.append("\(guide.id): evaluation failed")

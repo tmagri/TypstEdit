@@ -36,6 +36,21 @@ bundle is still launchable. The caller remains responsible for signing
 inside-out (`Contents/Resources/bin/*`, every `Contents/Frameworks` binary,
 `vector.framework`, then the app) and for notarization.
 
+### Calculator WASM core
+
+The assemble step must also copy the calculator's WebAssembly core into
+`Contents/Resources/bin/`:
+
+```
+build/calc/TypstEditCalc.wasm  ->  TypstEdit.app/Contents/Resources/bin/TypstEditCalc.wasm
+```
+
+Build it first with `Tools/calc-plugin/build_calc_plugin.sh` (see
+`Tools/calc-plugin/README.md`). The file is a WASM module, not Mach-O, so it
+needs no signing and `verify_bundle.sh` ignores it. Without it, documents that
+call `BesselJ`/`calc-gamma`/`plot` show a warning instead of a preview and the
+calculator's document integration is unavailable.
+
 ## prepare_bundle.sh
 
 ```

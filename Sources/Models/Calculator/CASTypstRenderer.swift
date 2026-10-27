@@ -281,6 +281,13 @@ enum CASTypstRenderer {
             return "cases(\(render(args[1])) & \"if\" & \(render(args[0])), \(render(args[2])) & \"otherwise\")"
         case "piecewise":
             return renderPiecewise(args)
+        // Bessel functions print like the literature: J_p(x), Y_p(x), I_p(x),
+        // K_p(x). Giac spells the order-first form `BesselJ(p, x)`; the
+        // lowercase `besselJ(x, p)` form is order-last and normalized here.
+        case "BesselJ", "BesselY", "BesselI", "BesselK" where args.count == 2:
+            return renderBessel(letter: String(name.last ?? "J"), args: args)
+        case "besselJ", "besselY", "besselI", "besselK" where args.count == 2:
+            return renderBessel(letter: String(name.last ?? "J").uppercased(), args: Array(args.reversed()))
         default:
             // Inverse trig prints like the TI-89: sin^(-1)(x).
             if let inverse = inverseTrig(name), args.count == 1 {
@@ -303,6 +310,19 @@ enum CASTypstRenderer {
         case "atanh", "arctanh": return "tanh"
         default: return nil
         }
+    }
+
+    /// Renders a Bessel function as `J_p(x)`. The order is subscripted only
+    /// when it is not zero (the literature omits the subscript for J₀/Y₀/I₀/K₀).
+    private static func renderBessel(letter: String, args: [CASExpression]) -> String {
+        let order = args[0]
+        let argument = render(args[1])
+        // Typst math: `J_(p)(x)` — quote the function letter so it stays upright.
+        if case let .number(value, _) = order, value == "0" || value == "0.0" {
+            return "\(letter)(\(argument))"
+        }
+        let sub = parenthesize(render(order), atomic: isAtomicOperand(order))
+        return "\(letter)_\(sub)(\(argument))"
     }
 
     private static func renderIntegral(_ args: [CASExpression]) -> String {

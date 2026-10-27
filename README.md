@@ -36,6 +36,7 @@
 
 ### Visual Editors
 * **🧮 Visual Equation Editor:** Interactive equation editor with live LaTeX preview for mathematical expressions.
+* **📈 Calculator in Documents:** Plot Bessel/Airy/erf/… functions, tabulate CAS expressions and inline exact results while the document compiles — see [Calculator Inside Your Documents](#-calculator-inside-your-documents-unique-to-typstedit).
 * **🖥️ Calculator Mode:** TI-89 style CAS home screen (solve, factor, d, ∫, Σ, matrices, exact/approx, ans recall) powered by the bundled Giac engine — right-click any result to insert it into your document as Typst math, save sessions as `.tcalc` files, browse a verified function catalogue, and let AI Chat evaluate math with `evaluate_math`. See `Docs/calculator.md`.
 * **🖼️ Figure Editor:** Visual interface for inserting and editing figures with captions and references.
 * **🔧 Foundation Item Picker:** Drill-down navigation for Typst foundation items (arrays, strings, datetime, calc, etc.) with searchable methods and properties.
@@ -45,7 +46,7 @@
 * **🚀 Project Templates:** Start quickly with built-in templates for **Articles, Reports, Presentations, and Resumes**.
 * **📁 Project Sidebar:** Easily navigate through your project files.
 * **📥 LyX Import:** Convert LyX documents to Typst format with automatic font, page size, and heading detection.
-* **📤 Export Options:** Export to PDF, PNG, SVG, or Markdown formats.
+* **📤 Export Options:** Export to PDF, PNG, SVG, Markdown, or **Standard Typst** (a portable `.typ` with calculator values inlined).
 * **💾 Project Backup:** One-click project backup functionality.
 
 ### Smart Snippets & Insertion
@@ -144,6 +145,52 @@ If you skip the install, use the full path `/Applications/TypstEdit.app/Contents
 
 </details>
 
+## 📈 Calculator Inside Your Documents (unique to TypstEdit)
+
+TypstEdit can evaluate mathematics *while your document compiles* — something no
+other Typst editor does. Write plots of Bessel functions, tables of exact CAS
+results and parameter studies directly in Typst:
+
+```typ
+#let k = calc-param(2)                      // a document parameter, shared with the CAS
+
+// One curve per loop step — the loop runs inside Typst, calling compiled functions.
+#plot(
+  curves: range(4).map(n => (fn: x => BesselJ(n, x), label: [$J_#n$])),
+  x-min: 0, x-max: 20, title: [Bessel $J_n (x)$],
+)
+
+// Any of ~80 special functions by name, curried for plotting.
+#plot(curves: ((fn: calc-fn("erf"), label: [erf]), (fn: calc-fn("airyai"), label: [Ai])), -4, 4)
+
+// Any Giac expression, sampled by the CAS at compile time.
+#plot(points: #calc-table("sin(k*x)/x", x, 0.05, 15, 150), x-min: 0, x-max: 15)
+
+// Exact CAS values, specialised per loop iteration.
+#table(columns: 2, ..for n in (1, 2, 3) {
+  ([#n], [#calc("integrate(x^n*exp(x), x, 0, 1)")])
+})
+```
+
+![Plots and CAS values computed while the document compiles](screenshots/calc-plots.png)
+
+*The image above is the real output of the document, rendered by TypstEdit.*
+
+**Three ways to reach the calculator, by when they run:**
+
+| You write | Runs | Covers | Values |
+|---|---|---|---|
+| `#calc("…")`, `#calc-table("…", …)` | before Typst, through the Giac CAS | any CAS expression | exact |
+| …the same inside `for` loops with literal bounds | specialised per iteration, before Typst | any CAS expression | exact |
+| `calc-call("name", …)`, `BesselJ`, `plot`, `calc-fn` | inside Typst (compiled WebAssembly) | ~80 functions: Bessel, Airy, gamma, erf, zeta, Lambert W, elliptic, orthogonal polynomials, … | chart-grade, verified |
+
+* **Verified numerics.** The WebAssembly core is checked against arbitrary-precision references (mpmath) on 16,765 cases across every function — no function returns a plausible-but-wrong number; where it cannot guarantee accuracy it returns NaN instead.
+* **Editor integration.** Offline autocomplete knows every function (`calc-call("bess…` → `besselj`), `plot(` parameters and CAS names inside `#calc("…")`. Put the cursor in an equation and use **Send to Calculator** to load it into the calculator panel.
+* **Portability is explicit.** A `.typ` that uses these features shows a *Non-portable Typst* badge. **File ▸ Export As ▸ Standard Typst** writes a version that compiles in *stock* Typst: every CAS value is inlined, and if runtime functions remain, the bridge and the 51 KB WebAssembly core are bundled next to it through Typst's standard plugin API. The export is verified with the plain `typst` compiler before it is reported as done. (`.note` files are TypstEdit-native and show no warning.)
+* Every export — PDF, PNG, SVG, Markdown/Note sources, and the command line (`typstedit compile`) — runs the same calculator step as the live preview.
+
+See `Docs/calculator.md` for the full guide and `Tools/calc-plugin/README.md` for the numeric core.
+
 ## 📥 Installation
 
 TypstEdit is available for both **Apple Silicon** (M1/M2/M3) and **Intel** Macs.
@@ -161,6 +208,7 @@ If you want to contribute or build the app yourself:
 * macOS 13.0+ (Ventura) or later to run; building needs a recent macOS.
 * **Xcode 26+ (Swift 6.2+)** installed — the package uses `swift-tools-version: 6.2`. Full Xcode is required for universal builds; Command Line Tools alone ship an Apple-Silicon-only copy of the Swift compatibility runtime.
 * For the Calculator's CAS helper: Homebrew `autoconf`, `automake`, `libtool`, and `bash` (`brew install autoconf automake libtool bash`).
+* For the calculator's WebAssembly core (functions used inside documents): `brew install lld` (provides `wasm-ld`). The bundle scripts run `Tools/calc-plugin/build_calc_plugin.sh` automatically.
 
 ### Steps
 

@@ -277,6 +277,41 @@ final class AgentCompileService {
         }
         text = TypstCompiler.substituteMissingFonts(text)
 
+        // TypstEdit calculator features: resolve #calc calls and inject the
+        // plugin bridge exactly like the live preview, so a headless
+        // `typstedit compile` produces the same output as the app.
+        let calcSummary = CalcFeatureScanner.scan(text)
+        if calcSummary.needsResolution {
+            let outcome = await CalcResolutionPass.resolve(
+                text,
+                fileExtension: kind,
+                settings: CalcResolutionSettings.fromDefaults(),
+                cache: [:],
+                storedParameters: [])
+            let linesBefore = text.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+            text = outcome.outcome.output
+            needsShadow = true
+            for diagnostic in outcome.outcome.diagnostics {
+                result.notes.append("calculator, line \(diagnostic.line.map(String.init) ?? "?"): \(diagnostic.message)")
+            }
+            // Loop specialisation repeats bodies; realign diagnostics.
+            if text.reduce(0, { $0 + ($1 == "\n" ? 1 : 0) }) != linesBefore {
+                lineMap = TypstCompiler.buildLineMap(source: originalText, output: text)
+            }
+        }
+        if calcSummary.needsBridge {
+            if CalcPlugin.install(into: sourceDirectory) {
+                text = CalcPlugin.importStatement + text
+                preambleLines += 1
+                needsShadow = true
+                result.notes.append(kind == "note"
+                    ? "Injected the TypstEdit calculator bridge."
+                    : "Injected the TypstEdit calculator bridge (non-portable Typst).")
+            } else {
+                result.notes.append("Calculator features were used, but TypstEditCalc.wasm is not built — run Tools/calc-plugin/build_calc_plugin.sh.")
+            }
+        }
+
         if Self.containsWebImage(text) {
             let tempDir = SafeDirectoryManager.safeTempDirectory(in: rootURL)
             let existed = fm.fileExists(atPath: tempDir.path)

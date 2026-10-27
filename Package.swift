@@ -35,7 +35,8 @@ let package = Package(
                 .process("Resources/AppIcon.png"),
                 .process("Resources/AppIconDark.png"),
                 .process("Resources/Vendor"),
-                .copy("Resources/Skills")
+                .copy("Resources/Skills"),
+                .copy("Resources/Calc")
             ]
         ),
         .testTarget(

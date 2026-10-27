@@ -37,12 +37,27 @@ struct CalculatorView: View {
             }
         }
         .sheet(isPresented: $showFunctionCatalog) {
-            CalculatorFunctionCatalogView { example in
-                // Replace the entry line with the chosen example, ready to
-                // edit or evaluate, like picking a catalogue item on the
-                // TI-89.
-                session.entryLine = example
-                entryFocusTrigger = UUID()
+            CalculatorFunctionCatalogView { guide in
+                if guide.category == .documents {
+                    // Typst-side helpers (#calc, plot, BesselJ…) are document
+                    // code, not calculator input: put them at the cursor when a
+                    // Typst-capable file is open, else hand them over via the
+                    // clipboard.
+                    if editorController.isTypstFile {
+                        editorController.insertText(guide.example)
+                        session.lastStatus = "Inserted into document"
+                    } else {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(guide.example, forType: .string)
+                        session.lastStatus = "Copied to clipboard"
+                    }
+                } else {
+                    // Replace the entry line with the chosen example, ready to
+                    // edit or evaluate, like picking a catalogue item on the
+                    // TI-89.
+                    session.entryLine = guide.example
+                    entryFocusTrigger = UUID()
+                }
             }
             .environmentObject(themeManager)
         }
@@ -124,6 +139,18 @@ struct CalculatorView: View {
                     ForEach(session.storedVariables, id: \.name) { variable in
                         Button("\(variable.name) = \(variable.value)") {
                             session.deleteVariable(name: variable.name)
+                        }
+                    }
+                }
+                if !session.documentParameters.isEmpty {
+                    Divider()
+                    Menu("Document parameters") {
+                        Text("From the open document (calc-param)")
+                        ForEach(session.documentParameters, id: \.name) { parameter in
+                            Button("\(parameter.name) = \(parameter.value)") {
+                                session.entryLine = parameter.value
+                                entryFocusTrigger = UUID()
+                            }
                         }
                     }
                 }

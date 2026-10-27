@@ -8,9 +8,11 @@ import SwiftUI
 /// Presented from the Calculator panel (see `CalculatorView`); the theme
 /// comes from the surrounding environment, like the rest of the panel.
 struct CalculatorFunctionCatalogView: View {
-    /// Called with the example text of the selected entry. The Calculator
-    /// panel supplies the actual insertion into the entry line.
-    let onInsert: (String) -> Void
+    /// Called with the selected entry. The Calculator panel decides what to do
+    /// with it: entry-line examples load into the home screen; "In documents"
+    /// entries insert into the open Typst file instead (they are Typst code,
+    /// not calculator input).
+    let onInsert: (CalculatorFunctionGuide) -> Void
 
     @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.dismiss) private var dismiss
@@ -227,12 +229,14 @@ struct CalculatorFunctionCatalogView: View {
             Divider()
 
             HStack {
-                Text("Insert Example closes this sheet and passes the example to the calculator.")
+                Text(guide.category == .documents
+                     ? "Insert Example places this Typst code at the cursor in the open document."
+                     : "Insert Example closes this sheet and passes the example to the calculator.")
                     .font(.caption2)
                     .foregroundColor(themeManager.textColor.opacity(0.5))
                 Spacer()
-                Button("Insert Example") {
-                    onInsert(guide.example)
+                Button(guide.category == .documents ? "Insert into Document" : "Insert Example") {
+                    onInsert(guide)
                     dismiss()
                 }
             }

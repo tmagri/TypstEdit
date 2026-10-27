@@ -121,6 +121,16 @@ if [ ! -x "$CAS_HELPER" ] || ! lipo -verify_arch "$ARCH" "$CAS_HELPER" >/dev/nul
 fi
 cp "$CAS_HELPER" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
 chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+
+# Calculator WASM core: the numeric library Typst documents call (BesselJ,
+# calc-call, plot…). Architecture-independent; one build serves both slices.
+CALC_WASM="build/calc/TypstEditCalc.wasm"
+bash "$SCRIPT_DIR/Tools/calc-plugin/build_calc_plugin.sh"
+if [ ! -f "$CALC_WASM" ]; then
+    echo "Error: $CALC_WASM was not built (needs: brew install lld)." >&2
+    exit 1
+fi
+cp "$CALC_WASM" "$APP_BUNDLE/Contents/Resources/bin/TypstEditCalc.wasm"
 echo "✓ CAS helper bundled"
 
 

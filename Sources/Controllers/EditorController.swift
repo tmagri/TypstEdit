@@ -580,7 +580,7 @@ class EditorController: NSObject, ObservableObject {
 
     /// Reveals the Calculator in the left panel (showing the sidebar if it
     /// was hidden), or switches back to the file browser if it is already
-    /// showing. Always available — no Settings opt-in, unlike AI Chat.
+    /// showing. Always available — no Settings opt-out.
     func toggleCalculatorPanel() {
         if isSidebarVisible && sidebarContent == .calculator {
             sidebarContent = .files
@@ -588,6 +588,46 @@ class EditorController: NSObject, ObservableObject {
             isSidebarVisible = true
             sidebarContent = .calculator
         }
+    }
+
+    // MARK: - Editor ↔ Calculator
+
+    /// Loads the equation at `range` (or under the caret when nil) into the
+    /// Calculator's entry line and reveals the panel. The Typst math is
+    /// translated to TI/Giac syntax first; a construct the translator cannot
+    /// handle is reported in the status bar instead of loading a wrong
+    /// expression.
+    func sendEquationToCalculator(at range: NSRange? = nil) {
+        let caret = range?.location ?? selectedRange.location
+        guard let equationRange = range ?? EquationDetector.findEquationRange(in: sourceCode, at: caret) else {
+            showStatus("No equation at the cursor — put the caret inside $ … $", duration: 3)
+            return
+        }
+        guard equationRange.location + equationRange.length <= (sourceCode as NSString).length,
+              let swiftRange = Range(equationRange, in: sourceCode) else {
+            showStatus("Could not read the equation", duration: 3)
+            return
+        }
+
+        let raw = String(sourceCode[swiftRange])
+        do {
+            let converted = try TypstMathToTI.convert(raw: raw)
+            calculatorSession.entryLine = converted
+            if !(isSidebarVisible && sidebarContent == .calculator) {
+                isSidebarVisible = true
+                sidebarContent = .calculator
+            }
+            showStatus("Sent to Calculator: \(converted)", duration: 3)
+        } catch {
+            showStatus("Cannot send to Calculator — \(error.localizedDescription)", duration: 5)
+        }
+    }
+
+    /// True when the equation under the caret can be sent to the Calculator.
+    /// Used by the context menu and toolbar to enable/disable the action.
+    var canSendEquationToCalculator: Bool {
+        guard isTypstFile else { return false }
+        return EquationDetector.findEquationRange(in: sourceCode, at: selectedRange.location) != nil
     }
     @Published var shouldCopyImages: Bool = true
     
@@ -939,6 +979,19 @@ class EditorController: NSObject, ObservableObject {
     
     func setupErrorSubscription() {
         NotificationCenter.default.addObserver(self, selector: #selector(handleTypstErrors(_:)), name: .typstErrorsUpdated, object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleCalcDocumentParameters(_:)),
+            name: .calcDocumentParametersChanged,
+            object: nil)
+    }
+
+    /// Mirrors the open document's `calc-param` declarations onto the
+    /// Calculator panel (display-only; the document is the source of truth).
+    @objc private func handleCalcDocumentParameters(_ notification: Notification) {
+        let parameters = notification.object as? [CalculatorStoredVariable] ?? []
+        guard calculatorSession.documentParameters != parameters else { return }
+        calculatorSession.documentParameters = parameters
     }
     
     @objc private func handleTypstErrors(_ notification: Notification) {
@@ -4371,6 +4424,16 @@ class EditorController: NSObject, ObservableObject {
         let demoteHeadingItem = NSMenuItem(title: "Demote Heading", action: #selector(contextMenuDemoteHeading(_:)), keyEquivalent: "")
         demoteHeadingItem.target = self
         baseMenu.addItem(demoteHeadingItem)
+
+        // Send to Calculator — offered when the right-click lands inside a
+        // `$ … $` math region of a Typst-capable document.
+        if isTypstFile, let equationRange = EquationDetector.findEquationRange(in: sourceCode, at: index) {
+            let sendItem = NSMenuItem(title: "Send to Calculator", action: #selector(contextMenuSendToCalculator(_:)), keyEquivalent: "")
+            sendItem.target = self
+            sendItem.representedObject = NSValue(range: equationRange)
+            baseMenu.addItem(NSMenuItem.separator())
+            baseMenu.addItem(sendItem)
+        }
         
         // AI Refine / Grammar — only when the user has selected text and AI
         // features are enabled in settings.
@@ -4459,6 +4522,11 @@ class EditorController: NSObject, ObservableObject {
 
     @objc func contextMenuDemoteHeading(_ sender: NSMenuItem) {
         demoteHeadingSelection()
+    }
+
+    @objc func contextMenuSendToCalculator(_ sender: NSMenuItem) {
+        let range = (sender.representedObject as? NSValue)?.rangeValue
+        sendEquationToCalculator(at: range)
     }
     
     @objc func applyStaticFix(_ sender: NSMenuItem) {

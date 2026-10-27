@@ -150,6 +150,26 @@ class TypstCompiler: ObservableObject {
     private var typstErrors: [TypstError] = []
     private var typstWarnings: [TypstError] = []
     private var noteWarnings: [TypstError] = []
+    /// Advisory warnings from the TypstEdit calculator pipeline: `#calc`
+    /// resolution failures plus, for `.typ` files, the "not portable Typst"
+    /// notice. Recomputed on each `updateContent`, cleared only when the
+    /// features disappear — they survive a successful recompile, like
+    /// `noteWarnings`.
+    private var calcWarnings: [TypstError] = []
+
+    /// True when the open document uses TypstEdit calculator features
+    /// (`#calc`, `calc-param`, `plot`, `BesselJ`…) AND the file type expects
+    /// portability (`.typ`). `.note` files never set this: notes are a
+    /// TypstEdit-native format, so there is no portability expectation.
+    @Published var usesNonPortableCalcFeatures: Bool = false
+    /// Comma-separated feature list for the status-bar badge tooltip.
+    @Published var calcFeatureSummaryText: String? = nil
+
+    // Calculator resolution state, so debounced recompiles reuse previous
+    // CAS results (the cache key covers the call text, the document
+    // parameters and the modes) and parameter stores only replay on change.
+    private var calcResolutionCache: [String: String] = [:]
+    private var calcStoredParameters: [CalculatorStoredVariable] = []
 
     /// Merges real errors + advisory warnings into the published `errors` list and
     /// notifies observers. Real compile errors are listed first (they block output);
@@ -160,7 +180,7 @@ class TypstCompiler: ObservableObject {
     /// marker: every observer is O(list) per update, and a rough conversion can
     /// produce thousands of diagnostics that no UI should render at once.
     private func publishIssues() {
-        var combined = typstErrors + typstWarnings + noteWarnings
+        var combined = typstErrors + typstWarnings + noteWarnings + calcWarnings
         if combined.count > Self.maxPublishedIssues {
             let hidden = combined.count - Self.maxPublishedIssues
             combined.removeLast(hidden)
@@ -182,6 +202,10 @@ class TypstCompiler: ObservableObject {
     /// that is actually on disk, so this is captured in `updateContent`
     /// instead of being read live (mirrors `isDarkMode`).
     private var keepWithNextActive: Bool = false
+    /// Snapshot of "the calculator bridge was imported for this shadow source",
+    /// captured in `updateContent` alongside `keepWithNextActive` for the same
+    /// reason: diagnostics line mapping must describe the file on disk.
+    private var calcBridgeActive: Bool = false
     private var preambleLineCount: Int {
         var count = 0
         if keepWithNextActive {
@@ -192,6 +216,9 @@ class TypstCompiler: ObservableObject {
         }
         if currentFileExtension == "note" {
             count += Self.notePreamble.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        }
+        if calcBridgeActive {
+            count += 1 /* the single #import line */
         }
         return count
     }
@@ -496,8 +523,69 @@ class TypstCompiler: ObservableObject {
             // Map raw-block language tags Typst can't highlight (csharp, ...)
             // to ones it can, and close up "``` json"-style gaps. Line-preserving.
             finalSource = Self.normalizeRawLanguages(finalSource)
-            
+
+            // ---- TypstEdit calculator features -----------------------------
+            // Scan for `#calc` / `calc-param` / `plot` / Bessel usage. The
+            // scan result decides (a) whether `#calc` calls are resolved
+            // through the CAS before compiling, (b) whether the calculator
+            // bridge preamble (`BesselJ`, `plot`, `calc-param`…) is injected
+            // into the shadow, and (c) whether the document is flagged as
+            // non-portable Typst (`.typ` files only; `.note` files are
+            // TypstEdit-native and exempt).
+            // Static compilation (loops, #calc, bridge install) is shared with
+            // every export path; the import line itself is added below with
+            // the other preambles so line accounting stays in one place.
+            let calcPipeline = await applyCalcPipeline(
+                finalSource, fileExtension: ext, bridgeDirectory: projectTempDir, prependImport: false)
+            let calcSummary = calcPipeline.summary
+            var calcAdvisory = calcPipeline.diagnostics
+            finalSource = calcPipeline.content
+            if calcPipeline.lineCountChanged {
+                // Loop specialisation repeats loop bodies: re-align so
+                // diagnostics still land on the line the user wrote.
+                shadowToSourceLine = Self.buildLineMap(source: source, output: finalSource)
+            }
+            if calcSummary.needsResolution {
+                // Mirror the document's parameters onto the Calculator panel.
+                NotificationCenter.default.post(
+                    name: .calcDocumentParametersChanged,
+                    object: calcPipeline.parameters)
+            }
+
+            // The bridge module and the WASM numeric core are loaded by
+            // relative path, so both must sit next to the shadow file.
+            // Without them the import would only produce "file not found".
+            var bridgeReady = false
+            if calcSummary.needsBridge {
+                bridgeReady = CalcPlugin.install(into: projectTempDir)
+                if !bridgeReady {
+                    var issue = TypstError(
+                        line: calcSummary.firstLine,
+                        message: "The calculator’s WebAssembly core is not built — calculator functions in this document cannot run.",
+                        severity: .warning)
+                    issue.hints = [
+                        "Build it with Tools/calc-plugin/build_calc_plugin.sh (needs brew install lld).",
+                        "The bridge imports TypstEditCalc.wasm; both are copied next to the preview file.",
+                    ]
+                    calcAdvisory.append(issue)
+                }
+            }
+            calcBridgeActive = calcSummary.needsBridge && bridgeReady
+
+            if let portabilityWarning = CalcPortabilityPolicy.warning(summary: calcSummary, fileExtension: ext) {
+                calcAdvisory.append(portabilityWarning)
+            }
+            self.calcWarnings = calcAdvisory
+            let nonPortable = CalcPortabilityPolicy.shouldWarn(fileExtension: ext) && calcSummary.usesAny
+            if self.usesNonPortableCalcFeatures != nonPortable {
+                self.usesNonPortableCalcFeatures = nonPortable
+            }
+            self.calcFeatureSummaryText = calcSummary.usesAny ? calcSummary.featureNames.joined(separator: ", ") : nil
+
             var injectedPreamble = ""
+            if calcBridgeActive {
+                injectedPreamble += CalcPlugin.importStatement
+            }
             if keepWithNextActive {
                 injectedPreamble += Self.keepWithNextPreamble
             }
@@ -568,8 +656,7 @@ class TypstCompiler: ObservableObject {
             self.noteWarnings = pendingNoteWarnings
             self.typstErrors = []
             self.typstWarnings = []
-            self.publishIssues()
-        } catch {
+            self.publishIssues()        } catch {
             self.compilationStatus = "Error writing shadow file: \(error)"
             return
         }
@@ -1867,9 +1954,11 @@ class TypstCompiler: ObservableObject {
         let directory = templateURL.deletingLastPathComponent()
         let templateName = templateURL.deletingPathExtension().lastPathComponent
         let extensionName = templateURL.pathExtension.lowercased()
-        let prefix = templateName
+        // "out-{0p}" → stem "out": typst writes out-1.png, out-01.png, …
+        var stem = templateName
             .replacingOccurrences(of: "{0p}", with: "")
             .replacingOccurrences(of: "{p}", with: "")
+        if stem.hasSuffix("-") { stem.removeLast() }
 
         guard let fileEnumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else {
             return nil
@@ -1877,12 +1966,201 @@ class TypstCompiler: ObservableObject {
 
         let matches = fileEnumerator.compactMap { $0 as? URL }
             .filter { $0.pathExtension.lowercased() == extensionName }
-            .filter { $0.deletingPathExtension().lastPathComponent.hasPrefix(prefix + "-") || $0.deletingPathExtension().lastPathComponent == prefix }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .filter { url in
+                let name = url.deletingPathExtension().lastPathComponent
+                if name == stem { return true }
+                guard name.hasPrefix(stem + "-") else { return false }
+                let page = name.dropFirst(stem.count + 1)
+                return !page.isEmpty && page.allSatisfy(\.isNumber)
+            }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
 
         return matches.first
     }
     
+    // MARK: - Export as Standard Typst
+
+    /// Outcome of `exportStandardTypst`.
+    struct StandardTypstExport {
+        var success: Bool
+        /// Every file written: the document, plus the bridge and WASM core
+        /// when runtime calculator functions remain.
+        var files: [URL] = []
+        /// What was done, for the user (inlined values, sidecars, …).
+        var notes: [String] = []
+        var error: String?
+    }
+
+    /// Writes a version of the document that compiles in *stock* Typst.
+    ///
+    /// - Markdown / Note sources are converted to Typst (a note's helper
+    ///   preamble is inlined, so it no longer depends on TypstEdit).
+    /// - Calculator static compilation runs: literal-bound loops are
+    ///   specialised and every `#calc(…)` / `#calc-table(…)` becomes a value.
+    /// - What must still run at compile time (`plot`, `BesselJ`, `calc-call`)
+    ///   keeps working through Typst's standard plugin API: the bridge module
+    ///   and the WASM core are written next to the document and imported.
+    ///   If only `calc-param` remains it is inlined (it is the identity).
+    /// - The result is verified by compiling it with the plain `typst` binary,
+    ///   with none of TypstEdit's preview preambles.
+    func exportStandardTypst(content: String, fileExtension: String, destination: URL) async -> StandardTypstExport {
+        var export = StandardTypstExport(success: false)
+        let ext = fileExtension.lowercased()
+        let directory = destination.deletingLastPathComponent()
+        var text = content
+
+        if ext == "md" || ext == "note" {
+            let isHybrid = ext == "note"
+            let prepared = isHybrid ? Self.autoFixBrokenNoteSyntax(text) : text
+            let aiService = AICompletionService.shared
+            text = await Task.detached {
+                let delimited = isHybrid ? Self.delimitImproperOperators(prepared).output : prepared
+                return aiService.sanitizeMarkdownToTypst(delimited, isHybrid: isHybrid)
+            }.value
+            if isHybrid { text = Self.notePreamble + text }
+            export.notes.append(isHybrid ? "Converted the note to Typst and inlined its helper definitions."
+                                         : "Converted the Markdown to Typst.")
+        }
+
+        let pipeline = await applyCalcPipeline(text, fileExtension: ext, bridgeDirectory: directory, prependImport: false)
+        text = pipeline.content
+        let remaining = CalcFeatureScanner.scan(text)
+        if remaining.usesCalcCall || remaining.usesCalcTable {
+            let reasons = pipeline.diagnostics.map { "line \($0.line.map(String.init) ?? "?"): \($0.message)" }
+            export.error = "Some calculator calls could not be evaluated, so the document cannot be made standard Typst:\n"
+                + (reasons.isEmpty ? "(the CAS helper may be missing — see Docs/calculator.md)" : reasons.joined(separator: "\n"))
+            return export
+        }
+        if pipeline.summary.needsResolution {
+            export.notes.append("Evaluated the #calc / #calc-table calls with the calculator and inserted their values.")
+        }
+
+        if remaining.usesBridge {
+            guard CalcPlugin.install(into: directory) else {
+                export.error = "The document uses runtime calculator functions (\(remaining.bridgeNames.joined(separator: ", "))), but the WASM core is not built. Run Tools/calc-plugin/build_calc_plugin.sh."
+                return export
+            }
+            text = CalcPlugin.importStatement + text
+            export.files.append(directory.appendingPathComponent(CalcPlugin.bridgeFileName))
+            export.files.append(directory.appendingPathComponent(CalcPlugin.wasmFileName))
+            export.notes.append("Uses \(remaining.bridgeNames.joined(separator: ", ")) at compile time: wrote \(CalcPlugin.bridgeFileName) and \(CalcPlugin.wasmFileName) next to the file. Keep the three files together; stock Typst loads the WASM core through its plugin API.")
+        } else if remaining.usesCalcParam {
+            // calc-param is the identity function: inline it.
+            text = text.replacingOccurrences(of: #"(?<![A-Za-z0-9_.-])calc-param\s*\("#, with: "(", options: .regularExpression)
+            export.notes.append("Inlined calc-param(…) parameters as plain values.")
+        }
+
+        do {
+            try text.write(to: destination, atomically: true, encoding: .utf8)
+        } catch {
+            export.error = "Could not write \(destination.lastPathComponent): \(error.localizedDescription)"
+            return export
+        }
+        export.files.insert(destination, at: 0)
+
+        // Verify with the plain typst binary: no preambles, no shadow file.
+        guard let typstPath = resolveTypstPath() else {
+            export.success = true
+            export.notes.append("Not verified: the typst binary was not found.")
+            return export
+        }
+        let check = FileManager.default.temporaryDirectory.appendingPathComponent("standard-typst-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: check) }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: typstPath)
+        process.arguments = ["compile", destination.path, check.path, "--root", directory.path]
+        let pipe = Pipe()
+        process.standardError = pipe
+        process.standardOutput = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                export.success = true
+                export.notes.append("Verified: the exported file compiles with the standard typst compiler.")
+            } else {
+                export.error = "The exported file was written, but it does not compile with standard Typst:\n"
+                    + (String(data: data, encoding: .utf8) ?? "")
+            }
+        } catch {
+            export.error = "Could not run typst to verify the export: \(error.localizedDescription)"
+        }
+        return export
+    }
+
+    // MARK: - Calculator static compilation (shared by preview and every export)
+
+    /// Outcome of `applyCalcPipeline`.
+    struct CalcPipelineResult {
+        /// The content with loops specialised, `#calc`/`#calc-table` replaced by
+        /// values and (when requested) the bridge import prepended.
+        var content: String
+        /// Features found in the *input* (before resolution).
+        var summary: CalcFeatureSummary
+        var diagnostics: [TypstError]
+        var parameters: [CalculatorStoredVariable]
+        /// Runtime bridge functions remain and the import was prepended.
+        var bridgeImported: Bool
+        /// Runtime bridge functions remain but the WASM core is not built.
+        var bridgeMissing: Bool
+        /// Loop specialisation changed the line count (diagnostics need a line map).
+        var lineCountChanged: Bool
+    }
+
+    /// The one implementation of the calculator's "static compilation" step:
+    ///
+    /// 1. specialise literal-bound loops that call the CAS,
+    /// 2. evaluate every `#calc(…)` / `#calc-table(…)` with the CAS and splice
+    ///    the values in as literals,
+    /// 3. if runtime functions remain (`plot`, `BesselJ`, `calc-call`,
+    ///    `calc-param`…), install the bridge + WASM core into `bridgeDirectory`
+    ///    and prepend the import.
+    ///
+    /// The live preview, PDF export, Markdown/Note exports, image exports and
+    /// "Export as Standard Typst" all call this, so they cannot drift apart.
+    func applyCalcPipeline(
+        _ content: String,
+        fileExtension: String,
+        bridgeDirectory: URL,
+        prependImport: Bool = true
+    ) async -> CalcPipelineResult {
+        let summary = CalcFeatureScanner.scan(content)
+        var result = CalcPipelineResult(
+            content: content, summary: summary, diagnostics: [], parameters: [],
+            bridgeImported: false, bridgeMissing: false, lineCountChanged: false)
+        guard summary.usesAny else { return result }
+
+        if summary.needsResolution {
+            let resolved = await CalcResolutionPass.resolve(
+                content,
+                fileExtension: fileExtension,
+                settings: CalcResolutionSettings.fromDefaults(),
+                cache: calcResolutionCache,
+                storedParameters: calcStoredParameters)
+            calcResolutionCache = resolved.cache
+            calcStoredParameters = resolved.storedParameters
+            result.lineCountChanged = Self.lineCount(of: resolved.outcome.output) != Self.lineCount(of: content)
+            result.content = resolved.outcome.output
+            result.diagnostics = resolved.outcome.diagnostics
+            result.parameters = resolved.outcome.parameters
+        }
+
+        if summary.needsBridge && prependImport {
+            if CalcPlugin.install(into: bridgeDirectory) {
+                result.content = CalcPlugin.importStatement + result.content
+                result.bridgeImported = true
+            } else {
+                result.bridgeMissing = true
+            }
+        }
+        return result
+    }
+
+    nonisolated static func lineCount(of text: String) -> Int {
+        text.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+    }
+
     func export(sourceURL: URL, outputURL: URL, format: String, projectRoot: URL? = nil) async -> (success: Bool, error: String?) {
         guard let typstPath = resolveTypstPath() else {
             return (false, "Error: 'typst' executable not found.")
@@ -1973,6 +2251,11 @@ class TypstCompiler: ObservableObject {
         // Same raw-language normalization the live preview applies (shadow-only),
         // so exported code blocks highlight like the preview does.
         finalContent = Self.normalizeRawLanguages(finalContent)
+
+        // Same calculator static compilation as the live preview and PDF
+        // export: loops, #calc values and the bridge (into the temp dir the
+        // export compiles from).
+        finalContent = await applyCalcPipeline(finalContent, fileExtension: ext, bridgeDirectory: tempDir).content
 
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
 
@@ -2100,6 +2383,9 @@ class TypstCompiler: ObservableObject {
         // Same raw-language normalization the live preview applies (shadow-only).
         finalContent = Self.normalizeRawLanguages(finalContent)
 
+        // Same calculator static compilation as the live preview.
+        finalContent = await applyCalcPipeline(finalContent, fileExtension: ext, bridgeDirectory: tempDir).content
+
         finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
 
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory ?? tempDir, tempDirectory: tempDir)
@@ -2215,6 +2501,9 @@ class TypstCompiler: ObservableObject {
     /// when the shadow source is written into a temporary folder. If the original source
     /// is nested under a subdirectory, we compute the path relative to the temp directory
     /// rather than blindly prepending `../`.
+    private static let relativeImportExceptBridge = try! NSRegularExpression(
+        pattern: #"(\b(?:import|include)\s+")(?!"# + NSRegularExpression.escapedPattern(for: CalcPlugin.bridgeFileName) + #"")([^/@.][^"]*)(")"#)
+
     func rewriteRelativeImports(in content: String, sourceDirectory: URL?, tempDirectory: URL?) async -> String {
         // Preserve the old behavior when no source context is available.
         guard let sourceDirectory, let tempDirectory else {
@@ -2236,7 +2525,11 @@ class TypstCompiler: ObservableObject {
             let prefix = (processed as NSString).substring(with: match.range(at: 1))
             let rawPath = (processed as NSString).substring(with: match.range(at: 2))
             let suffix = (processed as NSString).substring(with: match.range(at: 3))
-            
+
+            // The calculator bridge is installed next to the compiled file on
+            // purpose; its import must not be redirected to the source folder.
+            if rawPath == CalcPlugin.bridgeFileName { continue }
+
             var rewrittenPath = resolveRelativeImportPath(rawPath, relativePrefix: prefixForImports)
             
             if (rawPath.hasSuffix(".note") || rawPath.hasSuffix(".md")), let loader = self.fileLoader {
@@ -2289,7 +2582,8 @@ class TypstCompiler: ObservableObject {
     private func rewriteRelativeImports(in content: String) async -> String {
         var processed = content
 
-        processed = CompilerRegex.relativeImport.stringByReplacingMatches(
+        // Same exemption as above: the bridge sits next to the compiled file.
+        processed = Self.relativeImportExceptBridge.stringByReplacingMatches(
             in: processed,
             options: [],
             range: NSRange(0..<processed.utf16.count),
@@ -2436,4 +2730,10 @@ actor WebImageCache {
 extension Notification.Name {
     static let pdfDidUpdate = Notification.Name("pdfDidUpdate")
     static let typstErrorsUpdated = Notification.Name("typstErrorsUpdated")
+    /// Posted by `TypstCompiler` after a compile pass resolved a document's
+    /// `#let x = calc-param(…)` declarations. `object` is
+    /// `[CalculatorStoredVariable]`. `EditorController` mirrors the list onto
+    /// `CalculatorSession.documentParameters` so the Calculator panel shows
+    /// the open document's parameters.
+    static let calcDocumentParametersChanged = Notification.Name("calcDocumentParametersChanged")
 }

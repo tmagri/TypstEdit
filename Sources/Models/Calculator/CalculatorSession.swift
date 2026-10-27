@@ -21,6 +21,11 @@ final class CalculatorSession: ObservableObject {
     /// (TI-89 entry recall), from the end. `nil` when none is selected.
     @Published var recallIndex: Int?
     @Published var storedVariables: [CalculatorStoredVariable] = []
+    /// Parameters declared by the open document (`#let a = calc-param(2.5)`),
+    /// mirrored here by `EditorController` from the compiler's resolution pass.
+    /// Display-only: they are not part of a saved `.tcalc` session; the
+    /// document's source line is the single source of truth.
+    @Published var documentParameters: [CalculatorStoredVariable] = []
     @Published var lastStatus: String?
 
     /// The entry line contents — kept here (not in the view) so it survives

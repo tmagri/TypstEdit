@@ -12,6 +12,9 @@ enum CalculatorFunctionCategory: String, CaseIterable, Identifiable, Sendable {
     case lists = "lists"
     case numbers = "numbers"
     case complex = "complex"
+    /// Functions TypstEdit adds to the Typst compiler for documents
+    /// (`BesselJ`, `plot`, `#calc`, `calc-param`). These are non-portable.
+    case documents = "documents"
 
     var id: String { rawValue }
 
@@ -27,6 +30,7 @@ enum CalculatorFunctionCategory: String, CaseIterable, Identifiable, Sendable {
         case .lists: return "Lists"
         case .numbers: return "Numbers"
         case .complex: return "Complex"
+        case .documents: return "In documents"
         }
     }
 }
@@ -528,6 +532,68 @@ enum CalculatorFunctionCatalog {
             description: "Known gap: on a complex number like 3+4*i these come back unevaluated, even in APPROX mode. Read the parts from the printed result instead. Complex results from cSolve( and cZeros( do work.",
             example: "real(3+4*i)",
             compatibility: .notYetVerified),
+
+        // MARK: In documents
+        //
+        // These are not entry-line commands: they are helpers TypstEdit adds to
+        // the Typst compiler (via the shadow-file preamble), plus #calc, which
+        // resolves through this calculator at compile time. All of them make a
+        // `.typ` document non-portable — standard Typst has none of them.
+        // `.note` files are exempt from the warning (notes are TypstEdit-native).
+
+        CalculatorFunctionGuide(
+            id: "doc-calc",
+            title: "#calc(\"…\")",
+            category: .documents,
+            syntax: "#calc(\"2^10\") → 1024",
+            description: "Evaluates an expression with this calculator while the document compiles (decimal result), then inserts the value. Use it for one-shot values. It cannot sit inside Typst loops — use BesselJ and the other preamble functions there. Non-portable: standard Typst cannot run it.",
+            example: "#calc(\"2^10\")",
+            compatibility: .verified),
+
+        CalculatorFunctionGuide(
+            id: "doc-calc-table",
+            title: "#calc-table(…)",
+            category: .documents,
+            syntax: "#calc-table(\"sin(x)\", x, 0, 6.28, 40)",
+            description: "Tabulates any calculator expression over an interval and returns (x, y) pairs you can hand to plot(points: …). Use it when the curve needs the full CAS (solve, integrate, special functions with parameters). Non-portable.",
+            example: "#plot(points: #calc-table(\"sin(x)\", x, 0, 6.28, 40), x-min: 0, x-max: 6.28)",
+            compatibility: .verified),
+
+        CalculatorFunctionGuide(
+            id: "doc-calc-param",
+            title: "calc-param(…)",
+            category: .documents,
+            syntax: "#let a = calc-param(2.5)",
+            description: "Declares a document parameter. Typst uses the literal value, and the same value is loaded into this calculator so #calc(\"a*3\") and #calc-table(\"a*sin(x)\", …) see it. Change it in one place. Parameters appear in the calculator panel. Non-portable.",
+            example: "#let a = calc-param(2.5)\n#calc(\"a*3\")",
+            compatibility: .verified),
+
+        CalculatorFunctionGuide(
+            id: "doc-bessel",
+            title: "BesselJ( BesselY( BesselI( BesselK(",
+            category: .documents,
+            syntax: "BesselJ(order, x) · BesselY(order, x) · BesselI(order, x) · BesselK(order, x)",
+            description: "Bessel functions for documents, usable inside Typst loops and plot(). Implemented in pure Typst (series/asymptotic expansions, ~12 significant digits; K_0(20) etc. verified against scipy). The order comes first, like the literature — note that inside #calc(\"…\") Giac's own BesselJ is the same order-first form. Non-portable.",
+            example: "#plot(x => BesselJ(0, x), 0, 20)",
+            compatibility: .verified),
+
+        CalculatorFunctionGuide(
+            id: "doc-gamma",
+            title: "calc-gamma( calc-lgamma(",
+            category: .documents,
+            syntax: "calc-gamma(z) · calc-lgamma(z)",
+            description: "Gamma and log-gamma for documents, usable in loops and plot(). Typst's calc module has no gamma; this one uses the Lanczos approximation (accurate to ~14 digits for ordinary arguments). Non-portable.",
+            example: "#calc-gamma(5) → 24",
+            compatibility: .verified),
+
+        CalculatorFunctionGuide(
+            id: "doc-plot",
+            title: "plot(…)",
+            category: .documents,
+            syntax: "plot(fn, x-min, x-max) · plot(curves: (…)) · plot(points: (…))",
+            description: "Draws a labelled chart (axes, gridlines, ticks, legend). Give it a function of x, several curves, or explicit points from #calc-table. Options: y-min/y-max, samples, width/height, stroke, grid, ticks, title, legend, border. Non-portable.",
+            example: "#plot(curves: ((fn: x => BesselJ(0, x), label: [J0]), (fn: x => BesselJ(1, x), label: [J1])), x-min: 0, x-max: 20)",
+            compatibility: .verified),
     ]
 
     /// Searches the catalogue. Matches title, syntax, and description,

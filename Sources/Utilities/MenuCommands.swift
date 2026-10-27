@@ -152,6 +152,12 @@ struct AppMenuCommands: Commands {
                     NotificationCenter.default.post(name: .menuCommand, object: "exportAsMarkdown")
                 }
                 .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
+
+                Button("Standard Typst (.typ)…") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "exportStandardTypst")
+                }
+                .help("Writes a .typ that compiles in stock Typst: calculator values are inlined and the calculator core is bundled next to it.")
+                .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
             }
 
             Menu("Share As") {
