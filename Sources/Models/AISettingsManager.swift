@@ -9,11 +9,44 @@ enum ModelSource: String, CaseIterable, Identifiable, Codable {
     case openRouter = "OpenRouter"
     case anthropic = "Anthropic"
     case gemini = "Google Gemini"
+    case portkey = "Portkey AI Gateway"
     case local = "Local (Ollama/LMStudio)"
 
     var id: String { self.rawValue }
 
     var isLocal: Bool { self == .local }
+}
+
+// MARK: - Portkey
+
+/// Portkey AI Gateway (https://portkey.ai): an OpenAI-compatible gateway in
+/// front of many providers. Requests go to `<base URL>/chat/completions` with
+/// the Portkey key in `x-portkey-api-key`; the upstream provider is chosen by
+/// a Model Catalog model string (`@openai-prod/gpt-4o`), or optionally by a
+/// default provider slug / saved config sent as headers.
+enum PortkeyGateway {
+    static let defaultBaseURL = "https://api.portkey.ai/v1"
+
+    /// Accepts a base URL (`https://api.portkey.ai/v1`) or a full chat
+    /// completions URL, with or without a trailing slash, and returns the chat
+    /// completions URL. Empty → Portkey's hosted gateway.
+    static func chatEndpoint(fromBaseURL base: String) -> String {
+        var trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        if trimmed.isEmpty { trimmed = defaultBaseURL }
+        if trimmed.hasSuffix("/chat/completions") { return trimmed }
+        return trimmed + "/chat/completions"
+    }
+
+    /// Routing headers besides the API key. Empty values are omitted.
+    static func routingHeaders(provider: String, config: String) -> [String: String] {
+        var headers: [String: String] = [:]
+        let provider = provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        let config = config.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !provider.isEmpty { headers["x-portkey-provider"] = provider }
+        if !config.isEmpty { headers["x-portkey-config"] = config }
+        return headers
+    }
 }
 
 // MARK: - Model Task
@@ -112,11 +145,14 @@ struct ModelContext {
     let endpoint: String
     let apiKey: String
     let reasoningEffort: ReasoningEffort
+    /// Extra provider-specific request headers (e.g. Portkey routing headers).
+    var extraHeaders: [String: String] = [:]
 
     var isGemini: Bool { source == .gemini }
     var isAnthropic: Bool { source == .anthropic }
     var isLocal: Bool { source.isLocal }
     var isOpenRouter: Bool { source == .openRouter }
+    var isPortkey: Bool { source == .portkey }
 
     /// The chat completions endpoint for this context.
     var chatEndpoint: String {
@@ -125,8 +161,35 @@ struct ModelContext {
         case .openRouter: return "https://openrouter.ai/api/v1/chat/completions"
         case .anthropic: return "https://api.anthropic.com/v1/messages"
         case .gemini: return "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)"
+        case .portkey: return PortkeyGateway.chatEndpoint(fromBaseURL: endpoint)
         case .local: return endpoint
         }
+    }
+
+    /// Provider authentication and identification headers for a chat request.
+    /// (Gemini authenticates through the URL's `key` query parameter.)
+    var authHeaders: [String: String] {
+        var headers: [String: String]
+        switch source {
+        case .gemini:
+            headers = [:]
+        case .anthropic:
+            headers = ["x-api-key": apiKey, "anthropic-version": "2023-06-01"]
+        case .portkey:
+            // The Portkey key authenticates with the gateway; upstream
+            // provider credentials live in Portkey (Model Catalog/config).
+            headers = ["x-portkey-api-key": apiKey]
+        case .openRouter:
+            headers = [
+                "Authorization": "Bearer \(apiKey)",
+                "HTTP-Referer": "TypstEdit",
+                "X-Title": "TypstEdit",
+            ]
+        case .openAI, .local:
+            headers = ["Authorization": "Bearer \(apiKey)"]
+        }
+        headers.merge(extraHeaders) { current, _ in current }
+        return headers
     }
 
     /// The embeddings endpoint for this context (only relevant for .embedding task).
@@ -448,6 +511,24 @@ class AISettingsManager: ObservableObject {
     @AppStorage("anthropicApiKey") var anthropicApiKey: String = ""
     @AppStorage("geminiApiKey") var geminiApiKey: String = ""
     @AppStorage("customApiKey") var customApiKey: String = ""
+    @AppStorage("portkeyApiKey") var portkeyApiKey: String = ""
+
+    // MARK: - Portkey AI Gateway
+
+    /// Gateway base URL — Portkey's hosted gateway by default; change it for a
+    /// self-hosted gateway.
+    @AppStorage("portkeyBaseURL") var portkeyBaseURL: String = PortkeyGateway.defaultBaseURL
+    /// Optional default provider slug (`@openai-prod`), sent as
+    /// `x-portkey-provider`. Not needed when model names use the Model
+    /// Catalog form `@provider-slug/model`.
+    @AppStorage("portkeyProvider") var portkeyProvider: String = ""
+    /// Optional saved config ID (or config JSON), sent as `x-portkey-config`
+    /// for fallbacks, load balancing, caching, etc.
+    @AppStorage("portkeyConfig") var portkeyConfig: String = ""
+
+    private var portkeyRoutingHeaders: [String: String] {
+        PortkeyGateway.routingHeaders(provider: portkeyProvider, config: portkeyConfig)
+    }
 
     // MARK: - General AI Settings
     @AppStorage("aiContinuousCompletion") var isContinuousCompletionEnabled: Bool = false 
@@ -559,6 +640,7 @@ class AISettingsManager: ObservableObject {
         case .openRouter: return openRouterApiKey
         case .anthropic: return anthropicApiKey
         case .gemini: return geminiApiKey
+        case .portkey: return portkeyApiKey
         case .local: return customApiKey
         }
     }
@@ -601,6 +683,10 @@ class AISettingsManager: ObservableObject {
             endpoint = embeddingEndpoint
         }
 
+        if src == .portkey && task != .embedding {
+            return portkeyContext(task: task, model: modelName, reasoningEffort: reasoningEffort(for: task))
+        }
+
         return ModelContext(
             task: task,
             source: src,
@@ -608,6 +694,20 @@ class AISettingsManager: ObservableObject {
             endpoint: endpoint,
             apiKey: apiKey(for: src),
             reasoningEffort: reasoningEffort(for: task)
+        )
+    }
+
+    /// A Portkey request context: the shared gateway URL, Portkey key, and
+    /// optional default provider/config routing headers.
+    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort) -> ModelContext {
+        ModelContext(
+            task: task,
+            source: .portkey,
+            model: model.trimmingCharacters(in: .whitespacesAndNewlines),
+            endpoint: portkeyBaseURL,
+            apiKey: portkeyApiKey,
+            reasoningEffort: reasoningEffort,
+            extraHeaders: portkeyRoutingHeaders
         )
     }
 
@@ -713,7 +813,10 @@ class AISettingsManager: ObservableObject {
     /// Resolves a saved model into a request-ready context. API keys come
     /// from the shared per-provider keys.
     func modelContext(for profile: AIModelProfile) -> ModelContext {
-        ModelContext(
+        if profile.source == .portkey {
+            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort)
+        }
+        return ModelContext(
             task: .generation,
             source: profile.source,
             model: profile.trimmedModel,

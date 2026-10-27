@@ -727,9 +727,13 @@ struct AISettingsView: View {
         case .openRouter: return "e.g. anthropic/claude-3-5-sonnet"
         case .anthropic: return "e.g. claude-sonnet-4-20250514"
         case .gemini: return "e.g. gemini-1.5-flash"
+        case .portkey: return "e.g. @openai-prod/gpt-4o"
         case .local: return "e.g. llama3"
         }
     }
+
+    /// Shown under Portkey model fields: how model strings route.
+    private let portkeyModelCaption = "Use a Model Catalog name, @provider-slug/model (e.g. @openai-prod/gpt-4o). A plain model name also works when a default provider or config is set in the API Keys & Limits tab."
 
     @ViewBuilder
     private var savedModelsCard: some View {
@@ -784,7 +788,7 @@ struct AISettingsView: View {
                 }
             }
 
-            SettingsRow(label: "Model:") {
+            SettingsRow(label: "Model:", caption: value.source == .portkey ? portkeyModelCaption : nil) {
                 TextField(modelPlaceholder(for: value.source), text: profile.model)
                     .textFieldStyle(.roundedBorder)
             }
@@ -1308,8 +1312,38 @@ struct AISettingsView: View {
                     SecureField("AIzaSy...", text: $settings.geminiApiKey)
                         .textFieldStyle(.roundedBorder)
                 }
+                SettingsRow(label: "Portkey:") {
+                    SecureField("Portkey API key", text: $settings.portkeyApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
                 SettingsRow(label: "Local Server:") {
                     SecureField("Optional for Ollama / LM Studio", text: $settings.customApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+        }
+
+        SettingsCard(
+            title: "Portkey AI Gateway",
+            icon: "point.3.connected.trianglepath.dotted",
+            description: "Portkey routes requests to many providers through one OpenAI-compatible API. Upstream provider keys stay in your Portkey workspace; TypstEdit only sends your Portkey key. Applies to every model that uses Portkey as its source."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsRow(label: "Gateway URL:", caption: "Portkey's hosted gateway by default. Change it to use a self-hosted gateway.") {
+                    HStack {
+                        TextField(PortkeyGateway.defaultBaseURL, text: $settings.portkeyBaseURL)
+                            .textFieldStyle(.roundedBorder)
+                        if settings.portkeyBaseURL != PortkeyGateway.defaultBaseURL {
+                            Button("Reset") { settings.portkeyBaseURL = PortkeyGateway.defaultBaseURL }
+                        }
+                    }
+                }
+                SettingsRow(label: "Default Provider:", caption: "Optional. A Model Catalog provider slug such as @openai-prod, sent as x-portkey-provider. Leave it empty when model names already use @provider-slug/model.") {
+                    TextField("e.g. @openai-prod", text: $settings.portkeyProvider)
+                        .textFieldStyle(.roundedBorder)
+                }
+                SettingsRow(label: "Config:", caption: "Optional. A saved Portkey config ID (for fallbacks, load balancing, or caching), sent as x-portkey-config.") {
+                    TextField("e.g. pc-my-config-id", text: $settings.portkeyConfig)
                         .textFieldStyle(.roundedBorder)
                 }
             }
@@ -1386,6 +1420,15 @@ struct AISettingsView: View {
                 TextField("e.g. gemini-1.5-flash", text: $settings.generationModel)
                     .textFieldStyle(.roundedBorder)
             }
+        case .portkey:
+            SettingsRow(label: "API Key:") {
+                SecureField("Portkey API Key (or set in API Keys tab)", text: $settings.portkeyApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:", caption: portkeyModelCaption) {
+                TextField("e.g. @openai-prod/gpt-4o", text: $settings.generationModel)
+                    .textFieldStyle(.roundedBorder)
+            }
         case .local:
             SettingsRow(label: "Endpoint URL:") {
                 TextField("http://localhost:11434/v1/chat/completions", text: $settings.generationEndpoint)
@@ -1440,6 +1483,15 @@ struct AISettingsView: View {
             }
             SettingsRow(label: "Model:") {
                 TextField("e.g. gemini-1.5-flash", text: $settings.completionModel)
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .portkey:
+            SettingsRow(label: "API Key:") {
+                SecureField("Portkey API Key (or set in API Keys tab)", text: $settings.portkeyApiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            SettingsRow(label: "Model:", caption: portkeyModelCaption) {
+                TextField("e.g. @openai-prod/gpt-4o-mini", text: $settings.completionModel)
                     .textFieldStyle(.roundedBorder)
             }
         case .local:

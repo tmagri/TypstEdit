@@ -258,18 +258,10 @@ class AICompletionService: ObservableObject {
         request.timeoutInterval = settings.timeoutSeconds
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // Provider-specific auth headers
-        if ctx.isAnthropic {
-            request.addValue(ctx.apiKey, forHTTPHeaderField: "x-api-key")
-            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        } else if !isGemini {
-            request.addValue("Bearer \(ctx.apiKey)", forHTTPHeaderField: "Authorization")
-        }
-
-        // OpenRouter specific headers
-        if ctx.source == .openRouter {
-            request.addValue("TypstEdit", forHTTPHeaderField: "HTTP-Referer")
-            request.addValue("TypstEdit", forHTTPHeaderField: "X-Title")
+        // Provider-specific auth/identification headers (Anthropic, Portkey,
+        // OpenRouter, Bearer for OpenAI-compatible; none for Gemini).
+        for (field, value) in ctx.authHeaders {
+            request.addValue(value, forHTTPHeaderField: field)
         }
 
         // Gemini Body Format
@@ -896,15 +888,8 @@ class AICompletionService: ObservableObject {
         request.timeoutInterval = settings.timeoutSeconds
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        if ctx.isAnthropic {
-            request.addValue(ctx.apiKey, forHTTPHeaderField: "x-api-key")
-            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        } else {
-            request.addValue("Bearer \(ctx.apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        if ctx.source == .openRouter {
-            request.addValue("TypstEdit", forHTTPHeaderField: "HTTP-Referer")
-            request.addValue("TypstEdit", forHTTPHeaderField: "X-Title")
+        for (field, value) in ctx.authHeaders {
+            request.addValue(value, forHTTPHeaderField: field)
         }
 
         let streaming = reasoningDelta != nil
