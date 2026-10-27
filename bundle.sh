@@ -2,10 +2,13 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+export MACOSX_DEPLOYMENT_TARGET=13.0
 APP_NAME="TypstEdit"
 
 CONFIG=${1:-release}
-ARCH=${2:-arm64}
+# Default to this Mac's architecture, not always arm64.
+ARCH=${2:-$(uname -m)}
 
 case "$ARCH" in
     arm64|x86_64) ;;
@@ -69,35 +72,28 @@ strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 echo "Copying resources bundle..."
 find "$BIN_DIR" -maxdepth 1 -type d -name "*.bundle" -exec cp -R {} "$APP_BUNDLE/Contents/Resources/" \;
 
-# Copy vector.framework into Contents/MacOS/ so @loader_path rpath finds it at launch
-echo "Copying vector.framework..."
-VECTOR_FRAMEWORK=""
-for VECTOR_ROOT in "$SCRATCH_PATH/artifacts" ".build/artifacts"; do
-    CANDIDATE="$VECTOR_ROOT/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64/vector.framework"
-    if [ -d "$CANDIDATE" ]; then
-        VECTOR_FRAMEWORK="$CANDIDATE"
-        break
+# Recompile the pinned vector source at macOS 13 into Contents/Frameworks.
+# The vendor binary's load command requires macOS 15, despite its package
+# advertising an older floor.
+echo "Building vector.framework for macOS 13..."
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+VECTOR_SOURCE=""
+VECTOR_TEMPLATE=""
+for VECTOR_ROOT in "$SCRATCH_PATH" ".build"; do
+    if [ -z "$VECTOR_SOURCE" ] && [ -f "$VECTOR_ROOT/checkouts/sqlite-vector/src/sqlite-vector.c" ]; then
+        VECTOR_SOURCE="$VECTOR_ROOT/checkouts/sqlite-vector"
+    fi
+    CANDIDATE="$VECTOR_ROOT/artifacts/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64/vector.framework"
+    if [ -z "$VECTOR_TEMPLATE" ] && [ -d "$CANDIDATE" ]; then
+        VECTOR_TEMPLATE="$CANDIDATE"
     fi
 done
-
-if [ -z "$VECTOR_FRAMEWORK" ]; then
-    echo "Error: vector.framework not found in this architecture's SwiftPM artifacts."
+if [ -z "$VECTOR_SOURCE" ] || [ -z "$VECTOR_TEMPLATE" ]; then
+    echo "Error: sqlite-vector source or framework template not found in SwiftPM checkouts."
     exit 1
 fi
-
-cp -R "$VECTOR_FRAMEWORK" "$APP_BUNDLE/Contents/MacOS/"
-VECTOR_BINARY="$APP_BUNDLE/Contents/MacOS/vector.framework/Versions/A/vector"
-if [ ! -f "$VECTOR_BINARY" ] || ! lipo -verify_arch "$ARCH" "$VECTOR_BINARY" >/dev/null 2>&1; then
-    echo "Error: vector.framework does not contain the required $ARCH architecture."
-    exit 1
-fi
-
-VECTOR_ARCHS=$(lipo -archs "$VECTOR_BINARY")
-if [ "$VECTOR_ARCHS" != "$ARCH" ]; then
-    lipo "$VECTOR_BINARY" -thin "$ARCH" -output "$VECTOR_BINARY.thin"
-    mv "$VECTOR_BINARY.thin" "$VECTOR_BINARY"
-fi
-echo "  Copied and thinned vector.framework to $ARCH."
+bash "$SCRIPT_DIR/Tools/build_vector.sh" "$VECTOR_SOURCE" "$VECTOR_TEMPLATE" \
+    "$APP_BUNDLE/Contents/Frameworks/vector.framework" "$ARCH"
 
 # Copy Typst executable into the bundle
 echo "Bundling Typst executable..."
@@ -114,20 +110,17 @@ else
     echo "⚠️  Warning: Typst executable not found. App will require system Typst installation."
 fi
 
-# Build the CAS helper if it is missing or does not include this architecture.
+# Build the CAS helper. The builder validates its deployment-target cache and
+# only rebuilds when needed.
 echo "Bundling CAS helper..."
 CAS_HELPER="build/cas/typstedit-cas"
-if [ ! -x "$CAS_HELPER" ] || ! lipo -verify_arch "$ARCH" "$CAS_HELPER" >/dev/null 2>&1; then
-    echo "Building CAS helper for $ARCH (the first build can take 20–40 minutes)..."
-    "$SCRIPT_DIR/Tools/cas/build_cas.sh" --arch "$ARCH"
-fi
+bash "$SCRIPT_DIR/Tools/cas/build_cas.sh" --arch "$ARCH"
 if [ ! -x "$CAS_HELPER" ] || ! lipo -verify_arch "$ARCH" "$CAS_HELPER" >/dev/null 2>&1; then
     echo "Error: CAS helper was not built with the required $ARCH architecture."
     exit 1
 fi
 cp "$CAS_HELPER" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
 chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
-codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
 echo "✓ CAS helper bundled"
 
 
@@ -299,14 +292,36 @@ EOF
 
 echo "Done! App is located at $APP_BUNDLE"
 
-# Code-sign the fully assembled bundle so macOS TCC binds the Info.plist
-# (incl. folder usage descriptions) to a stable identity and seals resources.
-# See bundle_universal.sh for the full rationale. Sign inside-out (NOT --deep):
-# vector.framework in MacOS/ makes --deep fail to bind Info.plist.
+# Licences for redistributed components.
+mkdir -p "$APP_BUNDLE/Contents/Resources/Licenses"
+cp THIRD_PARTY_NOTICES.md "$APP_BUNDLE/Contents/Resources/Licenses/"
+case "$ARCH" in
+    arm64) TYPST_DIR="typst-aarch64-apple-darwin" ;;
+    x86_64) TYPST_DIR="typst-x86_64-apple-darwin" ;;
+esac
+for f in "$TYPST_DIR/LICENSE" "$TYPST_DIR/NOTICE"; do
+    [ -f "$f" ] && cp "$f" "$APP_BUNDLE/Contents/Resources/Licenses/typst-$(basename "$f")"
+done
+
+# Bundle the Swift compatibility runtime (libswiftCompatibilitySpan.dylib).
+# Without it the app only launches on Macs with this exact Xcode installed.
+bash "$SCRIPT_DIR/Tools/packaging/prepare_bundle.sh" "$APP_BUNDLE" "$ARCH"
+
+# Sign inside-out (NOT --deep), so the Info.plist (incl. folder usage
+# descriptions) is bound and TCC grants folder access instead of prompting
+# per file. Nested code first, then the outer bundle.
 echo "Code-signing app bundle (ad-hoc, inside-out)..."
-codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/vector.framework" || true
-codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst" || true
+for dylib in "$APP_BUNDLE"/Contents/Frameworks/*.dylib; do
+    [ -f "$dylib" ] && codesign --force --sign - "$dylib"
+done
+codesign --force --sign - "$APP_BUNDLE/Contents/Frameworks/vector.framework"
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst"
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
 codesign --force --sign - "$APP_BUNDLE"
+codesign --verify --strict "$APP_BUNDLE"
+
+# Fail rather than produce a bundle that can't launch on another Mac.
+bash "$SCRIPT_DIR/Tools/packaging/verify_bundle.sh" "$APP_BUNDLE" "$ARCH"
 
 echo "Refreshing macOS Launch Services cache..."
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE"

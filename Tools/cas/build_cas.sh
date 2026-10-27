@@ -17,11 +17,19 @@
 # Requirements: clang (Xcode CLT), curl, tar, make, (lipo for universal).
 set -euo pipefail
 
+# Homebrew uses different prefixes on Apple Silicon and Intel. Include its
+# build tools without requiring a custom interactive shell configuration.
+for tools_dir in /opt/homebrew/bin /usr/local/bin; do
+    if [[ -d "$tools_dir" ]]; then export PATH="$tools_dir:$PATH"; fi
+done
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CAS_ROOT="$REPO_ROOT/build/cas"
 DEPS="$CAS_ROOT/deps"
 SRC="$CAS_ROOT/src"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+# Apply the same target to every C/C++ object, not just the final executable.
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 
 GMP_VERSION=6.3.0
 GMP_URL="https://gmplib.org/download/gmp/gmp-${GMP_VERSION}.tar.xz"
@@ -36,8 +44,10 @@ CLEAN=0
 FETCH_ONLY=0
 # autoconf 2.72+ generates configure scripts that macOS's /bin/sh (bash 3.2)
 # cannot run; use Homebrew bash when it exists.
-BREW_BASH="/opt/homebrew/bin/bash"
-[[ -x "$BREW_BASH" ]] || BREW_BASH="/bin/bash"
+BREW_BASH="/bin/bash"
+for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [[ -x "$candidate" ]]; then BREW_BASH="$candidate"; break; fi
+done
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --arch) WANTED_ARCH="$2"; shift 2 ;;
@@ -54,6 +64,25 @@ case "$WANTED_ARCH" in
     arm64|x86_64) ARCHS=("$WANTED_ARCH") ;;
     *) echo "bad --arch '$WANTED_ARCH' (arm64|x86_64|universal)"; exit 1 ;;
 esac
+
+# Fail with installation instructions, rather than failing deep inside a
+# configure/make step with the unhelpful status 127.
+missing=()
+for tool in clang clang++ curl git make patch tar autoreconf autoconf automake aclocal; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+done
+if ! command -v glibtoolize >/dev/null 2>&1 && ! command -v libtoolize >/dev/null 2>&1; then
+    missing+=("GNU libtool (glibtoolize/libtoolize)")
+fi
+if [[ ${#missing[@]} -gt 0 ]]; then
+    printf 'Missing CAS build tools:\n'
+    printf '  %s\n' "${missing[@]}"
+    printf 'Install Xcode Command Line Tools and run: brew install autoconf automake libtool bash\n'
+    exit 1
+fi
+if command -v glibtoolize >/dev/null 2>&1; then
+    export LIBTOOLIZE="$(command -v glibtoolize)"
+fi
 
 mkdir -p "$DEPS" "$SRC" "$CAS_ROOT"
 
@@ -72,11 +101,15 @@ fetch_sources() {
         tar -xJf "$DEPS/mpfr.tar.xz" -C "$SRC"
     fi
     log "Fetching giac at $GIAC_COMMIT"
-    if [[ ! -d "$SRC/giac" ]]; then
-        git clone --depth 50 "$GIAC_REPO" "$SRC/giac"
+    if [[ ! -d "$SRC/giac/.git" ]]; then
+        git clone --no-checkout --depth 1 "$GIAC_REPO" "$SRC/giac"
     fi
-    ( cd "$SRC/giac" && git fetch --depth 50 origin master 2>/dev/null || true
-      git checkout -q "$GIAC_COMMIT" )
+    # Fetch the pinned revision itself: the latest 50 commits may no longer
+    # contain it after upstream advances.
+    if ! git -C "$SRC/giac" cat-file -e "$GIAC_COMMIT^{commit}" 2>/dev/null; then
+        git -C "$SRC/giac" fetch --depth 1 origin "$GIAC_COMMIT"
+    fi
+    git -C "$SRC/giac" checkout --detach "$GIAC_COMMIT"
     log "Sources ready"
 }
 
@@ -93,11 +126,17 @@ build_arch() {
     local prefix="$CAS_ROOT/prefix-$arch"
     local buildroot="$CAS_ROOT/build-$arch"
 
-    log "Building for $arch"
+    log "Building for $arch (macOS $MACOSX_DEPLOYMENT_TARGET)"
+    local cache_key="target-v3:$MACOSX_DEPLOYMENT_TARGET:gmp-$GMP_VERSION:mpfr-$MPFR_VERSION:giac-$GIAC_COMMIT"
+    # Earlier builds cached host-target objects (macOS 26), despite linking
+    # the final helper with a macOS 13 load command. Rebuild those caches.
+    if [[ ! -f "$prefix/.build-key" ]] || [[ "$(cat "$prefix/.build-key")" != "$cache_key" ]]; then
+        rm -rf "$prefix" "$buildroot"
+    fi
     mkdir -p "$prefix" "$buildroot"
 
-    local CC_BIN="clang -arch $arch"
-    local CXX_BIN="clang++ -arch $arch"
+    local CC_BIN="clang -arch $arch -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+    local CXX_BIN="clang++ -arch $arch -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
 
     # --- GMP
     if [[ ! -f "$prefix/lib/libgmp.a" ]]; then
@@ -132,51 +171,44 @@ build_arch() {
     if [[ ! -f "$prefix/lib/libgiac.a" ]]; then
         log "giac ($arch) — this is the long step"
         rm -rf "$buildroot/giac"
-        cp -R "$SRC/giac" "$buildroot/giac"
+        bash "$REPO_ROOT/Tools/cas/prepare_giac.sh" "$SRC/giac" "$GIAC_COMMIT" "$buildroot/giac"
         ( cd "$buildroot/giac" \
-          && for patch in "$SRC"/giac/debian/patches/*.patch; do \
-                patch -p1 --forward --silent < "$patch" 2>/dev/null || true; \
-            done \
-          && sed -i.bak -e 's/^   AM_GNU_GETTEXT$/   dnl AM_GNU_GETTEXT (not needed for the helper build)/' \
-                        -e 's/^   AM_GNU_GETTEXT_VERSION/   dnl AM_GNU_GETTEXT_VERSION/' \
-                        -e 's/^SUBDIRS =.*/SUBDIRS = src/' \
-                        -e 's/^DIST_SUBDIRS =.*/DIST_SUBDIRS = src/' \
-                        configure.ac Makefile.am \
-          && sed -i.bak2 '/^AC_OUTPUT(\[/,$ { /^doc\//d; /^intl\//d; /^po\//d; /^examples\//d; /^debian/d; /^micropython/d; /^check\//d; }' configure.ac \
-          && rm -rf doc check intl po debianold debian examples \
-          && touch src/js.h src/js.c \
-          && ( ./autogen.sh 2>/dev/null || autoreconf -fi ) \
           && CONFIG_SHELL="$BREW_BASH" "$BREW_BASH" ./configure --prefix="$prefix" \
                 --disable-fltk --disable-cocoa --disable-ao --disable-gsl \
                 --disable-lapack --disable-pari --disable-ntl --disable-glpk \
                 --disable-samplerate --disable-curl --disable-gettext \
                 --disable-micropy --disable-quickjs --disable-png \
-                --disable-ecm --disable-bernmm --disable-sscl --disable-dl \
+                --disable-ecm --disable-bernmm --disable-dl \
                 --disable-shared --enable-static \
                 CC="$CC_BIN" CXX="$CXX_BIN" \
-                CXXFLAGS="-O2 -std=gnu++17 -mmacosx-version-min=13.0" \
+                CFLAGS="-O2 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
+                CXXFLAGS="-O2 -std=gnu++17 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
                 CPPFLAGS="-I$prefix/include" \
-                LDFLAGS="-L$prefix/lib" \
+                LDFLAGS="-L$prefix/lib -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
           && make -C src libgiac.la -j"$JOBS" \
-          && make -C src install-libLTLIBRARIES install-data \
-                 install-giacincludeHEADERS DESTDIR= )
-        # autotools may name it .a directly in .libs; normalize.
-        if [[ ! -f "$prefix/lib/libgiac.a" ]]; then
-            found="$(find "$buildroot/giac/src/.libs" -name 'libgiac*.a' | head -1 || true)"
-            [[ -n "$found" ]] && mkdir -p "$prefix/lib" && cp "$found" "$prefix/lib/libgiac.a"
-        fi
+          && make -C src install-giacincludeHEADERS DESTDIR= )
+        # Install only the library the helper needs. `install-libLTLIBRARIES`
+        # would also build libxcas (the GUI), whose gl2ps.c Debian removes.
+        # Upstream installs these generated headers from an exec hook.
+        mkdir -p "$prefix/lib" "$prefix/include/giac"
+        cp "$buildroot/giac/src/.libs/libgiac.a" "$prefix/lib/libgiac.a"
+        for header in config.h input_lexer.h input_parser.h; do
+            cp "$buildroot/giac/src/$header" "$prefix/include/giac/$header"
+        done
         [[ -f "$prefix/lib/libgiac.a" ]] || { echo "giac build failed"; exit 1; }
     fi
 
     # --- helper
     log "typstedit-cas ($arch)"
-    clang++ -std=gnu++17 -O2 -arch "$arch" -mmacosx-version-min=13.0 \
+    clang++ -std=gnu++17 -O2 -arch "$arch" -mmacosx-version-min="$MACOSX_DEPLOYMENT_TARGET" \
         "$REPO_ROOT/Tools/cas/typstedit-cas.cpp" \
         -I"$prefix/include" \
-        -o "$CAS_ROOT/typstedit-cas-$arch" \
+        -o "$CAS_ROOT/typstedit-cas-$arch.new" \
         "$prefix/lib/libgiac.a" "$prefix/lib/libmpfr.a" "$prefix/lib/libgmp.a" \
         -lz -lm -lpthread \
         -framework CoreFoundation -framework Accelerate
+    mv "$CAS_ROOT/typstedit-cas-$arch.new" "$CAS_ROOT/typstedit-cas-$arch"
+    printf '%s\n' "$cache_key" > "$prefix/.build-key"
     log "Built $CAS_ROOT/typstedit-cas-$arch"
 }
 
@@ -190,14 +222,21 @@ done
 # ------------------------------------------------------------- final binary
 if [[ "${#ARCHS[@]}" -eq 2 ]]; then
     lipo -create "$CAS_ROOT/typstedit-cas-arm64" "$CAS_ROOT/typstedit-cas-x86_64" \
-        -output "$CAS_ROOT/typstedit-cas"
+        -output "$CAS_ROOT/typstedit-cas.new"
 else
-    cp "$CAS_ROOT/typstedit-cas-${ARCHS[0]}" "$CAS_ROOT/typstedit-cas"
+    cp "$CAS_ROOT/typstedit-cas-${ARCHS[0]}" "$CAS_ROOT/typstedit-cas.new"
 fi
 
-chmod +x "$CAS_ROOT/typstedit-cas"
+chmod +x "$CAS_ROOT/typstedit-cas.new"
+codesign --force --sign - "$CAS_ROOT/typstedit-cas.new"
+mv "$CAS_ROOT/typstedit-cas.new" "$CAS_ROOT/typstedit-cas"
 log "Done: $CAS_ROOT/typstedit-cas"
-"$CAS_ROOT/typstedit-cas" <<'EOF'
+# Do not fail a cross-build by executing a foreign architecture on the host.
+if lipo -verify_arch "$ARCH" "$CAS_ROOT/typstedit-cas" >/dev/null 2>&1; then
+    "$CAS_ROOT/typstedit-cas" <<'EOF'
 {"v":1,"id":1,"op":"eval","input":"solve(x^2-4=0,x)","angle":"rad","digits":12}
 {"v":1,"id":2,"op":"shutdown"}
 EOF
+else
+    log "Cross-built helper; execution test requires a $WANTED_ARCH Mac"
+fi

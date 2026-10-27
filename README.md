@@ -158,43 +158,45 @@ TypstEdit is available for both **Apple Silicon** (M1/M2/M3) and **Intel** Macs.
 If you want to contribute or build the app yourself:
 
 ### Prerequisites
-* macOS 13.0+ (Ventura) or later.
-* Xcode 15+ installed.
-* Swift 5.9+.
+* macOS 13.0+ (Ventura) or later to run; building needs a recent macOS.
+* **Xcode 26+ (Swift 6.2+)** installed — the package uses `swift-tools-version: 6.2`. Full Xcode is required for universal builds; Command Line Tools alone ship an Apple-Silicon-only copy of the Swift compatibility runtime.
+* For the Calculator's CAS helper: Homebrew `autoconf`, `automake`, `libtool`, and `bash` (`brew install autoconf automake libtool bash`).
 
 ### Steps
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/tmagri/TypstEdit.git](https://github.com/tmagri/TypstEdit.git)
+    git clone https://github.com/tmagri/TypstEdit.git
     cd TypstEdit
     ```
 
-2.  **Ensure the Typst binary is present:**
-    The app requires the `typst` binary. Place the matching binary in
-    `typst-aarch64-apple-darwin/typst` for ARM64 or
-    `typst-x86_64-apple-darwin/typst` for Intel.
+2.  **Ensure the Typst binaries are present:**
+    Place `typst-aarch64-apple-darwin/typst` (Apple Silicon),
+    `typst-x86_64-apple-darwin/typst` (Intel), and for universal builds the
+    combined `typst-universal`.
 
-3.  **Bundle and Build:**
-    Use the included script to compile and create the bundle. It also builds
-    the Calculator's CAS helper automatically the first time (allow 20–40
-    minutes per architecture):
+3.  **Build the app (universal, recommended):**
     ```bash
-    chmod +x bundle.sh
-    ./bundle.sh
+    ./bundle_universal.sh
     ```
-    The CAS build requires macOS with Xcode Command Line Tools and Homebrew
-    `autoconf`, `automake`, `libtool`, and `bash`. To build the helper manually
-    before launching TypstEdit directly from Xcode or SwiftPM, run
-    `Tools/cas/build_cas.sh`.
+    This builds one app that runs on both Apple Silicon and Intel Macs. The
+    first run also builds the Calculator's CAS helper (allow 20–40 minutes per
+    architecture; later runs reuse the cached libraries).
+
+    For a single-architecture app on this Mac, use `./bundle.sh` (defaults to
+    this Mac's architecture).
+
+    Both scripts finish by running `Tools/packaging/verify_bundle.sh`, which
+    fails the build if the app could not launch on another Mac — for example
+    a missing bundled Swift runtime, a wrong architecture, or a library that
+    needs a newer macOS than the app declares.
 
 4.  **Create Installer (Optional):**
-    To generate the `.dmg` file:
     ```bash
-    chmod +x create_dmg.sh
-    ./create_dmg.sh arm64
+    ./create_dmg.sh            # universal (TypstEdit_Universal.dmg)
+    ./create_dmg.sh arm64      # Apple Silicon only
+    ./create_dmg.sh x86_64     # Intel only
     ```
-    Use `./create_dmg.sh x86_64` to build the separate Intel installer.
 
 ### Build separate architecture binaries
 
@@ -210,25 +212,28 @@ The binaries are written to
 `.build/arch-build/arm64/out/Products/Release/TypstEdit` and
 `.build/arch-build/x86_64/out/Products/Release/TypstEdit`, respectively.
 
-### Publish separate installers
+### Publish installers
 
-Use **publish: installer (arm64)** and **publish: installer (Intel x86_64)**
-to create the separate `TypstEdit_AppleSilicon.dmg` and `TypstEdit_Intel.dmg`
-installers. **publish: installers (arm64 + Intel x86_64)** runs both in
-sequence. Each DMG contains an architecture-specific app and framework; no
-universal binary is created.
+`./create_dmg.sh` (no argument) creates `TypstEdit_Universal.dmg`, one
+installer for every Mac. The VS Code **publish: installer** tasks still build
+the separate `TypstEdit_AppleSilicon.dmg` and `TypstEdit_Intel.dmg` if you
+prefer smaller per-architecture downloads.
 
-### ⚠️ "App is damaged" Error
+### ⚠️ "App is damaged" / "can't be opened" on another Mac
 
-Since this app is open-source and not signed with a paid Apple Developer ID, macOS Gatekeeper might show a message saying **"TypstEdit is damaged and can't be opened"** on the first launch.
+The app is ad-hoc signed, not signed with a paid Apple Developer ID or
+notarized, so Gatekeeper blocks it the first time it is opened after a
+download.
 
-**To fix this (you only need to do it once):**
+**To fix this (once per Mac):**
 
-1. Open your **Terminal** app.
-2. Paste the following command and press Enter:
+1. Drag **TypstEdit** from the DMG to **Applications**.
+2. Open **Terminal** and run:
    ```bash
-   xattr -cr /Applications/TypstEdit.app
-3. You can now open the app normally!
+   xattr -dr com.apple.quarantine /Applications/TypstEdit.app
+   ```
+3. Open the app normally. (Alternatively: right-click the app → **Open** →
+   **Open**.)
 
 
 ## 📄 License

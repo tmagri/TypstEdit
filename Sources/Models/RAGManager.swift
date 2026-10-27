@@ -187,11 +187,17 @@ class RAGManager: ObservableObject {
         
         sqlite3_enable_load_extension(db, 1)
         var errMsg: UnsafeMutablePointer<Int8>?
-        // Compute path relative to the executable directory (Contents/MacOS/) where
-        // the bundle scripts copy vector.framework. This matches the @loader_path rpath
-        // that dyld already uses, so no install_name_tool rpath manipulation is needed.
-        let execDir = Bundle.main.executableURL?.deletingLastPathComponent().path ?? ""
-        let vectorExtPath = "\(execDir)/vector.framework/vector"
+        // Packaged apps keep vector.framework in Contents/Frameworks (the
+        // standard location, on the app's rpath). Older bundles placed it
+        // next to the executable, so keep that as a fallback.
+        let candidates = [
+            Bundle.main.privateFrameworksURL?
+                .appendingPathComponent("vector.framework/vector").path,
+            Bundle.main.executableURL?.deletingLastPathComponent()
+                .appendingPathComponent("vector.framework/vector").path,
+        ].compactMap { $0 }
+        let vectorExtPath = candidates.first { FileManager.default.fileExists(atPath: $0) }
+            ?? candidates.first ?? "vector.framework/vector"
         if sqlite3_load_extension(db, vectorExtPath, nil, &errMsg) != SQLITE_OK {
             let msg = errMsg != nil ? String(cString: errMsg!) : "Unknown error"
             print("Failed to load sqlite-vector: \(msg)")

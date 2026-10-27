@@ -1,10 +1,15 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+export MACOSX_DEPLOYMENT_TARGET=13.0
 APP_NAME="TypstEdit"
 BUILD_DIR=".build"
-APP_BUNDLE="$APP_NAME.app"
+FINAL_APP_BUNDLE="$APP_NAME.app"
+# Assemble and verify separately. A failed build must not destroy the
+# currently working app.
+APP_BUNDLE="build/bundles/$APP_NAME-universal.app"
 
 if [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
@@ -38,11 +43,15 @@ fi
 # overwrites the first and lipo would see one file twice.
 # Build for ARM64 (Apple Silicon)
 echo "Building for ARM64..."
-ARM_BIN="$(swift build -c release --arch arm64 --scratch-path "$BUILD_DIR/arch-build/arm64" --show-bin-path)/$APP_NAME"
+swift build -c release --arch arm64 --scratch-path "$BUILD_DIR/arch-build/arm64"
+ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path "$BUILD_DIR/arch-build/arm64" --show-bin-path)"
+ARM_BIN="$ARM_BIN_DIR/$APP_NAME"
 
-# Build for x86_64 (Intel)
+# --show-bin-path only reports a path; it does not perform a build.
 echo "Building for x86_64..."
-X86_BIN="$(swift build -c release --arch x86_64 --scratch-path "$BUILD_DIR/arch-build/x86_64" --show-bin-path)/$APP_NAME"
+swift build -c release --arch x86_64 --scratch-path "$BUILD_DIR/arch-build/x86_64"
+X86_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path "$BUILD_DIR/arch-build/x86_64" --show-bin-path)"
+X86_BIN="$X86_BIN_DIR/$APP_NAME"
 
 echo "Creating universal binary..."
 for BIN in "$ARM_BIN" "$X86_BIN"; do
@@ -57,34 +66,31 @@ echo "Creating App Bundle..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
 
 cp "$BUILD_DIR/$APP_NAME-universal" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 # Strip debug symbols from the release binary to reduce size
 strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Copy all SPM resource bundles — check both layout locations (new swift-build out dir and classic llbuild dir)
+# Use this build's actual output, never stale global .build/out bundles.
 echo "Copying SPM resource bundles..."
-for BUNDLE_DIR in "$BUILD_DIR/out/Products/Release" "$BUILD_DIR/out/arm64-apple-macosx/release" "$BUILD_DIR/arm64-apple-macosx/release"; do
-    if [ -d "$BUNDLE_DIR" ]; then
-        if [ -n "$(find "$BUNDLE_DIR" -maxdepth 1 -type d -name "*.bundle" 2>/dev/null)" ]; then
-            find "$BUNDLE_DIR" -maxdepth 1 -type d -name "*.bundle" | while read bundle; do
-                echo "  Copying: $(basename "$bundle")"
-                cp -r "$bundle" "$APP_BUNDLE/Contents/Resources/"
-            done
-            break
-        fi
+for NAME in TypstEdit_TypstEdit.bundle CodeEditLanguages_CodeEditLanguages.bundle; do
+    if [ ! -d "$ARM_BIN_DIR/$NAME" ] || [ ! -d "$X86_BIN_DIR/$NAME" ]; then
+        echo "Error: missing resource bundle $NAME in an architecture build."
+        exit 1
     fi
 done
+while IFS= read -r BUNDLE; do
+    ditto "$BUNDLE" "$APP_BUNDLE/Contents/Resources/$(basename "$BUNDLE")"
+done < <(find "$ARM_BIN_DIR" -maxdepth 1 -type d -name '*.bundle')
 
-# Copy vector.framework into Contents/MacOS/ so @loader_path rpath finds it at launch
-# Use the pre-built universal macOS slice from the XCFramework artifact
-echo "Copying vector.framework..."
-VECTOR_XCFW_MACOS="$BUILD_DIR/artifacts/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64"
-if [ -d "$VECTOR_XCFW_MACOS/vector.framework" ]; then
-    cp -r "$VECTOR_XCFW_MACOS/vector.framework" "$APP_BUNDLE/Contents/MacOS/"
-    echo "  Copied: vector.framework (universal)"
-fi
+# Recompile the pinned vector source at macOS 13. The vendor binary's load
+# command requires macOS 15, despite its package advertising an older floor.
+VECTOR_SOURCE="$BUILD_DIR/arch-build/arm64/checkouts/sqlite-vector"
+VECTOR_TEMPLATE="$BUILD_DIR/arch-build/arm64/artifacts/sqlite-vector/vectorBinary/vector.xcframework/macos-arm64_x86_64/vector.framework"
+bash "$SCRIPT_DIR/Tools/build_vector.sh" "$VECTOR_SOURCE" "$VECTOR_TEMPLATE" \
+    "$APP_BUNDLE/Contents/Frameworks/vector.framework" arm64 x86_64
 
 # Copy Typst executable into the bundle
 echo "Bundling Universal Typst executable..."
@@ -98,15 +104,12 @@ else
     exit 1
 fi
 
-# Build the universal CAS helper if it is missing or incomplete.
-echo "Bundling Universal CAS helper..."
+# The CAS builder validates its deployment-target cache and only rebuilds
+# libraries when necessary. An architecture-only check misses host-target
+# static objects hidden inside the helper.
+echo "Building/bundling Universal CAS helper..."
 CAS_HELPER="build/cas/typstedit-cas"
-if [ ! -x "$CAS_HELPER" ] \
-    || ! lipo -verify_arch arm64 "$CAS_HELPER" >/dev/null 2>&1 \
-    || ! lipo -verify_arch x86_64 "$CAS_HELPER" >/dev/null 2>&1; then
-    echo "Building universal CAS helper (the first build can take 20–40 minutes per architecture)..."
-    "$SCRIPT_DIR/Tools/cas/build_cas.sh" --arch universal
-fi
+bash "$SCRIPT_DIR/Tools/cas/build_cas.sh" --arch universal
 if [ ! -x "$CAS_HELPER" ] \
     || ! lipo -verify_arch arm64 "$CAS_HELPER" >/dev/null 2>&1 \
     || ! lipo -verify_arch x86_64 "$CAS_HELPER" >/dev/null 2>&1; then
@@ -115,7 +118,6 @@ if [ ! -x "$CAS_HELPER" ] \
 fi
 cp "$CAS_HELPER" "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
 chmod +x "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
-codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas" 2>/dev/null || true
 echo "✓ Universal CAS helper bundled"
 
 # Icon Handling
@@ -262,23 +264,41 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Code-sign the fully assembled bundle so macOS TCC binds the Info.plist
-# (incl. folder usage descriptions) to a stable identity and seals resources.
-# Without this, the linker-only signature leaves Info.plist unbound and TCC
-# falls back to per-file prompts for every file the app — or its `typst`
-# subprocess — touches.
-#
-# Sign inside-out (NOT --deep): vector.framework lives in MacOS/ which makes
-# --deep emit "bundle format is ambiguous" and fail to bind Info.plist.
-# Signing nested components first, then the outer bundle, binds the Info.plist
-# and seals resources correctly. The nested typst binary shares the app's
-# identity so its file reads are attributed to TypstEdit instead of re-prompting.
+# Licences for redistributed components.
+mkdir -p "$APP_BUNDLE/Contents/Resources/Licenses"
+cp THIRD_PARTY_NOTICES.md "$APP_BUNDLE/Contents/Resources/Licenses/"
+for f in typst-aarch64-apple-darwin/LICENSE typst-aarch64-apple-darwin/NOTICE; do
+    [ -f "$f" ] && cp "$f" "$APP_BUNDLE/Contents/Resources/Licenses/typst-$(basename "$f")"
+done
+
+# Bundle the Swift compatibility runtime (libswiftCompatibilitySpan.dylib).
+# The app links it with an rpath into this Mac's Xcode, so on any other Mac
+# it fails to launch with "Library not loaded". This copies it into
+# Contents/Frameworks, adds @executable_path/../Frameworks, and removes the
+# absolute Xcode rpath.
+bash "$SCRIPT_DIR/Tools/packaging/prepare_bundle.sh" "$APP_BUNDLE" arm64 x86_64
+
+# Sign inside-out (NOT --deep), so the Info.plist (incl. folder usage
+# descriptions) is bound and TCC grants folder access instead of prompting
+# per file. Nested code first, then the outer bundle.
 echo "Code-signing app bundle (ad-hoc, inside-out)..."
-codesign --force --sign - "$APP_BUNDLE/Contents/MacOS/vector.framework" || true
-codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst" || true
+for dylib in "$APP_BUNDLE"/Contents/Frameworks/*.dylib; do
+    [ -f "$dylib" ] && codesign --force --sign - "$dylib"
+done
+codesign --force --sign - "$APP_BUNDLE/Contents/Frameworks/vector.framework"
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst"
+codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
 codesign --force --sign - "$APP_BUNDLE"
+codesign --verify --strict "$APP_BUNDLE"
+
+# Fail the build rather than ship a bundle that can't launch elsewhere.
+bash "$SCRIPT_DIR/Tools/packaging/verify_bundle.sh" "$APP_BUNDLE" arm64 x86_64
+
+# Only now replace the working app.
+rm -rf "$FINAL_APP_BUNDLE"
+ditto "$APP_BUNDLE" "$FINAL_APP_BUNDLE"
 
 echo "Refreshing macOS Launch Services cache..."
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$FINAL_APP_BUNDLE"
 
-echo "Done! Universal binary app is located at $APP_BUNDLE"
+echo "Done! Universal app is located at $FINAL_APP_BUNDLE"
