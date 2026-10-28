@@ -158,4 +158,37 @@ final class AIModelProfileTests: XCTestCase {
             XCTAssertNil(settings.modelProfile(for: .chat))
         }
     }
+
+    // MARK: - Per-model context budget
+
+    func testOlderSavedModelsWithoutContextBudgetFollowTheGlobalSetting() {
+        let raw = """
+        [{"id":"\(UUID().uuidString)","name":"","source":"OpenAI","model":"gpt-4o","endpoint":"","reasoningEffort":"auto"}]
+        """
+        XCTAssertNil(AISettingsManager.decodeProfiles(raw).first?.contextBudgetTokens)
+    }
+
+    func testContextBudgetOverrideSurvivesEncoding() {
+        let profile = AIModelProfile(source: .anthropic, model: "claude", contextBudgetTokens: 200_000)
+        let decoded = AISettingsManager.decodeProfiles(AISettingsManager.encodeProfiles([profile]))
+        XCTAssertEqual(decoded.first?.contextBudgetTokens, 200_000)
+    }
+
+    func testEffectiveContextBudgetTokensForModels() {
+        let settings = AISettingsManager.shared
+        let original = settings.chatContextBudgetTokens
+        defer { settings.chatContextBudgetTokens = original }
+
+        settings.chatContextBudgetTokens = 16_000
+
+        let inherited = AIModelProfile(source: .openAI, model: "gpt-4o-mini")
+        let longContext = AIModelProfile(source: .anthropic, model: "claude", contextBudgetTokens: 200_000)
+        let tooSmall = AIModelProfile(source: .local, model: "tiny", contextBudgetTokens: 10)
+        let portkey = AIModelProfile(source: .portkey, model: "@openai-prod/gpt-4o", contextBudgetTokens: 128_000)
+
+        XCTAssertEqual(settings.effectiveContextBudgetTokens(for: settings.modelContext(for: inherited)), 16_000, "no override → global setting")
+        XCTAssertEqual(settings.effectiveContextBudgetTokens(for: settings.modelContext(for: longContext)), 200_000, "a paid long-context model can use its real window")
+        XCTAssertEqual(settings.effectiveContextBudgetTokens(for: settings.modelContext(for: tooSmall)), 2_000, "tiny overrides are clamped up so compaction still works")
+        XCTAssertEqual(settings.effectiveContextBudgetTokens(for: settings.modelContext(for: portkey)), 128_000, "Portkey models keep their override")
+    }
 }

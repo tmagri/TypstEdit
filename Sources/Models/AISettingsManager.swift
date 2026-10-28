@@ -150,6 +150,10 @@ struct ModelContext {
     /// Chat compaction override from a saved model; `nil` = the global
     /// setting. Resolve with `AISettingsManager.effectiveCompressionMethod(for:)`.
     var compressionMethod: ChatCompressionMethod? = nil
+    /// Context budget override from a saved model, in tokens; `nil` = the
+    /// global AI Chat → Context Budget setting. Resolve with
+    /// `AISettingsManager.effectiveContextBudgetTokens(for:)`.
+    var contextBudgetTokens: Int? = nil
 
     var isGemini: Bool { source == .gemini }
     var isAnthropic: Bool { source == .anthropic }
@@ -228,6 +232,11 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     /// How AI Chat compacts long conversations while this model is in use.
     /// `nil` = follow the global setting (AI Chat → Context Compression).
     var compressionMethod: ChatCompressionMethod?
+    /// Context budget for AI Chat while this model is in use, in tokens.
+    /// `nil` = follow the global setting (AI Chat → Context Budget). Paid
+    /// long-context models can use their real window here (e.g. 200,000)
+    /// without raising the global budget for every model.
+    var contextBudgetTokens: Int?
 
     static let defaultLocalEndpoint = "http://localhost:11434/v1/chat/completions"
 
@@ -238,7 +247,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         model: String = "",
         endpoint: String = AIModelProfile.defaultLocalEndpoint,
         reasoningEffort: ReasoningEffort = .auto,
-        compressionMethod: ChatCompressionMethod? = nil
+        compressionMethod: ChatCompressionMethod? = nil,
+        contextBudgetTokens: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -247,6 +257,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         self.endpoint = endpoint
         self.reasoningEffort = reasoningEffort
         self.compressionMethod = compressionMethod
+        self.contextBudgetTokens = contextBudgetTokens
     }
 
     /// Lenient decoding: an unknown source/effort raw value (e.g. from a
@@ -264,6 +275,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         reasoningEffort = ReasoningEffort(rawValue: effortRaw) ?? .auto
         // Missing (older saved models) or unknown → follow the global setting.
         compressionMethod = (try? c.decode(String.self, forKey: .compressionMethod)).flatMap(ChatCompressionMethod.init(rawValue:))
+        // Missing (older saved models) → follow the global budget.
+        contextBudgetTokens = try? c.decode(Int.self, forKey: .contextBudgetTokens)
     }
 
     var trimmedModel: String { model.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -414,7 +427,9 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiChatWebFetchAllowedDomains") var chatWebFetchAllowedDomains: String = ""
     /// Rough token budget for one chat request before old turns get summarized
     /// into a compaction summary. Bigger models/local models with long
-    /// contexts can raise this.
+    /// contexts can raise this; individual saved models can override it
+    /// (`AIModelProfile.contextBudgetTokens`), so a paid long-context model
+    /// doesn't need one global, conservative number.
     @AppStorage("aiChatContextBudgetTokens") var chatContextBudgetTokens: Int = 16_000
     /// Seconds of total silence (no new output arriving at all) before an
     /// in-flight chat response is treated as stalled. Some local reasoning
@@ -426,8 +441,15 @@ class AISettingsManager: ObservableObject {
     /// error is surfaced. Covers both triggers: a response that went silent
     /// past the stall timeout, and a response that ended empty because the
     /// model spent its whole reply budget on reasoning. 0 turns auto-continue
-    /// off; the service clamps the stored value to a sane range.
+    /// off; `chatAutoContinueUnlimited` removes the cap entirely.
     @AppStorage("aiChatAutoContinueAttempts") var chatAutoContinueAttempts: Int = 2
+    /// Keep auto-continuing instead of giving up after `chatAutoContinueAttempts`
+    /// retries. The chat shows every attempt in its live status line, and the
+    /// Stop button still ends the run, so an endless empty-reply loop stays
+    /// visible and interruptible. Off by default.
+    @AppStorage("aiChatAutoContinueUnlimited") var chatAutoContinueUnlimited: Bool = false {
+        willSet { objectWillChange.send() }
+    }
 
     /// Thought re-seeding: when a reply is interrupted (stall) or ends empty
     /// after a long thinking run, the abandoned reasoning is compressed
@@ -740,7 +762,7 @@ class AISettingsManager: ObservableObject {
 
     /// A Portkey request context: the shared gateway URL, Portkey key, and
     /// optional default provider/config routing headers.
-    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort, compressionMethod: ChatCompressionMethod? = nil) -> ModelContext {
+    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort, compressionMethod: ChatCompressionMethod? = nil, contextBudgetTokens: Int? = nil) -> ModelContext {
         ModelContext(
             task: task,
             source: .portkey,
@@ -749,7 +771,8 @@ class AISettingsManager: ObservableObject {
             apiKey: portkeyApiKey,
             reasoningEffort: reasoningEffort,
             extraHeaders: portkeyRoutingHeaders,
-            compressionMethod: compressionMethod
+            compressionMethod: compressionMethod,
+            contextBudgetTokens: contextBudgetTokens
         )
     }
 
@@ -758,6 +781,17 @@ class AISettingsManager: ObservableObject {
     /// summary for cloud (paid) models and offline filtering for local ones.
     func effectiveCompressionMethod(for ctx: ModelContext) -> ChatCompressionMethod {
         (ctx.compressionMethod ?? chatCompressionMethod).resolved(isLocal: ctx.isLocal)
+    }
+
+    /// The concrete chat context budget for a model, in tokens: its
+    /// saved-model override, else the global setting. The override is clamped
+    /// to 2,000...1,000,000 so a typo can't disable compaction (too small) or
+    /// overflow the model's real window (too large).
+    func effectiveContextBudgetTokens(for ctx: ModelContext) -> Int {
+        if let override = ctx.contextBudgetTokens, override > 0 {
+            return min(max(override, 2_000), 1_000_000)
+        }
+        return max(2_000, chatContextBudgetTokens)
     }
 
     // MARK: - Saved Model Profiles
@@ -863,7 +897,7 @@ class AISettingsManager: ObservableObject {
     /// from the shared per-provider keys.
     func modelContext(for profile: AIModelProfile) -> ModelContext {
         if profile.source == .portkey {
-            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort, compressionMethod: profile.compressionMethod)
+            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort, compressionMethod: profile.compressionMethod, contextBudgetTokens: profile.contextBudgetTokens)
         }
         return ModelContext(
             task: .generation,
@@ -872,7 +906,8 @@ class AISettingsManager: ObservableObject {
             endpoint: profile.endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKey(for: profile.source),
             reasoningEffort: profile.reasoningEffort,
-            compressionMethod: profile.compressionMethod
+            compressionMethod: profile.compressionMethod,
+            contextBudgetTokens: profile.contextBudgetTokens
         )
     }
 

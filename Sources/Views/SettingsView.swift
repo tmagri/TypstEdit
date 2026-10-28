@@ -788,12 +788,38 @@ struct AISettingsView: View {
         compressionLabel(settings.effectiveCompressionMethod(for: settings.modelContext(for: .chat)))
     }
 
+    /// What AI Chat will actually use right now: the chat model's saved-model
+    /// override, or the global setting above.
+    private var effectiveChatContextBudget: Int {
+        settings.effectiveContextBudgetTokens(for: settings.modelContext(for: .chat))
+    }
+
     private func profileCompressionCaption(_ profile: AIModelProfile) -> String {
         let effective = settings.effectiveCompressionMethod(for: settings.modelContext(for: profile))
         let base = profile.source.isLocal
             ? "Local models summarize poorly, so offline filtering usually works better."
             : "Cloud (paid) models write good summaries, so the LLM summary usually works best."
         return "\(base) Used for this model: \(compressionLabel(effective))."
+    }
+
+    /// Blank field = follow the global budget; a number = this model's own
+    /// AI Chat budget. Edited as text so an empty field stays empty instead
+    /// of snapping to a default while the user is typing.
+    private func contextBudgetBinding(_ profile: Binding<AIModelProfile>) -> Binding<String> {
+        Binding(
+            get: { profile.wrappedValue.contextBudgetTokens.map(String.init) ?? "" },
+            set: { raw in
+                var updated = profile.wrappedValue
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                updated.contextBudgetTokens = Int(trimmed).map { max($0, 0) }
+                profile.wrappedValue = updated
+            }
+        )
+    }
+
+    private func profileContextBudgetCaption(_ profile: AIModelProfile) -> String {
+        let effective = settings.effectiveContextBudgetTokens(for: settings.modelContext(for: profile))
+        return "Used for AI Chat with this model: \(effective) tokens. Blank follows the global setting (\(settings.chatContextBudgetTokens) tokens); paid long-context models can use their real window (e.g. 200000)."
     }
 
     /// Shown under Portkey model fields: how model strings route.
@@ -804,7 +830,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Saved Models",
             icon: "square.stack.3d.up",
-            description: "Save extra models, from any provider, to pick per feature below or to switch on the fly from the model menu in the AI Chat panel and the AI Prompt sheet. API keys are shared per provider (API Keys & Limits tab)."
+            description: "Save extra models, from any provider, to pick per feature below or to switch on the fly from the model menu in the AI Chat panel and the AI Prompt sheet. API keys are shared per provider (API Keys & Limits tab). Each saved model can also set its own AI Chat context budget and compaction method."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 if settings.modelProfiles.isEmpty {
@@ -873,6 +899,17 @@ struct AISettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
+            }
+
+            SettingsRow(label: "Context Budget:", caption: profileContextBudgetCaption(value)) {
+                HStack(spacing: 6) {
+                    TextField("Use global (\(settings.chatContextBudgetTokens))", text: contextBudgetBinding(profile))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                    Text("tokens")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             if !value.source.isLocal && settings.apiKey(for: value.source).isEmpty {
@@ -1060,7 +1097,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Context Budget",
             icon: "gauge.with.dots.needle.67percent",
-            description: "Long chats eventually overflow any model's context window — which some providers report as an empty response rather than a clear error. When the conversation passes this rough token budget, the chat summarizes older turns automatically. The header shows the current estimate; the compact button summarizes on demand."
+            description: "Long chats eventually overflow any model's context window — which some providers report as an empty response rather than a clear error. When the conversation passes this rough token budget, the chat summarizes older turns automatically. The header shows the current estimate; the compact button summarizes on demand. A saved model can set its own budget under Chat & Actions → Saved Models — raise it there for a paid long-context model without raising it for every model."
         ) {
             HStack(spacing: 10) {
                 Text("Summarize past")
@@ -1072,9 +1109,15 @@ struct AISettingsView: View {
                     .font(.caption)
                 Spacer()
             }
-            Text("Raise it for long-context models; lower it for small local models. 16,000 is a safe default for most.")
+            Text("Raise it for long-context models; lower it for small local models. 16,000 is a safe default — and only a starting point: most paid models take far more (e.g. 100,000–200,000), best set per model under Chat & Actions → Saved Models.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle").foregroundColor(.secondary)
+                Text("AI Chat now: \(settings.activeModelShortName(for: .chat)) → \(effectiveChatContextBudget) tokens")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
 
         SettingsCard(
@@ -1166,7 +1209,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Stalled Responses & Auto-Continue",
             icon: "hourglass.bottomhalf.filled",
-            description: "Local reasoning models (large Qwen and DeepSeek distills in particular) sometimes go quiet mid-reply — the panel shows \"Thinking…\" for minutes and nothing more ever arrives. After this many seconds of total silence the stuck attempt is abandoned and the model is asked to pick up where it left off, up to the number of attempts below. The same budget also covers replies that come back empty after a long thinking run. 0 attempts turns auto-continue off."
+            description: "Local reasoning models (large Qwen and DeepSeek distills in particular) sometimes go quiet mid-reply — the panel shows \"Thinking…\" for minutes and nothing more ever arrives. After this many seconds of total silence the stuck attempt is abandoned and the model is asked to pick up where it left off, up to the number of attempts below. The same budget covers replies that come back empty (a reasoning model can spend the whole reply on thinking and write nothing) — the chat's status line names each retry, so a pause is never unexplained. 0 attempts turns auto-continue off."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
@@ -1183,14 +1226,22 @@ struct AISettingsView: View {
                 HStack(spacing: 10) {
                     Text("Auto-continue attempts")
                         .font(.caption)
-                    Stepper(value: $settings.chatAutoContinueAttempts, in: 0...5) {
-                        Text("\(settings.chatAutoContinueAttempts)")
-                            .font(.caption.monospacedDigit())
-                            .frame(minWidth: 16)
-                    }
-                    .frame(width: 230, alignment: .leading)
+                    TextField("2", value: $settings.chatAutoContinueAttempts, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                        .disabled(settings.chatAutoContinueUnlimited)
+                    Text("attempts (0 = off)")
+                        .font(.caption)
+                        .foregroundColor(settings.chatAutoContinueUnlimited ? .secondary : .primary)
                     Spacer()
                 }
+
+                Toggle("Unlimited attempts", isOn: $settings.chatAutoContinueUnlimited)
+                    .font(.caption)
+                Text("Keep asking until the model answers or you press Stop. Every retry is named in the chat's status line, so an endless loop stays visible and interruptible.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
 
                 Divider()
 
@@ -1216,7 +1267,7 @@ struct AISettingsView: View {
                         .padding(.leading, 20)
                 }
 
-                Text("Defaults: 150 s (2.5 min) and 2 attempts. Each attempt re-prompts the model to finish, so a slow local model may still need a while — but it recovers on its own instead of hanging forever.")
+                Text("Defaults: 150 s (2.5 min) and 2 attempts. Each attempt re-prompts the model to finish, so a slow local model may still need a while — but it recovers on its own instead of hanging forever. Attempts are capped at 50; turn on Unlimited for no cap.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }

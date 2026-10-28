@@ -24,6 +24,12 @@ final class AIChatManager: ObservableObject {
     /// Cleared as soon as the turn ends; the same content, assembled, lands
     /// on the finished message via `onReasoning` so it isn't lost.
     @Published private(set) var liveReasoning: String = ""
+    /// One-line explanation of what the assistant is doing while the live row
+    /// is showing — set by auto-continue retries ("Empty reply — asking the
+    /// model to answer again (1 of 5)…") and cleared as soon as a request
+    /// produces a usable answer. Without it a retry looks like an unexplained
+    /// "Thinking…" pause.
+    @Published private(set) var liveStatus: String?
     @Published private(set) var pendingApproval: PendingApproval?
     @Published private(set) var scopeLabel: String = "Standalone — no file tools available"
     @Published var errorMessage: String?
@@ -239,6 +245,7 @@ final class AIChatManager: ObservableObject {
 
         isGenerating = true
         liveReasoning = ""
+        liveStatus = nil
         errorMessage = nil
 
         // The turn runs in a child task so `stop()` can cancel it by
@@ -255,6 +262,7 @@ final class AIChatManager: ObservableObject {
             // needed, and `Task` is a struct, so there is none to make.
             isGenerating = false
             liveReasoning = ""
+            liveStatus = nil
             generationTask = nil
         }
         await turn.value
@@ -354,8 +362,15 @@ final class AIChatManager: ObservableObject {
         // structured message array — simplest way to give the chat real
         // multi-turn memory without changing that method's signature again.
         // `dropLast()` because the current question was just appended and is
-        // passed as `userText`; leaving it in would duplicate it.
-        let prompt = Self.buildPrompt(history: Array(messages.dropLast()), userText: trimmed)
+        // passed as `userText`; leaving it in would duplicate it. The window
+        // follows the model's context budget, so raising it (globally or per
+        // saved model) actually sends more history instead of silently
+        // dropping everything past a fixed count.
+        let prompt = Self.buildPrompt(
+            history: Array(messages.dropLast()),
+            userText: trimmed,
+            charBudget: contextBudgetTokens * Self.charsPerToken
+        )
 
         do {
             var capturedReasoning: String?
@@ -367,6 +382,7 @@ final class AIChatManager: ObservableObject {
                 maxTurns: maxTurns,
                 onReasoning: { capturedReasoning = $0 },
                 onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
+                onStatus: { [weak self] status in self?.liveStatus = status },
                 // Chat replies are shown as plain prose in the panel, so the
                 // Markdown→Typst sanitizer (right for AI Prompt, which inserts
                 // into a .typ document) would only mangle them here.
@@ -415,11 +431,30 @@ final class AIChatManager: ObservableObject {
 
     /// Folds the non-compacted conversation into the single prompt string the
     /// tool-calling loop takes. The oldest turns are represented by the
-    /// compaction summary, if there is one. Internal (not private) so the
+    /// compaction summary, if there is one — and the summary is always kept,
+    /// since it is the only record of what was summarized away. The newest
+    /// turns are then added until `charBudget` is reached; `nil` keeps the old
+    /// fixed 24-message window. Internal (not private) so the
     /// transcript-shaping rules are directly testable.
-    static func buildPrompt(history: [ChatMessage], userText: String) -> String {
+    static func buildPrompt(history: [ChatMessage], userText: String, charBudget: Int? = nil) -> String {
         let usable = history.filter { !$0.isCompacted && $0.role != .toolCall }
-        let recent = usable.suffix(24)
+        let summaries = usable.filter(\.isSummary)
+        let turns = usable.filter { !$0.isSummary }
+        let recent: [ChatMessage]
+        if let charBudget {
+            var remaining = charBudget - summaries.reduce(0) { $0 + $1.text.count }
+            var kept: [ChatMessage] = []
+            for message in turns.reversed() {
+                let cost = message.text.count + 2 // the "\n\n" separator
+                // Always keep the newest turn, even if it alone is over budget.
+                if !kept.isEmpty, cost > remaining { break }
+                remaining -= cost
+                kept.append(message)
+            }
+            recent = summaries + kept.reversed()
+        } else {
+            recent = Array(usable.suffix(24))
+        }
         var transcript = ""
         for message in recent {
             let speaker = message.role == .user ? "User" : "Assistant"
@@ -438,8 +473,11 @@ final class AIChatManager: ObservableObject {
         return chars / Self.charsPerToken
     }
 
-    private var contextBudgetTokens: Int {
-        max(2_000, AISettingsManager.shared.chatContextBudgetTokens)
+    /// Token budget for this chat's model: the active saved model's own
+    /// override when set (a paid long-context model can use its real window),
+    /// else the global AI Chat → Context Budget setting.
+    var contextBudgetTokens: Int {
+        AISettingsManager.shared.effectiveContextBudgetTokens(for: chatModelContext)
     }
 
     /// Replaces all but the last three user turns with a model-written summary.
@@ -739,6 +777,7 @@ final class AIChatManager: ObservableObject {
             tools: subTools,
             maxTurns: subagentMaxTurns,
             onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
+            onStatus: { [weak self] status in self?.liveStatus = status },
             sanitize: false,
             contextCharBudget: contextBudgetTokens * Self.charsPerToken,
             model: chatModelContext,

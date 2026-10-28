@@ -645,6 +645,23 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(prompt.hasSuffix("User: follow up"))
     }
 
+    func testBuildPromptKeepsSummaryAndNewestTurnsWithinTheBudget() {
+        var history = [
+            ChatMessage(role: .assistant, text: "[Summary of earlier conversation]\n\nThey wanted X.", isSummary: true)
+        ]
+        for i in 1...40 {
+            history.append(ChatMessage(role: .user, text: "question \(i) " + String(repeating: "x", count: 200)))
+            history.append(ChatMessage(role: .assistant, text: "answer \(i) " + String(repeating: "y", count: 200)))
+        }
+
+        let prompt = AIChatManager.buildPrompt(history: history, userText: "follow up", charBudget: 2_000)
+
+        XCTAssertTrue(prompt.contains("They wanted X."), "the summary is always kept — it is the only record of the summarized turns")
+        XCTAssertTrue(prompt.contains("answer 40"), "the newest turn always fits")
+        XCTAssertFalse(prompt.contains("question 1 "), "older turns fall outside the budget")
+        XCTAssertTrue(prompt.hasSuffix("User: follow up"))
+    }
+
     func testPlanIsRebuiltFromTranscript() {
         let args = #"{"items":[{"content":"Read the file","status":"completed"},{"content":"Rewrite section 2","status":"in_progress"}]}"#
         let messages = [

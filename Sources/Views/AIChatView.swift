@@ -102,11 +102,11 @@ struct AIChatView: View {
             }
             Spacer()
             if aiSettings.chatEnabled {
-                Text("≈\(Self.contextLabel(chat.estimatedContextTokens)) / \(Self.contextLabel(aiSettings.chatContextBudgetTokens))")
+                Text("≈\(Self.contextLabel(chat.estimatedContextTokens)) / \(Self.contextLabel(chat.contextBudgetTokens))")
                     .font(.caption2.monospacedDigit())
                     .lineLimit(1)
-                    .foregroundColor(chat.estimatedContextTokens > aiSettings.chatContextBudgetTokens ? .orange : .secondary)
-                    .help("Rough estimate of the conversation context sent with the next message, against the configured budget. Older turns are summarized automatically when this is exceeded.")
+                    .foregroundColor(chat.estimatedContextTokens > chat.contextBudgetTokens ? .orange : .secondary)
+                    .help("Rough estimate of the conversation context sent with the next message, against this model's budget (a saved model can override the global setting). Older turns are summarized automatically when this is exceeded.")
                 Button {
                     Task { await chat.compactHistory() }
                 } label: {
@@ -222,10 +222,12 @@ struct AIChatView: View {
     /// thinking" in the header) to close it back down to just the spinner.
     @ViewBuilder
     private var generatingRow: some View {
-        if chat.liveReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let reasoning = chat.liveReasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+        let statusText = chat.liveStatus ?? "Thinking…"
+        if reasoning.isEmpty {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Thinking…").font(.caption).foregroundColor(.secondary)
+                Text(statusText).font(.caption).foregroundColor(.secondary)
             }
         } else {
             DisclosureGroup(isExpanded: $liveThinkingExpanded) {
@@ -249,7 +251,7 @@ struct AIChatView: View {
             } label: {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("Thinking…").font(.caption).foregroundColor(.secondary)
+                    Text(statusText).font(.caption).foregroundColor(.secondary)
                 }
             }
             .padding(8)

@@ -466,6 +466,12 @@ class AICompletionService: ObservableObject {
         /// Main-actor isolated (and therefore implicitly Sendable) so the
         /// stall watchdog can race the streaming parse in a child task.
         onReasoningDelta: (@MainActor (String) -> Void)? = nil,
+        /// Live status line for the caller's "generating" row — set while an
+        /// auto-continue retry is running ("Empty reply — asking again
+        /// (1 of 5)…") and cleared as soon as a request produces a usable
+        /// step. `nil` clears it. Without this the chat shows an unexplained
+        /// "Thinking…" while the model is silently being re-prompted.
+        onStatus: (@MainActor (String?) -> Void)? = nil,
         sanitize: Bool = true,
         contextCharBudget: Int? = nil,
         /// An explicit model to use (e.g. the saved model chosen for AI Chat).
@@ -503,8 +509,12 @@ class AICompletionService: ObservableObject {
         // and a response that ended empty because the model spent its whole
         // reply budget on reasoning. One counter bounds the total wasted
         // time — a pathological model can't get a fresh budget from each
-        // trigger. Configured in Settings; 0 turns auto-continue off.
-        let maxAutoContinues = Self.clampedAutoContinueAttempts(settings.chatAutoContinueAttempts)
+        // trigger. Configured in Settings; 0 turns auto-continue off, and the
+        // "unlimited" option removes the cap (`nil`).
+        let maxAutoContinues = Self.autoContinueBudget(
+            attempts: settings.chatAutoContinueAttempts,
+            unlimited: settings.chatAutoContinueUnlimited
+        )
         var autoContinues = 0
 
         // Thought re-seeding (optional): abandoned reasoning is compressed
@@ -551,11 +561,13 @@ class AICompletionService: ObservableObject {
                     // The stream went silent past the stall window and the
                     // attempt was abandoned. Rather than failing the whole
                     // exchange, tell the model to pick up where it left off
-                    // — bounded by the configured auto-continue budget.
-                    guard autoContinues < maxAutoContinues else {
+                    // — bounded by the configured auto-continue budget
+                    // (`nil` = unlimited, until the user presses Stop).
+                    if let maxAutoContinues, autoContinues >= maxAutoContinues {
                         throw AIError.apiError(Self.stallFailureMessage(attempts: autoContinues, idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds))
                     }
                     autoContinues += 1
+                    onStatus?(Self.stallStatusLine(attempt: autoContinues, maxAttempts: maxAutoContinues, idleSeconds: idleSeconds))
                     // Streaming chat shows a live thinking box — surface why
                     // it just went quiet and restarted. The note is
                     // deliberately transient: the saved reasoning comes from
@@ -584,6 +596,10 @@ class AICompletionService: ObservableObject {
                 }
             }
 
+            // A usable step arrived: whatever paused the turn is over, so
+            // clear the retry status line the chat is showing.
+            onStatus?(nil)
+
             switch step {
             case .finalText(let text, let stepReasoning):
                 if let stepReasoning, !stepReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -599,7 +615,13 @@ class AICompletionService: ObservableObject {
                 let sanitized = sanitize ? sanitizeMarkdownToTypst(finalResult) : finalResult
 
                 if sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let hadReasoning = (stepReasoning?.isEmpty == false) || (tagReasoning?.isEmpty == false)
+                    // Streamed reasoning counts too: some providers stream the
+                    // thinking but return it empty in the final step, and the
+                    // user-facing note should still say the reply was spent on
+                    // reasoning rather than claiming the model said nothing.
+                    let hadReasoning = (stepReasoning?.isEmpty == false)
+                        || (tagReasoning?.isEmpty == false)
+                        || !attemptReasoning.isEmpty
                     // The model stopped without writing anything — often after
                     // a long run of tool calls that didn't pan out, or (with a
                     // reasoning model) after spending its whole reply budget on
@@ -608,11 +630,22 @@ class AICompletionService: ObservableObject {
                     // nudge it to use what it has instead, a few times, before
                     // giving up. This is the fix for empty responses landing
                     // after a visible trail of successful tool calls.
-                    guard autoContinues < maxAutoContinues,
-                          maxTurns.map { turn < $0 - 1 } ?? true else {
+                    let budgetExhausted = maxAutoContinues.map { autoContinues >= $0 } ?? false
+                    // The turn budget normally caps retries too, so a stuck
+                    // model can't spend the whole turn allowance on empty
+                    // replies. With auto-continue explicitly unlimited the
+                    // user asked for it to keep trying, so only Stop ends it.
+                    let turnBudgetExhausted = maxAutoContinues == nil
+                        ? false
+                        : (maxTurns.map { turn >= $0 - 1 } ?? false)
+                    guard !budgetExhausted, !turnBudgetExhausted else {
                         throw AIError.apiError(Self.emptyAnswerFailureMessage(nudges: autoContinues, hadReasoning: hadReasoning))
                     }
                     autoContinues += 1
+                    // Say what is happening: without this the panel just
+                    // shows "Thinking…" while the model is silently re-asked.
+                    onStatus?(Self.emptyAnswerStatusLine(attempt: autoContinues, maxAttempts: maxAutoContinues))
+                    onReasoningDelta?(Self.emptyAnswerStatusNote(attempt: autoContinues, maxAttempts: maxAutoContinues, hadReasoning: hadReasoning))
                     // A placeholder (never literally empty) keeps strict
                     // user/assistant alternation intact for providers, like
                     // Anthropic, that require it.
@@ -675,12 +708,50 @@ class AICompletionService: ObservableObject {
     }
 
     /// Upper bound for the Settings-configured auto-continue attempts, so a
-    /// fat-fingered value can't make a stuck model burn dozens of requests —
-    /// bounded well below `maxTurns` for the same reason. `nonisolated` (and
-    /// not private): pure value, no instance state, and directly
-    /// unit-testable without hopping onto the main actor.
+    /// fat-fingered value can't make a stuck model burn dozens of requests.
+    /// Deliberately generous rather than tight: empty replies are cheap, and
+    /// a long local reasoning run can legitimately need more than a handful
+    /// of nudges. `nonisolated` (and not private): pure value, no instance
+    /// state, and directly unit-testable without hopping onto the main actor.
     nonisolated static func clampedAutoContinueAttempts(_ raw: Int) -> Int {
-        min(max(raw, 0), 5)
+        min(max(raw, 0), 50)
+    }
+
+    /// Resolved auto-continue budget. `nil` = unlimited (keep asking until
+    /// the model answers or the user presses Stop); `0` = auto-continue off;
+    /// otherwise the clamped attempt count.
+    nonisolated static func autoContinueBudget(attempts: Int, unlimited: Bool) -> Int? {
+        unlimited ? nil : clampedAutoContinueAttempts(attempts)
+    }
+
+    /// "(2 of 5)" / "(attempt 2, unlimited)" for status lines and notes.
+    nonisolated static func autoContinueProgressLabel(attempt: Int, maxAttempts: Int?) -> String {
+        if let maxAttempts {
+            return "\(attempt) of \(maxAttempts)"
+        }
+        return "attempt \(attempt), unlimited"
+    }
+
+    /// One-line status for the chat's live generating row while an empty
+    /// reply is being retried.
+    nonisolated static func emptyAnswerStatusLine(attempt: Int, maxAttempts: Int?) -> String {
+        "Empty reply — asking the model to answer again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
+    }
+
+    /// One-line status for the chat's live generating row while a stalled
+    /// attempt is being continued.
+    nonisolated static func stallStatusLine(attempt: Int, maxAttempts: Int?, idleSeconds: Int) -> String {
+        "No output for \(idleSeconds)s — continuing (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
+    }
+
+    /// Note pushed into the live thinking box when an empty reply is nudged,
+    /// mirroring the stall note so a retry doesn't look like the model simply
+    /// restarted for no reason. Never persisted.
+    nonisolated static func emptyAnswerStatusNote(attempt: Int, maxAttempts: Int?, hadReasoning: Bool) -> String {
+        let reason = hadReasoning
+            ? "it spent the reply on thinking and wrote no answer"
+            : "it returned nothing"
+        return "\n\n[Empty reply — \(reason); asking again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
     }
 
     nonisolated static func emptyAnswerNudgeMessage(hadReasoning: Bool) -> String {
@@ -704,8 +775,8 @@ class AICompletionService: ObservableObject {
     /// abandoned, so an automatically continued turn doesn't look like the
     /// model merely started over for no reason. Never persisted — the saved
     /// reasoning is collected separately.
-    nonisolated static func stallContinueStatusNote(attempt: Int, maxAttempts: Int, idleSeconds: Int) -> String {
-        "\n\n[No output for \(idleSeconds)s — the stalled attempt was abandoned and automatically continued (\(attempt) of \(maxAttempts)).]\n\n"
+    nonisolated static func stallContinueStatusNote(attempt: Int, maxAttempts: Int?, idleSeconds: Int) -> String {
+        "\n\n[No output for \(idleSeconds)s — the stalled attempt was abandoned and automatically continued (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
     }
 
     // MARK: Thinking Re-Seeding (interrupted/empty replies)
@@ -788,7 +859,7 @@ class AICompletionService: ObservableObject {
         if hadReasoning {
             message += " It spent its reply on reasoning and left nothing for the answer — try raising Max Tokens in Settings, or lowering the model's reasoning effort if it has one."
         } else {
-            message += " Try rephrasing your prompt."
+            message += " Try rephrasing your prompt — or, in AI Chat, raise Auto-continue attempts (or turn on Unlimited) in Settings → AI Assistant → AI Chat."
         }
         return message
     }

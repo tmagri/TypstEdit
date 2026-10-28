@@ -28,7 +28,7 @@ final class AICompletionServiceTests: XCTestCase {
     func testFailureMessageCountsNudgesWithCorrectPluralization() {
         let one = AICompletionService.emptyAnswerFailureMessage(nudges: 1, hadReasoning: false)
         XCTAssertTrue(one.contains("1 follow-up attempt"), one)
-        XCTAssertFalse(one.contains("attempts"))
+        XCTAssertFalse(one.contains("1 follow-up attempts"), one)
 
         let two = AICompletionService.emptyAnswerFailureMessage(nudges: 2, hadReasoning: false)
         XCTAssertTrue(two.contains("2 follow-up attempts"), two)
@@ -41,14 +41,44 @@ final class AICompletionServiceTests: XCTestCase {
     }
 
     func testAutoContinueAttemptsClampToSaneBounds() {
-        // A sanity bound: the Settings value must land in 0...5 — 0 turns the
-        // feature off, and anything larger would let a stuck model burn the
-        // turn budget continuing instead of making progress.
+        // A sanity bound: 0 turns the feature off, more than 0 is an attempt
+        // count, and anything larger is capped at 50 — the "Unlimited" toggle
+        // is the explicit way to ask for no cap.
         XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(0), 0)
         XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(2), 2)
         XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(-3), 0)
-        XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(99), 5)
-        XCTAssertLessThanOrEqual(AICompletionService.clampedAutoContinueAttempts(Int.max), 5)
+        XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(99), 50)
+        XCTAssertLessThanOrEqual(AICompletionService.clampedAutoContinueAttempts(Int.max), 50)
+    }
+
+    func testAutoContinueBudgetHonorsTheUnlimitedToggle() {
+        XCTAssertNil(AICompletionService.autoContinueBudget(attempts: 2, unlimited: true))
+        XCTAssertNil(AICompletionService.autoContinueBudget(attempts: 0, unlimited: true))
+        XCTAssertEqual(AICompletionService.autoContinueBudget(attempts: 7, unlimited: false), 7)
+        XCTAssertEqual(AICompletionService.autoContinueBudget(attempts: 0, unlimited: false), 0)
+    }
+
+    func testAutoContinueProgressLabelHandlesLimitedAndUnlimited() {
+        XCTAssertEqual(AICompletionService.autoContinueProgressLabel(attempt: 2, maxAttempts: 10), "2 of 10")
+        XCTAssertEqual(AICompletionService.autoContinueProgressLabel(attempt: 3, maxAttempts: nil), "attempt 3, unlimited")
+    }
+
+    func testEmptyAnswerStatusLineSaysWhatIsHappening() {
+        let line = AICompletionService.emptyAnswerStatusLine(attempt: 2, maxAttempts: 5)
+        XCTAssertTrue(line.contains("Empty reply"), line)
+        XCTAssertTrue(line.contains("2 of 5"), line)
+
+        let unlimited = AICompletionService.emptyAnswerStatusLine(attempt: 7, maxAttempts: nil)
+        XCTAssertTrue(unlimited.contains("attempt 7, unlimited"), unlimited)
+    }
+
+    func testEmptyAnswerStatusNoteDistinguishesReasoningOnlyReplies() {
+        let reasoning = AICompletionService.emptyAnswerStatusNote(attempt: 1, maxAttempts: 5, hadReasoning: true)
+        XCTAssertTrue(reasoning.contains("thinking"), reasoning)
+        XCTAssertTrue(reasoning.contains("1 of 5"), reasoning)
+
+        let silent = AICompletionService.emptyAnswerStatusNote(attempt: 1, maxAttempts: 5, hadReasoning: false)
+        XCTAssertTrue(silent.contains("returned nothing"), silent)
     }
 
     // MARK: - Stall Detection & Auto-Continue
@@ -64,6 +94,15 @@ final class AICompletionServiceTests: XCTestCase {
         let note = AICompletionService.stallContinueStatusNote(attempt: 1, maxAttempts: 3, idleSeconds: 150)
         XCTAssertTrue(note.contains("1 of 3"), note)
         XCTAssertTrue(note.contains("150s"), note)
+
+        let unlimited = AICompletionService.stallContinueStatusNote(attempt: 2, maxAttempts: nil, idleSeconds: 150)
+        XCTAssertTrue(unlimited.contains("attempt 2, unlimited"), unlimited)
+    }
+
+    func testStallStatusLineNamesTheSilenceAndAttempt() {
+        let line = AICompletionService.stallStatusLine(attempt: 2, maxAttempts: 4, idleSeconds: 150)
+        XCTAssertTrue(line.contains("150s"), line)
+        XCTAssertTrue(line.contains("2 of 4"), line)
     }
 
     func testStallFailureMessageWithoutAttemptsPointsAtTheServer() {
