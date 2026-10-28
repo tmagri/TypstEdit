@@ -25,6 +25,7 @@ private enum GitConfirmation: Identifiable {
     case revert(GitCommit)
     case abortOperation
     case dropStash(GitStash)
+    case addToGitIgnore(path: String, isDirectory: Bool)
 
     var id: String {
         switch self {
@@ -42,6 +43,7 @@ private enum GitConfirmation: Identifiable {
         case .revert(let commit): return "revert:\(commit.id)"
         case .abortOperation: return "abort-operation"
         case .dropStash(let stash): return "drop-stash:\(stash.id)"
+        case .addToGitIgnore(let path, let isDirectory): return "ignore:\(isDirectory ? "folder" : "file"):\(path)"
         }
     }
 }
@@ -427,6 +429,17 @@ struct SourceControlSidebarView: View {
                 }
             },
             onDiscard: { change in confirmation = .discard(change) },
+            canIgnore: { change in !change.isConflicted },
+            onIgnore: { change in
+                requestGitIgnore(path: change.path, isDirectory: false, tracked: !change.isUntracked)
+            },
+            onIgnoreFolder: { path in
+                // A folder row has no single change record; treat it as
+                // tracked when any change inside it already is.
+                let prefix = path + "/"
+                let tracked = manager.changes.contains { $0.path.hasPrefix(prefix) && !$0.isUntracked }
+                requestGitIgnore(path: path, isDirectory: true, tracked: tracked)
+            },
             onDiscardAll: isConflictGroup || group == .staged ? nil : { confirmation = .discardAll },
             onAcceptCurrent: { change in confirmation = .acceptCurrent(change) },
             onAcceptIncoming: { change in confirmation = .acceptIncoming(change) },
@@ -862,6 +875,26 @@ struct SourceControlSidebarView: View {
                 primaryButton: .destructive(Text("Drop")) { Task { await manager.dropStash(stash) } },
                 secondaryButton: .cancel()
             )
+        case .addToGitIgnore(let path, let isDirectory):
+            return Alert(
+                title: Text(isDirectory ? "Ignore this folder?" : "Ignore this file?"),
+                message: Text("Add “\(path)” to .gitignore? Git is already tracking \(isDirectory ? "files in this folder" : "this file"), so it will also be removed from the index. The files stay on disk; your next commit stops versioning them."),
+                primaryButton: .default(Text("Add to .gitignore")) {
+                    Task { await manager.addToGitIgnore(path: path, isDirectory: isDirectory) }
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+
+    /// Untracked paths only need the ignore rule, so they apply immediately;
+    /// tracked ones get a confirmation because the index changes too.
+    private func requestGitIgnore(path: String, isDirectory: Bool, tracked: Bool) {
+        guard !isWorking else { return }
+        if tracked {
+            confirmation = .addToGitIgnore(path: path, isDirectory: isDirectory)
+        } else {
+            Task { await manager.addToGitIgnore(path: path, isDirectory: isDirectory) }
         }
     }
 

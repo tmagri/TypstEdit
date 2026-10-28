@@ -224,7 +224,9 @@ struct AIChatView: View {
     private var generatingRow: some View {
         let reasoning = chat.liveReasoning.trimmingCharacters(in: .whitespacesAndNewlines)
         let statusText = chat.liveStatus ?? "Thinking…"
-        if reasoning.isEmpty {
+        if let running = chat.runningTool {
+            runningTaskRow(running)
+        } else if reasoning.isEmpty {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text(statusText).font(.caption).foregroundColor(.secondary)
@@ -257,6 +259,26 @@ struct AIChatView: View {
             .padding(8)
             .background(Color.secondary.opacity(0.06))
             .cornerRadius(8)
+        }
+    }
+
+    /// The live row while a tool task runs: what it is and how long it has
+    /// been going, so a long build/export/Git call doesn't look like a stuck
+    /// or empty chat. The task's own row in the transcript has the Stop
+    /// button; this row only reports.
+    private func runningTaskRow(_ running: AIChatManager.RunningTool) -> some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsed = Int(context.date.timeIntervalSince(running.startedAt))
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Running \(running.displayName) — \(AIChatManager.elapsedLabel(elapsed))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .help("Waiting for this task to finish. Stop it from its row in the transcript.")
         }
     }
 
@@ -360,35 +382,64 @@ struct AIChatView: View {
 
     @ViewBuilder
     private func toolCallRow(_ message: ChatMessage) -> some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: 6) {
-                if let args = message.toolArgumentsJSON, !args.isEmpty {
-                    Text("Arguments").font(.caption2.bold()).foregroundColor(.secondary)
-                    Text(args).font(.caption2.monospaced()).textSelection(.enabled)
+        HStack(alignment: .center, spacing: 8) {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let args = message.toolArgumentsJSON, !args.isEmpty {
+                        Text("Arguments").font(.caption2.bold()).foregroundColor(.secondary)
+                        Text(args).font(.caption2.monospaced()).textSelection(.enabled)
+                    }
+                    if let output = message.toolOutput, !output.isEmpty {
+                        Text("Result").font(.caption2.bold()).foregroundColor(.secondary)
+                        Text(output).font(.caption2.monospaced()).textSelection(.enabled).lineLimit(10)
+                    }
                 }
-                if let output = message.toolOutput, !output.isEmpty {
-                    Text("Result").font(.caption2.bold()).foregroundColor(.secondary)
-                    Text(output).font(.caption2.monospaced()).textSelection(.enabled).lineLimit(10)
+                .padding(.top, 4)
+            } label: {
+                HStack(spacing: 6) {
+                    statusIcon(message.toolStatus)
+                    if message.isSubagent {
+                        Image(systemName: "person.2")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Text(displayName(for: message.toolName ?? "tool"))
+                        .font(.caption.monospaced())
+                        .foregroundColor(message.isSubagent ? .secondary : .primary)
                 }
             }
-            .padding(.top, 4)
-        } label: {
-            HStack(spacing: 6) {
-                statusIcon(message.toolStatus)
-                if message.isSubagent {
-                    Image(systemName: "person.2")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                Text(displayName(for: message.toolName ?? "tool"))
-                    .font(.caption.monospaced())
-                    .foregroundColor(message.isSubagent ? .secondary : .primary)
+            if message.toolStatus == .running {
+                runningToolControls(message)
             }
         }
         .padding(8)
         .padding(.leading, message.isSubagent ? 18 : 0)
         .background(Color.secondary.opacity(message.isSubagent ? 0.03 : 0.06))
         .cornerRadius(8)
+    }
+
+    /// Elapsed time plus a Stop button for a task that is still running.
+    /// Stopping it ends just this call; the assistant receives a "stopped"
+    /// result and carries on, unlike the panel's full Stop.
+    private func runningToolControls(_ message: ChatMessage) -> some View {
+        HStack(spacing: 6) {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let elapsed = Int(context.date.timeIntervalSince(message.timestamp))
+                Text(AIChatManager.elapsedLabel(elapsed))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+            Button {
+                chat.stopTool(messageID: message.id)
+            } label: {
+                Image(systemName: "stop.circle.fill")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Stop this task and let the assistant continue without its result")
+            .accessibilityLabel("Stop \(displayName(for: message.toolName ?? "task"))")
+        }
     }
 
     /// Collapsed-by-default disclosure for whatever reasoning/"thinking"
@@ -426,7 +477,7 @@ struct AIChatView: View {
     }
 
     private func displayName(for qualifiedName: String) -> String {
-        qualifiedName.replacingOccurrences(of: "__", with: " → ")
+        AIChatManager.toolDisplayName(qualifiedName)
     }
 
     @ViewBuilder

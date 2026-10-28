@@ -32,6 +32,23 @@ The arrow beside **Commit** opens more commit actions:
 
 Amend and **Undo Last Commit** are available only for a commit that is not pushed.
 
+## Ignore files and folders
+
+To ignore one file:
+
+1. Right-click the file in **Changes** or **Staged Changes**.
+2. Click **Add to .gitignore…**.
+
+To ignore a folder, right-click the folder in Tree mode and click **Add Folder to .gitignore…**. This ignores all changes below that folder.
+
+TypstEdit adds one anchored rule to the `.gitignore` in the repository root, for example `/build/`. It does not change other rules in the file.
+
+If Git already tracks the path, TypstEdit also removes it from the index. The file stays on disk. The removal is staged, so commit it to stop versioning the file. TypstEdit asks for confirmation before it untracks a path.
+
+Untracked paths need only the rule. They disappear from **Changes** immediately.
+
+TypstEdit cannot ignore `.gitignore` itself.
+
 ## Edit commits that are not pushed
 
 The **Graph** shows each commit that is not pushed with a hollow dot. HEAD has a ring.

@@ -30,6 +30,17 @@ final class AIChatManager: ObservableObject {
     /// produces a usable answer. Without it a retry looks like an unexplained
     /// "Thinking…" pause.
     @Published private(set) var liveStatus: String?
+    /// The tool call executing right now, if any. The live row shows its name
+    /// and elapsed time, and the tool's transcript row can stop just that
+    /// task — the turn continues afterwards. Tools run one at a time, but a
+    /// subagent calls nested tools, so the previous value is restored when a
+    /// nested call finishes.
+    struct RunningTool: Equatable {
+        let messageID: UUID
+        let displayName: String
+        let startedAt: Date
+    }
+    @Published private(set) var runningTool: RunningTool?
     @Published private(set) var pendingApproval: PendingApproval?
     @Published private(set) var scopeLabel: String = "Standalone — no file tools available"
     @Published var errorMessage: String?
@@ -77,6 +88,13 @@ final class AIChatManager: ObservableObject {
     /// tool loop, any subagent) — created in `sendMessage` so `stop()` can
     /// cancel it and every layer in the chain can observe `Task.isCancelled`.
     private var generationTask: Task<Void, Never>?
+    /// Handles for the tool calls in flight, keyed by their transcript row, so
+    /// a single task can be stopped from its row without ending the turn.
+    private var toolTasks: [UUID: Task<String, Error>] = [:]
+    /// Rows whose task the user stopped individually. A stopped task can fail
+    /// as a plain cancellation or as a denied approval; either way the model
+    /// gets a "user stopped this task" result instead of an error.
+    private var stoppedToolMessageIDs: Set<UUID> = []
     /// Guards against subagents spawning subagents (each level would multiply
     /// the request count, and the read-only tool set already bounds what a
     /// subagent can usefully do).
@@ -219,7 +237,15 @@ final class AIChatManager: ObservableObject {
         guard let url, let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([ChatMessage].self, from: data)) ?? []
+        var loaded = (try? decoder.decode([ChatMessage].self, from: data)) ?? []
+        // A tool row still "running" in a saved transcript was interrupted by
+        // a quit or crash — nothing is executing it any more, so its row must
+        // not keep a spinner (or a Stop button) forever.
+        for index in loaded.indices where loaded[index].toolStatus == .running {
+            loaded[index].toolStatus = .cancelled
+            loaded[index].toolOutput = "Interrupted before it finished (the app closed)."
+        }
+        return loaded
     }
 
     func clearHistory() {
@@ -632,9 +658,32 @@ final class AIChatManager: ObservableObject {
         ))
         persist()
 
+        // Show the task in the live row (name + elapsed), and keep a handle
+        // so its own Stop button can cancel just this call. A subagent runs
+        // nested tools, so restore the outer task when a nested one finishes.
+        let previousRunning = runningTool
+        runningTool = RunningTool(
+            messageID: messageID,
+            displayName: Self.toolDisplayName(qualifiedName),
+            startedAt: Date()
+        )
+        defer { runningTool = previousRunning }
+        defer { stoppedToolMessageIDs.remove(messageID) }
+
         do {
             try Self.validateToolAccess(qualifiedName: qualifiedName, isSubagent: isSubagent)
-            let output = try await performTool(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON)
+            let task = Task { try await performTool(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON) }
+            toolTasks[messageID] = task
+            defer { toolTasks[messageID] = nil }
+
+            // Awaiting inside this handler means a full Stop (which cancels
+            // the turn) still terminates the Git/URLSession/subagent work.
+            let output = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+
             if Task.isCancelled {
                 // The tool finished (or returned early) but the user pressed
                 // Stop in the meantime — record that and unwind the loop.
@@ -644,19 +693,53 @@ final class AIChatManager: ObservableObject {
             updateToolMessage(id: messageID, status: .succeeded, output: output)
             return output
         } catch {
-            let status: ChatMessage.ToolStatus
             if Task.isCancelled {
                 // A stop pressed mid-tool (including one suspended on the
                 // approval prompt) isn't a failure or a denial.
-                status = .cancelled
-            } else if case LocalToolError.approvalDenied = error {
+                updateToolMessage(id: messageID, status: .cancelled, output: "Stopped.")
+                throw CancellationError()
+            }
+            if error is CancellationError || stoppedToolMessageIDs.contains(messageID) {
+                // Only this task was stopped from its row. Unlike a full
+                // Stop, hand the model a result and keep the turn alive.
+                let output = "The user stopped this task before it completed. Continue without its result."
+                updateToolMessage(id: messageID, status: .cancelled, output: output)
+                return output
+            }
+            let status: ChatMessage.ToolStatus
+            if case LocalToolError.approvalDenied = error {
                 status = .denied
             } else {
                 status = .failed
             }
-            updateToolMessage(id: messageID, status: status, output: Task.isCancelled ? "Stopped." : error.localizedDescription)
+            updateToolMessage(id: messageID, status: status, output: error.localizedDescription)
             throw error
         }
+    }
+
+    /// Stops one running tool call, identified by its transcript row. The
+    /// turn survives: the model is told the task was stopped and continues
+    /// without its result. Tools that don't observe cancellation finish
+    /// anyway; their real result is then used.
+    func stopTool(messageID: UUID) {
+        stoppedToolMessageIDs.insert(messageID)
+        toolTasks[messageID]?.cancel()
+        // A task suspended on an approval prompt never observes cancellation
+        // until the prompt is answered: deny it so the task can unwind.
+        if pendingApproval != nil {
+            resolveApproval(approved: false)
+        }
+    }
+
+    /// `file_read` → `file → read`, matching the transcript's labels.
+    nonisolated static func toolDisplayName(_ qualifiedName: String) -> String {
+        qualifiedName.replacingOccurrences(of: "__", with: " → ")
+    }
+
+    /// "0:07", "1:42" — elapsed time for a running task row.
+    nonisolated static func elapsedLabel(_ seconds: Int) -> String {
+        let clamped = max(0, seconds)
+        return String(format: "%d:%02d", clamped / 60, clamped % 60)
     }
 
     private func updateToolMessage(id: UUID, status: ChatMessage.ToolStatus, output: String) {

@@ -1173,6 +1173,101 @@ final class SourceControlManager: ObservableObject {
         }
     }
 
+    // MARK: Ignoring
+
+    /// Adds a repository-relative path to the root `.gitignore` and, when Git
+    /// already tracks it, stops tracking it — the files stay on disk, and the
+    /// next commit records that they are no longer versioned. Directories get
+    /// a trailing slash so the whole subtree is ignored, and every rule is
+    /// anchored to the repository root.
+    func addToGitIgnore(path: String, isDirectory: Bool) async {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = "Invalid path."
+            return
+        }
+        guard trimmed != ".gitignore" else {
+            errorMessage = "Ignoring .gitignore itself would hide the rules from Git."
+            return
+        }
+        // Untracking mid-merge/rebase would drop entries the operation still
+        // needs, so finish or abort it first — same rule as stash/merge.
+        guard operationState == .none else {
+            errorMessage = "Finish or abort the \(operationState.displayName.lowercased()) before changing what Git tracks."
+            return
+        }
+        let pattern = Self.gitIgnorePattern(for: trimmed, isDirectory: isDirectory)
+        await perform(label: "Adding to .gitignore…", touchesWorkingTree: true) { root, runner in
+            let ignoreURL = root.appendingPathComponent(".gitignore")
+            let existing: String
+            if FileManager.default.fileExists(atPath: ignoreURL.path) {
+                guard let text = try? String(contentsOf: ignoreURL, encoding: .utf8) else {
+                    throw GitError.invalidInput("The .gitignore file is not UTF-8 text; add the rule by hand.")
+                }
+                existing = text
+            } else {
+                existing = ""
+            }
+            let updated = Self.appendingGitIgnorePattern(pattern, to: existing)
+            if updated != existing {
+                try updated.write(to: ignoreURL, atomically: true, encoding: .utf8)
+            }
+
+            // Only untrack what Git actually tracks. Untracked paths need the
+            // rule alone, which the refresh then applies.
+            let tracked = try await runner.runRaw(
+                GitRunner.literalPathArguments + ["ls-files", "-z", "--", trimmed],
+                in: root
+            ).stdoutString
+                .split(separator: "\0", omittingEmptySubsequences: true)
+                .map(String.init)
+            guard !tracked.isEmpty else { return }
+            // `update-index --force-remove` drops the paths from the index
+            // without touching the working tree and without `git rm`'s
+            // refusal to untrack locally modified files.
+            _ = try await runner.run(
+                GitRunner.literalPathArguments + ["update-index", "--force-remove", "--"] + tracked,
+                in: root
+            )
+        }
+    }
+
+    /// Escapes one repository-relative path as an anchored `.gitignore` rule.
+    /// `#` and `!` are only special as the first character; `*`, `?`, `[` and
+    /// `\` are special anywhere (backslash first, so it isn't escaped twice).
+    nonisolated static func gitIgnorePattern(for path: String, isDirectory: Bool) -> String {
+        var relative = path
+        while relative.hasPrefix("/") { relative.removeFirst() }
+        var escaped = ""
+        for character in relative {
+            switch character {
+            case "\\":
+                escaped += "\\\\"
+            case "*", "?", "[":
+                escaped += "\\\(character)"
+            case "#", "!" where escaped.isEmpty:
+                escaped += "\\\(character)"
+            default:
+                escaped.append(character)
+            }
+        }
+        return "/" + escaped + (isDirectory ? "/" : "")
+    }
+
+    /// Appends `pattern` on its own line unless an identical rule is already
+    /// present, leaving the rest of the file untouched and ending with a
+    /// newline. Existing lines are compared with surrounding whitespace
+    /// trimmed, since Git ignores it too.
+    nonisolated static func appendingGitIgnorePattern(_ pattern: String, to existing: String) -> String {
+        let lines = existing
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !lines.contains(pattern) else { return existing }
+        var updated = existing
+        if !updated.isEmpty, !updated.hasSuffix("\n") { updated += "\n" }
+        return updated + pattern + "\n"
+    }
+
     // MARK: Staging
 
     func stage(_ change: GitChange) async {

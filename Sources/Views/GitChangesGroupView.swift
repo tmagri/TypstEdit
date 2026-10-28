@@ -15,6 +15,9 @@ private struct GitChangeActions {
     let onOpen: (GitChange) -> Void
     let onStage: (GitChange) -> Void
     let onDiscard: (GitChange) -> Void
+    let canIgnore: (GitChange) -> Bool
+    let onIgnore: (GitChange) -> Void
+    let onIgnoreFolder: (String) -> Void
     let onAcceptCurrent: (GitChange) -> Void
     let onAcceptIncoming: (GitChange) -> Void
     let onMarkResolved: (GitChange) -> Void
@@ -36,6 +39,9 @@ struct GitChangesGroupView: View {
     let onOpen: (GitChange) -> Void
     let onStage: (GitChange) -> Void
     let onDiscard: (GitChange) -> Void
+    let canIgnore: (GitChange) -> Bool
+    let onIgnore: (GitChange) -> Void
+    let onIgnoreFolder: (String) -> Void
     var onDiscardAll: (() -> Void)? = nil
     let onAcceptCurrent: (GitChange) -> Void
     let onAcceptIncoming: (GitChange) -> Void
@@ -48,6 +54,7 @@ struct GitChangesGroupView: View {
             group: group, isConflictGroup: isConflictGroup, isBusy: isBusy,
             canStage: canStage, canDiscard: canDiscard, canAcceptVersions: canAcceptVersions,
             onDiff: onDiff, onOpen: onOpen, onStage: onStage, onDiscard: onDiscard,
+            canIgnore: canIgnore, onIgnore: onIgnore, onIgnoreFolder: onIgnoreFolder,
             onAcceptCurrent: onAcceptCurrent, onAcceptIncoming: onAcceptIncoming, onMarkResolved: onMarkResolved
         )
     }
@@ -143,6 +150,13 @@ private struct GitChangeTreeRowView: View {
                 .buttonStyle(.plain)
                 .help(node.path)
                 .accessibilityLabel("\(isExpanded ? "Collapse" : "Expand") folder \(node.path)")
+                .contextMenu {
+                    Button(isExpanded ? "Collapse Folder" : "Expand Folder") { isExpanded.toggle() }
+                    Divider()
+                    Button("Add Folder to .gitignore…") { actions.onIgnoreFolder(node.path) }
+                        .disabled(actions.isBusy)
+                        .help("Stop versioning everything under \(node.path)")
+                }
                 if isExpanded {
                     ForEach(node.children) { child in
                         GitChangeTreeRowView(node: child, depth: depth + 1, actions: actions)
@@ -251,6 +265,12 @@ private struct GitChangeRowView: View {
     private var rowMenu: some View {
         Button("View Changes") { actions.onDiff(change) }.disabled(actions.isBusy)
         Button("Open File") { actions.onOpen(change) }
+        Divider()
+        Button("Add to .gitignore…") { actions.onIgnore(change) }
+            .disabled(actions.isBusy || !actions.canIgnore(change))
+            .help(actions.canIgnore(change)
+                  ? "Ignore \(change.path) and stop tracking it if it is already committed"
+                  : "Resolve the merge conflict first")
         if isConflictRow {
             Divider()
             Button("Accept Current…") { actions.onAcceptCurrent(change) }
