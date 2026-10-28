@@ -100,9 +100,10 @@ Compute ∫ x^2 sin(x) dx from 0 to pi, then check it numerically.
 
 ## AI fallback for questions
 
-When the CAS cannot evaluate an entry — or merely echoes it back as a quoted
-string, which is what it does with prose — the calculator can ask the AI chat
-model to interpret it, Wolfram|Alpha style:
+When the CAS cannot evaluate an entry — or returns something unusable for it,
+like a string echo of the input or `undef` (Giac's answer for text it cannot
+make sense of) — the calculator can ask the AI chat model to interpret it,
+Wolfram|Alpha style:
 
 - Opt in twice: enable AI Chat in Settings, then turn on *AI Fallback* in
   Settings → General → Calculator. Both default to off.

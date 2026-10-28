@@ -75,17 +75,18 @@ final class CalculatorSession: ObservableObject {
                 timeout: GeneralSettingsManager.shared.calcTimeout)
 
             // Wolfram|Alpha-style fallback: when the CAS can't evaluate an
-            // entry that reads like a natural-language question — or merely
-            // echoes it back as a string, which is what it does with prose —
-            // the chat model interprets the entry and, when it is computable,
-            // the CAS evaluates the model's expression locally so the number
-            // is exact. Math-shaped input is never routed, so typos in
+            // entry that reads like a natural-language question — or returns
+            // something unusable for it, like a string echo or `undef` — the
+            // chat model interprets the entry and, when it is computable, the
+            // CAS evaluates the model's expression locally so the number is
+            // exact. Formula-shaped input is never routed, so typos in
             // formulas still show the CAS error; if the request itself fails
             // we fall through to that error entry and surface the reason in
             // the status line.
             let casFailed = !result.ok
-            let echoedInput = result.ok && CalculatorAIFallback.isStringEcho(result, input: trimmed)
-            if casFailed || echoedInput {
+            let unhelpfulResult = result.ok
+                && CalculatorAIFallback.isUnhelpfulResult(result, input: trimmed)
+            if casFailed || unhelpfulResult {
                 if CalculatorAIFallback.isAvailable(),
                    CalculatorAIFallback.looksLikeNaturalLanguage(trimmed) {
                     do {
@@ -98,11 +99,11 @@ final class CalculatorSession: ObservableObject {
                                 angle: angle,
                                 digits: displayDigits,
                                 timeout: GeneralSettingsManager.shared.calcTimeout)
-                            // Only trust a numeric result: another string
-                            // echo means the expression was not computable.
+                            // Only trust a usable result: another echo or
+                            // `undef` means the expression did not compute.
                             if candidate.ok,
                                !candidate.resultText.isEmpty,
-                               !CalculatorAIFallback.isStringEcho(candidate, input: expression) {
+                               !CalculatorAIFallback.isUnhelpfulResult(candidate, input: expression) {
                                 computed = candidate
                             }
                         }

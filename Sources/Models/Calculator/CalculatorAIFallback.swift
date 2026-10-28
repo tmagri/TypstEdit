@@ -109,6 +109,24 @@ enum CalculatorAIFallback {
         return inner == input.trimmingCharacters(in: .whitespaces)
     }
 
+    /// True when the CAS reported success but the result is not usable as an
+    /// answer: a string echo of the input, or `undef` (Giac's answer for text
+    /// it cannot make sense of — the same rule the document calculator uses).
+    /// `nonisolated` so tests can call it without hopping to the main actor.
+    nonisolated static func isUnhelpfulResult(_ result: CASEvalResult, input: String) -> Bool {
+        isStringEcho(result, input: input) || isUndefined(result)
+    }
+
+    /// Giac answers `undef` instead of an error for text it cannot interpret
+    /// ("the derivative of x^2" → `undef`), so routing must treat that as a
+    /// failure too.
+    /// `nonisolated` so tests can call it without hopping to the main actor.
+    nonisolated static func isUndefined(_ result: CASEvalResult) -> Bool {
+        if result.resultTree == .undefined { return true }
+        let text = result.resultText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return text == "undef" || text == "undefined"
+    }
+
     /// Interpreter instructions. The strict two-line format keeps small local
     /// models on track, and the few-shot examples anchor both question types
     /// (computable → expression, knowledge → none).
@@ -116,8 +134,8 @@ enum CalculatorAIFallback {
     You are the interpreter for a calculator app (TI-89 style syntax). Its math engine could not evaluate the entry below, so you interpret it.
 
     If the entry has a computable numeric answer, EXPR is a calculator expression that computes it:
-    - Use only numbers, + - * / ^, parentheses, pi, e, and functions like sqrt(...), sin(...), cos(...), tan(...), log(...), ln(...), abs(...), root(x,n). For equations or unknowns, use solve(equation, x).
-    - Substitute every value given in the entry, and convert units so the expression answers in the unit the entry asks for (a 1 cm diameter is a 1/2 radius). No free variables.
+    - Use only numbers, + - * / ^, parentheses, pi, e, and functions like sqrt(...), sin(...), cos(...), tan(...), log(...), ln(...), abs(...), root(x,n), d(expression,x) for derivatives, integrate(expression,x,a,b) for integrals. For equations or unknowns, use solve(equation, x).
+    - Substitute every number given in the entry, and convert units so the expression answers in the unit the entry asks for (a 1 cm diameter is a 1/2 radius). Keep x (or the variable the entry names) only when the entry asks for an expression, like a derivative.
     - For physics or motion problems, start from the standard formula, then substitute the given numbers (a ball thrown up at v that returns to the hand takes 2*v/g).
     Otherwise (definitions, general knowledge, counting letters), EXPR is: none
 
@@ -132,6 +150,9 @@ enum CalculatorAIFallback {
     Question: How many r's are in strawberry?
     EXPR: none
     ANSWER: 3 — s-t-r-a-w-b-e-r-r-y has an r at positions 3, 8 and 9.
+    Question: the derivative of x^2 with respect to x
+    EXPR: d(x^2,x)
+    ANSWER: The derivative of x^2 with respect to x is 2x.
     """
 
     /// Asks the user's configured chat model to interpret the entry. Throws

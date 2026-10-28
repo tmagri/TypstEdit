@@ -46,6 +46,16 @@ final class CalculatorAIFallbackTests: XCTestCase {
             "If I caught 10 pokemon, how many can I carry at a time."))
     }
 
+    /// Prose requests for a symbolic answer are still questions — Giac
+    /// answers them `undef` rather than erroring, so they must route too.
+    func testDerivativePhrasingsRouteToAI() {
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage("the derivative of x^2"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "the derivative of x^2 with respect to x"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "integral of x^2 from 0 to 1"))
+    }
+
     // MARK: - Math-shaped input must never be routed, even on CAS failure,
     // so typos in formulas still show the CAS error.
 
@@ -103,6 +113,36 @@ final class CalculatorAIFallbackTests: XCTestCase {
             inputTree: nil, resultTree: nil, resultText: "",
             resultTypst: "", inputTypst: "", errorMessage: "bad syntax", ok: false)
         XCTAssertFalse(CalculatorAIFallback.isStringEcho(failure, input: "5+"))
+    }
+
+    // MARK: - `undef` results: Giac answers `undef` (not an error) for text
+    // it cannot make sense of, so that counts as unusable for routing too.
+
+    func testUndefinedResultsAreDetected() {
+        let viaTree = CASEvalResult(
+            inputTree: nil, resultTree: .undefined, resultText: "undef",
+            resultTypst: "undef", inputTypst: "", errorMessage: "", ok: true)
+        XCTAssertTrue(CalculatorAIFallback.isUndefined(viaTree))
+        XCTAssertTrue(CalculatorAIFallback.isUnhelpfulResult(
+            viaTree, input: "the derivative of x^2"))
+
+        let viaText = CASEvalResult(
+            inputTree: nil, resultTree: nil, resultText: "undef",
+            resultTypst: "undef", inputTypst: "", errorMessage: "", ok: true)
+        XCTAssertTrue(CalculatorAIFallback.isUndefined(viaText))
+    }
+
+    func testRealSymbolicResultsAreNotUndefined() {
+        let derivative = CASEvalResult(
+            inputTree: nil, resultTree: nil, resultText: "2*x",
+            resultTypst: "2 x", inputTypst: "d(x^2,x)", errorMessage: "", ok: true)
+        XCTAssertFalse(CalculatorAIFallback.isUndefined(derivative))
+        XCTAssertFalse(CalculatorAIFallback.isUnhelpfulResult(derivative, input: "d(x^2,x)"))
+
+        let number = CASEvalResult(
+            inputTree: nil, resultTree: nil, resultText: "60/49",
+            resultTypst: "60/49", inputTypst: "", errorMessage: "", ok: true)
+        XCTAssertFalse(CalculatorAIFallback.isUnhelpfulResult(number, input: "2*6/9.8"))
     }
 
     // MARK: - EXPR/ANSWER reply parsing (small local models misbehave, so
