@@ -430,46 +430,60 @@ struct CalculatorView: View {
 
     // MARK: - Entry line
 
-    /// Chat-style input bar: a taller framed entry box (like AI Chat's) with
-    /// a send button, instead of the TI-89's thin strip. ↩ still evaluates,
-    /// ⌥↩ forces approximate, ↑/↓ recall history, Esc clears or stops.
+    /// Chat-style input bar: a framed multi-line entry box (like AI Chat's)
+    /// with a send button, instead of the TI-89's thin strip. ↩ still
+    /// evaluates, ⇧↩ starts a new line, ⌥↩ forces approximate, ↑/↓ recall
+    /// history on single-line input, Esc clears or stops.
     private var entryArea: some View {
-        HStack(alignment: .center, spacing: 8) {
-            TIEntryField(
-                text: $session.entryLine,
-                focusTrigger: entryFocusTrigger,
-                pendingCursorOffset: $pendingCursorOffset,
-                onSubmit: { forceApprox in
-                    submitEntry(forceApprox: forceApprox)
-                },
-                onArrowUp: {
-                    if let recalled = session.moveRecall(-1) {
-                        session.entryLine = recalled
-                    }
-                },
-                onArrowDown: {
-                    if let recalled = session.moveRecall(1) {
-                        session.entryLine = recalled
-                    } else {
-                        session.entryLine = ""
-                    }
-                },
-                onEscape: {
-                    if session.busy {
-                        session.interrupt()
-                    } else {
-                        session.entryLine = ""
-                        session.recallIndex = nil
-                    }
-                })
-                .textFieldStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+        HStack(alignment: .bottom, spacing: 8) {
+            ZStack(alignment: .topLeading) {
+                TIEntryField(
+                    text: $session.entryLine,
+                    focusTrigger: entryFocusTrigger,
+                    pendingCursorOffset: $pendingCursorOffset,
+                    onSubmit: { forceApprox in
+                        submitEntry(forceApprox: forceApprox)
+                    },
+                    onArrowUp: {
+                        if let recalled = session.moveRecall(-1) {
+                            session.entryLine = recalled
+                        }
+                    },
+                    onArrowDown: {
+                        if let recalled = session.moveRecall(1) {
+                            session.entryLine = recalled
+                        } else {
+                            session.entryLine = ""
+                        }
+                    },
+                    onEscape: {
+                        if session.busy {
+                            session.interrupt()
+                        } else {
+                            session.entryLine = ""
+                            session.recallIndex = nil
+                        }
+                    })
+                    .frame(height: 64)
+
+                if session.entryLine.isEmpty {
+                    // NSTextView has no placeholder; this sits over the
+                    // text container's inset and lets clicks through.
+                    Text("Enter an expression — or ask a question")
+                        .font(.system(size: 15, design: .monospaced))
+                        .foregroundColor(themeManager.textColor.opacity(0.35))
+                        .padding(.top, 2)
+                        .padding(.leading, 1)
+                        .allowsHitTesting(false)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1))
 
             if session.busy {
                 ProgressView()
@@ -492,7 +506,7 @@ struct CalculatorView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(session.entryLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("Evaluate (↩). Hold ⌥↩ for an approximate result (◆Enter).")
+                .help("Evaluate (↩). Hold ⌥↩ for an approximate result (◆Enter); ⇧↩ starts a new line.")
             }
         }
         .padding(.horizontal, 12)
@@ -727,11 +741,12 @@ enum TICommands {
     ]
 }
 
-// MARK: - Entry line (NSTextField)
+// MARK: - Entry line (NSTextView)
 
-/// The monospace entry line with TI-89 key handling:
-/// ↩ evaluates (⌥↩ forces approximate), ↑/↓ walk the history,
-/// Esc clears the line or stops a running calculation.
+/// The monospace entry field with TI-89 key handling:
+/// ↩ evaluates (⌥↩ forces approximate), ⇧↩ starts a new line, ↑/↓ walk
+/// the history on single-line input, Esc clears the line or stops a
+/// running calculation.
 struct TIEntryField: NSViewRepresentable {
     @Binding var text: String
     let focusTrigger: UUID
@@ -741,43 +756,92 @@ struct TIEntryField: NSViewRepresentable {
     let onArrowDown: () -> Void
     let onEscape: () -> Void
 
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
-        field.isBordered = false
-        field.focusRingType = .none
-        field.drawsBackground = false
-        // Sized like the AI Chat input (which uses .callout), but monospaced
-        // for TI syntax.
-        field.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
-        field.placeholderString = "Enter an expression — or ask a question"
-        field.usesSingleLineMode = true
-        field.delegate = context.coordinator
-        field.target = context.coordinator
-        field.action = #selector(Coordinator.submit(_:))
-        return field
+    /// Sized like the AI Chat input (which uses .callout), but monospaced
+    /// for TI syntax.
+    private var entryFont: NSFont {
+        NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
     }
 
-    func updateNSView(_ field: NSTextField, context: Context) {
-        if field.stringValue != text {
-            field.stringValue = text
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.verticalScrollElasticity = .automatic
+
+        let field = EntryTextView()
+        field.delegate = context.coordinator
+        field.font = entryFont
+        field.textColor = .textColor
+        field.setAccessibilityLabel("Calculator entry")
+        field.isRichText = false
+        field.allowsUndo = true
+        field.drawsBackground = false
+        field.isVerticallyResizable = true
+        field.isHorizontallyResizable = false
+        field.autoresizingMask = [.width]
+        field.minSize = NSSize(width: 0, height: 0)
+        field.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        field.textContainerInset = NSSize(width: 1, height: 2)
+        field.textContainer?.widthTracksTextView = true
+        field.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        // TI syntax must reach the CAS exactly as typed: no curly quotes,
+        // dashes or autocorrect substitutions.
+        field.isAutomaticQuoteSubstitutionEnabled = false
+        field.isAutomaticDashSubstitutionEnabled = false
+        field.isAutomaticTextReplacementEnabled = false
+        field.isAutomaticSpellingCorrectionEnabled = false
+        field.string = text
+
+        field.onSubmit = { [weak coordinator = context.coordinator] forceApprox in
+            coordinator?.parent.onSubmit(forceApprox)
+        }
+        field.onArrowUp = { [weak coordinator = context.coordinator] in
+            coordinator?.parent.onArrowUp()
+        }
+        field.onArrowDown = { [weak coordinator = context.coordinator] in
+            coordinator?.parent.onArrowDown()
+        }
+        field.onEscape = { [weak coordinator = context.coordinator] in
+            coordinator?.parent.onEscape()
+        }
+
+        scrollView.documentView = field
+        context.coordinator.textView = field
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let field = context.coordinator.textView else { return }
+        if field.string != text {
+            // Recall, history click and submit replace the text from SwiftUI;
+            // put the caret at the end, like the old single-line field.
+            let undo = field.undoManager
+            undo?.disableUndoRegistration()
+            field.string = text
+            field.font = entryFont
+            field.textColor = .textColor
+            undo?.enableUndoRegistration()
+            let end = (text as NSString).length
+            field.setSelectedRange(NSRange(location: end, length: 0))
+            field.scrollRangeToVisible(field.selectedRange())
         }
         if let offset = pendingCursorOffset {
             pendingCursorOffset = nil
-            let clamped = min(offset, (text as NSString).length)
             DispatchQueue.main.async {
-                field.becomeFirstResponder()
-                if let editor = field.currentEditor() {
-                    editor.selectedRange = NSRange(location: clamped, length: 0)
-                }
+                field.window?.makeFirstResponder(field)
+                let clamped = min(offset, (field.string as NSString).length)
+                field.setSelectedRange(NSRange(location: clamped, length: 0))
             }
         }
         if context.coordinator.lastFocusTrigger != focusTrigger {
             context.coordinator.lastFocusTrigger = focusTrigger
             DispatchQueue.main.async {
-                field.becomeFirstResponder()
-                if let editor = field.currentEditor() {
-                    editor.selectedRange = NSRange(location: (text as NSString).length, length: 0)
-                }
+                field.window?.makeFirstResponder(field)
+                let end = (field.string as NSString).length
+                field.setSelectedRange(NSRange(location: end, length: 0))
             }
         }
     }
@@ -786,38 +850,77 @@ struct TIEntryField: NSViewRepresentable {
         Coordinator(self)
     }
 
-    final class Coordinator: NSObject, NSTextFieldDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: TIEntryField
         var lastFocusTrigger: UUID?
+        weak var textView: EntryTextView?
 
         init(_ parent: TIEntryField) {
             self.parent = parent
         }
 
-        func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSTextField else { return }
-            parent.text = field.stringValue
+        func textDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextView else { return }
+            parent.text = field.string
         }
+    }
 
-        @objc func submit(_ sender: NSTextField) {
-            // ⌥↩ mirrors the TI-89's ◆ENTER (approximate result).
-            let forceApprox = NSApp.currentEvent?.modifierFlags.contains(.option) ?? false
-            parent.onSubmit(forceApprox)
-        }
+    /// A multi-line text view with TI-89 key handling.
+    final class EntryTextView: NSTextView {
+        var onSubmit: ((_ forceApprox: Bool) -> Void)?
+        var onArrowUp: (() -> Void)?
+        var onArrowDown: (() -> Void)?
+        var onEscape: (() -> Void)?
 
-        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            switch commandSelector {
-            case #selector(NSResponder.moveUp(_:)):
-                parent.onArrowUp()
-                return true
-            case #selector(NSResponder.moveDown(_:)):
-                parent.onArrowDown()
-                return true
-            case #selector(NSResponder.cancelOperation(_:)):
-                parent.onEscape()
-                return true
+        override func keyDown(with event: NSEvent) {
+            // Let the input method confirm a composition first (e.g. Return
+            // ends a Japanese or Chinese candidate), and never eat Esc while
+            // a candidate window is open.
+            if hasMarkedText() {
+                super.keyDown(with: event)
+                return
+            }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            switch event.keyCode {
+            case 36, 76: // Return, keypad Enter
+                if flags.contains(.option) {
+                    // ⌥↩ mirrors the TI-89's ◆ENTER (approximate result).
+                    onSubmit?(true)
+                    return
+                }
+                if flags.contains(.shift) {
+                    // ⇧↩ starts a new line for a longer question.
+                    insertNewline(nil)
+                    return
+                }
+                if !flags.contains(.command) {
+                    onSubmit?(false)
+                    return
+                }
+            case 53: // Esc
+                onEscape?()
+                return
             default:
-                return false
+                break
+            }
+            super.keyDown(with: event)
+        }
+
+        override func moveUp(_ sender: Any?) {
+            // On a multi-line entry the arrows edit the question; history
+            // recall stays on single-line input so ↓ cannot wipe it.
+            if hasMarkedText() || string.contains("\n") {
+                super.moveUp(sender)
+            } else {
+                onArrowUp?()
+            }
+        }
+
+        override func moveDown(_ sender: Any?) {
+            if hasMarkedText() || string.contains("\n") {
+                super.moveDown(sender)
+            } else {
+                onArrowDown?()
             }
         }
     }

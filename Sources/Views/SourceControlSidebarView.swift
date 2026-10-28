@@ -46,6 +46,12 @@ private enum GitPostCommitAction {
     case none, push, sync
 }
 
+/// A commit waiting on the "nothing is staged — commit everything?" answer.
+private struct CommitAllRequest: Identifiable {
+    let id = UUID()
+    let post: GitPostCommitAction
+}
+
 /// A compact Source Control section under the project explorer. The two
 /// independent scroll areas keep changes and history usable in narrow sidebars.
 struct SourceControlSidebarView: View {
@@ -64,9 +70,13 @@ struct SourceControlSidebarView: View {
     @State private var treeMode = true
     @State private var message = ""
     @State private var confirmation: GitConfirmation?
+    @State private var commitAllRequest: CommitAllRequest?
     @State private var nameSheet: GitNameSheetKind?
     @State private var rewordRequest: GitRewordRequest?
     @FocusState private var messageFocused: Bool
+    /// When on, Commit stages every change first if nothing is staged, and
+    /// never asks again. Set from the prompt's checkbox or the actions menu.
+    @AppStorage("gitCommitAllWhenNothingStaged") private var commitAllWhenNothingStaged = false
 
     // MARK: Derived state
 
@@ -82,7 +92,8 @@ struct SourceControlSidebarView: View {
     private var currentBranchLabel: String { manager.branch.isEmpty ? "HEAD" : manager.branch }
 
     private var canCommit: Bool {
-        !isWorking && !staged.isEmpty && hasMessage && !hasConflicts && protectedPaths.isEmpty
+        !isWorking && hasMessage && !hasConflicts && protectedPaths.isEmpty
+            && (!staged.isEmpty || !unstaged.isEmpty)
     }
     /// Amending is allowed with nothing staged (message-only amend), but not
     /// when HEAD is pushed or the repository has no commits.
@@ -148,6 +159,12 @@ struct SourceControlSidebarView: View {
         .sheet(item: $rewordRequest) { request in
             GitRewordSheet(manager: manager, commit: request.commit) { newMessage in
                 rewordCommit(request.commit, message: newMessage)
+            }
+        }
+        .sheet(item: $commitAllRequest) { request in
+            GitCommitAllSheet(changeCount: unstaged.count) { remember in
+                if remember { commitAllWhenNothingStaged = true }
+                performCommit(amend: false, post: request.post, stageAll: true)
             }
         }
         .alert(item: $confirmation) { item in
@@ -217,6 +234,11 @@ struct SourceControlSidebarView: View {
                     .disabled(isWorking || staged.isEmpty)
                 Button("Discard All Changes…", role: .destructive) { confirmation = .discardAll }
                     .disabled(isWorking || unstaged.isEmpty || !canChangeWorkingTree)
+                Divider()
+                Toggle("Commit All When Nothing Is Staged", isOn: $commitAllWhenNothingStaged)
+                    .help(commitAllWhenNothingStaged
+                          ? "Commit stages every change first when nothing is staged, without asking"
+                          : "Commit asks before staging every change when nothing is staged")
                 Divider()
                 stashMenu
                 Divider()
@@ -488,8 +510,9 @@ struct SourceControlSidebarView: View {
     private var commitHelp: String {
         if !protectedPaths.isEmpty { return "Save the open files with unsaved edits first. Commits use saved files only." }
         if hasConflicts { return "Resolve the merge conflicts first." }
-        if staged.isEmpty { return "Stage changes to commit them" }
         if !hasMessage { return "Enter a commit message" }
+        if staged.isEmpty && !unstaged.isEmpty { return "Commit all changes — nothing is staged yet" }
+        if staged.isEmpty { return "There are no changes to commit" }
         return "Commit staged changes only"
     }
 
@@ -512,8 +535,36 @@ struct SourceControlSidebarView: View {
 
     private func commit(amend: Bool, then post: GitPostCommitAction = .none) {
         guard amend ? canAmend : canCommit else { return }
+
+        // Nothing staged: offer to stage every change first, unless the
+        // user asked not to be asked again.
+        if !amend && staged.isEmpty {
+            if commitAllWhenNothingStaged {
+                performCommit(amend: false, post: post, stageAll: true)
+            } else {
+                commitAllRequest = CommitAllRequest(post: post)
+            }
+            return
+        }
+        performCommit(amend: amend, post: post, stageAll: false)
+    }
+
+    /// Runs the commit, optionally staging everything first (the "commit all
+    /// changes" answer). The message is the one in the box when the action
+    /// started, so typing while a confirmation is open cannot change it.
+    private func performCommit(amend: Bool, post: GitPostCommitAction, stageAll: Bool) {
         let submitted = message
         Task {
+            if stageAll {
+                // State can change while the sheet is open: a dirty open file
+                // must be saved first, exactly like the commit button.
+                guard protectedPaths.isEmpty else {
+                    manager.errorMessage = "Save the open files with unsaved edits before you commit them."
+                    return
+                }
+                await manager.stageAll()
+                guard manager.changes.contains(where: \.isStaged) else { return }
+            }
             var text = submitted
             if amend && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // Prefill the message box from HEAD so a message-only amend

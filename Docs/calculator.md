@@ -17,8 +17,9 @@ network.
 | Key | Behaviour |
 |---|---|
 | ↩ | Evaluate |
+| ⇧↩ | Start a new line (for a longer multi-line question) |
 | ⌥↩ | Evaluate as a decimal (TI's ◆ENTER) |
-| ↑ / ↓ | Highlight a history line; the text shows in the entry line |
+| ↑ / ↓ | On single-line input, highlight a history line; the text shows in the entry line. On a multi-line question, move the caret |
 | Esc | Clear the entry line, or stop a running calculation |
 
 The `F2/F3/F4` menus insert templates (Algebra, Calc, Other) with the caret

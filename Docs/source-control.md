@@ -14,10 +14,12 @@ Git must be available at `/usr/bin/git`.
 4. Expand **Changes** to review the changed files.
 5. Click a file to open its diff preview.
 6. Click **+** beside a file to stage its changes.
-7. Enter a commit message.
+7. Enter a commit message. The box is multi-line: the first line is the subject, and you can add a body below it.
 8. Click **Commit**, or press **⌘Enter** in the message field.
 
-**Commit** includes staged changes only. **Staged Changes** compares HEAD with the index. **Changes** compares the index with saved files. Neither diff includes unsaved editor changes.
+**Commit** commits the staged changes. When nothing is staged, **Commit** asks whether to stage all changes and commit them: choose **Commit All**, or turn on **Always commit all changes when nothing is staged** in that prompt to stop being asked. The same option is in the **…** menu as **Commit All When Nothing Is Staged**.
+
+**Staged Changes** compares HEAD with the index. **Changes** compares the index with saved files. Neither diff includes unsaved editor changes.
 
 Changes use **Tree** mode by default. The **… → Changes View** menu also offers **List** mode.
 

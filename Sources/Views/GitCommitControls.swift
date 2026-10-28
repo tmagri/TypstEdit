@@ -14,7 +14,8 @@ extension GitOperationState {
 }
 
 /// The commit message box and the split Commit button: the primary action
-/// commits staged changes; the dropdown offers amend, push, sync and undo.
+/// commits staged changes (or offers to commit all changes when nothing is
+/// staged); the dropdown offers amend, push, sync and undo.
 struct GitCommitControls: View {
     @Binding var message: String
     /// The focus state lives in the sidebar so ⌘Enter only fires while the
@@ -44,10 +45,12 @@ struct GitCommitControls: View {
     var body: some View {
         VStack(spacing: 6) {
             ZStack(alignment: .topTrailing) {
+                // A commit message usually has a subject and a body, so the
+                // box shows several lines at rest and grows as it is typed.
                 TextField("Message (⌘Enter to commit)", text: $message, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .lineLimit(1...3)
+                    .lineLimit(3...6)
                     .padding(6)
                     .padding(.trailing, 22)
                     .background(themeManager.searchFieldBackground)
@@ -117,13 +120,13 @@ struct GitCommitControls: View {
         .frame(maxWidth: .infinity)
         .disabled(isBusy)
         .help(help)
-        .accessibilityLabel("Commit staged changes")
-        .accessibilityHint("Open the dropdown for amend, push, sync and undo")
+        .accessibilityLabel("Commit changes")
+        .accessibilityHint("Commit staged changes, or all changes when nothing is staged. Open the dropdown for amend, push, sync and undo")
         .background {
             // The shortcut exists only while the message field has focus, so
             // it cannot take ⌘Enter from the editor or the insert sheets.
             if messageFocus.wrappedValue {
-                Button("Commit Staged", action: onCommit)
+                Button("Commit Changes", action: onCommit)
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(!canCommit)
                     .opacity(0)

@@ -132,6 +132,41 @@ struct GitNameSheet: View {
     }
 }
 
+/// Asks whether to stage every change before committing when the index is
+/// empty. `onCommit(true)` also asks to stop prompting in future.
+struct GitCommitAllSheet: View {
+    let changeCount: Int
+    /// Called with the "always do this" checkbox state.
+    let onCommit: (_ remember: Bool) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var remember = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Commit all changes?").font(.headline)
+            Text(changeCount == 1
+                 ? "Nothing is staged. Stage the one changed file and commit it with this message? New files are added too."
+                 : "Nothing is staged. Stage all \(changeCount) changed files and commit them with this message? New files are added too.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Toggle("Always commit all changes when nothing is staged", isOn: $remember)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.escape, modifiers: [])
+                Button("Commit All") {
+                    onCommit(remember)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
+    }
+}
+
 /// One commit whose message is being rewritten.
 struct GitRewordRequest: Identifiable {
     let commit: GitCommit
