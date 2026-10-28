@@ -66,6 +66,23 @@ final class SourceControlAskpassTests: XCTestCase {
         XCTAssertEqual(result.code, 0, "script must be syntactically valid sh: \(result.output)")
     }
 
+    func testScriptBodyWritesPromptHeartbeatBesideItself() throws {
+        let body = GitAskpass.scriptBody()
+        XCTAssertTrue(body.contains("askpass-activity"), "the script records prompt activity so the timeout can restart")
+        XCTAssertTrue(body.contains("${0%/*}"), "the heartbeat is written next to the script itself")
+        // The heartbeat contains only the script's pid — never the prompt or answer.
+        XCTAssertFalse(body.contains("> \"$PROMPT\""))
+        XCTAssertFalse(body.contains(">>"), "never redirects output to a file")
+    }
+
+    func testActivityFileURLLivesBesideTheScript() {
+        let script = URL(fileURLWithPath: "/tmp/example-dir/askpass.sh")
+        XCTAssertEqual(
+            GitAskpass.activityFileURL(forScript: script),
+            URL(fileURLWithPath: "/tmp/example-dir/askpass-activity")
+        )
+    }
+
     func testInstallCreatesUniqueExecutableScriptWithSafePermissions() throws {
         let first = try XCTUnwrap(GitAskpass.installAskpassScript())
         let second = try XCTUnwrap(GitAskpass.installAskpassScript())
@@ -127,8 +144,12 @@ final class SourceControlAskpassTests: XCTestCase {
         XCTAssertEqual(network.runner.environmentOverrides["SSH_ASKPASS"], scriptPath)
         XCTAssertEqual(network.runner.environmentOverrides["SSH_ASKPASS_REQUIRE"], "force")
         XCTAssertEqual(network.timeout, 300, accuracy: 0.01)
-        // The test runner's /usr/bin/false override is replaced by the script.
         XCTAssertNotEqual(scriptPath, "/usr/bin/false")
+        // The runner watches the askpass heartbeat so the timeout pauses
+        // while a credential dialog is open.
+        let activityPath = try XCTUnwrap(network.askpassActivityURL?.path)
+        XCTAssertTrue(activityPath.hasSuffix("/askpass-activity"))
+        XCTAssertTrue(activityPath.hasPrefix((scriptPath as NSString).deletingLastPathComponent))
     }
 
     // MARK: Network timeout
@@ -154,6 +175,61 @@ final class SourceControlAskpassTests: XCTestCase {
             )
         }
         XCTAssertLessThan(Date().timeIntervalSince(start), 10, "the hung process is killed, not awaited")
+    }
+
+    /// A script that outlives the timeout but touches the askpass heartbeat
+    /// file (as the credential dialog would) must finish: every touch
+    /// restarts the countdown.
+    func testNetworkTimeoutRestartsWhileAskpassHeartbeatIsTouched() async throws {
+        let dir = try makeTempDir()
+        let activity = dir.appendingPathComponent("askpass-activity")
+        let slow = dir.appendingPathComponent("slow-with-heartbeat.sh")
+        // Sleeps past the 1 s timeout, but touches the heartbeat at ~0.6 s,
+        // then finishes at ~1.4 s — beyond the original deadline.
+        try """
+        #!/bin/sh
+        /bin/sleep 0.6
+        printf '%s\\n' "$$" > "\(activity.path)" 2>/dev/null || :
+        /bin/sleep 0.8
+        exit 0
+        """
+            .write(to: slow, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slow.path)
+
+        let start = Date()
+        let network = NetworkGitRunner(
+            runner: GitRunner(executableURL: slow),
+            timeout: 1.0,
+            askpassActivityURL: activity
+        )
+        let result = try await network.run([], in: dir)
+        XCTAssertEqual(result.exitCode, 0, "the heartbeat restarts the timeout, so the command completes")
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertGreaterThan(elapsed, 1.0, "the script really ran past the original deadline")
+        XCTAssertLessThan(elapsed, 10)
+    }
+
+    /// The same long script without a watched heartbeat still times out.
+    func testNetworkTimeoutStillAppliesWithoutHeartbeat() async throws {
+        let dir = try makeTempDir()
+        let slow = dir.appendingPathComponent("slow-without-heartbeat.sh")
+        try "#!/bin/sh\n/bin/sleep 5\nexit 0\n"
+            .write(to: slow, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slow.path)
+
+        let network = NetworkGitRunner(
+            runner: GitRunner(executableURL: slow),
+            timeout: 1.0,
+            askpassActivityURL: dir.appendingPathComponent("askpass-activity")
+        )
+        let start = Date()
+        do {
+            _ = try await network.run([], in: dir)
+            XCTFail("expected a timeout error")
+        } catch let error as GitError {
+            guard case .timedOut = error else { throw error }
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4, "the hung process is killed at the deadline")
     }
 
     // MARK: Cancellation

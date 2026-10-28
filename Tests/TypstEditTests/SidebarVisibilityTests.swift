@@ -58,15 +58,32 @@ final class SidebarVisibilityTests: XCTestCase {
         XCTAssertEqual(visibility.browserModes, [0, 1])
     }
 
+    func testIssuesAreShownByDefaultAndCanBeHiddenIndependently() {
+        XCTAssertTrue(SidebarVisibility().showsIssues)
+
+        let hidden = SidebarVisibility(issues: false)
+        XCTAssertFalse(hidden.showsIssues)
+        XCTAssertTrue(hidden.showsSourceControl)
+        XCTAssertEqual(hidden.panels, [.files, .calculator])
+    }
+
+    func testIssuesFollowTheFilesPanel() {
+        // Notebooks alone still show the Files panel, so Issues stay.
+        XCTAssertTrue(SidebarVisibility(projects: false).showsIssues)
+        XCTAssertFalse(SidebarVisibility(files: false).showsIssues)
+        XCTAssertFalse(SidebarVisibility(projects: false, notebooks: false).showsIssues)
+    }
+
     func testEveryCombinationResolvesOnlyToVisibleFeatures() {
-        for flags in 0..<64 {
+        for flags in 0..<128 {
             let visibility = SidebarVisibility(
                 files: flags & 1 != 0,
                 projects: flags & 2 != 0,
                 notebooks: flags & 4 != 0,
                 calculator: flags & 8 != 0,
                 sourceControl: flags & 16 != 0,
-                aiChat: flags & 32 != 0
+                aiChat: flags & 32 != 0,
+                issues: flags & 64 != 0
             )
             for panel: EditorController.SidebarContent in [.files, .aiChat, .calculator] {
                 if let resolved = visibility.resolvedPanel(panel) {
@@ -87,6 +104,8 @@ final class SidebarVisibilityTests: XCTestCase {
             }
             XCTAssertEqual(visibility.showsSourceControl,
                            visibility.files && visibility.projects && visibility.sourceControl)
+            XCTAssertEqual(visibility.showsIssues,
+                           visibility.files && (visibility.projects || visibility.notebooks) && visibility.issues)
         }
     }
 }

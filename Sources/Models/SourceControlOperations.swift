@@ -210,6 +210,11 @@ extension SourceControlManager {
             return
         }
         await perform(label: "Merging…", touchesWorkingTree: true) { root, runner in
+            // Checked live, not from the cached snapshot: merging on top of an
+            // unfinished rebase/cherry-pick/revert would move the branch.
+            guard await Self.operationState(root: root, runner: runner) == .none else {
+                throw GitError.invalidInput("An operation is in progress; finish or abort it first.")
+            }
             _ = try await runner.run(["merge", "--no-edit", trimmed], in: root)
         }
     }
@@ -223,6 +228,11 @@ extension SourceControlManager {
             return
         }
         await perform(label: "Rebasing…", touchesWorkingTree: true) { root, runner in
+            // Checked live: rebasing on top of another unfinished operation
+            // would corrupt both.
+            guard await Self.operationState(root: root, runner: runner) == .none else {
+                throw GitError.invalidInput("An operation is in progress; finish or abort it first.")
+            }
             _ = try await runner.run(["rebase", trimmed], in: root)
         }
     }
@@ -297,6 +307,11 @@ extension SourceControlManager {
         let messageArguments: [String] = (text?.isEmpty == false) ? ["-m", text!] : []
         let untrackedArguments: [String] = includeUntracked ? ["-u"] : []
         await perform(label: "Stashing…", touchesWorkingTree: true) { root, runner in
+            // Stashing mid-rebase/merge steals the staged conflict
+            // resolutions, so "continue" then commits a broken tree.
+            guard await Self.operationState(root: root, runner: runner) == .none else {
+                throw GitError.invalidInput("An operation is in progress; finish or abort it first.")
+            }
             // No --quiet here: Apple Git fails to remove untracked files
             // from the worktree when push runs quietly with -u.
             _ = try await runner.run(
@@ -308,12 +323,18 @@ extension SourceControlManager {
 
     func applyStash(_ stash: GitStash) async {
         await perform(label: "Applying stash…", touchesWorkingTree: true) { root, runner in
+            guard await Self.operationState(root: root, runner: runner) == .none else {
+                throw GitError.invalidInput("An operation is in progress; finish or abort it first.")
+            }
             _ = try await runner.run(["stash", "apply", "--quiet", stash.id], in: root)
         }
     }
 
     func popStash(_ stash: GitStash) async {
         await perform(label: "Applying stash…", touchesWorkingTree: true) { root, runner in
+            guard await Self.operationState(root: root, runner: runner) == .none else {
+                throw GitError.invalidInput("An operation is in progress; finish or abort it first.")
+            }
             _ = try await runner.run(["stash", "pop", "--quiet", stash.id], in: root)
         }
     }

@@ -15,6 +15,14 @@ import Foundation
 /// - The script lives in a unique 0700 directory in the app temp area.
 enum GitAskpass {
     static let scriptFileName = "askpass.sh"
+    /// Touched by the script on every prompt; the network runner watches its
+    /// modification date to restart the timeout while a dialog is up.
+    static let activityFileName = "askpass-activity"
+
+    /// The heartbeat file that belongs next to `scriptURL`.
+    static func activityFileURL(forScript scriptURL: URL) -> URL {
+        scriptURL.deletingLastPathComponent().appendingPathComponent(activityFileName)
+    }
 
     /// The full, static script text. No user input ever enters this string.
     static func scriptBody() -> String {
@@ -25,6 +33,10 @@ enum GitAskpass {
         # as an argument; it is never interpolated into the AppleScript source
         # and never written anywhere.
         PROMPT=${1:-"Git needs your input."}
+        # Heartbeat: record that a credential dialog is about to open, so the
+        # app restarts its network timeout while the user answers it. Failure
+        # to write the file is harmless (the prompt still works).
+        printf '%s\\n' "$$" > "${0%/*}/askpass-activity" 2>/dev/null || :
         case "$PROMPT" in
         *[Pp]assword*|*[Pp]assphrase*)
             if ANSWER=$(/usr/bin/osascript -e 'on run argv
@@ -102,9 +114,15 @@ enum GitAskpass {
 /// - times out after `timeout` seconds, then the git process is killed;
 /// - inherits the credential prompt environment from `runner`;
 /// - cancels cleanly (killing git) when its task is cancelled.
+///
+/// While a credential dialog is up, the askpass script touches
+/// `askpassActivityURL`; every touch restarts the timeout, so time spent
+/// typing a password never counts toward the deadline.
 struct NetworkGitRunner: Sendable {
     var runner: GitRunner
     var timeout: TimeInterval
+    /// Watched for changes so the timeout restarts on each askpass prompt.
+    var askpassActivityURL: URL?
 
     private enum Outcome {
         case done(GitCommandResult)
@@ -129,12 +147,7 @@ struct NetworkGitRunner: Sendable {
                 }
             }
             group.addTask {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                    return .timedOut
-                } catch {
-                    return .failed(CancellationError())
-                }
+                await self.countDown(seconds: seconds)
             }
             guard let first = try await group.next() else {
                 throw CancellationError()
@@ -149,5 +162,40 @@ struct NetworkGitRunner: Sendable {
                 throw GitError.timedOut(seconds: Int(seconds.rounded(.up)))
             }
         }
+    }
+
+    /// Returns `.timedOut` after `seconds` without an askpass heartbeat; each
+    /// change of the activity file's modification date restarts the clock.
+    /// Cancelling (a finished command) throws instead.
+    private func countDown(seconds: TimeInterval) async -> Outcome {
+        let activityURL = askpassActivityURL
+        let pollNanoseconds: UInt64 = 500_000_000
+        let pollInterval = TimeInterval(pollNanoseconds) / 1_000_000_000
+        var lastActivity = Self.activityDate(of: activityURL)
+        var waited: TimeInterval = 0
+        while waited < seconds {
+            do {
+                try await Task.sleep(nanoseconds: pollNanoseconds)
+            } catch {
+                return .failed(CancellationError())
+            }
+            waited += pollInterval
+            let current = Self.activityDate(of: activityURL)
+            if current != lastActivity {
+                // A credential dialog just opened: restart the countdown so
+                // the user has the full timeout to answer it.
+                lastActivity = current
+                waited = 0
+            }
+        }
+        return .timedOut
+    }
+
+    private static func activityDate(of url: URL?) -> Date? {
+        guard let url,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+            return nil
+        }
+        return attributes[.modificationDate] as? Date
     }
 }

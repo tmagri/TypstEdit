@@ -438,7 +438,16 @@ class EditorController: NSObject, ObservableObject {
             }
         }
     }
-    
+
+    deinit {
+        // The registry is main-actor isolated; hop there for the final
+        // cleanup so a closed window can never leave a stale dirty entry.
+        let id = ObjectIdentifier(self)
+        Task { @MainActor in
+            OpenDocumentRegistry.shared.removeEditor(id)
+        }
+    }
+
     func setupDefaultConfiguration() {
         let baseFontSize: CGFloat = 13.0
         let scaledFontSize = baseFontSize * zoomLevel
@@ -532,6 +541,11 @@ class EditorController: NSObject, ObservableObject {
             updateFileType()
             guard currentFileURL != oldValue else { return }
             AIChatManager.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
+            OpenDocumentRegistry.shared.updateEditor(
+                ObjectIdentifier(self),
+                fileURL: currentFileURL,
+                hasUnsavedChanges: hasUnsavedChanges
+            )
         }
     }
     @Published var projectRootURL: URL? {
@@ -755,7 +769,18 @@ class EditorController: NSObject, ObservableObject {
     @Published var tagLabel: String = ""
     @Published var currentTagRange: NSRange?
     
-    @Published var hasUnsavedChanges: Bool = false
+    @Published var hasUnsavedChanges: Bool = false {
+        didSet {
+            guard hasUnsavedChanges != oldValue else { return }
+            // Keep the app-wide registry of dirty documents in sync so the
+            // Source Control panel protects this file in every window.
+            OpenDocumentRegistry.shared.updateEditor(
+                ObjectIdentifier(self),
+                fileURL: currentFileURL,
+                hasUnsavedChanges: hasUnsavedChanges
+            )
+        }
+    }
     private var savedContent: String = ""
     @Published var viewMode: ViewMode = .both
     @Published var isVerticalSplit: Bool = true

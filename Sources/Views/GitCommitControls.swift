@@ -25,6 +25,9 @@ struct GitCommitControls: View {
     let canAmend: Bool
     let canUndoLastCommit: Bool
     let canPush: Bool
+    /// False while the branch is both ahead of and behind its upstream: a
+    /// fast-forward-only sync would always fail then.
+    let canCommitAndSync: Bool
     let hint: String?
     let help: String
     let onCommit: () -> Void
@@ -68,7 +71,8 @@ struct GitCommitControls: View {
             Button("Commit & Push") { onCommitAndPush() }
                 .disabled(!canCommit || !canPush)
             Button("Commit & Sync") { onCommitAndSync() }
-                .disabled(!canCommit || !canPush)
+                .disabled(!canCommit || !canPush || !canCommitAndSync)
+                .help(canCommitAndSync ? "" : "Branch has diverged — use Pull (Merge) or Pull (Rebase)")
             Divider()
             Button("Undo Last Commit") { onUndoLastCommit() }
                 .disabled(!canUndoLastCommit)
@@ -111,6 +115,9 @@ struct GitOperationBanner: View {
     let state: GitOperationState
     let hasConflicts: Bool
     let isBusy: Bool
+    /// False while an open file has unsaved edits: continuing would rewrite
+    /// the working tree and the next save would restore them.
+    let canContinue: Bool
     let onAbort: () -> Void
     let onContinue: () -> Void
     @EnvironmentObject private var themeManager: ThemeManager
@@ -126,8 +133,8 @@ struct GitOperationBanner: View {
                 Button("Continue") { onContinue() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(isBusy || hasConflicts)
-                    .help(hasConflicts ? "Resolve the conflicts first" : "Continue the \(state.displayName.lowercased())")
+                    .disabled(isBusy || hasConflicts || !canContinue)
+                    .help(continueHelp)
                     .accessibilityLabel("Continue \(state.displayName)")
                 Button("Abort…") { onAbort() }
                     .buttonStyle(.bordered)
@@ -143,5 +150,11 @@ struct GitOperationBanner: View {
         }
         .padding(8)
         .background(Color.orange.opacity(0.12))
+    }
+
+    private var continueHelp: String {
+        if !canContinue { return "Save the open file first" }
+        if hasConflicts { return "Resolve the conflicts first" }
+        return "Continue the \(state.displayName.lowercased())"
     }
 }

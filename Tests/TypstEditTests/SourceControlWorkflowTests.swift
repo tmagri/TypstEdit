@@ -448,6 +448,118 @@ final class SourceControlWorkflowTests: XCTestCase {
         XCTAssertTrue(ws.exists("other.typ", in: repo))
     }
 
+    // MARK: Stash and merge during an in-progress operation
+
+    /// The mid-operation states used below: a conflicted merge (MERGE_HEAD)
+    /// and a conflicted rebase (rebase-merge), plus one stash to try to
+    /// apply/pop.
+    private func makeConflictedMergeWithStash() async throws -> (URL, SourceControlManager) {
+        let (repo, manager) = try await makeBaseRepo()
+        // One stash to attempt to apply/pop mid-merge.
+        try ws.write("stashed\n", to: "stashed.typ", in: repo)
+        await manager.stash(message: "before the storm", includeUntracked: true)
+        XCTAssertEqual(manager.stashes.count, 1)
+
+        // Diverge and start a conflicted merge.
+        await manager.createBranch(name: "feature")
+        try ws.write("one\nfeature version\n", to: "keep.typ", in: repo)
+        try await ws.commitAll("feature change", in: repo)
+        await manager.checkout(branch: "main")
+        try ws.write("one\nmain version\n", to: "keep.typ", in: repo)
+        try await ws.commitAll("main change", in: repo)
+        await manager.mergeBranch("feature")
+        XCTAssertEqual(manager.operationState, .merging)
+        XCTAssertNotNil(manager.errorMessage, "the conflicted merge itself reports the conflict")
+        return (repo, manager)
+    }
+
+    func testStashPushApplyPopRefusedDuringMerge() async throws {
+        let (repo, manager) = try await makeConflictedMergeWithStash()
+        try ws.write("mid-merge edit\n", to: "other.typ", in: repo)
+        await manager.refresh()
+
+        await manager.stash(message: "mid merge", includeUntracked: true)
+        XCTAssertEqual(manager.errorMessage, "An operation is in progress; finish or abort it first.")
+        XCTAssertEqual(manager.stashes.count, 1, "no extra stash was created")
+        XCTAssertTrue(ws.exists("other.typ", in: repo), "mid-merge edit stays in the worktree")
+
+        await manager.applyStash(manager.stashes[0])
+        XCTAssertEqual(manager.errorMessage, "An operation is in progress; finish or abort it first.")
+        XCTAssertEqual(manager.stashes.count, 1)
+
+        await manager.popStash(manager.stashes[0])
+        XCTAssertEqual(manager.errorMessage, "An operation is in progress; finish or abort it first.")
+        XCTAssertEqual(manager.stashes.count, 1, "pop is refused, so the stash survives")
+
+        // Dropping stays allowed: it does not touch the working tree.
+        await manager.dropStash(manager.stashes[0])
+        XCTAssertNil(manager.errorMessage, manager.errorMessage ?? "")
+        XCTAssertTrue(manager.stashes.isEmpty)
+
+        // After the abort, stashing works again.
+        await manager.abortOperation()
+        XCTAssertEqual(manager.operationState, .none)
+        await manager.stash(message: nil, includeUntracked: true)
+        XCTAssertNil(manager.errorMessage, manager.errorMessage ?? "")
+        XCTAssertEqual(manager.stashes.count, 1)
+        XCTAssertFalse(ws.exists("other.typ", in: repo), "the mid-merge edit was stashed away")
+    }
+
+    func testStashPushRefusedDuringRebase() async throws {
+        let (repo, manager) = try await makeBaseRepo()
+        await manager.createBranch(name: "feature")
+        try ws.write("feature\n", to: "keep.typ", in: repo)
+        try await ws.commitAll("feature change", in: repo)
+        await manager.checkout(branch: "main")
+        try ws.write("main\n", to: "keep.typ", in: repo)
+        try await ws.commitAll("main change", in: repo)
+        await manager.checkout(branch: "feature")
+
+        await manager.rebaseCurrentBranch(onto: "main")
+        XCTAssertEqual(manager.operationState, .rebasing)
+        try ws.write("mid-rebase resolution\n", to: "resolved.typ", in: repo)
+        await manager.refresh()
+
+        await manager.stash(message: "mid rebase", includeUntracked: true)
+        XCTAssertEqual(manager.errorMessage, "An operation is in progress; finish or abort it first.")
+        XCTAssertTrue(ws.exists("resolved.typ", in: repo), "the staged resolution was not stolen")
+        XCTAssertEqual(manager.operationState, .rebasing, "the rebase is untouched")
+    }
+
+    func testMergeAndRebaseRefusedDuringRebase() async throws {
+        let (repo, manager) = try await makeBaseRepo()
+        await manager.createBranch(name: "feature")
+        try ws.write("feature\n", to: "keep.typ", in: repo)
+        try await ws.commitAll("feature change", in: repo)
+        await manager.checkout(branch: "main")
+        try ws.write("main\n", to: "keep.typ", in: repo)
+        try await ws.commitAll("main change", in: repo)
+        await manager.checkout(branch: "feature")
+
+        await manager.rebaseCurrentBranch(onto: "main")
+        XCTAssertEqual(manager.operationState, .rebasing)
+
+        await manager.mergeBranch("main")
+        XCTAssertEqual(manager.errorMessage, "An operation is in progress; finish or abort it first.")
+        XCTAssertEqual(manager.operationState, .rebasing, "no merge state was created on top")
+        XCTAssertEqual(manager.commits.first(where: \.isHead)?.parents.count, 1, "no merge commit")
+
+        await manager.rebaseCurrentBranch(onto: "main")
+        XCTAssertEqual(manager.errorMessage, "An operation is in progress; finish or abort it first.")
+        XCTAssertEqual(manager.operationState, .rebasing)
+    }
+
+    func testFastForwardSyncHelperCoversAllDivergenceStates() {
+        // Only ahead or only behind: a fast-forward pull still works.
+        XCTAssertTrue(GitOutputParser.canFastForwardSync(ahead: 0, behind: 0))
+        XCTAssertTrue(GitOutputParser.canFastForwardSync(ahead: 0, behind: 3))
+        XCTAssertTrue(GitOutputParser.canFastForwardSync(ahead: 2, behind: 0))
+        // Diverged: never fast-forwardable.
+        XCTAssertFalse(GitOutputParser.canFastForwardSync(ahead: 1, behind: 1))
+        XCTAssertFalse(GitOutputParser.canFastForwardSync(ahead: 7, behind: 2))
+        XCTAssertFalse(GitOutputParser.canFastForwardSync(ahead: 2, behind: 7))
+    }
+
     // MARK: Sync and pull modes
 
     func testSyncSetsUpstreamAndPushes() async throws {

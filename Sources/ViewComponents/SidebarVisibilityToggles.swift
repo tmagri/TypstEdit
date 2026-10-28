@@ -16,6 +16,9 @@ struct SidebarVisibilityToggles: View {
         // Git lives inside the Projects view.
         Toggle("Show Git Source Control", isOn: $settings.showSourceControl)
             .disabled(!settings.showFiles || !settings.showProjects)
+        // Issues live at the bottom of the Files panel (Projects or Notebooks).
+        Toggle("Show Issues", isOn: $settings.showIssues)
+            .disabled(!settings.showFiles || (!settings.showProjects && !settings.showNotebooks))
         Toggle("Show Calculator", isOn: $settings.showCalculator)
         // Reuse the existing AI Chat opt-in, not a second visibility setting.
         Toggle("Show AI Chat", isOn: $aiSettings.chatEnabled)

@@ -433,7 +433,22 @@ private final class ProcessControl: @unchecked Sendable {
     func cancel() {
         lock.lock(); defer { lock.unlock() }
         cancelled = true
-        if let process, process.isRunning { process.terminate() }
+        guard let process, process.isRunning else { return }
+        // SIGTERM first, then SIGKILL after a grace period, so a process
+        // that ignores or misses the terminate signal can never leave the
+        // manager stuck in the busy state.
+        process.terminate()
+        Thread.detachNewThread { [weak self] in
+            Thread.sleep(forTimeInterval: 3)
+            self?.forceKillIfStillRunning()
+        }
+    }
+
+    /// Sends SIGKILL when the process is still alive 3 s after the SIGTERM.
+    private func forceKillIfStillRunning() {
+        lock.lock(); defer { lock.unlock() }
+        guard let process, process.isRunning else { return }
+        kill(process.processIdentifier, SIGKILL)
     }
 }
 
@@ -664,6 +679,12 @@ enum GitOutputParser {
         return lower.contains("not a git repository")
             || lower.contains("must be run in a work tree")
     }
+
+    /// A fast-forward-only pull/sync can only succeed while the branch is
+    /// not diverged — ahead *and* behind its upstream at the same time.
+    static func canFastForwardSync(ahead: Int, behind: Int) -> Bool {
+        !(ahead > 0 && behind > 0)
+    }
 }
 
 // MARK: - Manager
@@ -741,6 +762,9 @@ final class SourceControlManager: ObservableObject {
     var unpushedCount: Int { commits.filter(\.isUnpushed).count }
     /// Conflicted entries of the current status.
     var conflictedChanges: [GitChange] { changes.filter(\.isConflicted) }
+    /// True when the branch has commits both ahead of and behind its
+    /// upstream: a fast-forward-only pull/sync cannot succeed then.
+    var hasDiverged: Bool { !GitOutputParser.canFastForwardSync(ahead: ahead, behind: behind) }
 
     // MARK: Root handling
 
@@ -987,6 +1011,7 @@ final class SourceControlManager: ObservableObject {
     /// per-command timeout, and process kill on cancel/timeout.
     func makeNetworkGit() -> NetworkGitRunner {
         var overrides = runner.environmentOverrides
+        var askpassScript: URL?
         if isAskpassEnabled {
             if askpassScriptURL == nil {
                 askpassScriptURL = GitAskpass.installAskpassScript()
@@ -996,12 +1021,17 @@ final class SourceControlManager: ObservableObject {
                     overrides[key] = value
                 }
             }
+            askpassScript = askpassScriptURL
         }
         let networkRunner = GitRunner(
             executableURL: runner.executableURL,
             environmentOverrides: overrides
         )
-        return NetworkGitRunner(runner: networkRunner, timeout: networkTimeout)
+        return NetworkGitRunner(
+            runner: networkRunner,
+            timeout: networkTimeout,
+            askpassActivityURL: askpassScript.map { GitAskpass.activityFileURL(forScript: $0) }
+        )
     }
 
     /// Runs a mutating operation guarded by `isBusy`, reports errors, refreshes

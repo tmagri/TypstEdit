@@ -40,11 +40,15 @@ class GeneralSettingsManager: ObservableObject {
     @AppStorage("showCalculator") var showCalculator: Bool = true {
         willSet { objectWillChange.send() }
     }
+    @AppStorage("showIssues") var showIssues: Bool = true {
+        willSet { objectWillChange.send() }
+    }
 
     func sidebarVisibility(chatEnabled: Bool) -> SidebarVisibility {
         SidebarVisibility(files: showFiles, projects: showProjects,
                           notebooks: showNotebooks, calculator: showCalculator,
-                          sourceControl: showSourceControl, aiChat: chatEnabled)
+                          sourceControl: showSourceControl, aiChat: chatEnabled,
+                          issues: showIssues)
     }
 
     // MARK: Calculator defaults (used when a session starts or opens without

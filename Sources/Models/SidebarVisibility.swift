@@ -8,6 +8,7 @@ struct SidebarVisibility: Equatable {
     var calculator = true
     var sourceControl = true
     var aiChat = false
+    var issues = true
 
     var browserModes: [Int] {
         (projects ? [0] : []) + (notebooks ? [1] : [])
@@ -31,5 +32,11 @@ struct SidebarVisibility: Equatable {
 
     var showsSourceControl: Bool {
         files && projects && sourceControl
+    }
+
+    /// Issues sit at the bottom of the Files panel, below Projects or
+    /// Notebooks, so they need the Files panel to be visible.
+    var showsIssues: Bool {
+        panels.contains(.files) && issues
     }
 }

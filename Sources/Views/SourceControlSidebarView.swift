@@ -61,6 +61,8 @@ struct SourceControlSidebarView: View {
     let isLoading: Bool
     let availableHeight: CGFloat
     @EnvironmentObject private var themeManager: ThemeManager
+    /// Every open document with unsaved edits, across all windows.
+    @ObservedObject private var openDocumentRegistry = OpenDocumentRegistry.shared
 
     @State private var isExpanded = true
     @State private var graphExpanded = true
@@ -98,20 +100,19 @@ struct SourceControlSidebarView: View {
         !isWorking && manager.hasCommits && headIsUnpushed && manager.operationState == .none
     }
 
+    /// True while a merge, rebase, cherry-pick or revert is unfinished.
+    private var hasOperation: Bool { manager.operationState != .none }
+
     /// Ops that rewrite the working tree are disabled while the open file
     /// has unsaved edits: the next save would silently restore them.
     private var canChangeWorkingTree: Bool { !isWorking && protectedPaths.isEmpty }
 
-    /// The open file is protected from discard while its buffer has edits:
-    /// discarding on disk would make the next save restore those edits.
+    /// Every dirty open file inside the repository, from any window — not
+    /// just this one. Discarding or rewriting them on disk would make the
+    /// next save silently restore the editor's version over git's changes.
     private var protectedPaths: Set<String> {
-        guard editorController.hasUnsavedChanges,
-              let url = editorController.currentFileURL,
-              let root = manager.repositoryRoot else { return [] }
-        let file = url.resolvingSymlinksInPath().standardizedFileURL.path
-        let base = root.resolvingSymlinksInPath().standardizedFileURL.path
-        guard file.hasPrefix(base + "/") else { return [] }
-        return [String(file.dropFirst(base.count + 1))]
+        guard let root = manager.repositoryRoot else { return [] }
+        return openDocumentRegistry.dirtyPaths(in: root)
     }
 
     /// Fixed chrome is about 190 pt; keep at least four change rows visible.
@@ -221,7 +222,7 @@ struct SourceControlSidebarView: View {
             if manager.repositoryRoot != nil {
                 Divider()
                 Button("Stage All Changes") { requestStageAll() }
-                    .disabled(isWorking || unstaged.isEmpty)
+                    .disabled(isWorking || unstaged.isEmpty || !protectedPaths.isEmpty)
                 Button("Unstage All Changes") { Task { await manager.unstageAll() } }
                     .disabled(isWorking || staged.isEmpty)
                 Button("Discard All Changes…", role: .destructive) { confirmation = .discardAll }
@@ -247,15 +248,17 @@ struct SourceControlSidebarView: View {
     private var stashMenu: some View {
         Menu("Stash") {
             Button("Stash Changes") { stash(includeUntracked: false) }
-                .disabled(!canStash || !canChangeWorkingTree)
-                .help("Stash tracked changes and restore the working tree")
+                .disabled(!canStash || !canChangeWorkingTree || hasOperation)
+                .help(hasOperation
+                      ? "Finish or abort the operation before stashing"
+                      : "Stash tracked changes and restore the working tree")
             Button("Stash (Include Untracked)") { stash(includeUntracked: true) }
-                .disabled(!canStashUntracked || !canChangeWorkingTree)
+                .disabled(!canStashUntracked || !canChangeWorkingTree || hasOperation)
             Divider()
             Button("Apply Latest Stash") { applyLatestStash() }
-                .disabled(manager.stashes.isEmpty || !canChangeWorkingTree)
+                .disabled(manager.stashes.isEmpty || !canChangeWorkingTree || hasOperation)
             Button("Pop Latest Stash") { popLatestStash() }
-                .disabled(manager.stashes.isEmpty || !canChangeWorkingTree)
+                .disabled(manager.stashes.isEmpty || !canChangeWorkingTree || hasOperation)
         }
     }
 
@@ -264,7 +267,7 @@ struct SourceControlSidebarView: View {
     private var canStashUntracked: Bool { !manager.changes.isEmpty && !isWorking }
 
     private func stash(includeUntracked: Bool) {
-        guard canChangeWorkingTree else { return }
+        guard canChangeWorkingTree, !hasOperation else { return }
         guard includeUntracked ? canStashUntracked : canStash else {
             manager.errorMessage = "There is nothing to stash."
             return
@@ -273,12 +276,12 @@ struct SourceControlSidebarView: View {
     }
 
     private func applyLatestStash() {
-        guard let latest = manager.stashes.first, canChangeWorkingTree else { return }
+        guard let latest = manager.stashes.first, canChangeWorkingTree, !hasOperation else { return }
         Task { await manager.applyStash(latest) }
     }
 
     private func popLatestStash() {
-        guard let latest = manager.stashes.first, canChangeWorkingTree else { return }
+        guard let latest = manager.stashes.first, canChangeWorkingTree, !hasOperation else { return }
         Task { await manager.popStash(latest) }
     }
 
@@ -309,6 +312,7 @@ struct SourceControlSidebarView: View {
                     state: manager.operationState,
                     hasConflicts: hasConflicts,
                     isBusy: manager.isBusy,
+                    canContinue: canChangeWorkingTree,
                     onAbort: { confirmation = .abortOperation },
                     onContinue: continueOperation
                 )
@@ -323,6 +327,7 @@ struct SourceControlSidebarView: View {
                 canAmend: canAmend,
                 canUndoLastCommit: canUndoLastCommit,
                 canPush: manager.hasRemote && manager.hasCommits && !manager.isDetachedHead,
+                canCommitAndSync: !manager.hasDiverged,
                 hint: commitHint,
                 help: commitHelp,
                 onCommit: { commit(amend: false) },
@@ -363,6 +368,7 @@ struct SourceControlSidebarView: View {
                         stashes: manager.stashes,
                         isBusy: isWorking,
                         canChangeWorkingTree: canChangeWorkingTree,
+                        hasOperation: hasOperation,
                         onApply: { stash in Task { await manager.applyStash(stash) } },
                         onPop: { stash in Task { await manager.popStash(stash) } },
                         onDrop: { stash in confirmation = .dropStash(stash) }
@@ -433,6 +439,9 @@ struct SourceControlSidebarView: View {
     }
 
     private func requestStageAll() {
+        // Protected dirty files must be saved first, exactly like the group
+        // header's stage-all button.
+        guard protectedPaths.isEmpty else { return }
         if hasConflicts {
             confirmation = .stageAllWithConflicts
         } else {
@@ -465,13 +474,13 @@ struct SourceControlSidebarView: View {
     // MARK: Commit
 
     private var commitHint: String? {
-        if !protectedPaths.isEmpty { return "Save the open file before you stage or commit it." }
+        if !protectedPaths.isEmpty { return "Save the open files with unsaved edits before you stage or commit them." }
         if hasConflicts { return "Resolve merge conflicts before you commit." }
         return nil
     }
 
     private var commitHelp: String {
-        if !protectedPaths.isEmpty { return "Save the open file first. Commits use saved files only." }
+        if !protectedPaths.isEmpty { return "Save the open files with unsaved edits first. Commits use saved files only." }
         if hasConflicts { return "Resolve the merge conflicts first." }
         if staged.isEmpty { return "Stage changes to commit them" }
         if !hasMessage { return "Enter a commit message" }
@@ -491,8 +500,12 @@ struct SourceControlSidebarView: View {
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             // `.id(root)` recreates this view for another project, so only
             // the message text needs a check before it is cleared.
+            let rootBeforeCommit = manager.repositoryRoot
             if await manager.commit(message: text, amend: amend) {
                 if message == submitted { message = "" }
+                // The commit itself can switch the project (it refreshes and
+                // another window may win); never push to a different repo.
+                guard manager.repositoryRoot == rootBeforeCommit else { return }
                 switch post {
                 case .none: break
                 case .push: await manager.push()
@@ -515,7 +528,9 @@ struct SourceControlSidebarView: View {
     // MARK: In-progress operations
 
     private func continueOperation() {
-        guard manager.operationState != .none, !hasConflicts, !manager.isBusy else { return }
+        // Continuing rewrites the working tree; refuse while a dirty open
+        // file would resurrect its buffer over the operation's result.
+        guard canChangeWorkingTree, manager.operationState != .none, !hasConflicts, !manager.isBusy else { return }
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             if await manager.continueOperation(message: text.isEmpty ? nil : text), !text.isEmpty {
@@ -802,7 +817,8 @@ struct SourceControlSidebarView: View {
                 title: Text("Merge branch?"),
                 message: Text("Merge “\(name)” into “\(currentBranchLabel)”? Conflicts pause the merge so you can resolve them."),
                 primaryButton: .default(Text("Merge")) {
-                    guard canChangeWorkingTree else { return }
+                    // State can change while the alert is open; check again.
+                    guard canChangeWorkingTree, manager.operationState == .none else { return }
                     Task { await manager.mergeBranch(name) }
                 },
                 secondaryButton: .cancel()
@@ -812,7 +828,7 @@ struct SourceControlSidebarView: View {
                 title: Text("Rebase branch?"),
                 message: Text("Replay “\(currentBranchLabel)” on top of “\(name)”? Conflicts pause the rebase so you can resolve them."),
                 primaryButton: .default(Text("Rebase")) {
-                    guard canChangeWorkingTree else { return }
+                    guard canChangeWorkingTree, manager.operationState == .none else { return }
                     Task { await manager.rebaseCurrentBranch(onto: name) }
                 },
                 secondaryButton: .cancel()
@@ -822,7 +838,8 @@ struct SourceControlSidebarView: View {
                 title: Text("Revert commit?"),
                 message: Text("Create a new commit that undoes \(commit.shortHash) “\(commit.subject)”? Conflicts pause the revert so you can resolve them."),
                 primaryButton: .default(Text("Revert")) {
-                    guard canChangeWorkingTree else { return }
+                    // State can change while the alert is open; check again.
+                    guard canChangeWorkingTree, manager.operationState == .none else { return }
                     Task { await manager.revertCommit(commit.id) }
                 },
                 secondaryButton: .cancel()

@@ -6,6 +6,9 @@ struct GitStashesSection: View {
     let stashes: [GitStash]
     let isBusy: Bool
     let canChangeWorkingTree: Bool
+    /// True while a merge/rebase/cherry-pick/revert is in progress: applying
+    /// or popping a stash then would corrupt the replay.
+    let hasOperation: Bool
     let onApply: (GitStash) -> Void
     let onPop: (GitStash) -> Void
     let onDrop: (GitStash) -> Void
@@ -39,6 +42,7 @@ struct GitStashesSection: View {
                         stash: stash,
                         isBusy: isBusy,
                         canChangeWorkingTree: canChangeWorkingTree,
+                        hasOperation: hasOperation,
                         onApply: { onApply(stash) },
                         onPop: { onPop(stash) },
                         onDrop: { onDrop(stash) }
@@ -53,6 +57,7 @@ private struct GitStashRowView: View {
     let stash: GitStash
     let isBusy: Bool
     let canChangeWorkingTree: Bool
+    let hasOperation: Bool
     let onApply: () -> Void
     let onPop: () -> Void
     let onDrop: () -> Void
@@ -63,6 +68,8 @@ private struct GitStashRowView: View {
         let message = stash.message.trimmingCharacters(in: .whitespacesAndNewlines)
         return message.isEmpty ? stash.id : message
     }
+
+    private var canUseStash: Bool { !isBusy && canChangeWorkingTree && !hasOperation }
 
     var body: some View {
         HStack(spacing: 5) {
@@ -84,14 +91,14 @@ private struct GitStashRowView: View {
                 .buttonStyle(.plain)
                 .opacity(hovering ? 1 : 0)
                 .allowsHitTesting(hovering)
-                .disabled(isBusy || !canChangeWorkingTree)
+                .disabled(!canUseStash)
                 .help(applyHelp)
                 .accessibilityLabel("Apply \(stash.id)")
             Button(action: onPop) { Image(systemName: "arrow.up.circle") }
                 .buttonStyle(.plain)
                 .opacity(hovering ? 1 : 0)
                 .allowsHitTesting(hovering)
-                .disabled(isBusy || !canChangeWorkingTree)
+                .disabled(!canUseStash)
                 .help(popHelp)
                 .accessibilityLabel("Pop \(stash.id)")
             Button(action: onDrop) { Image(systemName: "trash") }
@@ -111,9 +118,9 @@ private struct GitStashRowView: View {
         .help("\(stash.id) — \(title)")
         .contextMenu {
             Button("Apply Stash") { onApply() }
-                .disabled(isBusy || !canChangeWorkingTree)
+                .disabled(!canUseStash)
             Button("Pop Stash") { onPop() }
-                .disabled(isBusy || !canChangeWorkingTree)
+                .disabled(!canUseStash)
             Divider()
             Button("Drop Stash…", role: .destructive) { onDrop() }
                 .disabled(isBusy)
@@ -121,10 +128,12 @@ private struct GitStashRowView: View {
     }
 
     private var applyHelp: String {
-        canChangeWorkingTree ? "Apply the stash and keep it in the list" : "Save the open file before you apply a stash"
+        if hasOperation { return "Finish or abort the operation before you apply a stash" }
+        return canChangeWorkingTree ? "Apply the stash and keep it in the list" : "Save the open file before you apply a stash"
     }
 
     private var popHelp: String {
-        canChangeWorkingTree ? "Apply the stash and remove it from the list" : "Save the open file before you pop a stash"
+        if hasOperation { return "Finish or abort the operation before you pop a stash" }
+        return canChangeWorkingTree ? "Apply the stash and remove it from the list" : "Save the open file before you pop a stash"
     }
 }

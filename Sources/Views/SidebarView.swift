@@ -553,12 +553,15 @@ struct SidebarView: View {
                     .environmentObject(themeManager)
             }
             
-            Divider()
-                .background(themeManager.secondaryTextColor.opacity(0.3))
-            
-            // Error Panel
-            ErrorPanelView(compiler: compiler, editorController: editorController)
-                .environmentObject(themeManager)
+            if visibility.showsIssues {
+                Divider()
+                    .background(themeManager.secondaryTextColor.opacity(0.3))
+
+                // Error Panel. When hidden, `compiler.errors` still updates,
+                // so the panel shows current issues as soon as it returns.
+                ErrorPanelView(compiler: compiler, editorController: editorController)
+                    .environmentObject(themeManager)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.sidebarBackground.ignoresSafeArea())

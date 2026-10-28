@@ -26,6 +26,10 @@ struct GitBranchBar: View {
 
     private var otherLocalBranches: [GitBranch] { manager.branches.filter { !$0.isCurrent } }
     private var mergeTargets: [GitBranch] { otherLocalBranches + manager.remoteBranches }
+    private var hasOperation: Bool { manager.operationState != .none }
+    /// False when a fast-forward-only pull/sync cannot succeed (ahead and
+    /// behind at the same time).
+    private var canFastForwardSync: Bool { !manager.hasDiverged }
     private var canPull: Bool {
         manager.hasRemote && manager.upstreamBranch != nil && !manager.isBusy && canChangeWorkingTree
     }
@@ -108,15 +112,17 @@ struct GitBranchBar: View {
                 Menu("Merge Branch into Current…") {
                     ForEach(mergeTargets) { target in
                         Button(target.name) { onRequestMerge(target.name) }
-                            .disabled(!canChangeWorkingTree)
+                            .disabled(!canChangeWorkingTree || hasOperation)
                     }
                 }
+                .disabled(hasOperation)
                 Menu("Rebase Current Branch onto…") {
                     ForEach(mergeTargets) { target in
                         Button(target.name) { onRequestRebase(target.name) }
-                            .disabled(!canChangeWorkingTree)
+                            .disabled(!canChangeWorkingTree || hasOperation)
                     }
                 }
+                .disabled(hasOperation)
             }
             Divider()
             tagsMenu
@@ -153,7 +159,9 @@ struct GitBranchBar: View {
     private var syncButton: some View {
         Menu {
             Menu("Pull") {
-                Button("Fast-forward Only") { onPull(.fastForwardOnly) }.disabled(!canPull)
+                Button("Fast-forward Only") { onPull(.fastForwardOnly) }
+                    .disabled(!canPull || !canFastForwardSync)
+                    .help(canFastForwardSync ? "" : "Branch has diverged — use Pull (Merge) or Pull (Rebase)")
                 Button("Merge") { onPull(.merge) }.disabled(!canPull)
                 Button("Rebase") { onPull(.rebase) }.disabled(!canPull)
             }
@@ -179,7 +187,11 @@ struct GitBranchBar: View {
             }
             .font(.system(size: 11))
         } primaryAction: {
-            needsPublish ? onPush() : onSync(.fastForwardOnly)
+            if needsPublish {
+                onPush()
+            } else if canFastForwardSync {
+                onSync(.fastForwardOnly)
+            }
         }
         .menuStyle(.button)
         .buttonStyle(.bordered)
@@ -192,6 +204,7 @@ struct GitBranchBar: View {
 
     private var syncHelp: String {
         if needsPublish { return "Publish the current branch to its remote" }
+        if !canFastForwardSync { return "Branch has diverged — use Pull (Merge) or Pull (Rebase)" }
         if !canChangeWorkingTree { return "Save the open file before you synchronize" }
         return "Synchronize: pull, then push"
     }
