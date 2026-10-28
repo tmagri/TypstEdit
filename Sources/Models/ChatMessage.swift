@@ -53,6 +53,13 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var toolOutput: String? = nil
 }
 
+/// Typed actions keep publishing approval independent of the displayed label.
+enum GitNetworkAction: String, CaseIterable {
+    case fetch = "Fetch"
+    case pull = "Pull (fast-forward only)"
+    case push = "Push"
+}
+
 /// What's being asked of the user before a tool call is allowed to proceed.
 /// The chat's agentic loop blocks on this — see `AIChatManager.pendingApproval`.
 enum PendingApprovalKind {
@@ -76,6 +83,28 @@ enum PendingApprovalKind {
     /// Creating a folder (for an empty delivery/evidence folder, or before
     /// copying into it).
     case createFolder(relativePath: String)
+    /// Staging or unstaging files through `git_stage`. Contents never change,
+    /// but the index does, so the exact paths are shown.
+    case gitStage(paths: [String], stage: Bool)
+    /// A `git_commit` request: the message that will be recorded, the files
+    /// that go into the commit, and the branch. `stageAll` means the listed
+    /// files are also staged first (they include untracked files).
+    case gitCommit(message: String, files: [String], branch: String, stageAll: Bool)
+    /// A network Git action (`git_fetch`/`git_pull`/`git_push`). Shown with
+    /// the branch and upstream so a push is never a surprise.
+    case gitNetwork(operation: GitNetworkAction, branch: String, upstream: String?)
+
+    /// Publishing always requires a human review. YOLO can automate local
+    /// commits or permitted pulls, but it must never auto-approve a push.
+    func canAutoApprove(yoloMode: Bool) -> Bool {
+        if case .gitNetwork(let operation, _, _) = self {
+            switch operation {
+            case .push: return false
+            case .fetch, .pull: return yoloMode
+            }
+        }
+        return yoloMode
+    }
 }
 
 struct PendingApproval: Identifiable {

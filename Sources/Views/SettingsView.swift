@@ -1018,6 +1018,7 @@ struct AISettingsView: View {
                 Label("run_typst_check — compiles a snippet, or an existing file in place, to check for errors", systemImage: "checkmark.seal").font(.caption)
                 Label("update_plan — a visible task list for multi-step jobs", systemImage: "checklist").font(.caption)
                 Label("delegate_task — a read-only subagent for large research jobs", systemImage: "person.2").font(.caption)
+                Label("git_status, git_diff, git_log, git_stage, git_commit, and — separately opt-in — git_fetch, git_pull, git_push (see Git Tools below)", systemImage: "arrow.triangle.branch").font(.caption)
             }
             .foregroundColor(.secondary)
 
@@ -1252,6 +1253,54 @@ struct AISettingsView: View {
                 Text("Defaults: 24 for the main chat, 12 for the read-only delegate_task subagent. Positive values are capped at 500; 0 removes the limit entirely — a model that keeps calling tools will keep going until it answers or you press Stop.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+            }
+        }
+
+        SettingsCard(
+            title: "Git Tools",
+            icon: "arrow.triangle.branch",
+            description: "Off by default: many people don't want an assistant touching their repository. When on, the chat can read Git state (git_status, git_diff, git_log) and — with an approval every time — stage files and create commits. Git tools work only when the open project folder is the repository root, so they never touch a repository you did not open."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Allow AI Chat to use Git", isOn: $settings.chatGitToolsEnabled)
+                    .font(.body.weight(.medium))
+
+                if settings.chatGitToolsEnabled {
+                    Text("Read-only tools need no approval. git_stage and git_commit show you the exact paths and message and wait for your approval (unless YOLO mode is on). The AI cannot discard changes, switch branches, rebase, reset, rewrite history, or force-push.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+
+                    Divider()
+
+                    Text("git_commit requires a message and creates a local commit only. It never pulls or pushes.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Toggle("Allow AI Git Fetch", isOn: $settings.chatGitFetchEnabled)
+                        .font(.body.weight(.regular))
+                        .padding(.leading, 18)
+                    Text("Download remote changes without updating local files. Off by default.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 38)
+
+                    Toggle("Allow AI Git Pull", isOn: $settings.chatGitPullEnabled)
+                        .font(.body.weight(.regular))
+                        .padding(.leading, 18)
+                    Text("Allow fast-forward pulls. This permission does not allow Push. YOLO mode can auto-approve a permitted pull.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 38)
+
+                    Toggle("Allow AI Git Push (always ask)", isOn: $settings.chatGitPushEnabled)
+                        .font(.body.weight(.regular))
+                        .padding(.leading, 18)
+                    Text("Allow the AI to request publishing commits. Every push requires your approval, even in YOLO mode. Leave this off to review and push manually from Source Control.")
+                        .font(.caption)
+                        .foregroundColor(settings.chatGitPushEnabled ? .orange : .secondary)
+                        .padding(.leading, 38)
+                }
             }
         }
 

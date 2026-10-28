@@ -99,6 +99,46 @@ Pull, sync, checkout, stash, merge, and similar actions can change files on disk
 
 TypstEdit blocks actions that rewrite files while the open file has unsaved edits. Save the file to enable these actions.
 
+## AI Chat and Git
+
+AI Chat can use the same repository as this panel, but only if you allow it. Git tools are off by default.
+
+1. Open **Settings → AI Chat → Git Tools**.
+2. Turn on **Allow AI Chat to use Git**.
+3. If you want the AI to download remote state, turn on **Allow AI Git Fetch**.
+4. If you want the AI to update local files, turn on **Allow AI Git Pull**.
+5. If you want the AI to request publishing, turn on **Allow AI Git Push (always ask)**.
+
+These permissions are independent and off by default. You can enable local commits or Pull while leaving Push off.
+
+`git_commit` requires a non-empty `message`. It creates a local commit only; it does not pull or push.
+
+To review before publishing, leave Push off and use the Source Control panel to push manually. If you enable Push, every request still waits for approval, even in YOLO mode.
+
+AI Push publishes only the reviewed commit to the selected upstream. If the branch, commits, or destination change during review, it stops. Other branches and tags are not included.
+
+| Tool | What it does | Approval |
+|---|---|---|
+| `git_status` | Branch, upstream, ahead/behind, staged, unstaged, untracked, conflicts, operation in progress. | No |
+| `git_diff` | Unified diff for the saved files. Staged or unstaged. | No |
+| `git_log` | Recent commits with hash, author, date and subject. | No |
+| `git_stage` | Stage or unstage the paths it names. File contents do not change. | Every call |
+| `git_commit` | Create a local commit with a message. Never pushes. | Every call |
+| `git_fetch` | Download remote changes. | Separate Fetch permission; asks unless YOLO is on |
+| `git_pull` | Fast-forward only. Fails if the branch has diverged. | Separate Pull permission; asks unless YOLO is on |
+| `git_push` | Push to the existing upstream. Never force-pushes. | Separate Push permission; always asks, including in YOLO mode |
+
+Rules that always apply:
+
+- The tools work only when the open project folder **is** the repository root. If you open a subfolder of a larger repository, AI Chat gets no Git tools.
+- Paths must be relative and inside the project. Absolute paths, `..` and names that start with `-` are refused.
+- The assistant cannot discard changes, switch branches, rebase, reset, rewrite history, force-push, or set a new upstream. Use this panel for those actions.
+- A commit contains saved files only. Unsaved editor changes are not included.
+- YOLO mode can approve local commits, Fetch, and Pull only if their permissions are enabled. It never enables permissions or approves Push.
+- Turning off a permission while an approval card is open prevents the action, even if you then click **Approve**.
+
+If you turn the tools off, the assistant cannot call them, even if an earlier message in the conversation asked for a Git action.
+
 ## Refresh
 
 The panel refreshes after Git actions, project saves, and file operations. It also refreshes when the app becomes active.

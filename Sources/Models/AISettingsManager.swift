@@ -378,6 +378,35 @@ class AISettingsManager: ObservableObject {
     /// destination server sees), so it's off by default like the Python tool,
     /// with a per-call URL approval on every fetch.
     @AppStorage("aiChatWebFetchEnabled") var chatWebFetchEnabled: Bool = false
+    /// Extra opt-in for the Git tools. Off by default: many people don't want
+    /// an assistant touching their repository at all. When on, AI Chat can
+    /// read Git state (status/diff/log) and — with a per-call approval —
+    /// stage and commit. Every tool works only when the open project folder
+    /// is the repository root, and nothing here force-pushes, rebases or
+    /// rewrites history.
+    @AppStorage("aiChatGitToolsEnabled") var chatGitToolsEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    /// Remote actions have independent, off-by-default permissions. The old
+    /// combined network preference never grants these new permissions.
+    @AppStorage("aiChatGitFetchEnabled") var chatGitFetchEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    @AppStorage("aiChatGitPullEnabled") var chatGitPullEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    /// Enabling Push lets the AI request it, not publish automatically.
+    /// Every push requires explicit approval, even in YOLO mode.
+    @AppStorage("aiChatGitPushEnabled") var chatGitPushEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+
+    var chatGitPermissions: GitToolPermissions {
+        GitToolPermissions(enabled: chatGitToolsEnabled,
+                           fetchEnabled: chatGitFetchEnabled,
+                           pullEnabled: chatGitPullEnabled,
+                           pushEnabled: chatGitPushEnabled)
+    }
     /// Optional comma-separated allowlist for `web_fetch` (`"typst.app,
     /// *.wikipedia.org"`), mirroring Claude Code's `WebFetch(domain:…)` rules.
     /// Empty = any public domain; the SSRF guard (private/loopback addresses

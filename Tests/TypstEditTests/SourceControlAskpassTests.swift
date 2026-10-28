@@ -177,36 +177,45 @@ final class SourceControlAskpassTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 10, "the hung process is killed, not awaited")
     }
 
-    /// A script that outlives the timeout but touches the askpass heartbeat
-    /// file (as the credential dialog would) must finish: every touch
-    /// restarts the countdown.
+    /// A script that outlives the timeout but receives askpass heartbeats (as
+    /// the credential dialog would) must finish: every touch restarts the
+    /// countdown. The test touches the heartbeat itself, so the result does
+    /// not depend on how precisely the machine can sleep.
     func testNetworkTimeoutRestartsWhileAskpassHeartbeatIsTouched() async throws {
         let dir = try makeTempDir()
         let activity = dir.appendingPathComponent("askpass-activity")
+        let done = dir.appendingPathComponent("done")
         let slow = dir.appendingPathComponent("slow-with-heartbeat.sh")
-        // Sleeps past the 1 s timeout, but touches the heartbeat at ~0.6 s,
-        // then finishes at ~1.4 s — beyond the original deadline.
+        // Runs until the test creates `done`, well past the 2 s timeout.
         try """
         #!/bin/sh
-        /bin/sleep 0.6
-        printf '%s\\n' "$$" > "\(activity.path)" 2>/dev/null || :
-        /bin/sleep 0.8
+        while [ ! -f "\(done.path)" ]; do /bin/sleep 0.05; done
         exit 0
         """
             .write(to: slow, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slow.path)
 
-        let start = Date()
         let network = NetworkGitRunner(
             runner: GitRunner(executableURL: slow),
-            timeout: 1.0,
+            timeout: 2.0,
             askpassActivityURL: activity
         )
-        let result = try await network.run([], in: dir)
+        let start = Date()
+        let runTask = Task {
+            try await network.run([], in: dir)
+        }
+        // 12 touches x 0.25 s = ~3 s of dialog time, past the 2 s deadline.
+        // A gap would have to exceed 2 s for this test to fail spuriously.
+        for touch in 0..<12 {
+            try Data("\(touch)\n".utf8).write(to: activity)
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        try Data().write(to: done)
+        let result = try await runTask.value
         XCTAssertEqual(result.exitCode, 0, "the heartbeat restarts the timeout, so the command completes")
         let elapsed = Date().timeIntervalSince(start)
-        XCTAssertGreaterThan(elapsed, 1.0, "the script really ran past the original deadline")
-        XCTAssertLessThan(elapsed, 10)
+        XCTAssertGreaterThan(elapsed, 2.0, "the script really ran past the original deadline")
+        XCTAssertLessThan(elapsed, 20)
     }
 
     /// The same long script without a watched heartbeat still times out.

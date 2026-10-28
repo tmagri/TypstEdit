@@ -71,7 +71,7 @@ struct AIChatView: View {
             Button("Cancel", role: .cancel) {}
             Button("Enable", role: .destructive) { chat.yoloMode = true }
         } message: {
-            Text("Every file write, edit, and Python run will execute without asking you first for the rest of this app session. The AI can still only touch files inside this project/notebook. YOLO turns itself off when TypstEdit restarts.")
+            Text("File writes, edits, Python runs, and permitted Git actions (stage, commit, fetch, pull) will execute without asking you first for this app session. Push always requires your approval. YOLO does not enable Git permissions. The AI remains limited to this project/notebook, and Git tools require the repository root. YOLO turns itself off when TypstEdit restarts.")
         }
     }
 
@@ -556,6 +556,55 @@ struct AIChatView: View {
                 .padding(6)
                 .background(Color.black.opacity(0.06))
                 .cornerRadius(6)
+
+            case .gitStage(let paths, let stage):
+                HStack(spacing: 6) {
+                    Image(systemName: "tray.and.arrow.down").foregroundColor(.orange)
+                    Text("\(stage ? "Stage" : "Unstage") \(paths.count) file\(paths.count == 1 ? "" : "s")?").font(.subheadline.bold())
+                }
+                gitPathList(paths)
+                Text("Only the index changes; file contents are not touched.")
+                    .font(.caption2).foregroundColor(.secondary)
+
+            case .gitCommit(let message, let files, let branch, let stageAll):
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.branch").foregroundColor(.orange)
+                    Text("Commit \(files.count) file\(files.count == 1 ? "" : "s") on '\(branch)'?").font(.subheadline.bold())
+                }
+                if stageAll {
+                    Text("These files are staged first, including untracked files:")
+                        .font(.caption2).foregroundColor(.secondary)
+                } else {
+                    Text("Staged files:").font(.caption2).foregroundColor(.secondary)
+                }
+                gitPathList(files)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Message").font(.caption2).foregroundColor(.secondary)
+                    Text(message)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+                Text("This creates a local commit. It does not push.")
+                    .font(.caption2).foregroundColor(.secondary)
+
+            case .gitNetwork(let operation, let branch, let upstream):
+                HStack(spacing: 6) {
+                    Image(systemName: operation == .push ? "arrow.up.circle" : "arrow.down.circle")
+                        .foregroundColor(operation == .push ? .red : .orange)
+                    Text("\(operation.rawValue) '\(branch)'?").font(.subheadline.bold())
+                }
+                if let upstream {
+                    Text("Upstream: \(upstream)")
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                }
+                Text(gitNetworkWarning(operation))
+                    .font(.caption2)
+                    .foregroundColor(operation == .push ? .red : .secondary)
             }
 
             HStack {
@@ -605,6 +654,42 @@ struct AIChatView: View {
                 .strikethrough()
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.red.opacity(0.1))
+        }
+    }
+
+    /// Paths for the Git approval cards, capped so a huge staging request
+    /// cannot make the card unusable.
+    @ViewBuilder
+    private func gitPathList(_ paths: [String]) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(paths.prefix(25)), id: \.self) { path in
+                    Text(path)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                if paths.count > 25 {
+                    Text("… and \(paths.count - 25) more")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .frame(maxHeight: 120)
+        .padding(8)
+        .background(Color.black.opacity(0.06))
+        .cornerRadius(6)
+    }
+
+    private func gitNetworkWarning(_ operation: GitNetworkAction) -> String {
+        switch operation {
+        case .push:
+            return "Review before publishing: this sends local commits to the upstream. Your approval is required even in YOLO mode. It never force-pushes."
+        case .fetch:
+            return "Downloads remote changes without touching your branches or files."
+        case .pull:
+            return "Fast-forward only: if your branch and the remote have diverged, this fails instead of creating a merge. Files it updates are reloaded in open editors."
         }
     }
 
@@ -789,8 +874,8 @@ struct AIChatView: View {
         .buttonStyle(.plain)
         .foregroundColor(chat.yoloMode ? .red : .secondary)
         .help(chat.yoloMode
-              ? "YOLO mode is ON — every write, edit, and code run is auto-approved for this session. Click to turn off."
-              : "YOLO mode: auto-approve every write, edit, and code run for the rest of this session (still limited to this project/notebook).")
+              ? "YOLO mode is ON — writes, edits, code runs, and permitted local Git actions/pulls are auto-approved. Push still asks. Click to turn off."
+              : "YOLO mode: auto-approve writes, edits, code runs, and permitted local Git actions/pulls for this session. Push always asks.")
     }
 
     private func send() {
