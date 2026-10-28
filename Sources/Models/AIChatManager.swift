@@ -82,6 +82,8 @@ final class AIChatManager: ObservableObject {
     @Published var ragToolEnabled: Bool = AISettingsManager.shared.chatRAGToolEnabledDefault
 
     private let localTools = LocalToolExecutor()
+    /// The document in the active editor tab, if any.
+    private var openFileURL: URL?
     private var persistenceURL: URL?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
     /// The child task running the current generation turn (model request,
@@ -122,6 +124,9 @@ final class AIChatManager: ObservableObject {
     // MARK: - Context Switching
 
     func updateContext(projectRoot: URL?, currentFileURL: URL?) {
+        // Tracked on every call (the active tab changes far more often than
+        // the scope), so the prompt can say which document is open.
+        openFileURL = currentFileURL
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
@@ -361,11 +366,13 @@ final class AIChatManager: ObservableObject {
         - If you're not confident of Typst's exact syntax for something (bold, headings, lists, links, tables, math), write it in Markdown and run it through convert_markdown_to_typst first rather than guessing at delimiters. Use run_typst_check on a snippet (or an existing path) any time you want to double-check before or after writing.
         - For a finished document or handoff package, use the export tools instead of Python: export_document compiles to PDF/PNG/SVG, export_markdown writes a .md copy with the editor's own converter, create_folder makes a delivery folder, and copy_files gathers related files/evidence into it in one approved batch. A typical request ("make a deploy folder with the PDF, a Markdown copy and related evidence") is: create_folder, export_document, export_markdown, then copy_files for the evidence — all inside the current scope.
         - Use grep_project for exact lookups (a symbol, a phrase, a heading) before reading whole files, and read_file's offset/limit to page through a large document instead of pulling it in at once.
-        - To restructure, reorganize or review a long document, work in this order: (1) read_file with outline: true to map it; (2) write the target structure into update_plan, one item per section or move; (3) read and change one section at a time, using the outline's line ranges as offset/limit; (4) check that the edit's compile result is clean. Don't page through a whole long file just to learn how it's organized.
+        - To restructure, reorganize or review a long document, work in this order: (1) read_file with outline: true to map it; (2) write the target structure into update_plan, one item per section or move; (3) read and change one section at a time, using the outline's line ranges as offset/limit — move whole sections (into an appendix, for example) with move_lines instead of retyping them through edit_file, and work from the bottom of the file up so earlier line numbers stay valid; (4) check that the edit's compile result is clean. Don't page through a whole long file just to learn how it's organized.
         - Use evaluate_math for exact or approximate math. It returns plain text and Typst math. Do not use Python for arithmetic or algebra.
-        - For a job with several distinct steps, call update_plan first and keep it current. When a CURRENT PLAN is shown below, continue from it rather than starting over.
+        - For a job with several distinct steps, call update_plan first and keep it current. The plan must cover the whole request — every file and part the user mentions, not only the first one. When a CURRENT PLAN is shown below, continue from it rather than starting over.
+        - If you can't finish everything in this reply, end with what is done and what is still left (for example, a file you didn't get to), so the user can ask you to continue.
         - When a WORK LOG is shown below, use it to go straight to the right file and line range. Don't repeat a read or search you've already made in this request unless something has changed since — use what it returned.
         - If understanding a large document or several files would flood this conversation, use delegate_task: a read-only subagent explores and reports back just the facts and quotes you ask for.
+        - When the same file name exists in more than one place, work on the one the user means: the file open in the editor, or the one at the top of the project — not a copy under backups/, deploy/ or an export folder. Say which path you changed.
         - Explain briefly what you're about to do before calling a tool that changes anything.
         - Chat replies are shown as plain text to the user, not inserted into the document. Only change files when asked to.
         - Always finish with a written answer, even after a long run of tool calls that didn't find anything — never stop silently. If a search came up empty, say so directly instead of leaving your reply blank.
@@ -374,6 +381,9 @@ final class AIChatManager: ObservableObject {
 
         Current scope: \(scopeLabel)
         """
+        if let openFile = Self.relativeOpenFilePath(openFileURL, root: localTools.scope.root) {
+            systemPrompt += "\nOpen in the editor: \(openFile)"
+        }
         // Working memory: the plan and a log of earlier tool calls go into
         // every turn's prompt. Earlier turns' tool output isn't re-sent (see
         // `buildPrompt`), so without these the model starts each follow-up
@@ -415,7 +425,9 @@ final class AIChatManager: ObservableObject {
             let result = try await AICompletionService.shared.fetchCompletionWithTools(
                 prompt: prompt,
                 systemPrompt: systemPrompt,
-                maxTokens: AISettingsManager.shared.maxTokens,
+                maxTokens: AISettingsManager.shared.effectiveChatMaxTokens,
+                maxTokensCeiling: AISettingsManager.shared.chatMaxTokensCeiling,
+                hasActivePlan: plan.contains { $0.status != .completed },
                 tools: tools,
                 maxTurns: maxTurns,
                 onToolRefused: { [weak self] name, arguments, note in
@@ -454,6 +466,16 @@ final class AIChatManager: ObservableObject {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// `file` relative to `root`, or `nil` when there's no file or it lies
+    /// outside the scope (the model can't open it with its tools anyway).
+    nonisolated static func relativeOpenFilePath(_ file: URL?, root: URL?) -> String? {
+        guard let file, let root else { return nil }
+        let filePath = file.standardizedFileURL.resolvingSymlinksInPath().path
+        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+        guard filePath.hasPrefix(rootPath + "/") else { return nil }
+        return String(filePath.dropFirst(rootPath.count + 1))
     }
 
     /// Cancels the in-flight generation, if any: the child turn task
@@ -732,8 +754,9 @@ final class AIChatManager: ObservableObject {
         }
     }
 
-    /// Adds a transcript row for a call the repeat guard refused, so the
-    /// trace shows it instead of silently dropping it. Nothing ran, so the
+    /// Adds a transcript row for a call the loop did not run (an identical
+    /// repeat, or cut-off arguments), so the trace shows it instead of
+    /// silently dropping it. Nothing ran, so the
     /// row goes straight to `.skipped` with the note the model received.
     private func recordSkippedToolCall(qualifiedName: String, argumentsJSON: String, note: String, isSubagent: Bool) {
         messages.append(ChatMessage(
@@ -886,7 +909,8 @@ final class AIChatManager: ObservableObject {
         return try await AICompletionService.shared.fetchCompletionWithTools(
             prompt: prompt,
             systemPrompt: systemPrompt,
-            maxTokens: AISettingsManager.shared.maxTokens,
+            maxTokens: AISettingsManager.shared.effectiveChatMaxTokens,
+            maxTokensCeiling: AISettingsManager.shared.chatMaxTokensCeiling,
             tools: subTools,
             maxTurns: subagentMaxTurns,
             onToolRefused: { [weak self] name, arguments, note in

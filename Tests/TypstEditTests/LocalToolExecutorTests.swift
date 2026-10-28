@@ -113,6 +113,28 @@ final class LocalToolExecutorTests: XCTestCase {
         }
     }
 
+    func testMoveLinesRequiresAReadThenMovesAndKeepsCRLF() async throws {
+        try write("doc.typ", "= Design\r\nA\r\n= Transform\r\nT\r\n= Appendix\r\n")
+        let args: [String: Any] = ["path": "doc.typ", "start_line": 3, "end_line": 4, "before_line": 6, "start_text": "= Transform"]
+        await assertThrows({ if case .fileNotReadYet = $0 { return true }; return false }) {
+            try await self.run("move_lines", args)
+        }
+        _ = try await run("read_file", ["path": "doc.typ"])
+        let out = try await run("move_lines", args)
+        XCTAssertTrue(out.contains("Moved lines 3-4 (2 lines)"), out)
+        XCTAssertTrue(out.contains("now start at line 4"), out)
+        XCTAssertEqual(try read("doc.typ"), "= Design\r\nA\r\n= Appendix\r\n= Transform\r\nT\r\n")
+    }
+
+    func testMoveLinesDeniedLeavesFileAlone() async throws {
+        try write("doc.typ", "a\nb\nc\n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+        await assertThrows({ if case .approvalDenied = $0 { return true }; return false }) {
+            try await self.run("move_lines", ["path": "doc.typ", "start_line": 1, "end_line": 1, "before_line": 4, "start_text": "a"], approve: false)
+        }
+        XCTAssertEqual(try read("doc.typ"), "a\nb\nc\n")
+    }
+
     func testOffsetPastEndExplainsInsteadOfCrashing() async throws {
         try write("short.typ", "a\nb")
         let out = try await run("read_file", ["path": "short.typ", "offset": 99])

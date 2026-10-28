@@ -235,6 +235,22 @@ final class LocalToolExecutor {
                     "required": ["path", "old_string", "new_string"]
                 ]
             ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "move_lines",
+                description: "Move a block of lines to another place in the same file without retyping it — the cheap, exact way to restructure a document, such as moving a section into an appendix. Lines are numbered the way read_file and its outline show them. The file must have been read in this request, and start_text must be the exact text of start_line, as a check that the numbers still match the file. The user reviews a diff and approves before anything is written.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
+                        "start_line": ["type": "integer", "description": "First line of the block (1-based)."],
+                        "end_line": ["type": "integer", "description": "Last line of the block (inclusive)."],
+                        "before_line": ["type": "integer", "description": "The block is inserted immediately before this line, numbered as the file is now. Use the file's last line number + 1 to move the block to the end."],
+                        "start_text": ["type": "string", "description": "The exact text of start_line (leading/trailing spaces ignored)."]
+                    ],
+                    "required": ["path", "start_line", "end_line", "before_line", "start_text"]
+                ]
+            ))
             if ragToolEnabled {
                 tools.append(MCPTool(
                     serverName: Self.namespace,
@@ -424,6 +440,7 @@ final class LocalToolExecutor {
         case "read_skill_file": return try readSkillFile(arguments)
         case "grep_project": return try await grepProject(arguments)
         case "edit_file": return try await editFile(arguments, requestApproval: requestApproval)
+        case "move_lines": return try await moveLines(arguments, requestApproval: requestApproval)
         case "search_project": return await searchProject(arguments)
         case "write_file": return try await writeFile(arguments, requestApproval: requestApproval)
         case "run_typst_check": return await runTypstCheck(arguments)
@@ -886,6 +903,86 @@ final class LocalToolExecutor {
         let what = occurrences == 1 ? "1 place" : "\(occurrences) places"
         let summary = "Edited '\(path)': replaced \(what) with \(newNormalized.count) character\(newNormalized.count == 1 ? "" : "s") of new text."
         return summary + (await validationNote(for: url, path: path))
+    }
+
+    private func moveLines(_ arguments: [String: Any], requestApproval: @escaping (PendingApprovalKind) async -> Bool) async throws -> String {
+        guard let path = arguments["path"] as? String,
+              let start = Self.intValue(arguments["start_line"]),
+              let end = Self.intValue(arguments["end_line"]),
+              let before = Self.intValue(arguments["before_line"]),
+              let startText = arguments["start_text"] as? String else {
+            throw LocalToolError.invalidArguments("path, start_line, end_line, before_line and start_text are required")
+        }
+        let url = try resolvePath(path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw LocalToolError.fileNotFound(path)
+        }
+        try requireFreshRead(of: url, path: path, tool: "move_lines")
+
+        let data = try Data(contentsOf: url)
+        // The approval shows a whole-file diff, so the same cap as write_file.
+        guard data.count <= maxReadableBytes else { throw LocalToolError.fileTooLarge(path) }
+        let decoded = TextFileEncoding.decode(data)
+        let usesCRLF = decoded.text.contains("\r\n")
+        let normalized = decoded.text.replacingOccurrences(of: "\r\n", with: "\n")
+        let moved = try Self.movingLines(in: normalized, start: start, end: end, before: before, startText: startText)
+
+        let approved = await requestApproval(.fileWrite(
+            relativePath: path,
+            oldContent: normalized,
+            newContent: moved.text,
+            isNewFile: false
+        ))
+        guard approved else { throw LocalToolError.approvalDenied }
+
+        let finalText = usesCRLF ? moved.text.replacingOccurrences(of: "\n", with: "\r\n") : moved.text
+        try Self.write(text: finalText, to: url, originalData: data, encoding: decoded.encoding)
+        readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+        Self.notifyFileChangedOnDisk(url)
+
+        let count = end - start + 1
+        let summary = "Moved lines \(start)-\(end) (\(count) line\(count == 1 ? "" : "s")) of '\(path)'; they now start at line \(moved.newStart). Line numbers between the old and new place have shifted — use these, or read the file again, before moving anything else."
+        return summary + (await validationNote(for: url, path: path))
+    }
+
+    /// The pure part of `move_lines`: `text` with lines `start...end`
+    /// (1-based, inclusive) moved to just before line `before`, and the
+    /// block's new first line number. A trailing newline isn't counted as an
+    /// extra line to move, and is kept.
+    static func movingLines(in text: String, start: Int, end: Int, before: Int, startText: String) throws -> (text: String, newStart: Int) {
+        let endsWithNewline = text.hasSuffix("\n")
+        var lines = text.components(separatedBy: "\n")
+        if endsWithNewline { lines.removeLast() }
+        let total = lines.count
+        // read_file counts the empty line after a final newline, so "its
+        // line count + 1" also means the end of the file.
+        let before = (endsWithNewline && before == total + 2) ? total + 1 : before
+        // Likewise an end_line of read_file's count means the last real line.
+        let end = (endsWithNewline && end == total + 1 && start <= total) ? total : end
+
+        guard start >= 1, end >= start, end <= total else {
+            throw LocalToolError.invalidArguments("start_line/end_line must be within 1-\(total), with start_line ≤ end_line.")
+        }
+        guard before >= 1, before <= total + 1 else {
+            throw LocalToolError.invalidArguments("before_line must be within 1-\(total + 1) (\(total + 1) = the end of the file).")
+        }
+        guard before <= start || before > end + 1 else {
+            throw LocalToolError.invalidArguments("before_line \(before) is inside or right after the block \(start)-\(end), so nothing would move. Pick a line outside the block.")
+        }
+        let actual = lines[start - 1]
+        guard actual.trimmingCharacters(in: .whitespaces) == startText.trimmingCharacters(in: .whitespaces) else {
+            let shown = actual.count > 120 ? String(actual.prefix(120)) + "…" : actual
+            throw LocalToolError.invalidArguments("Line \(start) is \"\(shown)\", not the start_text you gave. Line numbers have probably shifted after an earlier edit — read the file again (outline: true is enough to find a section) and retry with current numbers.")
+        }
+
+        let block = Array(lines[(start - 1)...(end - 1)])
+        lines.removeSubrange((start - 1)...(end - 1))
+        let insertAt = before > end ? before - 1 - block.count : before - 1
+        lines.insert(contentsOf: block, at: insertAt)
+
+        var result = lines.joined(separator: "\n")
+        if endsWithNewline { result += "\n" }
+        return (result, insertAt + 1)
     }
 
     private static func occurrenceCount(of needle: String, in haystack: String) -> Int {

@@ -491,6 +491,40 @@ class AISettingsManager: ObservableObject {
         chatSubagentMaxTurns <= 0 ? nil : min(chatSubagentMaxTurns, 500)
     }
 
+    // MARK: - AI Chat Reply Size
+
+    /// Output-token cap for each AI Chat (and subagent) reply. Hidden
+    /// reasoning counts against the same cap, so the 2,048 that suits an AI
+    /// Prompt insertion leaves an agent nothing to answer or call tools
+    /// with. 0 = automatic: 16,384, or the global Max Tokens if higher.
+    @AppStorage("aiChatMaxTokens") var chatMaxTokens: Int = 0 {
+        willSet { objectWillChange.send() }
+    }
+    /// When a reply is cut off by the cap, retry it with a doubled cap (up to
+    /// four times the starting cap), instead of treating it as empty or
+    /// running a half-written tool call.
+    @AppStorage("aiChatTokenLimitRetry") var chatTokenLimitRetryEnabled: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+
+    static let automaticChatMaxTokens = 16_384
+    /// Upper bound for the cap and its retries.
+    static let maxChatReplyTokens = 131_072
+
+    var effectiveChatMaxTokens: Int {
+        if chatMaxTokens > 0 {
+            return min(max(chatMaxTokens, 1_024), Self.maxChatReplyTokens)
+        }
+        return min(max(Self.automaticChatMaxTokens, maxTokens), Self.maxChatReplyTokens)
+    }
+
+    /// Largest cap a cut-off reply may be retried with, or `nil` when
+    /// retrying is off.
+    var chatMaxTokensCeiling: Int? {
+        guard chatTokenLimitRetryEnabled else { return nil }
+        return min(effectiveChatMaxTokens * 4, Self.maxChatReplyTokens)
+    }
+
     // MARK: - Loop Protection
 
     /// How many times an identical read or search may run, with nothing

@@ -1308,9 +1308,35 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
+            title: "Reply Size",
+            icon: "text.append",
+            description: "The most tokens one AI Chat reply may use. Reasoning models spend their hidden thinking from the same budget, so a small cap can leave nothing for the answer or a tool call: the reply comes back empty, or a tool call is cut off halfway. With retrying on, a reply cut off by the cap is sent again with twice the cap, up to four times the setting."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Text("Max reply tokens")
+                        .font(.caption)
+                    TextField("0", value: $settings.chatMaxTokens, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                    Text("tokens (0 = automatic: \(AISettingsManager.automaticChatMaxTokens), or Max Tokens if higher)")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                Toggle("Retry a cut-off reply with a larger cap", isOn: $settings.chatTokenLimitRetryEnabled)
+                    .font(.caption)
+
+                Text("Now using \(settings.effectiveChatMaxTokens) tokens\(settings.chatMaxTokensCeiling.map { ", retrying up to \($0)" } ?? ""). This is separate from Max Tokens, which still sizes AI Prompt insertions. If a provider refuses a raised cap, the chat goes back to the last cap it accepted.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+
+        SettingsCard(
             title: "Loop Protection",
             icon: "arrow.uturn.backward.circle",
-            description: "Keeps a long tool-calling run from going in circles. An identical read or search that runs again with nothing edited in between is marked as a repeat, and after the limit it is not run at all: the assistant is told to use what it already has, and the chat shows the call as \"repeat — not run\". After a run of rounds that only read and search, the assistant is told to act or answer. Near the turn limit, it is warned so it writes an answer instead of running out mid-task. Each setting also applies to the read-only subagent. 0 turns a setting off."
+            description: "Keeps a long tool-calling run from going in circles. An identical read or search that runs again with nothing edited in between is marked as a repeat, and after the limit it is not run at all: the assistant is told to use what it already has, and the chat shows the call as \"not run\". After a run of rounds that only read and search, the assistant is told to act or answer. Near the turn limit, it is warned so it writes an answer instead of running out mid-task. Each setting also applies to the read-only subagent. 0 turns a setting off."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {

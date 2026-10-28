@@ -407,7 +407,7 @@ struct AIChatView: View {
                         .font(.caption.monospaced())
                         .foregroundColor(message.isSubagent || message.toolStatus == .skipped ? .secondary : .primary)
                     if message.toolStatus == .skipped {
-                        Text("repeat — not run")
+                        Text("not run")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -496,8 +496,8 @@ struct AIChatView: View {
         case .skipped:
             Image(systemName: "arrow.uturn.backward.circle.fill")
                 .foregroundColor(.secondary)
-                .help("Not run — an identical repeat of an earlier call")
-                .accessibilityLabel("Skipped repeat")
+                .help("Not run — expand the row to see why")
+                .accessibilityLabel("Not run")
         case nil: Image(systemName: "wrench.and.screwdriver").foregroundColor(.secondary)
         }
     }

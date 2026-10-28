@@ -142,6 +142,7 @@ enum AgentHarnessTools {
     /// ones (old_string, new_string, content, code, items) are left out.
     private static let workLogArgumentKeys = [
         "path", "outline", "pattern", "glob", "query", "url", "offset", "limit",
+        "start_line", "end_line", "before_line",
         "source", "output", "format", "destination", "files", "sources", "task", "message"
     ]
 
@@ -183,7 +184,7 @@ enum AgentHarnessTools {
         case .denied: return "declined by the user"
         case .cancelled: return "stopped before it finished"
         case .running: return "still running"
-        case .skipped: return "not run (identical repeat)"
+        case .skipped: return "not run"
         case .succeeded, .none: break
         }
         let lines = output.components(separatedBy: "\n")

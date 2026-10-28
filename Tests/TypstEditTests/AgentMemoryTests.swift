@@ -298,7 +298,7 @@ final class AgentWorkingMemoryTests: XCTestCase {
         ]))
         XCTAssertEqual(log.components(separatedBy: "\n").count, 1)
         XCTAssertFalse(log.contains("Not run"))
-        XCTAssertEqual(AgentHarnessTools.workLogOutcome(status: .skipped, output: ""), "not run (identical repeat)")
+        XCTAssertEqual(AgentHarnessTools.workLogOutcome(status: .skipped, output: ""), "not run")
     }
 
     func testToolStatusDecodingToleratesUnknownValues() throws {
@@ -438,5 +438,172 @@ final class ToolOutputDigestElisionTests: XCTestCase {
         await AICompletionService.elideOldToolOutputs(in: &messages, charBudget: 100, compressor: nil, keepRate: 0.5)
         guard case .toolResult(let again) = messages[2] else { return XCTFail() }
         XCTAssertEqual(again.output, first.output)
+    }
+}
+
+// MARK: - Reply Token Limit
+
+final class ReplyTokenLimitTests: XCTestCase {
+
+    private func call(_ args: String) -> AIToolCallRequest {
+        AIToolCallRequest(id: "1", name: "project__edit_file", argumentsJSON: args)
+    }
+
+    func testHitTokenLimitCoversBothProviders() {
+        XCTAssertTrue(AIChatStepMeta(finishReason: "length").hitTokenLimit)
+        XCTAssertTrue(AIChatStepMeta(finishReason: "max_tokens").hitTokenLimit)
+        XCTAssertFalse(AIChatStepMeta(finishReason: "stop").hitTokenLimit)
+        XCTAssertFalse(AIChatStepMeta(finishReason: "tool_calls").hitTokenLimit)
+        XCTAssertFalse(AIChatStepMeta().hitTokenLimit)
+    }
+
+    func testTokenLimitOutcome() {
+        XCTAssertEqual(AICompletionService.tokenLimitOutcome(for: .finalText("  \n", reasoning: nil)), .emptyText)
+        XCTAssertEqual(AICompletionService.tokenLimitOutcome(for: .finalText("1. Lead each", reasoning: nil)), .truncatedText)
+        XCTAssertEqual(AICompletionService.tokenLimitOutcome(for: .toolCalls([call(#"{"path":"a"}"#)], reasoning: nil)), .completeToolCalls)
+        XCTAssertEqual(AICompletionService.tokenLimitOutcome(for: .toolCalls([call(#"{"path":"a"}"#), call(#"{"path":"a","new_str"#)], reasoning: nil)), .brokenToolCalls)
+    }
+
+    func testValidToolArguments() {
+        XCTAssertTrue(AICompletionService.isValidToolArguments(""))
+        XCTAssertTrue(AICompletionService.isValidToolArguments("{}"))
+        XCTAssertTrue(AICompletionService.isValidToolArguments(#" {"a": [1, 2]} "#))
+        XCTAssertFalse(AICompletionService.isValidToolArguments(#"{"a": "cut"#))
+        XCTAssertFalse(AICompletionService.isValidToolArguments("[1, 2]"))
+        XCTAssertFalse(AICompletionService.isValidToolArguments("null"))
+    }
+
+    func testCapDoublesUpToTheCeiling() {
+        XCTAssertEqual(AICompletionService.nextReplyTokenCap(current: 16_384, ceiling: 65_536), 32_768)
+        XCTAssertEqual(AICompletionService.nextReplyTokenCap(current: 32_768, ceiling: 50_000), 50_000)
+        XCTAssertEqual(AICompletionService.nextReplyTokenCap(current: 0, ceiling: 10), 1)
+    }
+
+    func testTokenCapRejectionDetection() {
+        XCTAssertTrue(AICompletionService.isTokenCapRejection("API Error (400): max_tokens is too large: 65536. This model supports at most 32768 completion tokens"))
+        XCTAssertTrue(AICompletionService.isTokenCapRejection("max_completion_tokens must be ≤ 16384"))
+        XCTAssertFalse(AICompletionService.isTokenCapRejection("API Error (401): invalid api key"))
+    }
+
+    func testMessagesNameTheLimit() {
+        XCTAssertTrue(AICompletionService.tokenLimitNudgeMessage(limit: 65_536).contains("65536-token"))
+        XCTAssertTrue(AICompletionService.invalidArgumentsNote(cutOffAtLimit: 2_048).contains("cut off by the 2048-token"))
+        XCTAssertTrue(AICompletionService.invalidArgumentsNote(cutOffAtLimit: nil).contains("not a valid JSON object"))
+        XCTAssertTrue(AICompletionService.cutOffAnswerNote(limit: 4_096).contains("cut off at the 4096-token"))
+    }
+
+    @MainActor
+    func testChatMaxTokensSetting() {
+        let settings = AISettingsManager.shared
+        let original = (settings.chatMaxTokens, settings.maxTokens, settings.chatTokenLimitRetryEnabled)
+        defer {
+            settings.chatMaxTokens = original.0
+            settings.maxTokens = original.1
+            settings.chatTokenLimitRetryEnabled = original.2
+        }
+        // Automatic: 16,384, or the global Max Tokens when that's higher.
+        settings.chatMaxTokens = 0
+        settings.maxTokens = 2_048
+        XCTAssertEqual(settings.effectiveChatMaxTokens, 16_384)
+        settings.maxTokens = 40_000
+        XCTAssertEqual(settings.effectiveChatMaxTokens, 40_000)
+        // Explicit values are clamped.
+        settings.chatMaxTokens = 100
+        XCTAssertEqual(settings.effectiveChatMaxTokens, 1_024)
+        settings.chatMaxTokens = 10_000_000
+        XCTAssertEqual(settings.effectiveChatMaxTokens, AISettingsManager.maxChatReplyTokens)
+        // Ceiling: 4× the cap, bounded; nil when retrying is off.
+        settings.chatMaxTokens = 16_384
+        settings.chatTokenLimitRetryEnabled = true
+        XCTAssertEqual(settings.chatMaxTokensCeiling, 65_536)
+        settings.chatMaxTokens = 100_000
+        XCTAssertEqual(settings.chatMaxTokensCeiling, AISettingsManager.maxChatReplyTokens)
+        settings.chatTokenLimitRetryEnabled = false
+        XCTAssertNil(settings.chatMaxTokensCeiling)
+    }
+
+    func testRelativeOpenFilePath() {
+        let root = URL(fileURLWithPath: "/tmp/proj", isDirectory: true)
+        XCTAssertEqual(AIChatManager.relativeOpenFilePath(URL(fileURLWithPath: "/tmp/proj/Mugs.typ"), root: root), "Mugs.typ")
+        XCTAssertEqual(AIChatManager.relativeOpenFilePath(URL(fileURLWithPath: "/tmp/proj/deploy/Mugs/Mugs.typ"), root: root), "deploy/Mugs/Mugs.typ")
+        XCTAssertNil(AIChatManager.relativeOpenFilePath(URL(fileURLWithPath: "/tmp/other/Mugs.typ"), root: root))
+        XCTAssertNil(AIChatManager.relativeOpenFilePath(nil, root: root))
+        XCTAssertNil(AIChatManager.relativeOpenFilePath(URL(fileURLWithPath: "/tmp/proj/a.typ"), root: nil))
+    }
+}
+
+// MARK: - move_lines (pure part)
+
+@MainActor
+final class MoveLinesTests: XCTestCase {
+
+    private let doc = "= Final design\nA\nB\n= Transform\nT1\nT2\n= Appendix\nZ\n"
+
+    func testMoveBlockDownToTheEnd() throws {
+        // Lines 4-6 ("= Transform" section) to the end of the file.
+        let moved = try LocalToolExecutor.movingLines(in: doc, start: 4, end: 6, before: 9, startText: "= Transform")
+        XCTAssertEqual(moved.text, "= Final design\nA\nB\n= Appendix\nZ\n= Transform\nT1\nT2\n")
+        XCTAssertEqual(moved.newStart, 6)
+    }
+
+    func testMoveBlockIntoTheMiddleAfterTheAppendixHeading() throws {
+        let moved = try LocalToolExecutor.movingLines(in: doc, start: 4, end: 6, before: 8, startText: "  = Transform  ")
+        XCTAssertEqual(moved.text, "= Final design\nA\nB\n= Appendix\n= Transform\nT1\nT2\nZ\n")
+        XCTAssertEqual(moved.newStart, 5)
+    }
+
+    func testMoveBlockUp() throws {
+        let moved = try LocalToolExecutor.movingLines(in: doc, start: 7, end: 8, before: 1, startText: "= Appendix")
+        XCTAssertEqual(moved.text, "= Appendix\nZ\n= Final design\nA\nB\n= Transform\nT1\nT2\n")
+        XCTAssertEqual(moved.newStart, 1)
+    }
+
+    func testReadFileLineCountPlusOneMeansEnd() throws {
+        // read_file reports 9 lines for this text (the empty one after the
+        // final newline), so 10 must also mean "the end".
+        let moved = try LocalToolExecutor.movingLines(in: doc, start: 1, end: 1, before: 10, startText: "= Final design")
+        XCTAssertTrue(moved.text.hasSuffix("Z\n= Final design\n"), moved.text)
+    }
+
+    func testNoTrailingNewlineStaysThatWay() throws {
+        let moved = try LocalToolExecutor.movingLines(in: "a\nb\nc", start: 1, end: 1, before: 4, startText: "a")
+        XCTAssertEqual(moved.text, "b\nc\na")
+    }
+
+    func testRejectsStaleLineNumbers() {
+        XCTAssertThrowsError(try LocalToolExecutor.movingLines(in: doc, start: 4, end: 6, before: 9, startText: "= Final design")) { error in
+            XCTAssertTrue("\(error.localizedDescription)".contains("Line 4 is \"= Transform\""), error.localizedDescription)
+        }
+    }
+
+    func testRejectsTargetsInsideTheBlockAndOutOfRange() {
+        XCTAssertThrowsError(try LocalToolExecutor.movingLines(in: doc, start: 4, end: 6, before: 5, startText: "= Transform"))
+        XCTAssertThrowsError(try LocalToolExecutor.movingLines(in: doc, start: 4, end: 6, before: 7, startText: "= Transform"))
+        XCTAssertThrowsError(try LocalToolExecutor.movingLines(in: doc, start: 0, end: 2, before: 9, startText: ""))
+        XCTAssertThrowsError(try LocalToolExecutor.movingLines(in: doc, start: 4, end: 99, before: 1, startText: "= Transform"))
+        XCTAssertThrowsError(try LocalToolExecutor.movingLines(in: doc, start: 4, end: 6, before: 20, startText: "= Transform"))
+    }
+}
+
+extension MoveLinesTests {
+    func testEndLineOfReadFileCountMeansTheLastLine() throws {
+        // read_file reports 9 lines for `doc` (8 real ones + the empty one
+        // after the final newline); end_line 9 must mean line 8.
+        let moved = try LocalToolExecutor.movingLines(in: doc, start: 7, end: 9, before: 1, startText: "= Appendix")
+        XCTAssertEqual(moved.text, "= Appendix\nZ\n= Final design\nA\nB\n= Transform\nT1\nT2\n")
+    }
+}
+
+extension AgentWorkingMemoryTests {
+    func testPlanReminderFiresEveryThresholdRounds() {
+        let threshold = AICompletionService.planReminderRounds
+        XCTAssertNil(AICompletionService.planReminderNote(roundsSinceUpdate: 0))
+        XCTAssertNil(AICompletionService.planReminderNote(roundsSinceUpdate: threshold - 1))
+        let note = AICompletionService.planReminderNote(roundsSinceUpdate: threshold)
+        XCTAssertTrue(note?.contains("\(threshold) rounds ago") == true, note ?? "nil")
+        XCTAssertTrue(note?.hasPrefix(AICompletionService.harnessNotePrefix) == true)
+        XCTAssertNil(AICompletionService.planReminderNote(roundsSinceUpdate: threshold + 1))
+        XCTAssertNotNil(AICompletionService.planReminderNote(roundsSinceUpdate: threshold * 2))
+        XCTAssertNil(AICompletionService.planReminderNote(roundsSinceUpdate: 5, threshold: 0))
     }
 }

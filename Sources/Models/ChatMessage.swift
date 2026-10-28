@@ -18,8 +18,9 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         case failed
         case denied
         case cancelled
-        /// Not run: the loop refused an identical repeat of a read or search
-        /// (see `ToolCallRepeatGuard`). Shown so the refusal isn't invisible.
+        /// Not run: an identical repeat of a read or search (see
+        /// `ToolCallRepeatGuard`), or a call whose arguments were cut off or
+        /// invalid. Shown so the refusal isn't invisible.
         case skipped
 
         /// An unknown status (written by a newer build) reads as `.failed`
