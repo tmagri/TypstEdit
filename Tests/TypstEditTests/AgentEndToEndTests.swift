@@ -41,7 +41,7 @@ final class AgentEndToEndTests: XCTestCase {
 
         try loadAppSettings(domain: env["TYPSTEDIT_E2E_SETTINGS_DOMAIN"] ?? "com.tmagri.TypstEdit", env: env)
 
-        let chat = AIChatManager.shared
+        let chat = AIChatManager()
         let openFile = env["TYPSTEDIT_E2E_OPEN_FILE"].map { projectURL.appendingPathComponent($0) }
         chat.updateContext(projectRoot: projectURL, currentFileURL: openFile)
         chat.clearHistory()

@@ -84,7 +84,7 @@ final class AIChatSkillDefaultsTests: XCTestCase {
         settings.chatDefaultSkillIDs = Array(liveIDs) + [staleID]
 
         XCTAssertEqual(
-            AIChatManager.shared.defaultSkillIDs(),
+            AIChatManager().defaultSkillIDs(),
             liveIDs,
             "every currently available skill must be kept and the stale ID dropped"
         )

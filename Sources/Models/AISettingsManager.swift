@@ -358,6 +358,24 @@ class AISettingsManager: ObservableObject {
     /// off per session from the chat panel itself; this only controls where
     /// each new session starts from.
     @AppStorage("aiChatRAGToolEnabledDefault") var chatRAGToolEnabledDefault: Bool = true
+    /// Whether conversations are saved to disk at all, keyed to where the
+    /// chat's scope lives: project chats go to `.typstedit/chat/sessions/`
+    /// inside the project (so they travel with it and can be committed),
+    /// notebook chats to the app's library folder. Off = conversations live
+    /// in memory for this app run only.
+    @AppStorage("aiChatSessionsEnabled") var chatSessionsEnabled: Bool = true
+    /// After the first reply, one small request asks the chat model for a
+    /// short conversation title (until then the first message names it).
+    /// A manual rename always wins and is never overwritten.
+    @AppStorage("aiChatAutoTitleEnabled") var chatAutoTitleEnabled: Bool = true
+    /// Wolfram|Alpha-style fallback for the calculator: when the CAS can't
+    /// evaluate an entry that reads like a natural-language question, one
+    /// one-shot request asks the chat model for the answer. Off by default —
+    /// a calculator that silently makes network calls would be a surprise —
+    /// and it additionally requires AI Chat itself to be switched on.
+    @AppStorage("calcAIFallbackEnabled") var calcAIFallbackEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
 
     /// Skills that start enabled in new AI chats. Persisted as a
     /// comma-separated list of skill IDs (`scope:folderName`). Empty by

@@ -10,6 +10,9 @@ struct ContentView: View {
     @ObservedObject var editorController: EditorController
     @ObservedObject private var aiService = AICompletionService.shared
     @ObservedObject private var aiSettings = AISettingsManager.shared
+    /// Which conversation the AI Chat panel shows — re-rendered (and the
+    /// panel handed the new manager) whenever the user switches sessions.
+    @ObservedObject private var chatSessions = AIChatSessionStore.shared
     @ObservedObject private var typstUpdater = TypstUpdater.shared
     @ObservedObject private var generalSettings = GeneralSettingsManager.shared
     
@@ -472,7 +475,7 @@ struct ContentView: View {
                 SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController,
                             sourceControl: sourceControl)
             case .aiChat:
-                AIChatView(controller: editorController)
+                AIChatView(controller: editorController, chat: chatSessions.activeManager)
             case .calculator:
                 CalculatorView(session: editorController.calculatorSession, editorController: editorController)
             case nil:

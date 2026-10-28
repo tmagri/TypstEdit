@@ -540,7 +540,7 @@ class EditorController: NSObject, ObservableObject {
         didSet {
             updateFileType()
             guard currentFileURL != oldValue else { return }
-            AIChatManager.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
+            AIChatSessionStore.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
             OpenDocumentRegistry.shared.updateEditor(
                 ObjectIdentifier(self),
                 fileURL: currentFileURL,
@@ -554,7 +554,7 @@ class EditorController: NSObject, ObservableObject {
             SkillsManager.shared.setProjectRoot(projectRootURL)
             MCPManager.shared.setProjectRoot(projectRootURL)
             projectSettings = projectRootURL.map { ProjectSettingsManager(projectRoot: $0) }
-            AIChatManager.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
+            AIChatSessionStore.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
         }
     }
     /// Project-scoped settings (temp/vectorcache storage overrides, default

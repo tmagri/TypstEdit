@@ -1,14 +1,21 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// The AI Chat panel: a persistent, multi-turn conversation about the whole
 /// open project (or current notebook) rather than a single insertion point.
 /// Sits between the editor and the PDF preview, toggled the same way the
 /// preview pane itself is. Disabled/hidden entirely until the user opts in
 /// from Settings → AI Assistant → Chat.
+///
+/// `chat` is the conversation currently shown — one of the sessions owned by
+/// `AIChatSessionStore` (which also owns the session menu: switching, new
+/// chat, rename, import/export, delete). Switching away never stops a
+/// conversation that's still generating; it keeps working in the background.
 struct AIChatView: View {
     @ObservedObject var controller: EditorController
-    @ObservedObject private var chat = AIChatManager.shared
+    @ObservedObject var chat: AIChatManager
+    @ObservedObject private var store = AIChatSessionStore.shared
     @ObservedObject private var aiSettings = AISettingsManager.shared
     @ObservedObject private var skillsManager = SkillsManager.shared
     @ObservedObject private var mcpManager = MCPManager.shared
@@ -23,6 +30,10 @@ struct AIChatView: View {
     /// Whether the live "Thinking…" indicator (shown while generating) is
     /// expanded to follow the model's reasoning as it streams in.
     @State private var liveThinkingExpanded = false
+
+    @State private var showRename = false
+    @State private var renameDraft: String = ""
+    @State private var actionError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -59,11 +70,11 @@ struct AIChatView: View {
         .onAppear {
             chat.refreshToolSettings()
             // Covers launches where no file or project was ever opened: the
-            // `EditorController` observers that normally call `updateContext`
-            // only fire on value *changes*, so the one-time skill seeding
-            // would otherwise never run. Same-scope calls are no-ops once
-            // seeded, so this is safe to call on every appearance.
-            chat.updateContext(projectRoot: controller.projectRootURL, currentFileURL: controller.currentFileURL)
+            // `EditorController` observers that normally call the store's
+            // `updateContext` only fire on value *changes*, so the one-time
+            // skill seeding would otherwise never run. Same-scope calls are
+            // no-ops once seeded, so this is safe to call on every appearance.
+            store.updateContext(projectRoot: controller.projectRootURL, currentFileURL: controller.currentFileURL)
             installShiftEnterMonitor()
         }
         .onDisappear { removeShiftEnterMonitor() }
@@ -72,6 +83,21 @@ struct AIChatView: View {
             Button("Enable", role: .destructive) { chat.yoloMode = true }
         } message: {
             Text("File writes, edits, Python runs, and permitted Git actions (stage, commit, fetch, pull) will execute without asking you first for this app session. Push always requires your approval. YOLO does not enable Git permissions. The AI remains limited to this project/notebook, and Git tools require the repository root. YOLO turns itself off when TypstEdit restarts.")
+        }
+        .alert("Rename Chat", isPresented: $showRename) {
+            TextField("Name", text: $renameDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { store.renameSession(chat.id, to: renameDraft) }
+        } message: {
+            Text("Names are shown in the chat menu and saved with the conversation.")
+        }
+        .alert("Couldn't Do That", isPresented: Binding(
+            get: { actionError != nil },
+            set: { if !$0 { actionError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(actionError ?? "")
         }
     }
 
@@ -84,11 +110,13 @@ struct AIChatView: View {
             // Same squeeze rule as the sidebar section titles: the title and
             // scope line stay on single lines, truncating the scope label
             // with an ellipsis while there's room, and the whole block
-            // disappears once even "AI Chat" no longer fits — instead of
-            // wrapping into fragments that grow the header.
+            // disappears once even the title no longer fits — instead of
+            // wrapping into fragments that grow the header. The title is the
+            // conversation's name (auto-written after the first reply, or
+            // renamed by the user from the chat menu).
             ViewThatFits(in: .horizontal) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("AI Chat")
+                    Text(chat.displayTitle)
                         .font(.subheadline.bold())
                         .lineLimit(1)
                         .fixedSize(horizontal: true, vertical: false)
@@ -115,6 +143,16 @@ struct AIChatView: View {
                 .buttonStyle(.plain)
                 .disabled(chat.isGenerating || chat.isCompacting || chat.messages.isEmpty)
                 .help("Summarize older turns now to free up context")
+                sessionsMenu
+                Button {
+                    // Starts a fresh conversation; the current one stays
+                    // saved in the chat menu.
+                    store.startNewSession()
+                } label: {
+                    Image(systemName: "plus.bubble")
+                }
+                .buttonStyle(.plain)
+                .help("New chat — the current conversation stays in the chat menu")
                 if liveThinkingExpanded || !expandedThinkingIDs.isEmpty {
                     Button {
                         expandedThinkingIDs = []
@@ -126,12 +164,12 @@ struct AIChatView: View {
                     .help("Collapse all thinking sections to keep the chat lean")
                 }
                 Button {
-                    chat.clearHistory()
+                    store.clearSession(chat.id)
                 } label: {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.plain)
-                .help("Clear chat history — starts a new chat, so skills reset to their \"on by default\" settings")
+                .help("Clear this conversation — starts fresh, and skills reset to their \"on by default\" settings. The chat disappears from the menu.")
             }
             Button {
                 // Falls back to another visible panel, or hides the sidebar
@@ -145,6 +183,112 @@ struct AIChatView: View {
             .help("Close AI Chat")
         }
         .padding(10)
+    }
+
+    // MARK: - Session Menu
+
+    /// The conversation list and its actions: switching (any number can run
+    /// at once — a still-generating one shows a live badge), plus rename,
+    /// import/export and delete for the current conversation.
+    private var sessionsMenu: some View {
+        Menu {
+            Button {
+                store.startNewSession()
+            } label: {
+                Label("New Chat", systemImage: "plus.bubble")
+            }
+            if !store.sessions.isEmpty {
+                Divider()
+            }
+            ForEach(store.sessions) { summary in
+                let summaryManager = store.manager(for: summary.id)
+                Button {
+                    store.switchSession(to: summary.id)
+                } label: {
+                    Label {
+                        Text(summary.displayTitle)
+                    } icon: {
+                        Image(systemName: Self.sessionIcon(isActive: summary.id == chat.id, manager: summaryManager))
+                    }
+                }
+            }
+            Divider()
+            Button {
+                renameDraft = chat.title
+                showRename = true
+            } label: {
+                Label("Rename This Chat…", systemImage: "pencil")
+            }
+            Button {
+                exportActiveSession()
+            } label: {
+                Label("Export Conversation…", systemImage: "square.and.arrow.up")
+            }
+            Button {
+                importSession()
+            } label: {
+                Label("Import Conversation…", systemImage: "square.and.arrow.down.on.square")
+            }
+            Divider()
+            Button(role: .destructive) {
+                store.deleteSession(chat.id)
+            } label: {
+                Label("Delete This Chat", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "square.stack.3d.up")
+                .overlay(alignment: .topTrailing) {
+                    // A dot while some *other* conversation is still
+                    // generating or waiting for an approval.
+                    if store.hasBackgroundActivity {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 3, y: -3)
+                    }
+                }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Conversations — switch, rename, import/export. Chats keep running while you're in another one.")
+    }
+
+    /// Icon per session row: a checkmark for the open one, live badges for a
+    /// conversation still generating or waiting for an approval.
+    private static func sessionIcon(isActive: Bool, manager: AIChatManager?) -> String {
+        if isActive { return "checkmark" }
+        if manager?.pendingApproval != nil { return "hand.raised.fill" }
+        if manager?.isGenerating == true { return "ellipsis.bubble" }
+        return "bubble.left"
+    }
+
+    private func exportActiveSession() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = AIChatSessionStore.exportFileName(from: chat.displayTitle) + ".json"
+        panel.title = "Export Conversation"
+        panel.message = "Save this conversation as a JSON file you can import again later."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try store.exportSession(chat.id, to: url)
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    private func importSession() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.title = "Import Conversation"
+        panel.message = "Select a TypstEdit conversation export (or an old chat history file)."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            _ = try store.importSession(from: url)
+        } catch {
+            actionError = error.localizedDescription
+        }
     }
 
     private var scopeNoun: String {
@@ -305,8 +449,7 @@ struct AIChatView: View {
                             thinkingDisclosure(reasoning, id: message.id)
                         }
                         HStack {
-                            Text(message.text)
-                                .font(.callout)
+                            MarkdownText(text: message.text, font: .callout)
                                 .textSelection(.enabled)
                                 .padding(8)
                                 .background(Color.secondary.opacity(0.12))
@@ -329,12 +472,14 @@ struct AIChatView: View {
                 Label("Earlier turns summarized", systemImage: "rectangle.compress.vertical")
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                Text(message.text.replacingOccurrences(of: "[Summary of earlier conversation]\n\n", with: ""))
-                    .font(.caption)
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .background(Color.secondary.opacity(0.07))
-                    .cornerRadius(10)
+                MarkdownText(
+                    text: message.text.replacingOccurrences(of: "[Summary of earlier conversation]\n\n", with: ""),
+                    font: .caption
+                )
+                .textSelection(.enabled)
+                .padding(8)
+                .background(Color.secondary.opacity(0.07))
+                .cornerRadius(10)
             }
             Spacer(minLength: 30)
         }

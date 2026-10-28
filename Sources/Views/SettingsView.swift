@@ -201,6 +201,23 @@ struct GeneralSettingsView: View {
                 Slider(value: $generalSettings.calcTimeout, in: 3...60, step: 1)
             }
         }
+
+        SettingsCard(
+            title: "AI Fallback",
+            icon: "sparkles",
+            description: "When an entry reads like a question the math engine can't evaluate, ask the AI chat model for the answer instead of showing an error — Wolfram|Alpha style."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Answer questions with AI when the CAS can't", isOn: $aiSettings.calcAIFallbackEnabled)
+                    .font(.body.weight(.medium))
+                    .disabled(!aiSettings.chatEnabled)
+
+                Text("Off by default, and it needs AI Chat to be enabled (Settings → AI → Chat). Only entries that read like a question are routed — including word problems that embed units and equations. Formula-shaped input still shows the CAS error, so typos in formulas are never sent to the AI.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1033,6 +1050,30 @@ struct AISettingsView: View {
                     .font(.body.weight(.medium))
 
                 Text("Show or hide AI Chat from View → Sidebar Features or Settings → General → Sidebar. Once enabled, open the panel from the status bar or Editor → Open AI Chat (⌘⇧J).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+            }
+        }
+
+        SettingsCard(
+            title: "Conversations",
+            icon: "square.stack.3d.up",
+            description: "Every chat is its own conversation. Switch between them from the chat menu in the panel's header, keep several running at once (one can keep working while you use another), and come back to them any time. Chats are named automatically after their first reply, or rename them yourself."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Save conversations", isOn: $settings.chatSessionsEnabled)
+                    .font(.body.weight(.medium))
+
+                Text("Project chats are saved in the project's .typstedit folder (chat/sessions), so they come back when you reopen the project — and can be committed or synced with it. Notebook chats are saved in the app's library folder instead. With this off, conversations live in memory until TypstEdit quits. Import and export are in the panel's chat menu.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Toggle("Name conversations automatically", isOn: $settings.chatAutoTitleEnabled)
+                    .font(.body.weight(.medium))
+
+                Text("The first message names the chat right away; with this on, one small request after the first reply replaces that with a short title written by the chat model. A name you type yourself is never overwritten.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.leading, 20)

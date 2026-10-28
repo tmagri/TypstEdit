@@ -392,7 +392,27 @@ struct CalculatorView: View {
 
     @ViewBuilder
     private func resultView(_ entry: CalculatorEntry) -> some View {
-        if entry.isError {
+        if let answer = entry.aiAnswer, !answer.isEmpty {
+            // AI-fallback entry: when the model's interpretation was
+            // computable, the exact CAS result shows as math with the
+            // model's prose underneath; otherwise the prose is the answer.
+            let computed = !entry.resultTypst.isEmpty
+            VStack(alignment: .trailing, spacing: 4) {
+                Label("AI", systemImage: "sparkles")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(.accentColor)
+                if computed {
+                    MathImageView(typst: entry.resultTypst, dark: colorScheme == .dark)
+                        .frame(maxHeight: 120)
+                }
+                Text(answer)
+                    .font(computed ? .caption : .callout)
+                    .foregroundColor(computed ? .secondary : themeManager.textColor)
+                    .multilineTextAlignment(.trailing)
+                    .textSelection(.enabled)
+            }
+            .frame(maxWidth: 320, alignment: .trailing)
+        } else if entry.isError {
             Text(entry.errorMessage)
                 .font(.caption)
                 .foregroundColor(.red)
@@ -410,26 +430,17 @@ struct CalculatorView: View {
 
     // MARK: - Entry line
 
+    /// Chat-style input bar: a taller framed entry box (like AI Chat's) with
+    /// a send button, instead of the TI-89's thin strip. ↩ still evaluates,
+    /// ⌥↩ forces approximate, ↑/↓ recall history, Esc clears or stops.
     private var entryArea: some View {
-        HStack(spacing: 8) {
-            if session.busy {
-                ProgressView()
-                    .scaleEffect(0.7)
-                Button {
-                    session.interrupt()
-                } label: {
-                    Image(systemName: "stop.fill")
-                        .foregroundColor(.red)
-                }
-                .buttonStyle(.plain)
-                .help("Stop this calculation (Esc also stops it)")
-            }
+        HStack(alignment: .center, spacing: 8) {
             TIEntryField(
                 text: $session.entryLine,
                 focusTrigger: entryFocusTrigger,
                 pendingCursorOffset: $pendingCursorOffset,
                 onSubmit: { forceApprox in
-                    Task { await session.submit(session.entryLine, forceApprox: forceApprox) }
+                    submitEntry(forceApprox: forceApprox)
                 },
                 onArrowUp: {
                     if let recalled = session.moveRecall(-1) {
@@ -452,10 +463,44 @@ struct CalculatorView: View {
                     }
                 })
                 .textFieldStyle(.plain)
-                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+
+            if session.busy {
+                ProgressView()
+                    .scaleEffect(0.7)
+                Button {
+                    session.interrupt()
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Stop this calculation (Esc also stops it)")
+            } else {
+                Button {
+                    submitEntry(forceApprox: false)
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 24))
+                }
+                .buttonStyle(.plain)
+                .disabled(session.entryLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Evaluate (↩). Hold ⌥↩ for an approximate result (◆Enter).")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private func submitEntry(forceApprox: Bool) {
+        Task { await session.submit(session.entryLine, forceApprox: forceApprox) }
     }
 
     private var statusBar: some View {
@@ -496,15 +541,15 @@ struct CalculatorView: View {
             Button("Inline equation  $…$") {
                 insertIntoDocument(CalculatorSession.inlineEquation(entry.resultTypst))
             }
-            .disabled(!canInsert || entry.isError)
+            .disabled(!canInsert || entry.isError || entry.aiAnswer != nil)
             Button("Block equation  $ … $") {
                 insertIntoDocument(CalculatorSession.blockEquation(entry.resultTypst))
             }
-            .disabled(!canInsert || entry.isError)
+            .disabled(!canInsert || entry.isError || entry.aiAnswer != nil)
             Button("Input = Result") {
                 insertIntoDocument(CalculatorSession.inputEqualsResult(entry))
             }
-            .disabled(!canInsert || entry.isError)
+            .disabled(!canInsert || entry.isError || entry.aiAnswer != nil)
         }
         Section("Copy") {
             Button("Copy as Typst") {
@@ -517,6 +562,11 @@ struct CalculatorView: View {
                 NSPasteboard.general.setString(entry.resultPlain, forType: .string)
             }
             .disabled(entry.resultPlain.isEmpty)
+            Button("Copy AI answer") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(entry.aiAnswer ?? "", forType: .string)
+            }
+            .disabled(entry.aiAnswer == nil)
         }
         Section {
             Button("Reuse in entry line") {
@@ -696,7 +746,11 @@ struct TIEntryField: NSViewRepresentable {
         field.isBordered = false
         field.focusRingType = .none
         field.drawsBackground = false
-        field.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        // Sized like the AI Chat input (which uses .callout), but monospaced
+        // for TI syntax.
+        field.font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+        field.placeholderString = "Enter an expression — or ask a question"
+        field.usesSingleLineMode = true
         field.delegate = context.coordinator
         field.target = context.coordinator
         field.action = #selector(Coordinator.submit(_:))

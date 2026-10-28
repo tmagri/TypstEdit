@@ -1,13 +1,6 @@
 import SwiftUI
 import AppKit
 
-private struct GitDiffRequest: Identifiable {
-    let change: GitChange
-    let group: GitChangeGroup
-    let repository: URL
-    var id: String { "\(repository.path):\(group.rawValue):\(change.path)" }
-}
-
 /// Destructive or state-changing actions that need a second click. All
 /// confirmations go through one `.alert(item:)`.
 private enum GitConfirmation: Identifiable {
@@ -70,7 +63,6 @@ struct SourceControlSidebarView: View {
     @State private var graphExpanded = true
     @State private var treeMode = true
     @State private var message = ""
-    @State private var diffRequest: GitDiffRequest?
     @State private var confirmation: GitConfirmation?
     @State private var nameSheet: GitNameSheetKind?
     @State private var rewordRequest: GitRewordRequest?
@@ -149,10 +141,6 @@ struct SourceControlSidebarView: View {
                 .frame(height: panelHeight - 34)
                 .clipped()
             }
-        }
-        .sheet(item: $diffRequest) { request in
-            GitDiffPreviewView(manager: manager, change: request.change, group: request.group, repository: request.repository)
-                .environmentObject(themeManager)
         }
         .sheet(item: $nameSheet) { kind in
             nameSheetContent(kind)
@@ -419,7 +407,9 @@ struct SourceControlSidebarView: View {
                 if group == .staged { Task { await manager.unstageAll() } } else { requestStageAll() }
             },
             onDiff: { change in
-                if let root = manager.repositoryRoot { diffRequest = GitDiffRequest(change: change, group: group, repository: root) }
+                if let root = manager.repositoryRoot {
+                    GitDiffPreviewWindow.open(manager: manager, change: change, group: group, repository: root, themeManager: themeManager)
+                }
             },
             onOpen: openFile,
             onStage: { change in

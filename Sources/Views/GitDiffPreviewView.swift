@@ -46,6 +46,9 @@ struct GitDiffPreviewView: View {
     @State private var diff: String?
     @State private var lines: [GitDiffLine] = []
     @State private var error: String?
+    /// The window this view is hosted in (set by `WindowAccessor` below), so
+    /// Close works both in a standalone preview window and in a sheet.
+    @State private var hostingWindow: NSWindow?
 
     private let previewLineLimit = 3000
 
@@ -65,7 +68,14 @@ struct GitDiffPreviewView: View {
                     NSPasteboard.general.setString(diff, forType: .string)
                 }
                 .disabled(diff?.isEmpty ?? true)
-                Button("Close") { dismiss() }.keyboardShortcut(.escape, modifiers: [])
+                Button("Close") {
+                    if let hostingWindow {
+                        hostingWindow.performClose(nil)
+                    } else {
+                        dismiss()
+                    }
+                }
+                .keyboardShortcut(.escape, modifiers: [])
             }
             .padding(16)
             Divider()
@@ -78,6 +88,7 @@ struct GitDiffPreviewView: View {
         }
         .frame(minWidth: 720, minHeight: 480)
         .background(themeManager.editorBackground)
+        .background(WindowAccessor { hostingWindow = $0 })
         .task { await load() }
     }
 
@@ -106,7 +117,14 @@ struct GitDiffPreviewView: View {
                                     .foregroundColor(color(for: line.kind))
                                     .padding(.horizontal, 12)
                                     .padding(.vertical, 1)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    // Single line, never wrapped: long lines
+                                    // grow past the window and scroll.
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    // Width goes on each row so it re-measures
+                                    // on every window resize; a wrapper-level
+                                    // width kept a stale, "thin" column that
+                                    // did not flex.
+                                    .frame(minWidth: geometry.size.width, alignment: .leading)
                                     .background(background(for: line.kind))
                             }
                             if lines.count > previewLineLimit {
@@ -116,10 +134,6 @@ struct GitDiffPreviewView: View {
                                     .padding(12)
                             }
                         }
-                        .fixedSize(horizontal: true, vertical: false)
-                        // Line backgrounds fill the visible width, also when
-                        // every line is shorter than the sheet.
-                        .frame(minWidth: geometry.size.width, alignment: .leading)
                         .padding(.vertical, 8)
                     }
                 }
@@ -163,6 +177,95 @@ struct GitDiffPreviewView: View {
         case .added: return .green.opacity(0.08)
         case .removed: return .red.opacity(0.08)
         default: return .clear
+        }
+    }
+}
+
+/// Opens the diff preview in its own AppKit window — resizable and full
+/// screen capable — instead of a fixed sheet. Several previews can be open
+/// at once; each closes with the Close button, Escape, or Cmd+W.
+@MainActor
+enum GitDiffPreviewWindow {
+    static func open(
+        manager: SourceControlManager,
+        change: GitChange,
+        group: GitChangeGroup,
+        repository: URL,
+        themeManager: ThemeManager
+    ) {
+        GitDiffWindowKeeper.shared.open(
+            manager: manager,
+            change: change,
+            group: group,
+            repository: repository,
+            themeManager: themeManager
+        )
+    }
+}
+
+/// Retains visible diff windows and their delegates so they stay alive while
+/// open and are released when closed.
+@MainActor
+private final class GitDiffWindowKeeper {
+    static let shared = GitDiffWindowKeeper()
+    private var windows: [NSWindow] = []
+    private var delegates: [NSWindow: GitDiffWindowDelegate] = [:]
+
+    func open(
+        manager: SourceControlManager,
+        change: GitChange,
+        group: GitChangeGroup,
+        repository: URL,
+        themeManager: ThemeManager
+    ) {
+        let content = GitDiffPreviewView(
+            manager: manager,
+            change: change,
+            group: group,
+            repository: repository
+        )
+        .environmentObject(themeManager)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 640),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullScreen],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = change.path
+        window.identifier = NSUserInterfaceItemIdentifier("git-diff-preview-\(UUID().uuidString)")
+        window.tabbingMode = .disallowed
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 480, height: 320)
+
+        let delegate = GitDiffWindowDelegate { [weak self] window in
+            self?.windows.removeAll { $0 === window }
+            self?.delegates[window] = nil
+        }
+        window.delegate = delegate
+        delegates[window] = delegate
+        windows.append(window)
+
+        window.contentView = NSHostingView(rootView: content)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+}
+
+/// Retained by the keeper so the weak `window.delegate` stays set until the
+/// window closes.
+@MainActor
+private final class GitDiffWindowDelegate: NSObject, NSWindowDelegate {
+    private let onClose: (NSWindow) -> Void
+
+    init(onClose: @escaping (NSWindow) -> Void) {
+        self.onClose = onClose
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let window = notification.object as? NSWindow {
+            onClose(window)
         }
     }
 }

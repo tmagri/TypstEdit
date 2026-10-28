@@ -89,6 +89,18 @@ enum CalculatorExport {
         lines.append("")
         for entry in document.entries {
             if entry.isError { continue }
+            // AI-fallback answers are prose (plus an exact result when the
+            // model's interpretation was computable), not plain math.
+            if let answer = entry.aiAnswer, !answer.isEmpty {
+                lines.append("*\(escapeText(entry.input))*")
+                lines.append("")
+                if !entry.resultTypst.isEmpty {
+                    lines.append("$ \(entry.resultTypst) $")
+                }
+                lines.append(escapeText(answer))
+                lines.append("")
+                continue
+            }
             if !entry.inputTypst.isEmpty && !entry.resultTypst.isEmpty {
                 lines.append("$ \(entry.inputTypst) = \(entry.resultTypst) $")
             } else if !entry.resultTypst.isEmpty {

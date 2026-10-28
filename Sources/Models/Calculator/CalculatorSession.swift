@@ -74,6 +74,56 @@ final class CalculatorSession: ObservableObject {
                 digits: displayDigits,
                 timeout: GeneralSettingsManager.shared.calcTimeout)
 
+            // Wolfram|Alpha-style fallback: when the CAS can't evaluate an
+            // entry that reads like a natural-language question — or merely
+            // echoes it back as a string, which is what it does with prose —
+            // the chat model interprets the entry and, when it is computable,
+            // the CAS evaluates the model's expression locally so the number
+            // is exact. Math-shaped input is never routed, so typos in
+            // formulas still show the CAS error; if the request itself fails
+            // we fall through to that error entry and surface the reason in
+            // the status line.
+            let casFailed = !result.ok
+            let echoedInput = result.ok && CalculatorAIFallback.isStringEcho(result, input: trimmed)
+            if casFailed || echoedInput {
+                if CalculatorAIFallback.isAvailable(),
+                   CalculatorAIFallback.looksLikeNaturalLanguage(trimmed) {
+                    do {
+                        let interpretation = try await CalculatorAIFallback.interpret(trimmed)
+                        var computed: CASEvalResult?
+                        if let expression = interpretation.expression {
+                            let candidate = await CASEngine.shared.eval(
+                                input: TISyntax.preprocess(expression),
+                                approx: approx,
+                                angle: angle,
+                                digits: displayDigits,
+                                timeout: GeneralSettingsManager.shared.calcTimeout)
+                            // Only trust a numeric result: another string
+                            // echo means the expression was not computable.
+                            if candidate.ok,
+                               !candidate.resultText.isEmpty,
+                               !CalculatorAIFallback.isStringEcho(candidate, input: expression) {
+                                computed = candidate
+                            }
+                        }
+
+                        entries.append(CalculatorEntry(
+                            input: trimmed,
+                            approx: approx,
+                            resultTypst: computed?.resultTypst ?? "",
+                            resultPlain: computed?.resultText ?? interpretation.answer,
+                            inputTypst: computed?.inputTypst ?? "",
+                            aiAnswer: interpretation.answer))
+                        hasUnsavedChanges = true
+                        recallIndex = nil
+                        busy = false
+                        return
+                    } catch {
+                        lastStatus = "AI fallback failed: \(error.localizedDescription)"
+                    }
+                }
+            }
+
             let entry = CalculatorEntry(
                 input: trimmed,
                 approx: approx,

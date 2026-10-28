@@ -36,6 +36,11 @@ struct CalculatorEntry: Identifiable, Codable, Hashable, Sendable {
     var inputTypst: String
     var isError: Bool
     var errorMessage: String
+    /// The AI fallback's answer, when this entry was routed to the chat model
+    /// instead of the CAS (`CalculatorAIFallback`). Optional so `.tcalc` files
+    /// written before the feature existed still decode; when set, `resultPlain`
+    /// holds the same answer so copy/export treat it like any other result.
+    var aiAnswer: String?
     var timestamp: Date
 
     init(id: UUID = UUID(),
@@ -46,6 +51,7 @@ struct CalculatorEntry: Identifiable, Codable, Hashable, Sendable {
          inputTypst: String = "",
          isError: Bool = false,
          errorMessage: String = "",
+         aiAnswer: String? = nil,
          timestamp: Date = Date()) {
         self.id = id
         self.input = input
@@ -55,6 +61,7 @@ struct CalculatorEntry: Identifiable, Codable, Hashable, Sendable {
         self.inputTypst = inputTypst
         self.isError = isError
         self.errorMessage = errorMessage
+        self.aiAnswer = aiAnswer
         self.timestamp = timestamp
     }
 }

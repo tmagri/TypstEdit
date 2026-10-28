@@ -98,6 +98,30 @@ Solve 3x^2 - 5x + 2 = 0 and insert the roots as an equation.
 Compute ∫ x^2 sin(x) dx from 0 to pi, then check it numerically.
 ```
 
+## AI fallback for questions
+
+When the CAS cannot evaluate an entry — or merely echoes it back as a quoted
+string, which is what it does with prose — the calculator can ask the AI chat
+model to interpret it, Wolfram|Alpha style:
+
+- Opt in twice: enable AI Chat in Settings, then turn on *AI Fallback* in
+  Settings → General → Calculator. Both default to off.
+- Only entries that read like a question are routed ("How many r's in
+  strawberry", "Area of a circle, if diameter is 1 cm?", or a word problem
+  that embeds units — "…velocity of 6 m/s, using g = 9.8 m/s^2, how many
+  seconds…?"). Formula-shaped input — a bare function call or operator-heavy
+  text — still shows the CAS error, so a typo in a formula is never sent to
+  the AI.
+- The model only *interprets*: computable questions become a TI-syntax
+  expression that the CAS evaluates locally, so the number is exact even
+  from a small local model. The result shows as math with the model's prose
+  underneath. Knowledge and counting questions get a prose answer.
+- The answer appears in the history with an AI badge, copies via the
+  context menu, is saved in the `.tcalc` file, and is exported as text (plus
+  the exact result) by *Export as .typ*.
+- If the AI request fails, the normal CAS error entry appears and the status
+  line says why the fallback failed.
+
 ## The engine
 
 `build/cas/typstedit-cas` is built by `Tools/cas/build_cas.sh` (Giac + GMP +
