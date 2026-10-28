@@ -54,6 +54,12 @@ final class CalculatorAIFallbackTests: XCTestCase {
             "the derivative of x^2 with respect to x"))
         XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
             "integral of x^2 from 0 to 1"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "taylor series expansion of sin(x) at x = 0"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "taylor series expansion of sin(x) at x = a"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "the derivative of x^2 + 2x + 4 with respect to x"))
     }
 
     // MARK: - Math-shaped input must never be routed, even on CAS failure,
@@ -130,6 +136,28 @@ final class CalculatorAIFallbackTests: XCTestCase {
             inputTree: nil, resultTree: nil, resultText: "undef",
             resultTypst: "undef", inputTypst: "", errorMessage: "", ok: true)
         XCTAssertTrue(CalculatorAIFallback.isUndefined(viaText))
+    }
+
+    /// Giac also mangles prose into an equation with `undef` on one side
+    /// ("… at x = 0" → `undef = 0`), which must count as undefined too.
+    func testMangledUndefinedExpressionsAreDetected() {
+        let asZero = CASEvalResult(
+            inputTree: nil, resultTree: nil, resultText: "undef = 0",
+            resultTypst: "undef = 0", inputTypst: "", errorMessage: "", ok: true)
+        XCTAssertTrue(CalculatorAIFallback.isUndefined(asZero))
+        XCTAssertTrue(CalculatorAIFallback.isUnhelpfulResult(
+            asZero, input: "taylor series expansion of sin(x) at x = 0"))
+
+        let asSymbol = CASEvalResult(
+            inputTree: nil, resultTree: nil, resultText: "undef = a",
+            resultTypst: "undef = a", inputTypst: "", errorMessage: "", ok: true)
+        XCTAssertTrue(CalculatorAIFallback.isUndefined(asSymbol))
+
+        // The same shape in the expression tree.
+        let tree = CASExpression.operation(name: "=", args: [.undefined, .symbol("a")])
+        XCTAssertTrue(CalculatorAIFallback.containsUndefined(tree))
+        let clean = CASExpression.operation(name: "=", args: [.symbol("x"), .number(value: "2", approx: nil)])
+        XCTAssertFalse(CalculatorAIFallback.containsUndefined(clean))
     }
 
     func testRealSymbolicResultsAreNotUndefined() {
