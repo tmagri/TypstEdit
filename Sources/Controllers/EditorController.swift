@@ -552,8 +552,9 @@ class EditorController: NSObject, ObservableObject {
     /// currently shows. AI Chat shares that real estate with the file list
     /// instead of taking its own column, keeping the editor and preview
     /// full-width. Switched via the in-panel segmented control, the status
-    /// bar icon, or Editor → AI Chat.
-    enum SidebarContent {
+    /// bar icon, or Editor → Open AI Chat. Visibility is controlled from
+    /// View → Sidebar Features (see `SidebarVisibility`).
+    enum SidebarContent: Hashable {
         case files
         case aiChat
         case calculator
@@ -565,28 +566,29 @@ class EditorController: NSObject, ObservableObject {
     /// doesn't wipe the history, like a TI-89's home screen.
     let calculatorSession = CalculatorSession()
 
-    /// Reveals AI Chat in the left panel (showing the sidebar if it was
-    /// hidden), or switches back to the file browser if chat is already
-    /// showing. No-ops entirely unless chat is enabled in Settings.
+    /// Reveals AI Chat only when its existing opt-in is enabled.
     func toggleAIChatPanel() {
-        guard AISettingsManager.shared.chatEnabled else { return }
-        if isSidebarVisible && sidebarContent == .aiChat {
-            sidebarContent = .files
-        } else {
-            isSidebarVisible = true
-            sidebarContent = .aiChat
-        }
+        toggleSidebarPanel(.aiChat)
     }
 
-    /// Reveals the Calculator in the left panel (showing the sidebar if it
-    /// was hidden), or switches back to the file browser if it is already
-    /// showing. Always available — no Settings opt-out.
+    /// Reveals the Calculator only when it is visible in Settings.
     func toggleCalculatorPanel() {
-        if isSidebarVisible && sidebarContent == .calculator {
-            sidebarContent = .files
+        toggleSidebarPanel(.calculator)
+    }
+
+    private func toggleSidebarPanel(_ panel: SidebarContent) {
+        let panels = GeneralSettingsManager.shared
+            .sidebarVisibility(chatEnabled: AISettingsManager.shared.chatEnabled).panels
+        guard panels.contains(panel) else { return }
+        if isSidebarVisible && sidebarContent == panel {
+            if let fallback = panels.first(where: { $0 != panel }) {
+                sidebarContent = fallback
+            } else {
+                isSidebarVisible = false
+            }
         } else {
             isSidebarVisible = true
-            sidebarContent = .calculator
+            sidebarContent = panel
         }
     }
 
@@ -598,6 +600,10 @@ class EditorController: NSObject, ObservableObject {
     /// handle is reported in the status bar instead of loading a wrong
     /// expression.
     func sendEquationToCalculator(at range: NSRange? = nil) {
+        guard GeneralSettingsManager.shared.showCalculator else {
+            showStatus("Calculator is hidden. Show it in View → Sidebar Features.", duration: 4)
+            return
+        }
         let caret = range?.location ?? selectedRange.location
         guard let equationRange = range ?? EquationDetector.findEquationRange(in: sourceCode, at: caret) else {
             showStatus("No equation at the cursor — put the caret inside $ … $", duration: 3)
@@ -626,7 +632,7 @@ class EditorController: NSObject, ObservableObject {
     /// True when the equation under the caret can be sent to the Calculator.
     /// Used by the context menu and toolbar to enable/disable the action.
     var canSendEquationToCalculator: Bool {
-        guard isTypstFile else { return false }
+        guard GeneralSettingsManager.shared.showCalculator, isTypstFile else { return false }
         return EquationDetector.findEquationRange(in: sourceCode, at: selectedRange.location) != nil
     }
     @Published var shouldCopyImages: Bool = true
@@ -4434,7 +4440,8 @@ class EditorController: NSObject, ObservableObject {
 
         // Send to Calculator — offered when the right-click lands inside a
         // `$ … $` math region of a Typst-capable document.
-        if isTypstFile, let equationRange = EquationDetector.findEquationRange(in: sourceCode, at: index) {
+        if GeneralSettingsManager.shared.showCalculator, isTypstFile,
+           let equationRange = EquationDetector.findEquationRange(in: sourceCode, at: index) {
             let sendItem = NSMenuItem(title: "Send to Calculator", action: #selector(contextMenuSendToCalculator(_:)), keyEquivalent: "")
             sendItem.target = self
             sendItem.representedObject = NSValue(range: equationRange)

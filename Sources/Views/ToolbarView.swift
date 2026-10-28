@@ -3,6 +3,7 @@ import SwiftUI
 struct ToolbarView: View {
     @ObservedObject var controller: EditorController
     @AppStorage("aiAssistantEnabled") private var aiEnabled = false
+    @AppStorage("showCalculator") private var showCalculator = true
     @State private var showColorPopover = false
     @State private var customColor: Color = .blue
 
@@ -162,7 +163,9 @@ struct ToolbarView: View {
                              ToolbarButton(icon: "tablecells", tooltip: "Insert Table (Cmd+Ctrl+T)", isActive: controller.isTableActive, action: controller.insertTableSnippet)
                              ToolbarButton(icon: "sum", tooltip: "Insert Equation (Cmd+Ctrl+E)", isActive: controller.isEquationActive, action: controller.openNewEquationEditor)
                              // Sends the equation under the caret to the Calculator panel.
-                             ToolbarButton(icon: "arrow.up.forward.app", tooltip: "Send Equation to Calculator", action: { controller.sendEquationToCalculator() })
+                             if showCalculator {
+                                 ToolbarButton(icon: "arrow.up.forward.app", tooltip: "Send Equation to Calculator", action: { controller.sendEquationToCalculator() })
+                             }
                              if aiEnabled {
                                  ToolbarButton(icon: "sparkles", tooltip: "AI Prompt (Cmd+Ctrl+A)", isActive: controller.showAIPromptEditor, action: controller.openAIPromptEditor)
                              }

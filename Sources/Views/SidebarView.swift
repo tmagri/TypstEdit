@@ -327,13 +327,42 @@ struct SidebarView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @StateObject private var compiler = TypstCompiler()
     @ObservedObject var editorController: EditorController
+    /// Owned by ContentView so switching to AI Chat or Calculator keeps the
+    /// repository state instead of scanning again when Files comes back.
+    @ObservedObject var sourceControl: SourceControlManager
+    @State private var sourceControlLoadingRoot: URL?
     @ObservedObject private var ragManager = RAGManager.shared
+    @ObservedObject private var generalSettings = GeneralSettingsManager.shared
 
     @State private var sidebarMode: Int = 0 // 0: Projects, 1: Notebooks
     @State private var imageCleanupTarget: ImageCleanupTarget?
 
+    private var visibility: SidebarVisibility {
+        generalSettings.sidebarVisibility(chatEnabled: false)
+    }
+
+    private var browserTabs: [AccessibleTab<Int>] {
+        let tabs = [
+            AccessibleTab(0, title: "Projects", systemImage: "folder", selectedSystemImage: "folder.fill", color: .orange),
+            AccessibleTab(1, title: "Notebooks", systemImage: "book.closed", selectedSystemImage: "book.closed.fill", color: .indigo),
+        ]
+        return tabs.filter { visibility.browserModes.contains($0.value) }
+    }
+
+    private var sourceControlRoot: URL? {
+        guard visibility.showsSourceControl,
+              model.currentFolder != NotebookManager.shared.rootDirectory else { return nil }
+        return model.currentFolder
+    }
+
+    private func reconcileBrowserSelection() {
+        if let mode = visibility.resolvedBrowserMode(sidebarMode), mode != sidebarMode {
+            sidebarMode = mode
+        }
+    }
 
     var body: some View {
+        GeometryReader { geometry in
         VStack(spacing: 0) {
             
             // Mode Selector — colour-coded tabs: orange for Projects,
@@ -341,14 +370,13 @@ struct SidebarView: View {
             // used throughout the notebook list below), with bold text and
             // a filled icon on the active tab so the state never relies on
             // colour alone.
-            AccessibleTabStrip(tabs: [
-                AccessibleTab(0, title: "Projects", systemImage: "folder", selectedSystemImage: "folder.fill", color: .orange),
-                AccessibleTab(1, title: "Notebooks", systemImage: "book.closed", selectedSystemImage: "book.closed.fill", color: .indigo),
-            ], selection: $sidebarMode)
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
+            if !browserTabs.isEmpty {
+                AccessibleTabStrip(tabs: browserTabs, selection: $sidebarMode)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+            }
             
-            if sidebarMode == 0 {
+            if visibility.resolvedBrowserMode(sidebarMode) == 0 {
                 // Header & File Tree
                 VStack(alignment: .leading, spacing: 0) {
                     if let folderName = model.currentFolder?.lastPathComponent {
@@ -426,12 +454,14 @@ struct SidebarView: View {
                                     Label("New Markdown File", systemImage: "doc.text.fill") 
                                 }
 
-                                Button(action: {
-                                    if let newFile = model.createProjectFile(extension: "tcalc") {
-                                        selectedFile = newFile // Opens in the Calculator panel
+                                if generalSettings.showCalculator {
+                                    Button(action: {
+                                        if let newFile = model.createProjectFile(extension: "tcalc") {
+                                            selectedFile = newFile // Opens in the Calculator panel
+                                        }
+                                    }) {
+                                        Label("New Calculation", systemImage: "function")
                                     }
-                                }) {
-                                    Label("New Calculation", systemImage: "function")
                                 }
                             } label: {
                                 Image(systemName: "plus")
@@ -503,8 +533,22 @@ struct SidebarView: View {
                 // fix for the stale-refresh glitch; identity-diffing alone
                 // can leave old rows on screen (see FileSystemModel).
                 .id(model.refreshGeneration)
+
+                if let root = sourceControlRoot {
+                    Divider()
+                    // `.id(root)` intentionally resets the commit message,
+                    // dialogs, and collapse state when another project opens.
+                    SourceControlSidebarView(
+                        manager: sourceControl, editorController: editorController,
+                        selectedFile: $selectedFile, projectRoot: root,
+                        isLoading: sourceControlLoadingRoot == root
+                            || sourceControl.projectRoot != root.standardizedFileURL,
+                        availableHeight: geometry.size.height
+                    )
+                    .id(root)
+                }
             } // Close VStack
-            } else {
+            } else if visibility.resolvedBrowserMode(sidebarMode) == 1 {
                 NotebookSidebarView(selectedFile: $selectedFile)
                     .environmentObject(themeManager)
             }
@@ -518,6 +562,21 @@ struct SidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(themeManager.sidebarBackground.ignoresSafeArea())
+        }
+        .task(id: sourceControlRoot) {
+            let root = sourceControlRoot
+            sourceControlLoadingRoot = root
+            await sourceControl.setProjectRoot(root)
+            if sourceControlLoadingRoot == root { sourceControlLoadingRoot = nil }
+        }
+        .onChange(of: model.refreshGeneration) { _ in
+            guard sourceControlRoot != nil else { return }
+            Task { await sourceControl.refresh() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard sourceControlRoot != nil else { return }
+            Task { await sourceControl.refresh() }
+        }
         .sheet(item: $imageCleanupTarget) { target in
             ImageCleanupView(root: target.url)
         }
@@ -529,11 +588,16 @@ struct SidebarView: View {
         .onReceive(NotificationCenter.default.publisher(for: .refreshProjectSidebar)) { _ in
             model.loadFiles()
             NotebookManager.shared.loadNotebooks()
+            if sourceControlRoot != nil {
+                Task { await sourceControl.refresh() }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .refreshNotebooks)) { _ in
             NotebookManager.shared.loadNotebooks()
         }
+        .onChange(of: visibility) { _ in reconcileBrowserSelection() }
         .onChange(of: sidebarMode) { newMode in
+            reconcileBrowserSelection()
             if newMode == 1 {
                 NotebookManager.shared.loadNotebooks()
             } else {
@@ -550,12 +614,14 @@ struct SidebarView: View {
             } else {
                 sidebarMode = 0
             }
+            reconcileBrowserSelection()
         }
         .onAppear {
             if model.currentFolder == NotebookManager.shared.rootDirectory {
                 sidebarMode = 1
                 NotebookManager.shared.loadNotebooks()
             }
+            reconcileBrowserSelection()
         }
     }
 

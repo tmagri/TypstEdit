@@ -9,7 +9,7 @@ network.
 ## Opening it
 
 - The `function` icon in the status bar, or
-- Editor → Show Calculator (⌘⇧U), or
+- Editor → Open Calculator (⌘⇧U), or
 - open a saved `.tcalc` file from the Files tab.
 
 ## Entry line

@@ -39,6 +39,7 @@ struct SettingsView: View {
 
 enum GeneralSettingsSection: String, CaseIterable, Identifiable {
     case appearance = "Appearance"
+    case sidebar = "Sidebar"
     case files = "Files & Backups"
     case calculator = "Calculator"
 
@@ -47,6 +48,7 @@ enum GeneralSettingsSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .appearance: return "paintbrush"
+        case .sidebar:    return "sidebar.left"
         case .files:      return "folder"
         case .calculator: return "function"
         }
@@ -80,6 +82,7 @@ struct GeneralSettingsView: View {
                 VStack(spacing: 18) {
                     switch selectedSection {
                     case .appearance: appearanceSection
+                    case .sidebar:    sidebarSection
                     case .files:      filesSection
                     case .calculator: calculatorSection
                     }
@@ -107,6 +110,30 @@ struct GeneralSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+            }
+        }
+    }
+
+    // MARK: - Sidebar
+
+    private var sidebarSection: some View {
+        SettingsCard(
+            title: "Sidebar Features",
+            icon: "sidebar.left",
+            description: "Choose which tabs and tools are visible. These choices also appear in View → Sidebar Features and apply to all windows."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                SidebarVisibilityToggles()
+                Divider()
+                Text("Projects and Notebooks appear within Files, and Git appears within Projects. Files is hidden when both Projects and Notebooks are off. If every feature is hidden, the sidebar closes.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Hiding a feature does not delete its files, calculator history, or Git repository.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Show AI Chat uses the existing Enable AI Chat setting. Other AI features keep their own settings.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -968,7 +995,7 @@ struct AISettingsView: View {
                 Toggle("Enable AI Chat", isOn: $settings.chatEnabled)
                     .font(.body.weight(.medium))
 
-                Text("Once enabled, toggle the panel itself from the status bar icon or Editor → AI Chat (⌘⇧J).")
+                Text("Show or hide AI Chat from View → Sidebar Features or Settings → General → Sidebar. Once enabled, open the panel from the status bar or Editor → Open AI Chat (⌘⇧J).")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.leading, 20)

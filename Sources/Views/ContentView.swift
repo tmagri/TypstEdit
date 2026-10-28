@@ -15,6 +15,7 @@ struct ContentView: View {
     
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
+    @StateObject private var sourceControl = SourceControlManager()
     
     @Environment(\.colorScheme) var colorScheme
     
@@ -240,6 +241,24 @@ struct ContentView: View {
                       changedURL.resolvingSymlinksInPath().path == openURL.resolvingSymlinksInPath().path else { return }
                 self.handleExternalDiskChange(at: changedURL, userInitiated: false)
             }
+            .onReceive(NotificationCenter.default.publisher(for: .gitWorkingTreeDidChange)) { notification in
+                // Pull, checkout, stash, merge and similar Git actions can
+                // rewrite any file in the repository. Every window examines
+                // its own open file: a clean buffer reloads at once, and a
+                // buffer with unsaved edits only shows the reload badge.
+                guard let root = notification.object as? URL,
+                      let openURL = self.editorController.currentFileURL else { return }
+                let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+                let filePath = openURL.resolvingSymlinksInPath().standardizedFileURL.path
+                guard filePath.hasPrefix(rootPath + "/") else { return }
+                guard FileManager.default.fileExists(atPath: openURL.path) else {
+                    // The file is not on this branch, or Git removed it. Keep
+                    // the buffer instead of a "file not found" alert.
+                    editorController.showStatus("\(openURL.lastPathComponent) no longer exists in the working tree", duration: 4.0)
+                    return
+                }
+                self.handleExternalDiskChange(at: openURL, userInitiated: false)
+            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 // Catches edits made in another app while this one was in the
                 // background — snappier than waiting for the next poll tick.
@@ -392,7 +411,8 @@ struct ContentView: View {
                     // (like VS Code's side bar); the editor + preview fill the
                     // rest and split it evenly. Still drag-resizable.
                     FractionalSplitView(
-                        showLeft: editorController.isSidebarVisible,
+                        // No visible feature means no empty sidebar pane.
+                        showLeft: editorController.isSidebarVisible && !sidebarVisibility.panels.isEmpty,
                         initialLeftWidth: 180
                     ) {
                         sidebarPanel
@@ -425,42 +445,55 @@ struct ContentView: View {
         }
     }
     
-    /// The left panel swaps between the file browser, AI Chat and the
-    /// Calculator — rather than giving each its own column — to keep the
-    /// real estate focused on the editor and preview. The segmented toggle
-    /// appears once chat is enabled in Settings or the calculator has been
-    /// used; otherwise this is just the file browser, as before.
+    private var sidebarVisibility: SidebarVisibility {
+        generalSettings.sidebarVisibility(chatEnabled: aiSettings.chatEnabled)
+    }
+
+    private var sidebarTabs: [AccessibleTab<EditorController.SidebarContent>] {
+        let tabs = [
+            AccessibleTab(EditorController.SidebarContent.files, title: "Files", systemImage: "doc.text", selectedSystemImage: "doc.text.fill", color: .blue),
+            AccessibleTab(EditorController.SidebarContent.aiChat, title: "AI Chat", systemImage: "bubble.left.and.text.bubble.right", selectedSystemImage: "bubble.left.and.text.bubble.right.fill", color: .purple),
+            AccessibleTab(EditorController.SidebarContent.calculator, title: "Calculator", systemImage: "function", selectedSystemImage: "function", color: .green),
+        ]
+        return tabs.filter { sidebarVisibility.panels.contains($0.value) }
+    }
+
+    /// Only visible features participate in the tabs or the active panel.
     private var sidebarPanel: some View {
         VStack(spacing: 0) {
-            if aiSettings.chatEnabled || editorController.sidebarContent != .files {
-                AccessibleTabStrip(tabs: [
-                    AccessibleTab(EditorController.SidebarContent.files, title: "Files", systemImage: "doc.text", selectedSystemImage: "doc.text.fill", color: .blue),
-                    AccessibleTab(EditorController.SidebarContent.aiChat, title: "AI Chat", systemImage: "bubble.left.and.text.bubble.right", selectedSystemImage: "bubble.left.and.text.bubble.right.fill", color: .purple),
-                    AccessibleTab(EditorController.SidebarContent.calculator, title: "Calculator", systemImage: "function", selectedSystemImage: "function", color: .green),
-                ], selection: $editorController.sidebarContent)
-                .padding(.horizontal, 8)
-                .padding(.top, 8)
+            if !sidebarTabs.isEmpty {
+                AccessibleTabStrip(tabs: sidebarTabs, selection: $editorController.sidebarContent)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
             }
 
-            switch editorController.sidebarContent {
+            switch sidebarVisibility.resolvedPanel(editorController.sidebarContent) {
             case .files:
-                SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
+                SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController,
+                            sourceControl: sourceControl)
             case .aiChat:
-                if aiSettings.chatEnabled {
-                    AIChatView(controller: editorController)
-                } else {
-                    SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController)
-                }
+                AIChatView(controller: editorController)
             case .calculator:
                 CalculatorView(session: editorController.calculatorSession, editorController: editorController)
+            case nil:
+                // Not reached: the split view hides the pane in this state.
+                EmptyView()
             }
         }
+        .background(themeManager.sidebarBackground)
         .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
-        .onAppear { editorController.projectRootURL = fileSystem.currentFolder }
-        .onChange(of: aiSettings.chatEnabled) { enabled in
-            if !enabled && editorController.sidebarContent == .aiChat {
-                editorController.sidebarContent = .files
-            }
+        .onAppear {
+            editorController.projectRootURL = fileSystem.currentFolder
+            reconcileSidebarSelection()
+        }
+        .onChange(of: sidebarVisibility) { _ in reconcileSidebarSelection() }
+        .onChange(of: editorController.sidebarContent) { _ in reconcileSidebarSelection() }
+    }
+
+    private func reconcileSidebarSelection() {
+        if let panel = sidebarVisibility.resolvedPanel(editorController.sidebarContent),
+           panel != editorController.sidebarContent {
+            editorController.sidebarContent = panel
         }
     }
 
@@ -510,7 +543,10 @@ struct ContentView: View {
                             .foregroundColor(editorController.isSidebarVisible ? .accentColor : themeManager.textColor.opacity(0.7))
                     }
                     .buttonStyle(.plain)
-                    .help("Toggle Sidebar")
+                    .disabled(sidebarVisibility.panels.isEmpty)
+                    .help(sidebarVisibility.panels.isEmpty
+                          ? "All sidebar features are hidden. Show them in View → Sidebar Features."
+                          : "Toggle Sidebar")
                     
                     Divider().frame(height: 12).padding(.horizontal, 4)
 
@@ -587,15 +623,17 @@ struct ContentView: View {
                             .help("Toggle AI Chat")
                         }
 
-                        Button(action: {
-                            withAnimation { editorController.toggleCalculatorPanel() }
-                        }) {
-                            Image(systemName: "function")
-                                .font(.system(size: 11))
-                                .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? .accentColor : themeManager.textColor.opacity(0.7))
+                        if generalSettings.showCalculator {
+                            Button(action: {
+                                withAnimation { editorController.toggleCalculatorPanel() }
+                            }) {
+                                Image(systemName: "function")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? .accentColor : themeManager.textColor.opacity(0.7))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Toggle Calculator")
                         }
-                        .buttonStyle(.plain)
-                        .help("Toggle Calculator")
                     }
                     
                     Divider().frame(height: 12).padding(.horizontal, 4)
@@ -1152,6 +1190,8 @@ struct ContentView: View {
         
         let currentlyLoadedFile = self.editorController.currentFileURL
         if newValue == currentlyLoadedFile { return }
+        // Reject before the unsaved-changes prompt: nothing will be opened.
+        if let newValue, rejectHiddenCalculatorFile(newValue) { return }
         
         if self.editorController.hasUnsavedChanges, let prev = currentlyLoadedFile {
            if let appDelegate = AppDelegate.shared {
@@ -1169,6 +1209,21 @@ struct ContentView: View {
         self.loadFile(url: newValue)
     }
     
+    /// A `.tcalc` file cannot open while the Calculator is hidden. Restores
+    /// the previous selection so the title, highlight, and Save target keep
+    /// matching the document that is still in the editor.
+    private func rejectHiddenCalculatorFile(_ url: URL) -> Bool {
+        guard url.pathExtension.lowercased() == CalculatorDocument.fileExtension,
+              !generalSettings.showCalculator else { return false }
+        let previous = editorController.currentFileURL
+        if selectedFile == url, previous != url {
+            isInternalSelectionChange = true
+            selectedFile = previous
+        }
+        editorController.showStatus("Calculator is hidden. Show it in View → Sidebar Features.", duration: 4)
+        return true
+    }
+
     private func handleSnippetInsertion(notification: Notification) {
         if let snippetKey = notification.object as? String {
             switch snippetKey {
@@ -1201,6 +1256,7 @@ struct ContentView: View {
 
         // Calculator sessions open in the Calculator panel, not the editor.
         if ext == CalculatorDocument.fileExtension {
+            if rejectHiddenCalculatorFile(url) { return }
             editorController.currentFileURL = url
             editorController.calculatorSession.load(from: url)
             withAnimation {

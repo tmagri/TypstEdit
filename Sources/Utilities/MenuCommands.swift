@@ -8,6 +8,7 @@ struct AppMenuCommands: Commands {
     @ObservedObject private var recentFilesManager = RecentFilesManager.shared
     @AppStorage("aiAssistantEnabled") private var aiEnabled = false
     @AppStorage("aiChatEnabled") private var chatEnabled = false
+    @ObservedObject private var generalSettings = GeneralSettingsManager.shared
     
     @Environment(\.openWindow) private var openWindow
     
@@ -510,10 +511,18 @@ struct AppMenuCommands: Commands {
         
         
         // MARK: - View Menu
-        CommandMenu("Editor") {
-            Toggle("File Panel", isOn: $editorController.isSidebarVisible)
+        CommandGroup(after: .sidebar) {
+            Toggle("Show Sidebar", isOn: $editorController.isSidebarVisible)
                 .keyboardShortcut("0", modifiers: .command)
-            
+                .disabled(generalSettings.sidebarVisibility(chatEnabled: chatEnabled).panels.isEmpty)
+            Menu("Sidebar Features") {
+                SidebarVisibilityToggles()
+            }
+        }
+
+        CommandMenu("Editor") {
+            // "File Panel" moved to View → Show Sidebar (same state, ⌘0).
+
             // Search Panel toggle removed as we rely on native panel
 
             
@@ -526,16 +535,18 @@ struct AppMenuCommands: Commands {
             Toggle("Wrap Lines", isOn: $editorController.wrapLines)
 
             if chatEnabled {
-                Button(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? "Show Files" : "Show AI Chat") {
+                Button(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? "Switch from AI Chat" : "Open AI Chat") {
                     editorController.toggleAIChatPanel()
                 }
                 .keyboardShortcut("j", modifiers: [.command, .shift])
             }
 
-            Button(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? "Show Files" : "Show Calculator") {
-                editorController.toggleCalculatorPanel()
+            if generalSettings.showCalculator {
+                Button(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? "Switch from Calculator" : "Open Calculator") {
+                    editorController.toggleCalculatorPanel()
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
             }
-            .keyboardShortcut("u", modifiers: [.command, .shift])
             
             Toggle("Preview Dark Mode", isOn: $editorController.isPreviewDarkMode)
             

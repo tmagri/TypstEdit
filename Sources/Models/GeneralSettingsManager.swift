@@ -23,6 +23,30 @@ class GeneralSettingsManager: ObservableObject {
     /// (`block.sticky`).
     @AppStorage("keepWithNextHeadings") var keepWithNextHeadings: Bool = true
 
+    // MARK: Sidebar visibility (shared by the View menu and Settings)
+
+    @AppStorage("showFiles") var showFiles: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    @AppStorage("showProjects") var showProjects: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    @AppStorage("showNotebooks") var showNotebooks: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    @AppStorage("showSourceControl") var showSourceControl: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    @AppStorage("showCalculator") var showCalculator: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+
+    func sidebarVisibility(chatEnabled: Bool) -> SidebarVisibility {
+        SidebarVisibility(files: showFiles, projects: showProjects,
+                          notebooks: showNotebooks, calculator: showCalculator,
+                          sourceControl: showSourceControl, aiChat: chatEnabled)
+    }
+
     // MARK: Calculator defaults (used when a session starts or opens without
     // its own modes — each session's own modes override these once saved).
 

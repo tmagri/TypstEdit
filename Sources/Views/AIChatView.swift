@@ -134,13 +134,15 @@ struct AIChatView: View {
                 .help("Clear chat history — starts a new chat, so skills reset to their \"on by default\" settings")
             }
             Button {
-                controller.sidebarContent = .files
+                // Falls back to another visible panel, or hides the sidebar
+                // when AI Chat is the only visible feature.
+                controller.toggleAIChatPanel()
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
-            .help("Back to Files")
+            .help("Close AI Chat")
         }
         .padding(10)
     }

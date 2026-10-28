@@ -332,7 +332,9 @@ class AISettingsManager: ObservableObject {
     // The chat panel itself is a separate switch from "is a project/notebook
     // scope available" — it's off for every new install until explicitly
     // turned on in Settings, same as `completionEnabled`/`assistantEnabled`.
-    @AppStorage("aiChatEnabled") var chatEnabled: Bool = false
+    @AppStorage("aiChatEnabled") var chatEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
     /// Separate, extra opt-in for the sandboxed Python execution tool — off
     /// by default even when chat itself is on, since it's a materially
     /// different risk (arbitrary code execution) from read/search/write.
