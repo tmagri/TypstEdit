@@ -332,6 +332,9 @@ struct SourceControlSidebarView: View {
                 canCommitAndSync: !manager.hasDiverged,
                 hint: commitHint,
                 help: commitHelp,
+                canGenerateMessage: canGenerateCommitMessage,
+                isGeneratingMessage: manager.isGeneratingCommitMessage,
+                onGenerateMessage: { generateCommitMessage() },
                 onCommit: { commit(amend: false) },
                 onCommitAmend: { commit(amend: true) },
                 onCommitAndPush: { commit(amend: false, then: .push) },
@@ -498,6 +501,23 @@ struct SourceControlSidebarView: View {
         if staged.isEmpty { return "Stage changes to commit them" }
         if !hasMessage { return "Enter a commit message" }
         return "Commit staged changes only"
+    }
+
+    /// Any change a message could describe: staged, unstaged, or conflicts.
+    private var canGenerateCommitMessage: Bool {
+        !isWorking && manager.repositoryRoot != nil
+            && (!staged.isEmpty || !unstaged.isEmpty || !conflicted.isEmpty)
+    }
+
+    /// Asks the configured chat model for a commit message and puts it in
+    /// the box. Nothing is committed — the text lands there for review, and
+    /// failures surface through `manager.errorMessage`.
+    private func generateCommitMessage() {
+        Task {
+            if let generated = await manager.generateCommitMessage() {
+                message = generated
+            }
+        }
     }
 
     private func commit(amend: Bool, then post: GitPostCommitAction = .none) {

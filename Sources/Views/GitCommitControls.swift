@@ -30,6 +30,10 @@ struct GitCommitControls: View {
     let canCommitAndSync: Bool
     let hint: String?
     let help: String
+    /// True when there are changes a message could describe.
+    let canGenerateMessage: Bool
+    let isGeneratingMessage: Bool
+    let onGenerateMessage: () -> Void
     let onCommit: () -> Void
     let onCommitAmend: () -> Void
     let onCommitAndPush: () -> Void
@@ -39,16 +43,37 @@ struct GitCommitControls: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            TextField("Message (⌘Enter to commit)", text: $message, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .lineLimit(1...3)
-                .padding(6)
-                .background(themeManager.searchFieldBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 5))
-                .overlay(RoundedRectangle(cornerRadius: 5).stroke(themeManager.secondaryTextColor.opacity(0.25)))
-                .focused(messageFocus)
-                .accessibilityLabel("Commit message")
+            ZStack(alignment: .topTrailing) {
+                TextField("Message (⌘Enter to commit)", text: $message, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .lineLimit(1...3)
+                    .padding(6)
+                    .padding(.trailing, 22)
+                    .background(themeManager.searchFieldBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(themeManager.secondaryTextColor.opacity(0.25)))
+                    .focused(messageFocus)
+                    .accessibilityLabel("Commit message")
+                Button(action: onGenerateMessage) {
+                    Group {
+                        if isGeneratingMessage {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(systemName: "sparkles")
+                        }
+                    }
+                    .font(.system(size: 11))
+                    .foregroundColor(themeManager.secondaryTextColor)
+                    .padding(5)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canGenerateMessage || isGeneratingMessage)
+                .opacity(canGenerateMessage || isGeneratingMessage ? 1 : 0.35)
+                .help("Generate a commit message with AI — from the staged changes, or all changes when nothing is staged")
+                .accessibilityLabel("Generate commit message with AI")
+            }
             commitMenu
                 .opacity(canCommit ? 1 : 0.55)
             if let hint {

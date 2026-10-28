@@ -716,6 +716,10 @@ final class SourceControlManager: ObservableObject {
     @Published private(set) var currentOperation: String?
     @Published var errorMessage: String?
 
+    /// True while an AI commit message is being generated for the commit box.
+    /// Set from `SourceControlCommitMessage.swift`; the UI only reads it.
+    @Published var isGeneratingCommitMessage: Bool = false
+
     private(set) var projectRoot: URL?
 
     /// Number of commits loaded into `commits`.
