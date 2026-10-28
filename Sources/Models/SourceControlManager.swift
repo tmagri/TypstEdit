@@ -153,7 +153,7 @@ enum GitError: LocalizedError, Sendable, Equatable {
         case .launchFailed(let message):
             return "Could not run Git: \(message)"
         case .timedOut(let seconds):
-            return "The network operation did not finish within \(seconds) seconds and was cancelled."
+            return "The network operation did not finish within \(seconds) \(seconds == 1 ? "second" : "seconds") and was cancelled."
         }
     }
 }
@@ -186,14 +186,20 @@ struct GitRunner: Sendable {
         self.environmentOverrides = environmentOverrides
     }
 
-    /// Global options prepended to every invocation.
+    /// Global options prepended to every invocation. `--literal-pathspecs` is
+    /// deliberately NOT here: it breaks `git stash push -u` (Apple Git fails
+    /// to remove the stashed untracked files). It is passed per command
+    /// instead, exactly where user-controlled paths appear after `--`.
     static let globalArguments: [String] = [
         "--no-pager",
-        "--literal-pathspecs",
         "-c", "core.quotepath=false",
         "-c", "color.ui=false",
         "-c", "log.showSignature=false",
     ]
+
+    /// Prepended to commands that pass user-controlled paths after `--`, so
+    /// magic-looking names (e.g. ":(glob)*.typ") stay literal.
+    static let literalPathArguments = ["--literal-pathspecs"]
 
     /// Inherited variables that would redirect git to a different repository
     /// or index than the one we are pointing it at.
@@ -1144,7 +1150,10 @@ final class SourceControlManager: ObservableObject {
             // `-A` also stages deletions. Only the current path is passed:
             // for a staged rename the original path is already gone from the
             // index and worktree, and naming it would fail the pathspec.
-            _ = try await runner.run(["add", "-A", "--", change.path], in: root)
+            _ = try await runner.run(
+                GitRunner.literalPathArguments + ["add", "-A", "--", change.path],
+                in: root
+            )
         }
     }
 
@@ -1176,9 +1185,16 @@ final class SourceControlManager: ObservableObject {
         if try await headExists(root: root, runner: runner) {
             // Restores both sides of a rename (removes the new path from the
             // index and re-adds the original from HEAD) and staged deletions.
-            _ = try await runner.run(["reset", "-q", "HEAD", "--"] + paths, in: root)
+            _ = try await runner.run(
+                GitRunner.literalPathArguments + ["reset", "-q", "HEAD", "--"] + paths,
+                in: root
+            )
         } else {
-            _ = try await runner.run(["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--"] + paths, in: root)
+            _ = try await runner.run(
+                GitRunner.literalPathArguments
+                    + ["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--"] + paths,
+                in: root
+            )
         }
     }
 
@@ -1422,7 +1438,10 @@ final class SourceControlManager: ObservableObject {
         }
         let path = change.path
         await perform(label: "Discarding…", touchesWorkingTree: true) { root, runner in
-            _ = try await runner.run(["checkout", "--quiet", "--", path], in: root)
+            _ = try await runner.run(
+                GitRunner.literalPathArguments + ["checkout", "--quiet", "--", path],
+                in: root
+            )
         }
     }
 
@@ -1439,7 +1458,10 @@ final class SourceControlManager: ObservableObject {
         await perform(label: "Discarding changes…", touchesWorkingTree: true) { root, runner in
             if hasUnstagedTracked {
                 // Restores the working tree from the index; staged changes survive.
-                _ = try await runner.run(["checkout", "--quiet", "--", "."], in: root)
+                _ = try await runner.run(
+                    GitRunner.literalPathArguments + ["checkout", "--quiet", "--", "."],
+                    in: root
+                )
             }
             for path in untracked {
                 let url = root.appendingPathComponent(path)
@@ -1460,7 +1482,9 @@ final class SourceControlManager: ObservableObject {
         let runner = runner
         let limit = maxDiffBytes
         let paths = Self.paths(for: change)
-        let base = ["diff", "--no-color", "--no-ext-diff", "--find-renames", "--no-relative"]
+        // Literal pathspecs so magic-looking file names stay literal.
+        let base = GitRunner.literalPathArguments
+            + ["diff", "--no-color", "--no-ext-diff", "--find-renames", "--no-relative"]
 
         let output: Data
         switch group {
@@ -1476,7 +1500,8 @@ final class SourceControlManager: ObservableObject {
             if change.isUntracked {
                 // --no-index exits 1 when files differ.
                 output = try await runner.run(
-                    ["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", change.path],
+                    GitRunner.literalPathArguments
+                        + ["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", change.path],
                     in: root,
                     acceptedExitCodes: [0, 1]
                 ).stdout

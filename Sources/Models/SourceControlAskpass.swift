@@ -120,7 +120,7 @@ struct NetworkGitRunner: Sendable {
     ) async throws -> GitCommandResult {
         let seconds = max(0, timeout)
         // Race the command against the timer; whichever finishes first wins.
-        return try await withTaskGroup(of: Outcome.self, returning: GitCommandResult.self) { group in
+        return try await withThrowingTaskGroup(of: Outcome.self, returning: GitCommandResult.self) { group in
             group.addTask {
                 do {
                     return .done(try await self.runner.run(arguments, in: directory, input: input, acceptedExitCodes: acceptedExitCodes))
@@ -136,7 +136,7 @@ struct NetworkGitRunner: Sendable {
                     return .failed(CancellationError())
                 }
             }
-            guard let first = await group.next() else {
+            guard let first = try await group.next() else {
                 throw CancellationError()
             }
             group.cancelAll()

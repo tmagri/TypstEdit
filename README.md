@@ -45,7 +45,7 @@
 ### Project & File Management
 * **🚀 Project Templates:** Start quickly with built-in templates for **Articles, Reports, Presentations, and Resumes**.
 * **📁 Project Sidebar:** Easily navigate through your project files.
-* **🌿 Git Source Control:** The panel below the project files shows changes in **Tree mode by default**. It supports diff previews, staging, commits, branches, remote actions, and a commit graph. See [Git source control](Docs/source-control.md).
+* **🌿 Git Source Control:** The panel below the project files shows changes in **Tree mode by default**, similar to VS Code. It supports diffs, staging, amend, undo, sync, branches, tags, stashes, and merge conflicts. You can reword commits that are not pushed from the commit graph. Open files reload after a pull or checkout. See [Git source control](Docs/source-control.md).
 * **📥 LyX Import:** Convert LyX documents to Typst format with automatic font, page size, and heading detection.
 * **📤 Export Options:** Export to PDF, PNG, SVG, Markdown, or **Standard Typst** (a portable `.typ` with calculator values inlined).
 * **💾 Project Backup:** One-click project backup functionality.

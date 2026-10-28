@@ -544,3 +544,110 @@ final class SourceControlTests: XCTestCase {
         XCTAssertGreaterThan(diff.utf8.count, big.utf8.count)
     }
 }
+
+// MARK: - Shared fixture workspace
+
+/// Fixture helpers shared by the Source Control integration tests. Every
+/// repository lives in a fresh temporary directory; the user's real
+/// repository and git configuration are never touched. Credential prompts
+/// are impossible: the runner's environment points GIT_ASKPASS/SSH_ASKPASS
+/// at /usr/bin/false and the managers created here disable dialogs.
+@MainActor
+final class GitTestWorkspace {
+    nonisolated static let isolatedEnvironment: [String: String] = [
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Test User",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test User",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "init.defaultBranch",
+        "GIT_CONFIG_VALUE_0": "main",
+        "GIT_CONFIG_KEY_1": "commit.gpgsign",
+        "GIT_CONFIG_VALUE_1": "false",
+        "GIT_ASKPASS": "/usr/bin/false",
+        "SSH_ASKPASS": "/usr/bin/false",
+        "SSH_ASKPASS_REQUIRE": "never",
+    ]
+
+    let runner = GitRunner(environmentOverrides: GitTestWorkspace.isolatedEnvironment)
+    private var tempDirs: [URL] = []
+
+    func cleanup() {
+        for dir in tempDirs { try? FileManager.default.removeItem(at: dir) }
+        tempDirs.removeAll()
+    }
+
+    @discardableResult
+    func makeTempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SourceControlTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        tempDirs.append(dir)
+        return dir.resolvingSymlinksInPath()
+    }
+
+    func makeRepo(bare: Bool = false) async throws -> URL {
+        let dir = try makeTempDir()
+        _ = try await runner.run(bare ? ["init", "-q", "--bare"] : ["init", "-q"], in: dir)
+        return dir
+    }
+
+    @discardableResult
+    func git(_ args: [String], in dir: URL) async throws -> String {
+        try await runner.run(args, in: dir).stdoutString
+    }
+
+    /// Runs git with a different author identity, so tests can prove that
+    /// author identity/date are preserved by rewrites.
+    func gitAsAda(_ args: [String], in dir: URL) async throws -> String {
+        var overrides = GitTestWorkspace.isolatedEnvironment
+        overrides["GIT_AUTHOR_NAME"] = "Ada Lovelace"
+        overrides["GIT_AUTHOR_EMAIL"] = "ada@example.com"
+        overrides["GIT_AUTHOR_DATE"] = "2005-04-07T22:13:13+02:00"
+        return try await GitRunner(environmentOverrides: overrides).run(args, in: dir).stdoutString
+    }
+
+    func write(_ text: String, to name: String, in dir: URL) throws {
+        let url = dir.appendingPathComponent(name)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    func read(_ name: String, in dir: URL) throws -> String {
+        try String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8)
+    }
+
+    func exists(_ name: String, in dir: URL) -> Bool {
+        FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path)
+    }
+
+    func commitAll(_ message: String, in dir: URL) async throws {
+        _ = try await git(["add", "-A"], in: dir)
+        _ = try await git(["commit", "-q", "-m", message], in: dir)
+    }
+
+    func makeManager(root: URL) async -> SourceControlManager {
+        let manager = SourceControlManager(runner: runner)
+        // Never show a credential dialog from a test.
+        manager.isAskpassEnabled = false
+        await manager.setProjectRoot(root)
+        return manager
+    }
+
+    func change(
+        _ path: String,
+        in manager: SourceControlManager,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> GitChange {
+        try XCTUnwrap(
+            manager.changes.first { $0.path == path },
+            "missing change for \(path); have \(manager.changes.map(\.path))",
+            file: file, line: line
+        )
+    }
+}

@@ -16,14 +16,16 @@ extension SourceControlManager {
         }
         let network = makeNetworkGit()
         let pullArguments = upstream == nil ? nil : Self.pullArguments(for: mode)
-        var pushArguments = ["push", "--quiet"]
+        let pushArguments: [String]
         if upstream == nil {
             guard !isDetached, !isUnborn, !branch.isEmpty else {
                 errorMessage = isUnborn ? "Create a commit before pushing." : "Check out a branch before pushing."
                 return
             }
             let remote = remotes.contains("origin") ? "origin" : (remotes.first ?? "origin")
-            pushArguments += ["--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(branch)"]
+            pushArguments = ["push", "--quiet", "--set-upstream", remote, "refs/heads/\(branch):refs/heads/\(branch)"]
+        } else {
+            pushArguments = ["push", "--quiet"]
         }
         await perform(label: "Syncing…", touchesWorkingTree: true) { root, _ in
             if let pullArguments {
@@ -291,16 +293,16 @@ extension SourceControlManager {
     // MARK: Stash
 
     func stash(message: String?, includeUntracked: Bool) async {
-        var arguments = ["stash", "push", "--quiet"]
         let text = message?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let text, !text.isEmpty {
-            arguments.append(contentsOf: ["-m", text])
-        }
-        if includeUntracked {
-            arguments.append("-u")
-        }
+        let messageArguments: [String] = (text?.isEmpty == false) ? ["-m", text!] : []
+        let untrackedArguments: [String] = includeUntracked ? ["-u"] : []
         await perform(label: "Stashing…", touchesWorkingTree: true) { root, runner in
-            _ = try await runner.run(arguments, in: root)
+            // No --quiet here: Apple Git fails to remove untracked files
+            // from the worktree when push runs quietly with -u.
+            _ = try await runner.run(
+                ["stash", "push"] + messageArguments + untrackedArguments,
+                in: root
+            )
         }
     }
 
@@ -337,8 +339,14 @@ extension SourceControlManager {
     private func accept(_ change: GitChange, side: String) async {
         let path = change.path
         await perform(label: "Resolving…", touchesWorkingTree: true) { root, runner in
-            _ = try await runner.run(["checkout", "--quiet", side, "--", path], in: root)
-            _ = try await runner.run(["add", "--", path], in: root)
+            _ = try await runner.run(
+                GitRunner.literalPathArguments + ["checkout", "--quiet", side, "--", path],
+                in: root
+            )
+            _ = try await runner.run(
+                GitRunner.literalPathArguments + ["add", "--", path],
+                in: root
+            )
         }
     }
 
@@ -346,7 +354,10 @@ extension SourceControlManager {
     func markResolved(_ change: GitChange) async {
         let path = change.path
         await perform(label: "Resolving…", touchesWorkingTree: false) { root, runner in
-            _ = try await runner.run(["add", "--", path], in: root)
+            _ = try await runner.run(
+                GitRunner.literalPathArguments + ["add", "--", path],
+                in: root
+            )
         }
     }
 
