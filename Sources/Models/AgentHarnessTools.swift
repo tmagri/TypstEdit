@@ -3,8 +3,8 @@ import Foundation
 /// One row of the chat's visible task list — the same "keep the model (and
 /// you) honest about multi-step work" idea as Claude Code's todo list. Kept
 /// intentionally small: an imperative description and a status.
-struct AgentPlanItem: Equatable, Identifiable {
-    enum Status: String {
+struct AgentPlanItem: Equatable, Identifiable, Codable {
+    enum Status: String, Codable {
         case pending
         case inProgress = "in_progress"
         case completed

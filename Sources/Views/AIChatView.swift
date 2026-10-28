@@ -27,9 +27,20 @@ struct AIChatView: View {
 
     /// Which past messages' "Thought process" disclosures are expanded.
     @State private var expandedThinkingIDs: Set<UUID> = []
+    /// The answer whose thinking was opened automatically when it finished —
+    /// replaced (and closed) by the next answer, so one open thinking section
+    /// carries over from the live row without every old one piling up.
+    @State private var autoExpandedThinkingID: UUID?
     /// Whether the live "Thinking…" indicator (shown while generating) is
-    /// expanded to follow the model's reasoning as it streams in.
-    @State private var liveThinkingExpanded = false
+    /// expanded to follow the model's reasoning as it streams in. On by
+    /// default: the thinking is part of what the user asked to see, not
+    /// something buried behind an extra click. "Collapse all thinking" in the
+    /// header still closes it, and each new turn opens it again.
+    @State private var liveThinkingExpanded = true
+
+    /// Guards the one-pending follow-up scroll, so a burst of streaming
+    /// updates schedules at most one extra `scrollTo` instead of one per token.
+    @State private var followScrollScheduled = false
 
     @State private var showRename = false
     @State private var renameDraft: String = ""
@@ -156,6 +167,7 @@ struct AIChatView: View {
                 if liveThinkingExpanded || !expandedThinkingIDs.isEmpty {
                     Button {
                         expandedThinkingIDs = []
+                        autoExpandedThinkingID = nil
                         liveThinkingExpanded = false
                     } label: {
                         Image(systemName: "eye.slash")
@@ -329,6 +341,13 @@ struct AIChatView: View {
 
     // MARK: - Transcript
 
+    /// Anchor id for the invisible row pinned to the end of the transcript.
+    /// Scrolling targets this instead of the last message: the live
+    /// "Thinking…"/tool row sits *below* the last message, so scrolling to the
+    /// message left both that row and the newest message's true (measured)
+    /// height off the bottom — the "always one short" behaviour this fixes.
+    private static let transcriptBottomID = "transcript-bottom"
+
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -348,61 +367,139 @@ struct AIChatView: View {
                         .background(Color.red.opacity(0.08))
                         .cornerRadius(6)
                     }
+                    // Always present, so the bottom is reachable even in an
+                    // empty (new) conversation with no last message.
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.transcriptBottomID)
                 }
                 .padding(10)
             }
-            .onChange(of: chat.messages.count) { _ in
-                if let last = chat.messages.last?.id {
-                    withAnimation { proxy.scrollTo(last, anchor: .bottom) }
-                }
+            // Opened on an existing conversation (or a newly switched one):
+            // start at the newest exchange, not the top of the history.
+            .onAppear { followBottom(proxy) }
+            // New chat / new session: reset the per-chat thinking state and
+            // start at the bottom (which is all there is, usually).
+            .onChange(of: chat.id) { _ in
+                expandedThinkingIDs = []
+                autoExpandedThinkingID = nil
+                liveThinkingExpanded = true
+                followBottom(proxy)
             }
+            // Structural changes: a message, tool row or error was added or
+            // updated, or the live row appeared/disappeared.
+            .onChange(of: chat.messages) { messages in
+                // Carry an open live thinking box over to the finished answer,
+                // so the reasoning doesn't disappear the moment it lands.
+                if liveThinkingExpanded,
+                   let last = messages.last,
+                   last.role == .assistant,
+                   last.id != autoExpandedThinkingID,
+                   last.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    if let previous = autoExpandedThinkingID, previous != last.id {
+                        expandedThinkingIDs.remove(previous)
+                    }
+                    autoExpandedThinkingID = last.id
+                    expandedThinkingIDs.insert(last.id)
+                }
+                followBottom(proxy)
+            }
+            .onChange(of: chat.isGenerating) { isGenerating in
+                if isGenerating { liveThinkingExpanded = true }
+                followBottom(proxy)
+            }
+            .onChange(of: chat.errorMessage) { _ in followBottom(proxy) }
+            // Streaming updates only grow the live row, so they take the
+            // coalesced path: a stream of deltas costs at most one scroll.
+            .onChange(of: chat.liveReasoning) { _ in followBottomSoon(proxy) }
+            .onChange(of: chat.liveStatus) { _ in followBottomSoon(proxy) }
+            .onChange(of: chat.runningTool) { _ in followBottomSoon(proxy) }
+        }
+    }
+
+    /// Pins the transcript to its bottom. The second, delayed pass is
+    /// deliberate: `LazyVStack` lays a freshly appended row out with an
+    /// estimated height, so a single `scrollTo` fired in the same update
+    /// lands short and leaves the newest row just below the fold.
+    private func followBottom(_ proxy: ScrollViewProxy) {
+        proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
+        followBottomSoon(proxy)
+    }
+
+    /// At most one pending follow-up scroll per burst of updates. For
+    /// streaming reasoning this runs about a dozen times a second rather than
+    /// once per token, which keeps the bottom pinned without the transcript
+    /// stuttering.
+    private func followBottomSoon(_ proxy: ScrollViewProxy) {
+        guard !followScrollScheduled else { return }
+        followScrollScheduled = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
+            followScrollScheduled = false
         }
     }
 
     /// The live "Thinking…" row shown while a response is being generated.
-    /// Plain spinner until the model actually streams some reasoning text —
-    /// at that point it becomes a disclosure so there's something to open:
-    /// click to follow the thinking live, click again (or "Collapse all
-    /// thinking" in the header) to close it back down to just the spinner.
+    /// While the model streams reasoning, the box is open by default so the
+    /// thinking is actually visible as it arrives; it can be collapsed (and
+    /// the header's "Collapse all thinking" closes it too) without stopping
+    /// the response. A running tool call is reported on its own line beneath
+    /// the thinking, so the reasoning doesn't vanish while a task runs.
     @ViewBuilder
     private var generatingRow: some View {
         let reasoning = chat.liveReasoning.trimmingCharacters(in: .whitespacesAndNewlines)
         let statusText = chat.liveStatus ?? "Thinking…"
-        if let running = chat.runningTool {
-            runningTaskRow(running)
-        } else if reasoning.isEmpty {
+        VStack(alignment: .leading, spacing: 6) {
+            if reasoning.isEmpty {
+                // Nothing to show yet (or the model doesn't expose its
+                // reasoning): spinner plus why it's still working.
+                if let running = chat.runningTool {
+                    runningTaskRow(running)
+                } else {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(statusText).font(.caption).foregroundColor(.secondary)
+                    }
+                }
+            } else {
+                liveThinkingBox(statusText: statusText)
+                if let running = chat.runningTool {
+                    runningTaskRow(running)
+                }
+            }
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
+
+    /// Expandable live reasoning, following the newest text as it streams.
+    private func liveThinkingBox(statusText: String) -> some View {
+        DisclosureGroup(isExpanded: $liveThinkingExpanded) {
+            ScrollViewReader { innerProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(chat.liveReasoning)
+                            .font(.caption2.monospaced())
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Color.clear.frame(height: 1).id("live-reasoning-end")
+                    }
+                }
+                .frame(maxHeight: 180)
+                .onAppear { innerProxy.scrollTo("live-reasoning-end", anchor: .bottom) }
+                .onChange(of: chat.liveReasoning) { _ in
+                    innerProxy.scrollTo("live-reasoning-end", anchor: .bottom)
+                }
+            }
+            .padding(.top, 4)
+        } label: {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text(statusText).font(.caption).foregroundColor(.secondary)
             }
-        } else {
-            DisclosureGroup(isExpanded: $liveThinkingExpanded) {
-                ScrollViewReader { innerProxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(chat.liveReasoning)
-                                .font(.caption2.monospaced())
-                                .foregroundColor(.secondary)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Color.clear.frame(height: 1).id("live-reasoning-end")
-                        }
-                    }
-                    .frame(maxHeight: 180)
-                    .onChange(of: chat.liveReasoning) { _ in
-                        innerProxy.scrollTo("live-reasoning-end", anchor: .bottom)
-                    }
-                }
-                .padding(.top, 4)
-            } label: {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(statusText).font(.caption).foregroundColor(.secondary)
-                }
-            }
-            .padding(8)
-            .background(Color.secondary.opacity(0.06))
-            .cornerRadius(8)
         }
     }
 
@@ -602,11 +699,17 @@ struct AIChatView: View {
     @ViewBuilder
     private func thinkingDisclosure(_ reasoning: String, id: UUID) -> some View {
         DisclosureGroup(isExpanded: thinkingBinding(for: id)) {
-            Text(reasoning)
-                .font(.caption2.monospaced())
-                .foregroundColor(.secondary)
-                .textSelection(.enabled)
-                .padding(.top, 4)
+            // Scrollable and capped like the live box: an expanded thinking
+            // section should never push the answer itself out of the panel.
+            ScrollView {
+                Text(reasoning)
+                    .font(.caption2.monospaced())
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 180)
+            .padding(.top, 4)
         } label: {
             Label("Thought process", systemImage: "brain")
                 .font(.caption2)
