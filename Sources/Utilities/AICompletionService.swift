@@ -129,6 +129,98 @@ struct AIToolResult {
     let output: String
 }
 
+/// Stops the tool-calling loop from re-running the same read over and over.
+/// One instance lives for one `fetchCompletionWithTools` request.
+///
+/// Only read-only tools are tracked. A repeat still runs, so the answer is
+/// never stale, but when it returns exactly what the previous identical call
+/// returned the result is labelled as a repeat. Once a call has come back
+/// identical `maxIdenticalRuns` times it is no longer executed: the model gets
+/// a note telling it to use what it has. Any call that can change files (or
+/// an unknown MCP tool) clears the history, because re-reading after an edit
+/// is legitimate.
+struct ToolCallRepeatGuard {
+    /// Tools whose identical repeats are pure waste while nothing changes.
+    static let readOnlyToolNames: Set<String> = [
+        "list_files", "read_file", "grep_project", "search_project",
+        "read_skill_file", "web_fetch", "git_status", "git_diff", "git_log"
+    ]
+    /// Tools that change nothing on disk, so they don't invalidate the
+    /// history, but aren't worth tracking either.
+    static let neutralToolNames: Set<String> = [
+        "update_plan", "delegate_task", "run_typst_check",
+        "convert_markdown_to_typst", "evaluate_math"
+    ]
+    /// Default for the Settings value (`chatRepeatCallLimit`).
+    static let defaultMaxIdenticalRuns = 2
+
+    static let repeatNote = "[Same result as your earlier identical call in this request — nothing has changed. Use what you already have instead of calling it again.]\n"
+
+    /// Identical runs allowed before a call is refused. 0 turns the guard
+    /// off: nothing is labelled or refused.
+    let maxIdenticalRuns: Int
+
+    private var history: [String: (runs: Int, output: String)] = [:]
+
+    init(maxIdenticalRuns: Int = defaultMaxIdenticalRuns) {
+        self.maxIdenticalRuns = max(0, maxIdenticalRuns)
+    }
+
+    /// `project__read_file` → `read_file`.
+    static func baseName(_ qualifiedName: String) -> String {
+        qualifiedName.range(of: "__").map { String(qualifiedName[$0.upperBound...]) } ?? qualifiedName
+    }
+
+    /// Tool name plus arguments with sorted keys, so `{"limit":5,"path":"a"}`
+    /// and `{"path":"a","limit":5}` count as the same call.
+    static func signature(name: String, argumentsJSON: String) -> String {
+        let trimmed = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canonical: String
+        if trimmed.isEmpty {
+            canonical = "{}"
+        } else if let data = trimmed.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let sorted = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+                  let string = String(data: sorted, encoding: .utf8) {
+            canonical = string
+        } else {
+            canonical = trimmed
+        }
+        return name + "|" + canonical
+    }
+
+    /// The note to return instead of running the call, or `nil` to run it.
+    func refusal(name: String, argumentsJSON: String) -> String? {
+        let base = Self.baseName(name)
+        guard maxIdenticalRuns > 0,
+              Self.readOnlyToolNames.contains(base),
+              let entry = history[Self.signature(name: name, argumentsJSON: argumentsJSON)],
+              entry.runs >= maxIdenticalRuns else { return nil }
+        let times = entry.runs == 1 ? "once" : "\(entry.runs) times, with the same result each time,"
+        return "Not run: this exact \(base) call already ran \(times) in this request, and nothing has been edited since, so it would return the same thing. Use what it already returned, read a different range or search for something else, or write your answer now."
+    }
+
+    /// Records a finished call and returns the output to hand the model
+    /// (labelled when it repeats the previous identical call exactly).
+    mutating func record(name: String, argumentsJSON: String, output: String) -> String {
+        guard maxIdenticalRuns > 0 else { return output }
+        let base = Self.baseName(name)
+        guard Self.readOnlyToolNames.contains(base) else {
+            if !Self.neutralToolNames.contains(base) {
+                history.removeAll()
+            }
+            return output
+        }
+        let key = Self.signature(name: name, argumentsJSON: argumentsJSON)
+        if let entry = history[key], entry.output == output {
+            history[key] = (entry.runs + 1, output)
+            return Self.repeatNote + output
+        }
+        history[key] = (1, output)
+        return output
+    }
+}
+
 /// A provider-neutral chat message used internally by the tool-calling loop
 /// in `AICompletionService`. Converted to each provider's wire format
 /// immediately before sending (OpenAI-compatible vs. Anthropic shapes differ
@@ -458,6 +550,10 @@ class AICompletionService: ObservableObject {
         /// when the model produces a final answer or the task is cancelled.
         maxTurns: Int? = 6,
         onToolCall: @escaping (String, String) -> Void = { _, _ in },
+        /// A read or search the repeat guard refused to run again: qualified
+        /// name, arguments JSON, and the note the model received instead.
+        /// Lets the caller show the refusal, since `executeTool` never runs.
+        onToolRefused: ((_ qualifiedName: String, _ argumentsJSON: String, _ note: String) -> Void)? = nil,
         onReasoning: @escaping (String) -> Void = { _ in },
         /// When non-nil, each turn is requested with streaming enabled and
         /// every reasoning/"thinking" fragment is forwarded here as it
@@ -534,6 +630,15 @@ class AICompletionService: ObservableObject {
         // when the model isn't installed. Per model: a saved model may override
         // the global method, and "Automatic" depends on cloud vs. local.
         let compression = await ChatCompressor.resolve(method: settings.effectiveCompressionMethod(for: ctx))
+
+        // Catches the read loop: the same read/search issued again and again
+        // with nothing edited in between.
+        var repeatGuard = ToolCallRepeatGuard(maxIdenticalRuns: settings.effectiveChatRepeatCallLimit)
+        // Consecutive tool rounds that only read and searched — reset by any
+        // round that changes something or updates the plan.
+        var investigativeRounds = 0
+        let noProgressThreshold = settings.effectiveChatNoProgressRounds
+        let turnWarningReplies = settings.effectiveChatTurnLimitWarningReplies
 
         var turn = 0
         while true {
@@ -686,8 +791,13 @@ class AICompletionService: ObservableObject {
                 messages.append(.assistantToolCalls(calls))
                 for call in calls {
                     try Task.checkCancellation()
+                    if let refusal = repeatGuard.refusal(name: call.name, argumentsJSON: call.argumentsJSON) {
+                        onToolRefused?(call.name, call.argumentsJSON, refusal)
+                        messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: refusal)))
+                        continue
+                    }
                     onToolCall(call.name, call.argumentsJSON)
-                    let output: String
+                    var output: String
                     do {
                         output = try await executeTool(call.name, call.argumentsJSON)
                     } catch {
@@ -697,8 +807,26 @@ class AICompletionService: ObservableObject {
                         if Task.isCancelled { throw CancellationError() }
                         output = "Error: \(error.localizedDescription)"
                     }
+                    output = repeatGuard.record(name: call.name, argumentsJSON: call.argumentsJSON, output: output)
                     messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
                 }
+
+                // Steering notes ride on the round's last tool result, which
+                // every provider accepts (an extra user message would break
+                // Anthropic's strict alternation).
+                investigativeRounds = Self.isInvestigativeRound(calls) ? investigativeRounds + 1 : 0
+                var notes: [String] = []
+                if let note = Self.noProgressNote(rounds: investigativeRounds, threshold: noProgressThreshold) {
+                    notes.append(note)
+                    onReasoningDelta?("\n\n[\(investigativeRounds) rounds of reading and searching in a row — asking the model to act or answer.]\n\n")
+                }
+                if let note = Self.turnBudgetNote(completedTurn: turn, maxTurns: maxTurns, warnAt: turnWarningReplies) {
+                    notes.append(note)
+                }
+                if !notes.isEmpty {
+                    Self.appendHarnessNote(notes.joined(separator: "\n\n"), to: &messages)
+                }
+
                 if let maxTurns, turn == maxTurns - 1 {
                     throw AIError.apiError("The AI kept calling tools without producing a final answer after \(maxTurns) turns.")
                 }
@@ -715,6 +843,72 @@ class AICompletionService: ObservableObject {
     /// state, and directly unit-testable without hopping onto the main actor.
     nonisolated static func clampedAutoContinueAttempts(_ raw: Int) -> Int {
         min(max(raw, 0), 50)
+    }
+
+    // MARK: Progress & Turn-Budget Steering
+
+    /// Default rounds of nothing but reads and searches before the loop asks
+    /// the model to act or answer (Settings: `chatNoProgressRounds`).
+    nonisolated static let defaultNoProgressRoundThreshold = 8
+
+    /// Default replies-left count for the turn-limit heads-up (Settings:
+    /// `chatTurnLimitWarningReplies`).
+    nonisolated static let defaultTurnBudgetWarningRemaining = 3
+
+    /// Prefix on every steering note, so the model can tell it apart from
+    /// the tool's own output.
+    nonisolated static let harnessNotePrefix = "[Harness note]"
+
+    /// A round made only of read-only lookups (and subagent research).
+    /// Anything else — an edit, an export, a plan update, a compile check,
+    /// an MCP tool — counts as progress.
+    nonisolated static func isInvestigativeRound(_ calls: [AIToolCallRequest]) -> Bool {
+        !calls.isEmpty && calls.allSatisfy { call in
+            let base = ToolCallRepeatGuard.baseName(call.name)
+            return ToolCallRepeatGuard.readOnlyToolNames.contains(base) || base == "delegate_task"
+        }
+    }
+
+    /// The nudge after `rounds` investigative rounds in a row, or `nil`.
+    /// Repeats every `threshold` rounds; 0 turns it off. Worded without tool
+    /// names, since a read-only subagent gets it too.
+    nonisolated static func noProgressNote(rounds: Int, threshold: Int = defaultNoProgressRoundThreshold) -> String? {
+        guard threshold > 0, rounds > 0, rounds % threshold == 0 else { return nil }
+        return "\(harnessNotePrefix) You have spent \(rounds) rounds in a row reading and searching without changing anything or updating the plan. Decide now: if what you have is enough, write your answer or make the first change. If it isn't, name the one specific thing still missing and get only that — don't re-read what you've already seen."
+    }
+
+    /// A warning when the turn cap is close, or `nil`. `completedTurn` is the
+    /// 0-based turn whose tool calls just ran; the loop allows requests
+    /// 0 ..< maxTurns, and fails if the last one still calls tools.
+    /// `warnAt`: 0 = no warnings, 1 = only the final-reply notice, 2+ = also
+    /// a heads-up when that many replies are left.
+    nonisolated static func turnBudgetNote(
+        completedTurn: Int,
+        maxTurns: Int?,
+        warnAt: Int = defaultTurnBudgetWarningRemaining
+    ) -> String? {
+        guard let maxTurns, warnAt > 0 else { return nil }
+        let remaining = maxTurns - 1 - completedTurn
+        if remaining == 1 {
+            return "\(harnessNotePrefix) Your next reply is the last one this request allows. Tool calls in it will not run and the request will fail, so write your final answer now in plain text: what you did, what you found, and what is still left to do."
+        }
+        if warnAt >= 2, remaining == warnAt, maxTurns > warnAt + 2 {
+            return "\(harnessNotePrefix) Only \(remaining) replies are left in this request. Finish the step you are on and leave room to write your answer; anything unfinished can go in the answer as next steps."
+        }
+        return nil
+    }
+
+    /// Appends `note` to the newest tool result.
+    nonisolated static func appendHarnessNote(_ note: String, to messages: inout [AIChatMessage]) {
+        guard let index = messages.lastIndex(where: {
+            if case .toolResult = $0 { return true }
+            return false
+        }), case .toolResult(let result) = messages[index] else { return }
+        messages[index] = .toolResult(AIToolResult(
+            callID: result.callID,
+            name: result.name,
+            output: result.output + "\n\n" + note
+        ))
     }
 
     /// Resolved auto-continue budget. `nil` = unlimited (keep asking until
@@ -868,7 +1062,7 @@ class AICompletionService: ObservableObject {
     /// `elideOldToolOutputs` compressed verbatim. Both tells the model the
     /// text below is an information-dense extract, and lets the elision pass
     /// recognize outputs that must not be filtered a second time.
-    static let compressedToolOutputMarker = "[Extract — filler words omitted, kept wording verbatim.]\n"
+    nonisolated static let compressedToolOutputMarker = "[Extract — filler words omitted, kept wording verbatim.]\n"
 
     /// Keeps a long tool-calling conversation inside a rough character budget.
     /// Two passes over the *oldest* tool results (the two most recent are
@@ -936,14 +1130,101 @@ class AICompletionService: ObservableObject {
             guard total > charBudget else { return }
         }
 
-        // Pass 2 — last resort: drop the whole output to a placeholder.
+        // Pass 2 — last resort: replace the whole output with a short digest
+        // (read window, headings, files matched). A bare "re-run the tool"
+        // placeholder made the model re-read the same file, which refilled
+        // the budget and got elided again — the read loop.
         for index in toolIndices where !protected.contains(index) {
             guard case .toolResult(let result) = messages[index] else { continue }
-            let placeholder = "[\(result.output.count) characters of earlier \(result.name) output elided to stay within the context budget. Re-run the tool if you still need it.]"
-            total -= (result.output.count - placeholder.count)
-            messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: placeholder))
+            guard !result.output.contains(Self.elidedToolOutputPhrase) else { continue }
+            let digest = Self.elisionDigest(for: result)
+            guard digest.count < result.output.count else { continue }
+            total -= (result.output.count - digest.count)
+            messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: digest))
             if total <= charBudget { break }
         }
+    }
+
+    /// Wording shared by every elision digest; also how pass 2 recognizes a
+    /// digest so it never digests one again.
+    nonisolated static let elidedToolOutputPhrase = "output elided to stay within the context budget"
+
+    /// Most heading / file lines one digest lists.
+    nonisolated static let elisionDigestMaxEntries = 40
+
+    /// What survives when a tool result has to be dropped: enough for the
+    /// model to know what it already looked at and where things are, so it
+    /// only re-reads a specific range when it needs the exact text.
+    nonisolated static func elisionDigest(for result: AIToolResult) -> String {
+        var output = result.output
+        if output.hasPrefix(ToolCallRepeatGuard.repeatNote) {
+            output.removeFirst(ToolCallRepeatGuard.repeatNote.count)
+        }
+        let base = ToolCallRepeatGuard.baseName(result.name)
+        var lines = ["[\(result.output.count) characters of earlier \(result.name) \(elidedToolOutputPhrase).]"]
+
+        let isCompressed = output.hasPrefix(compressedToolOutputMarker)
+        let outputLines = output.components(separatedBy: "\n")
+
+        if base == "read_file", outputLines.first?.hasPrefix("[outline of ") == true {
+            // Already a map of the file: keep its header and first entries.
+            let entries = outputLines.dropFirst().filter { $0.first?.isNumber == true }
+            lines.append(outputLines[0])
+            lines.append(contentsOf: entries.prefix(elisionDigestMaxEntries))
+            if entries.count > elisionDigestMaxEntries {
+                lines.append("… \(entries.count - elisionDigestMaxEntries) more — call read_file with outline: true again for the full list")
+            }
+        } else if base == "read_file" || base == "read_skill_file" {
+            // The window header, when the read was paged.
+            var firstLineNumber = 1
+            var contentStart = 0
+            if let headerIndex = outputLines.prefix(3).firstIndex(where: { $0.hasPrefix("[lines ") && $0.hasSuffix("]") }) {
+                let header = outputLines[headerIndex]
+                lines.append("It covered " + String(header.dropFirst().dropLast()) + ".")
+                if let start = Int(header.dropFirst("[lines ".count).prefix(while: \.isNumber)) {
+                    firstLineNumber = start
+                }
+                contentStart = headerIndex + 1
+                if contentStart < outputLines.count, outputLines[contentStart].hasPrefix("(truncated") {
+                    contentStart += 1
+                }
+            }
+            // Compressed text has lost lines, so its line numbers would lie.
+            if !isCompressed {
+                let content = outputLines.dropFirst(contentStart).joined(separator: "\n")
+                let headings = DocumentOutline.entries(in: content).map { entry in
+                    "\(firstLineNumber + entry.line - 1): \(entry.text)"
+                }
+                if !headings.isEmpty {
+                    lines.append("Headings and #include lines in it (line: text):")
+                    lines.append(contentsOf: headings.prefix(elisionDigestMaxEntries))
+                    if headings.count > elisionDigestMaxEntries {
+                        lines.append("… \(headings.count - elisionDigestMaxEntries) more")
+                    }
+                }
+            }
+            lines.append("Re-read with offset/limit only the range you still need word for word (for example, to copy old_string for edit_file).")
+        } else if base == "grep_project" {
+            // "path:line: text" → match count per file, in first-seen order.
+            var order: [String] = []
+            var counts: [String: Int] = [:]
+            for line in outputLines {
+                let parts = line.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+                guard parts.count == 3, Int(parts[1]) != nil else { continue }
+                let path = String(parts[0])
+                if counts[path] == nil { order.append(path) }
+                counts[path, default: 0] += 1
+            }
+            if !order.isEmpty {
+                let listed = order.prefix(elisionDigestMaxEntries).map { "\($0) (\(counts[$0]!))" }
+                lines.append("Matches were in: " + listed.joined(separator: ", ")
+                    + (order.count > elisionDigestMaxEntries ? ", … \(order.count - elisionDigestMaxEntries) more files" : "") + ".")
+            }
+            lines.append("Re-run a narrower search (pattern or glob) if you need the matching lines again.")
+        } else {
+            lines.append("Re-run the tool if you still need it.")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Sends one turn of a tool-calling conversation and returns either the

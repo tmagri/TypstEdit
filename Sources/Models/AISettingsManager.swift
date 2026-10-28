@@ -491,6 +491,23 @@ class AISettingsManager: ObservableObject {
         chatSubagentMaxTurns <= 0 ? nil : min(chatSubagentMaxTurns, 500)
     }
 
+    // MARK: - Loop Protection
+
+    /// How many times an identical read or search may run, with nothing
+    /// edited in between, before further repeats are refused. 0 = off.
+    @AppStorage("aiChatRepeatCallLimit") var chatRepeatCallLimit: Int = ToolCallRepeatGuard.defaultMaxIdenticalRuns
+    /// Rounds in a row of only reading and searching before the model is
+    /// told to act or answer (repeats every this many rounds). 0 = off.
+    @AppStorage("aiChatNoProgressRounds") var chatNoProgressRounds: Int = AICompletionService.defaultNoProgressRoundThreshold
+    /// Replies left at which the model is warned that the turn limit is
+    /// near. 0 = no warnings; 1 = only the final-reply notice; 2 or more =
+    /// an early heads-up as well. Has no effect with unlimited turns.
+    @AppStorage("aiChatTurnLimitWarningReplies") var chatTurnLimitWarningReplies: Int = AICompletionService.defaultTurnBudgetWarningRemaining
+
+    var effectiveChatRepeatCallLimit: Int { min(max(chatRepeatCallLimit, 0), 20) }
+    var effectiveChatNoProgressRounds: Int { min(max(chatNoProgressRounds, 0), 100) }
+    var effectiveChatTurnLimitWarningReplies: Int { min(max(chatTurnLimitWarningReplies, 0), 20) }
+
     // MARK: - Context Compression (LLMLingua-style token filtering)
 
     /// How older context is squeezed back under the budget: the original

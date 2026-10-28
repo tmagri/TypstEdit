@@ -361,8 +361,10 @@ final class AIChatManager: ObservableObject {
         - If you're not confident of Typst's exact syntax for something (bold, headings, lists, links, tables, math), write it in Markdown and run it through convert_markdown_to_typst first rather than guessing at delimiters. Use run_typst_check on a snippet (or an existing path) any time you want to double-check before or after writing.
         - For a finished document or handoff package, use the export tools instead of Python: export_document compiles to PDF/PNG/SVG, export_markdown writes a .md copy with the editor's own converter, create_folder makes a delivery folder, and copy_files gathers related files/evidence into it in one approved batch. A typical request ("make a deploy folder with the PDF, a Markdown copy and related evidence") is: create_folder, export_document, export_markdown, then copy_files for the evidence — all inside the current scope.
         - Use grep_project for exact lookups (a symbol, a phrase, a heading) before reading whole files, and read_file's offset/limit to page through a large document instead of pulling it in at once.
+        - To restructure, reorganize or review a long document, work in this order: (1) read_file with outline: true to map it; (2) write the target structure into update_plan, one item per section or move; (3) read and change one section at a time, using the outline's line ranges as offset/limit; (4) check that the edit's compile result is clean. Don't page through a whole long file just to learn how it's organized.
         - Use evaluate_math for exact or approximate math. It returns plain text and Typst math. Do not use Python for arithmetic or algebra.
-        - For a job with several distinct steps, call update_plan first and keep it current.
+        - For a job with several distinct steps, call update_plan first and keep it current. When a CURRENT PLAN is shown below, continue from it rather than starting over.
+        - When a WORK LOG is shown below, use it to go straight to the right file and line range. Don't repeat a read or search you've already made in this request unless something has changed since — use what it returned.
         - If understanding a large document or several files would flood this conversation, use delegate_task: a read-only subagent explores and reports back just the facts and quotes you ask for.
         - Explain briefly what you're about to do before calling a tool that changes anything.
         - Chat replies are shown as plain text to the user, not inserted into the document. Only change files when asked to.
@@ -372,6 +374,16 @@ final class AIChatManager: ObservableObject {
 
         Current scope: \(scopeLabel)
         """
+        // Working memory: the plan and a log of earlier tool calls go into
+        // every turn's prompt. Earlier turns' tool output isn't re-sent (see
+        // `buildPrompt`), so without these the model starts each follow-up
+        // turn blind and rediscovers the project with tools.
+        if let planBlock = AgentHarnessTools.planPromptBlock(plan) {
+            systemPrompt += "\n\n" + planBlock
+        }
+        if let workLogBlock = AgentHarnessTools.workLogPromptBlock(from: messages) {
+            systemPrompt += "\n\n" + workLogBlock
+        }
         if !activeSkills.isEmpty {
             systemPrompt += "\n\n" + activeSkills.map { skill in
                 var block = "SKILL (id: \(skill.id)): \(skill.name)\n\(skill.body)"
@@ -406,6 +418,9 @@ final class AIChatManager: ObservableObject {
                 maxTokens: AISettingsManager.shared.maxTokens,
                 tools: tools,
                 maxTurns: maxTurns,
+                onToolRefused: { [weak self] name, arguments, note in
+                    self?.recordSkippedToolCall(qualifiedName: name, argumentsJSON: arguments, note: note, isSubagent: false)
+                },
                 onReasoning: { capturedReasoning = $0 },
                 onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
                 onStatus: { [weak self] status in self?.liveStatus = status },
@@ -717,6 +732,21 @@ final class AIChatManager: ObservableObject {
         }
     }
 
+    /// Adds a transcript row for a call the repeat guard refused, so the
+    /// trace shows it instead of silently dropping it. Nothing ran, so the
+    /// row goes straight to `.skipped` with the note the model received.
+    private func recordSkippedToolCall(qualifiedName: String, argumentsJSON: String, note: String, isSubagent: Bool) {
+        messages.append(ChatMessage(
+            role: .toolCall,
+            isSubagent: isSubagent,
+            toolName: qualifiedName,
+            toolArgumentsJSON: argumentsJSON,
+            toolStatus: .skipped,
+            toolOutput: note
+        ))
+        persist()
+    }
+
     /// Stops one running tool call, identified by its transcript row. The
     /// turn survives: the model is told the task was stopped and continues
     /// without its result. Tools that don't observe cancellation finish
@@ -846,7 +876,7 @@ final class AIChatManager: ObservableObject {
         let systemPrompt = """
         You are a read-only research subagent working inside TypstEdit. A larger chat delegated this job to you, but you cannot see its conversation — everything you need is in the task brief.
 
-        Use the available tools to read and search files, to evaluate math, and — if Git tools are on — to inspect the Git state. You cannot write, edit, run Python, commit, push, or delegate. Stop as soon as you can answer the brief.
+        Use the available tools to read and search files, to evaluate math, and — if Git tools are on — to inspect the Git state. You cannot write, edit, run Python, commit, push, or delegate. For a long document, call read_file with outline: true first and then read only the sections you need. Stop as soon as you can answer the brief.
 
         Reply with findings only: verified facts, short verbatim quotes where exact wording matters, and the file paths they came from. Be concise. If you couldn't find something, say so plainly instead of guessing.
 
@@ -859,6 +889,9 @@ final class AIChatManager: ObservableObject {
             maxTokens: AISettingsManager.shared.maxTokens,
             tools: subTools,
             maxTurns: subagentMaxTurns,
+            onToolRefused: { [weak self] name, arguments, note in
+                self?.recordSkippedToolCall(qualifiedName: name, argumentsJSON: arguments, note: note, isSubagent: true)
+            },
             onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
             onStatus: { [weak self] status in self?.liveStatus = status },
             sanitize: false,

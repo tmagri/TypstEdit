@@ -1045,7 +1045,7 @@ struct AISettingsView: View {
             description: "Always available to the chat (no MCP server needed): listing/reading/searching files, precise edits, Typst compile checks, Markdown↔Typst conversion, delivery tools for exporting a document or gathering related files, and evaluate_math for exact or approximate math with the bundled CAS. Anything that changes a file — or runs code — is shown to you for approval first, unless YOLO mode is on."
         ) {
             VStack(alignment: .leading, spacing: 10) {
-                Label("list_files, read_file (paged), grep_project — case-insensitive content search", systemImage: "doc.text.magnifyingglass").font(.caption)
+                Label("list_files, read_file (paged, or an outline of headings), grep_project — case-insensitive content search", systemImage: "doc.text.magnifyingglass").font(.caption)
                 Label("edit_file — exact-match replacement, with a diff preview; write_file for whole-file changes", systemImage: "pencil.and.outline").font(.caption)
                 Label("evaluate_math — exact or approximate math with the bundled CAS; no files, Python, or network", systemImage: "function").font(.caption)
                 Label("convert_markdown_to_typst — the same converter used when pasting Markdown into the editor", systemImage: "arrow.left.arrow.right").font(.caption)
@@ -1302,6 +1302,51 @@ struct AISettingsView: View {
                 }
 
                 Text("Defaults: 24 for the main chat, 12 for the read-only delegate_task subagent. Positive values are capped at 500; 0 removes the limit entirely — a model that keeps calling tools will keep going until it answers or you press Stop.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+
+        SettingsCard(
+            title: "Loop Protection",
+            icon: "arrow.uturn.backward.circle",
+            description: "Keeps a long tool-calling run from going in circles. An identical read or search that runs again with nothing edited in between is marked as a repeat, and after the limit it is not run at all: the assistant is told to use what it already has, and the chat shows the call as \"repeat — not run\". After a run of rounds that only read and search, the assistant is told to act or answer. Near the turn limit, it is warned so it writes an answer instead of running out mid-task. Each setting also applies to the read-only subagent. 0 turns a setting off."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Text("Refuse an identical call after")
+                        .font(.caption)
+                    TextField("\(ToolCallRepeatGuard.defaultMaxIdenticalRuns)", value: $settings.chatRepeatCallLimit, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("runs (0 = off)")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                HStack(spacing: 10) {
+                    Text("Ask to act or answer after")
+                        .font(.caption)
+                    TextField("\(AICompletionService.defaultNoProgressRoundThreshold)", value: $settings.chatNoProgressRounds, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("rounds of only reading (0 = off)")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                HStack(spacing: 10) {
+                    Text("Warn about the turn limit at")
+                        .font(.caption)
+                    TextField("\(AICompletionService.defaultTurnBudgetWarningRemaining)", value: $settings.chatTurnLimitWarningReplies, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("replies left (0 = off)")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                Text("Defaults: \(ToolCallRepeatGuard.defaultMaxIdenticalRuns) runs, \(AICompletionService.defaultNoProgressRoundThreshold) rounds, \(AICompletionService.defaultTurnBudgetWarningRemaining) replies. With 1 for the turn-limit warning, only the final reply gets a notice; with 2 or more, there is also an early heads-up. The turn-limit warning does nothing when turns are unlimited. Values are capped at 20, 100 and 20.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }

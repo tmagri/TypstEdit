@@ -192,13 +192,14 @@ final class LocalToolExecutor {
             tools.append(MCPTool(
                 serverName: Self.namespace,
                 name: "read_file",
-                description: "Read a text file's contents, by path relative to the \(scope.noun) root. Files over \(defaultReadLineLimit) lines are returned in a window instead of all at once — the result tells you the total line count and, if truncated, which `offset` to pass next to keep reading. Prefer requesting a smaller `limit` for a quick look before pulling in the rest of a large file. A file must be read in the current request before you can edit or overwrite it.",
+                description: "Read a text file's contents, by path relative to the \(scope.noun) root. Files over \(defaultReadLineLimit) lines are returned in a window instead of all at once — the result tells you the total line count and, if truncated, which `offset` to pass next to keep reading. Prefer requesting a smaller `limit` for a quick look before pulling in the rest of a large file. To learn how a long document is organized, pass `outline: true` first: it returns only the headings, with the line range each section covers, and #include lines — one small call instead of paging through the whole file. A file must be read in the current request before you can edit or overwrite it (an outline doesn't count).",
                 inputSchema: [
                     "type": "object",
                     "properties": [
                         "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
                         "offset": ["type": "integer", "description": "1-based line number to start reading from. Omit to start at the top of the file."],
-                        "limit": ["type": "integer", "description": "Maximum number of lines to return (default \(defaultReadLineLimit), capped at \(maxReadLineLimit))."]
+                        "limit": ["type": "integer", "description": "Maximum number of lines to return (default \(defaultReadLineLimit), capped at \(maxReadLineLimit))."],
+                        "outline": ["type": "boolean", "description": "Return the document's structure (headings with line ranges, #include lines) instead of its text. offset/limit are ignored. Default false."]
                     ],
                     "required": ["path"]
                 ]
@@ -518,8 +519,20 @@ final class LocalToolExecutor {
             throw LocalToolError.fileTooLarge(path)
         }
         let fullText = TextFileEncoding.decode(data).text
+        // An outline shows structure, not the exact text edit_file needs to
+        // match, so it deliberately doesn't satisfy read-before-edit.
+        if Self.boolValue(arguments["outline"]) == true {
+            return DocumentOutline.render(fullText, label: path)
+        }
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
         return Self.windowed(fullText, label: path, arguments: arguments, defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+    }
+
+    private static func boolValue(_ any: Any?) -> Bool? {
+        if let b = any as? Bool { return b }
+        if let s = any as? String { return ["true", "1", "yes"].contains(s.lowercased()) }
+        if let i = any as? Int { return i != 0 }
+        return nil
     }
 
     /// Slices `text` into the line range the model asked for (`offset`/

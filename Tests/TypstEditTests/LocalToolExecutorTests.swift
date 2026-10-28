@@ -88,6 +88,31 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(second.contains("line 410"))
     }
 
+    func testOutlineModeMapsALongDocument() async throws {
+        var lines = (1...900).map { "body \($0)" }
+        lines[0] = "= Final design"
+        lines[299] = "== Colours"
+        lines[599] = "= Appendix"
+        lines[700] = "#include \"steps.typ\""
+        try write("Mugs.typ", lines.joined(separator: "\n"))
+
+        let out = try await run("read_file", ["path": "Mugs.typ", "outline": true])
+        XCTAssertTrue(out.hasPrefix("[outline of 'Mugs.typ' — 900 lines, 3 headings]"), out)
+        XCTAssertTrue(out.contains("1-599: = Final design"), out)
+        XCTAssertTrue(out.contains("300-599: == Colours"), out)
+        XCTAssertTrue(out.contains("600-900: = Appendix"), out)
+        XCTAssertTrue(out.contains("701: #include \"steps.typ\""), out)
+        XCTAssertFalse(out.contains("body 5"))
+    }
+
+    func testOutlineDoesNotSatisfyReadBeforeEdit() async throws {
+        try write("doc.typ", "= Title\nalpha\n")
+        _ = try await run("read_file", ["path": "doc.typ", "outline": true])
+        await assertThrows({ if case .fileNotReadYet = $0 { return true }; return false }) {
+            try await self.run("edit_file", ["path": "doc.typ", "old_string": "alpha", "new_string": "gamma"])
+        }
+    }
+
     func testOffsetPastEndExplainsInsteadOfCrashing() async throws {
         try write("short.typ", "a\nb")
         let out = try await run("read_file", ["path": "short.typ", "offset": 99])

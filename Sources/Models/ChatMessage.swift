@@ -18,6 +18,16 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         case failed
         case denied
         case cancelled
+        /// Not run: the loop refused an identical repeat of a read or search
+        /// (see `ToolCallRepeatGuard`). Shown so the refusal isn't invisible.
+        case skipped
+
+        /// An unknown status (written by a newer build) reads as `.failed`
+        /// instead of making the whole saved transcript undecodable.
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = ToolStatus(rawValue: raw) ?? .failed
+        }
     }
 
     var id: UUID = UUID()

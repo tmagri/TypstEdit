@@ -405,7 +405,12 @@ struct AIChatView: View {
                     }
                     Text(displayName(for: message.toolName ?? "tool"))
                         .font(.caption.monospaced())
-                        .foregroundColor(message.isSubagent ? .secondary : .primary)
+                        .foregroundColor(message.isSubagent || message.toolStatus == .skipped ? .secondary : .primary)
+                    if message.toolStatus == .skipped {
+                        Text("repeat — not run")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             if message.toolStatus == .running {
@@ -488,6 +493,11 @@ struct AIChatView: View {
         case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
         case .denied: Image(systemName: "hand.raised.fill").foregroundColor(.red)
         case .cancelled: Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+        case .skipped:
+            Image(systemName: "arrow.uturn.backward.circle.fill")
+                .foregroundColor(.secondary)
+                .help("Not run — an identical repeat of an earlier call")
+                .accessibilityLabel("Skipped repeat")
         case nil: Image(systemName: "wrench.and.screwdriver").foregroundColor(.secondary)
         }
     }
