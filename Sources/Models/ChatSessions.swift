@@ -39,6 +39,46 @@ struct ChatSessionSummary: Codable, Identifiable, Equatable {
     var displayTitle: String { title.isEmpty ? "Untitled chat" : title }
 }
 
+/// The autonomous work loop of one conversation (modeled on opencode's
+/// `/goal` plugin): an objective the chat keeps working toward across
+/// exchanges. After each reply a reviewer model judges whether the goal is
+/// met, and either injects a continuation (`active`), settles as `complete`,
+/// or parks it as `paused` — on a stall, a round limit, the user pressing
+/// Stop, a turn failure, or a verdict of "blocked". Persisted with the
+/// session, like the checklist it drives.
+struct ChatGoal: Codable, Equatable {
+    enum Status: String, Codable {
+        case active
+        case paused
+        case complete
+
+        /// An unknown status (written by a newer build) reads as `.paused`
+        /// instead of making the whole saved transcript undecodable — the
+        /// same repair `ChatMessage.ToolStatus` makes. A paused goal never
+        /// drives the loop on its own.
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Status(rawValue: raw) ?? .paused
+        }
+    }
+
+    var objective: String
+    var status: Status
+    /// Continuations injected so far; the round cap stops runaway loops.
+    var rounds: Int
+    var maxRounds: Int
+    /// Consecutive rounds the reviewer saw no progress (same reason, or no
+    /// tool calls since the last continuation) — at the cap the goal pauses.
+    var stalls: Int
+    /// The reviewer's last verdict reason, shown in the panel and used for
+    /// stall detection.
+    var reason: String?
+    /// Tool-call rows in the transcript when this round began — the baseline
+    /// the next review compares against to detect "nothing happened".
+    var toolCallsAtBaseline: Int
+    var updatedAt: Date
+}
+
 /// The full on-disk form of one conversation: the summary fields plus the
 /// whole transcript. One JSON file per session, next to an `index.json`
 /// listing the summaries, so the session menu loads instantly no matter how
@@ -55,6 +95,12 @@ struct ChatSessionRecord: Codable, Equatable {
     /// `nil` in older files, where it is rebuilt from the last `update_plan`
     /// row instead (see `AIChatManager.init(record:scope:)`).
     var plan: [AgentPlanItem]? = nil
+    /// Whether the conversation is in Plan mode (read-only tools only).
+    /// `nil` in older files, decoded as off — a mode the user switched on
+    /// should survive a restart, the same way the checklist does.
+    var planMode: Bool? = nil
+    /// The armed goal loop, if any. `nil` in older files.
+    var goal: ChatGoal? = nil
 }
 
 enum ChatSessionImportError: LocalizedError {
@@ -219,7 +265,9 @@ final class AIChatSessionStore: ObservableObject {
                 createdAt: Date(),
                 updatedAt: Date(),
                 messages: record.messages,
-                plan: record.plan
+                plan: record.plan,
+                planMode: record.planMode,
+                goal: record.goal
             ),
             scope: scope
         )

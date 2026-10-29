@@ -593,6 +593,14 @@ class AICompletionService: ObservableObject {
         /// step. `nil` clears it. Without this the chat shows an unexplained
         /// "Thinking…" while the model is silently being re-prompted.
         onStatus: (@MainActor (String?) -> Void)? = nil,
+        /// Steering (opencode's session-inbox "steer" delivery): called at
+        /// each step boundary — after a tool round's results are in, before
+        /// the next model request. A non-nil return is user input that
+        /// arrived while this turn was running; it is injected as a steering
+        /// note on the round's last tool result (an extra user message would
+        /// break strict-alternation providers). Main-actor isolated so the
+        /// caller drains its own queue atomically.
+        onSteer: (@MainActor () -> String?)? = nil,
         sanitize: Bool = true,
         contextCharBudget: Int? = nil,
         /// An explicit model to use (e.g. the saved model chosen for AI Chat).
@@ -943,6 +951,16 @@ class AICompletionService: ObservableObject {
                     Self.appendHarnessNote(notes.joined(separator: "\n\n"), to: &messages)
                 }
 
+                // Promote steering input queued while the tools ran — the
+                // note lands last on the round's newest result, so it is the
+                // freshest instruction the model reads before its next
+                // request.
+                if let steer = onSteer?() {
+                    AgentTrace.log("steer", ["turn": turn, "chars": steer.count])
+                    onReasoningDelta?("\n\n[The user sent steering input while you were working — it is attached to the last tool result.]\n\n")
+                    Self.appendHarnessNote(Self.steerNote(steer), to: &messages)
+                }
+
                 if let maxTurns, turn == maxTurns - 1 {
                     AgentTrace.log("turn_limit", ["turn": turn, "maxTurns": maxTurns])
                     throw AIError.apiError("The AI kept calling tools without producing a final answer after \(maxTurns) turns.")
@@ -1030,6 +1048,147 @@ class AICompletionService: ObservableObject {
         if trimmed.isEmpty { return true }
         guard let data = trimmed.data(using: .utf8) else { return false }
         return (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
+    }
+
+    /// Schema-guided repair of malformed tool arguments before execution —
+    /// a lean port of opencode's tool-input-repair plugin. Small local
+    /// models routinely emit `"20"` where a number belongs, stringify a
+    /// nested object, or fill an optional field with `null`; without repair
+    /// each of those costs a refused call, a harness note, and a whole extra
+    /// round. Only provably-safe repairs are made, mirroring opencode:
+    /// - a string coerced to number/boolean where the schema declares a
+    ///   plain `number`/`integer`/`boolean` type
+    /// - a stringified JSON object/array parsed where the schema declares a
+    ///   plain `object`/`array` type, then repaired recursively
+    /// - a `null` or empty-object placeholder dropped from an optional,
+    ///   plainly-typed property (only a bare single type provably rejects
+    ///   those; compositions may accept them, so those are left alone)
+    /// - undeclared keys dropped only where the schema sets
+    ///   `additionalProperties: false`
+    ///
+    /// TypstEdit's schemas use none of `$ref`/`$defs`/`prefixItems`/
+    /// `patternProperties`, so those opencode branches are omitted, and the
+    /// recursion is depth-capped the same way. Applied by the chat manager
+    /// (`AIChatManager`) when it has the called tool's input schema;
+    /// unknown tools pass through untouched.
+    nonisolated static func repairToolInput(_ arguments: [String: Any], schema: [String: Any]?) -> [String: Any] {
+        guard let schema, !arguments.isEmpty else { return arguments }
+        let properties = schema["properties"] as? [String: Any] ?? [:]
+        let required = schema["required"] as? [String] ?? []
+        let additionalProperties = (schema["additionalProperties"] as? NSNumber)?.boolValue
+        var repaired = arguments
+        for (key, value) in arguments {
+            // Undeclared keys are only provably unwelcome when the schema
+            // closes the object; anything else may be a dynamic property.
+            guard let property = properties[key] as? [String: Any] else {
+                if additionalProperties == false, !required.contains(key) {
+                    repaired.removeValue(forKey: key)
+                }
+                continue
+            }
+            if placeholder(value, declaredType: property["type"] as? String),
+               plainOptionalType(property, required: required.contains(key)) {
+                repaired.removeValue(forKey: key)
+                continue
+            }
+            let new = repairValue(value, schema: property, depth: 0)
+            if !Self.valuesEquivalent(new, value) {
+                repaired[key] = new
+            }
+        }
+        return repaired
+    }
+
+    /// Repairs one value against its property schema. Returns the input
+    /// unchanged whenever nothing provably applies.
+    private nonisolated static func repairValue(_ value: Any, schema: [String: Any], depth: Int) -> Any {
+        guard depth < 6 else { return value }
+        // A `"type": ["x", "null"]` list unwraps to its single non-null type.
+        var schema = schema
+        if let types = schema["type"] as? [String], types.count == 2, types.contains("null") {
+            schema["type"] = types.first { $0 != "null" }
+        }
+        guard let type = schema["type"] as? String, isPlainType(schema) else { return value }
+
+        if type == "number" || type == "integer" {
+            guard let text = value as? String else { return value }
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            guard let parsed = Double(trimmed), parsed.isFinite else { return value }
+            if type == "integer", parsed != parsed.rounded() { return value }
+            return parsed
+        }
+        if type == "boolean" {
+            guard let text = value as? String else { return value }
+            let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+            if trimmed == "true" { return true }
+            if trimmed == "false" { return false }
+            return value
+        }
+        if type == "object" {
+            let parsed = (value as? String).flatMap { stringifiedJSONObject($0) } ?? value
+            guard let object = parsed as? [String: Any] else { return value }
+            let properties = schema["properties"] as? [String: Any] ?? [:]
+            var repaired: [String: Any] = [:]
+            for (key, member) in object {
+                if let memberSchema = properties[key] as? [String: Any] {
+                    repaired[key] = repairValue(member, schema: memberSchema, depth: depth + 1)
+                } else {
+                    repaired[key] = member
+                }
+            }
+            return repaired
+        }
+        if type == "array" {
+            let parsed = (value as? String).flatMap { stringifiedJSONArray($0) } ?? value
+            guard let array = parsed as? [Any], let items = schema["items"] as? [String: Any] else { return value }
+            // Every member is repaired against the declared item schema; a
+            // member whose type already matches passes through unchanged.
+            return array.map { repairValue($0, schema: items, depth: depth + 1) }
+        }
+        return value
+    }
+
+    /// True when the schema's declared type is a bare single type with no
+    /// compositions — the only case where `null`/`{}` placeholders are
+    /// provably rejected, and the only case a coercion cannot be wrong.
+    private nonisolated static func isPlainType(_ schema: [String: Any]) -> Bool {
+        for keyword in ["anyOf", "oneOf", "allOf", "enum", "const", "$ref"] where schema[keyword] != nil {
+            return false
+        }
+        return schema["type"] is String
+    }
+
+    private nonisolated static func plainOptionalType(_ schema: [String: Any], required: Bool) -> Bool {
+        !required && isPlainType(schema)
+    }
+
+    /// `null`, or an object with no keys — what cut-off or confused calls
+    /// leave in an optional field. An empty object is only a placeholder
+    /// when the declared type is not itself `object`.
+    private nonisolated static func placeholder(_ value: Any, declaredType: String?) -> Bool {
+        if value is NSNull { return true }
+        if let object = value as? [String: Any], object.isEmpty, declaredType != "object" { return true }
+        return false
+    }
+
+    /// Parses a stringified JSON object (`"{\"a\":1}"` → `["a": 1]`).
+    private nonisolated static func stringifiedJSONObject(_ text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return parsed as? [String: Any]
+    }
+
+    private nonisolated static func stringifiedJSONArray(_ text: String) -> [Any]? {
+        guard let data = text.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return parsed as? [Any]
+    }
+
+    /// JSONSerialization comparisons: NSNumber boxes both booleans and
+    /// numbers, and `20` vs `20.0` compare equal, which is exactly the
+    /// equivalence a repair needs — "changed" means a type or parse happened.
+    private nonisolated static func valuesEquivalent(_ lhs: Any, _ rhs: Any) -> Bool {
+        (lhs as? NSObject) == (rhs as? NSObject)
     }
 
     /// The next cap after a cut-off reply: double, up to the ceiling.
@@ -1130,9 +1289,16 @@ class AICompletionService: ObservableObject {
         return "\(harnessNotePrefix) Your plan was last updated \(rounds) rounds ago. If an item is finished, call update_plan now: mark it completed and set the next one in_progress. The user follows your progress there, and the next turn continues from it."
     }
 
+    /// The steering note: user input that arrived mid-turn, promoted at a
+    /// step boundary. Rides on the round's last tool result (see
+    /// `appendHarnessNote`), which every provider accepts — an extra user
+    /// message would break Anthropic's strict user/assistant alternation.
+    nonisolated static func steerNote(_ text: String) -> String {
+        "\(harnessNotePrefix) STEERING — the user sent this while you were working. Finish your current step, then adjust course to include it. Don't restart what is already done, and don't drop it:\n\n\(text)"
+    }
+
     /// Appends `note` to the newest tool result.
-    nonisolated static func appendHarnessNote(_ note: String, to messages: inout [AIChatMessage]) {
-        guard let index = messages.lastIndex(where: {
+    nonisolated static func appendHarnessNote(_ note: String, to messages: inout [AIChatMessage]) {        guard let index = messages.lastIndex(where: {
             if case .toolResult = $0 { return true }
             return false
         }), case .toolResult(let result) = messages[index] else { return }

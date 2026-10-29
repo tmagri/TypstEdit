@@ -51,6 +51,14 @@ struct AIChatView: View {
     /// Deliberately *not* `@State`: flagging every schedule as UI state would
     /// rebuild the whole transcript many times a second, which is what made
     /// the live row flicker while it streamed.
+    ///
+    /// Also owns the programmatic-scroll window: while one of *our* follow
+    /// scrolls is in flight (plus a short settle time), the bottom probe must
+    /// not report, because a lazy stack lands a scroll using estimated row
+    /// heights and only corrects them as rows materialize. Treating that
+    /// landing as "the user scrolled away" used to disable autoscroll
+    /// mid-generation, leaving the viewport parked on stale (often blank)
+    /// space until the next click scrolled it back.
     @StateObject private var transcriptScroller = TranscriptScroller()
 
     /// Whether the transcript is scrolled to (or within a few points of) the
@@ -61,6 +69,8 @@ struct AIChatView: View {
     @State private var showRename = false
     @State private var renameDraft: String = ""
     @State private var actionError: String?
+    @State private var showGoalSet = false
+    @State private var goalDraft: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,6 +81,10 @@ struct AIChatView: View {
                 disabledState
             } else {
                 transcript
+                if let goal = chat.goal {
+                    Divider()
+                    goalBanner(goal)
+                }
                 if !chat.plan.isEmpty {
                     Divider()
                     planCard
@@ -110,6 +124,17 @@ struct AIChatView: View {
             Button("Enable", role: .destructive) { chat.yoloMode = true }
         } message: {
             Text("File writes, edits, Python runs, and permitted Git actions (stage, commit, fetch, pull) will execute without asking you first for this app session. Push always requires your approval. YOLO does not enable Git permissions. The AI remains limited to this project/notebook, and Git tools require the repository root. YOLO turns itself off when TypstEdit restarts.")
+        }
+        .alert("Set a Goal", isPresented: $showGoalSet) {
+            TextField("Objective", text: $goalDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Set & Start") {
+                let draft = goalDraft
+                goalDraft = ""
+                Task { await chat.armGoal(draft) }
+            }
+        } message: {
+            Text("The AI keeps working toward this objective across replies — a reviewer continues or pauses it after each round. Stop parks it.")
         }
         .alert("Rename Chat", isPresented: $showRename) {
             TextField("Name", text: $renameDraft)
@@ -362,6 +387,24 @@ struct AIChatView: View {
     /// tracking a pending scroll doesn't invalidate the view.
     private final class TranscriptScroller: ObservableObject {
         var pending: Task<Void, Never>?
+
+        /// How long after a programmatic scroll the bottom probe stays
+        /// muted. Covers the scroll itself plus the lazy-row materialization
+        /// (and height correction) it triggers.
+        private var autoScrollGraceUntil = Date.distantPast
+
+        /// Marks that a scroll we initiated is starting; opens (or extends)
+        /// the grace window.
+        func markProgrammaticScroll() {
+            autoScrollGraceUntil = Date().addingTimeInterval(0.3)
+        }
+
+        /// True while a programmatic scroll (or its settle window) is
+        /// active — the probe must not report in that period, or our own
+        /// scrolls would read as user scrolls and strand the transcript.
+        var isAutoScrolling: Bool {
+            Date() < autoScrollGraceUntil
+        }
     }
 
     /// Anchor id for the invisible row pinned to the end of the transcript.
@@ -433,8 +476,12 @@ struct AIChatView: View {
                 // Passive probe for the real scroll position: it flips
                 // `transcriptAtBottom` when *you* scroll the transcript, so
                 // autoscroll can stop fighting you while you read earlier
-                // output. It never scrolls anything itself.
-                .background(TranscriptBottomProbe(isAtBottom: $transcriptAtBottom))
+                // output. It never scrolls anything itself, and it stays
+                // muted while the panel's own follow scrolls are in flight.
+                .background(TranscriptBottomProbe(
+                    isAtBottom: $transcriptAtBottom,
+                    isProgrammaticScroll: { [transcriptScroller] in transcriptScroller.isAutoScrolling }
+                ))
             }
             .overlay(alignment: .bottomTrailing) {
                 if !transcriptAtBottom {
@@ -443,7 +490,7 @@ struct AIChatView: View {
             }
             // Opened on an existing conversation (or a newly switched one):
             // start at the newest exchange, not the top of the history.
-            .onAppear { followBottom(proxy, force: true) }
+            .onAppear { followBottom(proxy, force: true, animate: true) }
             // New chat / new session: reset the per-chat thinking state and
             // start at the bottom (which is all there is, usually).
             .onChange(of: chat.id) { _ in
@@ -453,7 +500,7 @@ struct AIChatView: View {
                 liveThinkingExpanded = true
                 transcriptWindow = Self.transcriptWindowStep
                 transcriptAtBottom = true
-                followBottom(proxy, force: true)
+                followBottom(proxy, force: true, animate: true)
             }
             // Structural changes: a message, tool row or error was added or
             // updated, or the live row appeared/disappeared.
@@ -492,7 +539,7 @@ struct AIChatView: View {
     private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
         Button {
             transcriptAtBottom = true
-            followBottom(proxy, force: true)
+            followBottom(proxy, force: true, animate: true)
         } label: {
             Image(systemName: "arrow.down")
                 .font(.caption.bold())
@@ -509,18 +556,33 @@ struct AIChatView: View {
     /// Pins the transcript to its bottom. The single short delay lets a row
     /// that was just appended finish being measured, which is what makes the
     /// scroll land on the real bottom instead of one row short. Scheduling is
-    /// coalesced, so a burst of streamed reasoning costs one smooth scroll
-    /// rather than a visible jump per token.
-    private func followBottom(_ proxy: ScrollViewProxy, force: Bool = false) {
+    /// coalesced, so a burst of streamed reasoning costs one scroll rather
+    /// than a visible jump per token.
+    ///
+    /// Streaming follows scroll without animation: an animated scroll over a
+    /// lazy stack lands on estimated row heights, and the corrections that
+    /// arrive as rows materialize can leave the landing short of the real
+    /// bottom — which the bottom probe then misreads as the user scrolling
+    /// away, killing autoscroll mid-generation. Every follow scroll opens the
+    /// scroller's programmatic-scroll grace window first, so the probe stays
+    /// muted while this scroll (and its settle) happens. `animate` stays on
+    /// for the user-initiated paths (opening the panel, switching sessions,
+    /// the jump-to-latest button), where the layout is settled.
+    private func followBottom(_ proxy: ScrollViewProxy, force: Bool = false, animate: Bool = false) {
         guard force || transcriptAtBottom else { return }
         if force { transcriptAtBottom = true }
         guard transcriptScroller.pending == nil else { return }
         transcriptScroller.pending = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 50_000_000)
-            withAnimation(.easeOut(duration: 0.12)) {
+            transcriptScroller.pending = nil
+            transcriptScroller.markProgrammaticScroll()
+            if animate {
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
+                }
+            } else {
                 proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
             }
-            transcriptScroller.pending = nil
         }
     }
 
@@ -1142,12 +1204,27 @@ struct AIChatView: View {
                     .background(Color(NSColor.controlBackgroundColor))
                     .cornerRadius(8)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
-                    .disabled(chat.isGenerating || chat.pendingApproval != nil)
+                    // Stays enabled while the AI works: sending then steers
+                    // the running task instead of starting a new turn.
+                    .disabled(chat.pendingApproval != nil)
+                    .help(chat.isGenerating
+                          ? "The AI is working. Sending now steers the current task — it reads your message at its next step."
+                          : "Ask anything. Shift+Return sends.")
 
                 if chat.isGenerating {
-                    // A sibling of the (disabled) TextEditor, so it stays
+                    // A sibling of the (still enabled) TextEditor, so it stays
                     // pressable while generation runs — including while an
                     // approval is pending, since `isGenerating` covers that.
+                    // A non-empty draft gets a steering send next to Stop.
+                    if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button {
+                            send()
+                        } label: {
+                            Image(systemName: "arrow.up.circle").font(.system(size: 24))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Send as steering input — the AI adjusts course at its next step")
+                    }
                     Button {
                         chat.stop()
                     } label: {
@@ -1196,7 +1273,9 @@ struct AIChatView: View {
                     ragToggle(iconOnly: iconOnly)
                     skillsMenu(iconOnly: iconOnly)
                     toolsMenu(iconOnly: iconOnly)
+                    goalMenu(iconOnly: iconOnly)
                     Spacer(minLength: 0)
+                    planToggle(iconOnly: iconOnly)
                     yoloToggle(iconOnly: iconOnly)
                 }
                 // On its own line the chip always has room for the name.
@@ -1211,9 +1290,11 @@ struct AIChatView: View {
                 ragToggle(iconOnly: iconOnly)
                 skillsMenu(iconOnly: iconOnly)
                 toolsMenu(iconOnly: iconOnly)
+                goalMenu(iconOnly: iconOnly)
                 AIModelPickerMenu(feature: .chat, showsName: !iconOnly)
                     .disabled(chat.isGenerating)
                 Spacer(minLength: 0)
+                planToggle(iconOnly: iconOnly)
                 yoloToggle(iconOnly: iconOnly)
             }
         }
@@ -1295,6 +1376,123 @@ struct AIChatView: View {
         .help("Choose which MCP tool servers are available to the AI for this session")
     }
 
+    /// Plan mode (opencode-style): the AI explores and plans, but every
+    /// mutating tool is withheld, so the turn cannot touch files. Unlike
+    /// YOLO there is no confirmation — turning it *on* only removes
+    /// abilities, and the reminder telling the model what it may do goes out
+    /// with the very next message.
+    private func planToggle(iconOnly: Bool) -> some View {
+        Button {
+            chat.planMode.toggle()
+        } label: {
+            pickerLabel("Plan", systemImage: chat.planMode ? "lightbulb.fill" : "lightbulb", iconOnly: iconOnly)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(chat.planMode ? .accentColor : .secondary)
+        .help(chat.planMode
+              ? "Plan mode is ON — the AI can read, search, and keep its plan checklist current, but cannot edit files, write files, export, run Python, or change Git state. Click to turn off."
+              : "Plan mode: the AI explores the project and discusses a plan without touching files. Click to turn on.")
+    }
+
+    /// Goal menu (opencode's `/goal`): arms an objective the chat keeps
+    /// working toward, with pause/resume/clear for the loop it starts.
+    private func goalMenu(iconOnly: Bool) -> some View {
+        Menu {
+            Button("Set goal…") {
+                goalDraft = chat.goal?.objective ?? ""
+                showGoalSet = true
+            }
+            if let goal = chat.goal {
+                switch goal.status {
+                case .active:
+                    Button("Pause goal") { chat.pauseGoal() }
+                    Button("Clear goal", role: .destructive) { chat.clearGoal() }
+                case .paused:
+                    Button("Resume goal") { Task { await chat.resumeGoal() } }
+                    Button("Clear goal", role: .destructive) { chat.clearGoal() }
+                case .complete:
+                    Button("Clear goal") { chat.clearGoal() }
+                }
+            }
+        } label: {
+            pickerLabel(
+                "Goal",
+                systemImage: "flag.checkered",
+                iconOnly: iconOnly
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundColor(goalLabelColor)
+        .help(goalHelpText)
+    }
+
+    private var goalLabelColor: Color {
+        guard let goal = chat.goal else { return .secondary }
+        switch goal.status {
+        case .active: return .accentColor
+        case .complete: return .green
+        case .paused: return .orange
+        }
+    }
+
+    private var goalHelpText: String {
+        guard let goal = chat.goal else {
+            return "Goal mode: set an objective and the AI keeps working toward it across replies — a reviewer continues or pauses it after each round."
+        }
+        switch goal.status {
+        case .active: return "Goal active — the AI keeps working toward it. Click to pause or clear."
+        case .paused: return "Goal paused (\(goal.reason ?? "no reason recorded")). Click to resume or clear."
+        case .complete: return "Goal complete: \(goal.reason ?? ""). Click to clear."
+        }
+    }
+
+    /// The banner row shown while a goal exists — objective, round progress,
+    /// and the reviewer's last word. The checklist card below it is what the
+    /// goal actually drives.
+    private func goalBanner(_ goal: ChatGoal) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "flag.checkered")
+                .foregroundColor(goal.status == .active ? .accentColor : goal.status == .complete ? .green : .orange)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(goalBannerTitle(goal))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(goal.objective)
+                    .font(.caption)
+                    .lineLimit(2)
+                if let reason = goal.reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+            if goal.status == .active {
+                Button {
+                    chat.pauseGoal()
+                } label: {
+                    Image(systemName: "pause.circle").font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+                .help("Pause the goal — the loop stops after this reply; resume it from the Goal menu")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private func goalBannerTitle(_ goal: ChatGoal) -> String {
+        switch goal.status {
+        case .active: return "Goal · round \(min(goal.rounds + 1, goal.maxRounds))/\(goal.maxRounds)"
+        case .paused: return "Goal · paused"
+        case .complete: return "Goal · complete"
+        }
+    }
+
     private func yoloToggle(iconOnly: Bool) -> some View {
         Button {
             if chat.yoloMode {
@@ -1329,7 +1527,6 @@ struct AIChatView: View {
                 && event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.shift]
             guard isShiftEnter,
                   let chat,
-                  !chat.isGenerating,
                   chat.pendingApproval == nil,
                   self.inputFocused,
                   !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1353,8 +1550,16 @@ struct AIChatView: View {
 /// the bottom while you were trying to read an earlier step. The probe is
 /// passive — it never scrolls, and if no scroll view can be found the binding
 /// simply stays at its initial `true` (the old always-follow behaviour).
+///
+/// The probe also stays silent while a *programmatic* scroll is in flight (per
+/// `isProgrammaticScroll`): a scroll the panel issued itself is not the user
+/// scrolling away, and the lazy stack's post-scroll height corrections would
+/// otherwise read as one — which is what used to disable autoscroll mid-
+/// generation and leave the transcript stranded on blank space until the next
+/// click.
 private struct TranscriptBottomProbe: NSViewRepresentable {
     @Binding var isAtBottom: Bool
+    var isProgrammaticScroll: () -> Bool
 
     /// Distance from the bottom still treated as "at the bottom", so a
     /// one-pixel rounding difference or a short scroll doesn't flip it.
@@ -1376,10 +1581,12 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
 
     final class Coordinator: NSObject {
         var isAtBottom: Binding<Bool>
+        var isProgrammaticScroll: () -> Bool
         private var scrollView: NSScrollView?
 
-        init(isAtBottom: Binding<Bool>) {
+        init(isAtBottom: Binding<Bool>, isProgrammaticScroll: @escaping () -> Bool) {
             self.isAtBottom = isAtBottom
+            self.isProgrammaticScroll = isProgrammaticScroll
         }
 
         /// Finds the enclosing scroll view once the probe is in the window
@@ -1404,6 +1611,10 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
         }
 
         private func report() {
+            // Our own scrolls (and the lazy-row height corrections right
+            // after them) are not the user moving; reacting to them would
+            // pause autoscroll in the middle of a generation.
+            guard !isProgrammaticScroll() else { return }
             guard let scrollView, let document = scrollView.documentView else { return }
             let clipView = scrollView.contentView
             // SwiftUI's document view is flipped (y = 0 at the top), so the
@@ -1422,7 +1633,7 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(isAtBottom: $isAtBottom)
+        Coordinator(isAtBottom: $isAtBottom, isProgrammaticScroll: isProgrammaticScroll)
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -1436,6 +1647,7 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.isAtBottom = $isAtBottom
+        context.coordinator.isProgrammaticScroll = isProgrammaticScroll
         context.coordinator.attach(to: nsView)
     }
 
