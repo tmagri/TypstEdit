@@ -94,13 +94,41 @@ final class AIModelProfileTests: XCTestCase {
             let profile = settings.addModelProfile()
             settings.setModelProfileID(profile.id, for: .chat)
             settings.setModelProfileID(profile.id, for: .refine)
+            settings.setModelProfileID(profile.id, for: .calculator)
             XCTAssertEqual(settings.modelProfileID(for: .chat), profile.id)
+            XCTAssertEqual(settings.modelProfileID(for: .calculator), profile.id)
 
             settings.removeModelProfile(id: profile.id)
 
             XCTAssertTrue(settings.modelProfiles.isEmpty)
             XCTAssertNil(settings.modelProfileID(for: .chat))
             XCTAssertNil(settings.modelProfileID(for: .refine))
+            XCTAssertNil(settings.modelProfileID(for: .calculator))
+        }
+    }
+
+    /// The calculator's AI fallback has its own model choice, independent of
+    /// the chat model.
+    func testCalculatorFallbackUsesItsOwnModel() {
+        withCleanProfiles { settings in
+            var profile = settings.addModelProfile()
+            profile.source = .openAI
+            profile.model = "calculator-test"
+            settings.updateModelProfile(profile)
+
+            // With no choice it follows the default Chat & Actions model.
+            XCTAssertNil(settings.modelProfileID(for: .calculator))
+            XCTAssertEqual(settings.modelContext(for: .calculator).model,
+                           settings.modelContext(for: .generation).model)
+
+            settings.setModelProfileID(profile.id, for: .calculator)
+            XCTAssertEqual(settings.modelContext(for: .calculator).model, "calculator-test")
+            XCTAssertEqual(settings.activeModelShortName(for: .calculator), "calculator-test")
+
+            // Picking one for the calculator leaves chat alone.
+            XCTAssertNil(settings.modelProfileID(for: .chat))
+            XCTAssertEqual(settings.modelContext(for: .chat).model,
+                           settings.modelContext(for: .generation).model)
         }
     }
 

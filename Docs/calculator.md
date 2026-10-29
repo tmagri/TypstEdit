@@ -118,6 +118,10 @@ Wolfram|Alpha style:
   expression that the CAS evaluates locally, so the number is exact even
   from a small local model. The result shows as math with the model's prose
   underneath. Knowledge and counting questions get a prose answer.
+- The model the fallback uses is its own choice: pick it under *Model* in the
+  AI Fallback card, in Settings → AI → Model per Feature, or from the model
+  chip in the calculator's status strip — which also shows what is in use.
+  With nothing chosen, it uses the default Chat & Actions model.
 - The answer appears in the history with an AI badge, copies via the
   context menu, is saved in the `.tcalc` file, and is exported as text (plus
   the exact result) by *Export as .typ*.

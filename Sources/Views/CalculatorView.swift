@@ -11,6 +11,9 @@ struct CalculatorView: View {
     @ObservedObject var editorController: EditorController
     @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.colorScheme) private var colorScheme
+    /// Observed so the status strip can show which model the AI fallback is
+    /// using (and let the user switch it without opening Settings).
+    @ObservedObject private var aiSettings = AISettingsManager.shared
 
     @State private var showOpenPanel = false
     @State private var showNewAlert = false
@@ -522,6 +525,15 @@ struct CalculatorView: View {
             Text(session.statusText)
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(themeManager.textColor.opacity(0.55))
+            // Which model answers questions, when the fallback is on — the
+            // menu switches it without a trip to Settings. Collapses to the
+            // chip icon when the strip is too narrow for the model name.
+            if aiSettings.chatEnabled && aiSettings.calcAIFallbackEnabled {
+                ViewThatFits(in: .horizontal) {
+                    AIModelPickerMenu(feature: .calculator, font: .caption2)
+                    AIModelPickerMenu(feature: .calculator, font: .caption2, showsName: false)
+                }
+            }
             Spacer()
             if let status = session.lastStatus {
                 Text(status)

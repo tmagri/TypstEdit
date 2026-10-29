@@ -54,7 +54,7 @@ enum CalculatorAIFallback {
     static func isAvailable() -> Bool {
         let settings = AISettingsManager.shared
         guard settings.chatEnabled, settings.calcAIFallbackEnabled else { return false }
-        let context = settings.modelContext(for: .generation)
+        let context = settings.modelContext(for: .calculator)
         return context.isLocal || !context.apiKey.isEmpty
     }
 
@@ -186,6 +186,9 @@ enum CalculatorAIFallback {
             // anything by itself.
             maxTokens: 800,
             purpose: .chat,
+            // Use the model picked for the calculator (Settings → General →
+            // Calculator → AI Fallback), falling back to Chat & Actions.
+            model: AISettingsManager.shared.modelContext(for: .calculator),
             sanitize: false)
         return parseInterpretation(raw)
     }

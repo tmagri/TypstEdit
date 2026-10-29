@@ -304,6 +304,7 @@ enum AIFeature: String, CaseIterable, Identifiable {
     case chat
     case prompt
     case refine
+    case calculator
 
     var id: String { rawValue }
 
@@ -312,6 +313,7 @@ enum AIFeature: String, CaseIterable, Identifiable {
         case .chat: return "AI Chat"
         case .prompt: return "AI Prompt (Insert)"
         case .refine: return "Refine & Grammar"
+        case .calculator: return "Calculator AI Fallback"
         }
     }
 
@@ -320,6 +322,7 @@ enum AIFeature: String, CaseIterable, Identifiable {
         case .chat: return "The chat panel, its delegate_task subagent, and history compaction."
         case .prompt: return "The AI Prompt sheet that generates content to insert at the cursor (including Fix with AI)."
         case .refine: return "Refine Writing and Fix Grammar on a selection."
+        case .calculator: return "Questions the calculator's math engine cannot evaluate, answered instead of an error."
         }
     }
 }
@@ -874,6 +877,7 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiFeatureModel.chat") private var chatModelProfileIDRaw: String = ""
     @AppStorage("aiFeatureModel.prompt") private var promptModelProfileIDRaw: String = ""
     @AppStorage("aiFeatureModel.refine") private var refineModelProfileIDRaw: String = ""
+    @AppStorage("aiFeatureModel.calculator") private var calculatorModelProfileIDRaw: String = ""
 
     /// Every saved model, in the order the user added them.
     var modelProfiles: [AIModelProfile] {
@@ -937,6 +941,7 @@ class AISettingsManager: ObservableObject {
         case .chat: return chatModelProfileIDRaw
         case .prompt: return promptModelProfileIDRaw
         case .refine: return refineModelProfileIDRaw
+        case .calculator: return calculatorModelProfileIDRaw
         }
     }
 
@@ -955,6 +960,7 @@ class AISettingsManager: ObservableObject {
         case .chat: chatModelProfileIDRaw = raw
         case .prompt: promptModelProfileIDRaw = raw
         case .refine: refineModelProfileIDRaw = raw
+        case .calculator: calculatorModelProfileIDRaw = raw
         }
     }
 

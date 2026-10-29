@@ -212,7 +212,16 @@ struct GeneralSettingsView: View {
                     .font(.body.weight(.medium))
                     .disabled(!aiSettings.chatEnabled)
 
-                Text("Off by default, and it needs AI Chat to be enabled (Settings → AI → Chat). Only entries that read like a question are routed — including word problems that embed units and equations. Formula-shaped input still shows the CAS error, so typos in formulas are never sent to the AI.")
+                HStack(spacing: 8) {
+                    Text("Model:")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                    AIModelPickerMenu(feature: .calculator, font: .callout)
+                        .disabled(!aiSettings.chatEnabled || !aiSettings.calcAIFallbackEnabled)
+                }
+                .padding(.leading, 20)
+
+                Text("Off by default, and it needs AI Chat to be enabled (Settings → AI → Chat). Only entries that read like a question are routed — including word problems that embed units and equations. Formula-shaped input still shows the CAS error, so typos in formulas are never sent to the AI. With no model chosen here, the default Chat & Actions model is used.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.leading, 20)
@@ -970,7 +979,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Model per Feature",
             icon: "arrow.triangle.branch",
-            description: "Choose which model each feature uses. You can also change this from the model menu in the AI Chat panel and the AI Prompt sheet."
+            description: "Choose which model each feature uses. You can also change this from the model menu in the AI Chat panel, the AI Prompt sheet, and the calculator's status strip."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(AIFeature.allCases) { feature in
