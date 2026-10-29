@@ -416,7 +416,7 @@ struct ContentView: View {
                     FractionalSplitView(
                         // No visible feature means no empty sidebar pane.
                         showLeft: editorController.isSidebarVisible && !sidebarVisibility.panels.isEmpty,
-                        initialLeftWidth: 180
+                        initialLeftWidth: 252
                     ) {
                         sidebarPanel
                     } right: {

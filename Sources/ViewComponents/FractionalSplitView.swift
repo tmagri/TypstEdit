@@ -23,7 +23,7 @@ struct FractionalSplitView<Left: View, Right: View>: NSViewRepresentable {
 
     init(
         showLeft: Bool,
-        initialLeftWidth: CGFloat = 180,
+        initialLeftWidth: CGFloat = 252,
         minimumLeftWidth: CGFloat = 150,
         @ViewBuilder left: () -> Left,
         @ViewBuilder right: () -> Right
