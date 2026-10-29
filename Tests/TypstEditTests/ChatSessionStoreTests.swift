@@ -118,6 +118,37 @@ final class ChatSessionStoreTests: XCTestCase {
         XCTAssertEqual(chat.plan.map(\.status), [.completed, .inProgress])
     }
 
+    // MARK: - Long-conversation rendering
+
+    @MainActor
+    func testLiveReasoningKeepsOnlyARecentWindow() {
+        let chat = AIChatManager()
+        for _ in 0..<8 {
+            chat.appendLiveReasoning(String(repeating: "a", count: 1_000))
+        }
+        chat.appendLiveReasoning("TAIL")
+
+        XCTAssertLessThanOrEqual(chat.liveReasoning.count, AIChatManager.liveReasoningTrimThreshold)
+        XCTAssertTrue(chat.liveReasoning.hasSuffix("TAIL"))
+    }
+
+    @MainActor
+    func testContextEstimateCountsOnlyWhatIsSentAndRefreshesOnPersist() {
+        let long = String(repeating: "a", count: 400)
+        let chat = AIChatManager(messages: [
+            ChatMessage(role: .user, text: long),
+            ChatMessage(role: .toolCall, text: long, toolName: "project__read_file"),
+            ChatMessage(role: .assistant, text: long, isCompacted: true),
+            ChatMessage(role: .assistant, text: long),
+        ])
+        // Tool rows and compacted history aren't sent to the model: two
+        // counted messages of 400 characters, at four characters per token.
+        XCTAssertEqual(chat.estimatedContextTokens, 200)
+
+        chat.clearHistory()
+        XCTAssertEqual(chat.estimatedContextTokens, 0)
+    }
+
     func testDecodeRecordRepairsInterruptedToolRow() throws {
         let record = makeRecord(messages: [
             ChatMessage(role: .user, text: "hi"),

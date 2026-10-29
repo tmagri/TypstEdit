@@ -27,6 +27,14 @@ struct AIChatView: View {
 
     /// Which past messages' "Thought process" disclosures are expanded.
     @State private var expandedThinkingIDs: Set<UUID> = []
+    /// Which of those are showing the complete reasoning rather than the
+    /// preview slice. Only set when the user clicks "Show full thought".
+    @State private var fullThinkingIDs: Set<UUID> = []
+    /// How many of the most recent messages the transcript keeps in the view.
+    /// The full history stays in the model (and on disk); the extra rows are
+    /// loaded on demand, so a long chat doesn't rebuild a `ForEach` over
+    /// hundreds of messages on every update.
+    @State private var transcriptWindow = 120
     /// The answer whose thinking was opened automatically when it finished —
     /// replaced (and closed) by the next answer, so one open thinking section
     /// carries over from the live row without every old one piling up.
@@ -172,9 +180,10 @@ struct AIChatView: View {
                 }
                 .buttonStyle(.plain)
                 .help("New chat — the current conversation stays in the chat menu")
-                if liveThinkingExpanded || !expandedThinkingIDs.isEmpty {
+                if liveThinkingExpanded || !expandedThinkingIDs.isEmpty || !fullThinkingIDs.isEmpty {
                     Button {
                         expandedThinkingIDs = []
+                        fullThinkingIDs = []
                         autoExpandedThinkingID = nil
                         liveThinkingExpanded = false
                     } label: {
@@ -361,12 +370,45 @@ struct AIChatView: View {
     /// message left both that row and the newest message's true (measured)
     /// height off the bottom — the "always one short" behaviour this fixes.
     private static let transcriptBottomID = "transcript-bottom"
+    /// How many extra messages "Show earlier messages" reveals each time.
+    private static let transcriptWindowStep = 120
+
+    /// The newest slice of the transcript shown in the view. The manager still
+    /// holds the whole conversation, so the model is unaffected.
+    private var visibleMessages: [ChatMessage] {
+        chat.messages.count <= transcriptWindow
+            ? chat.messages
+            : Array(chat.messages.suffix(transcriptWindow))
+    }
+
+    private var hiddenMessageCount: Int {
+        max(0, chat.messages.count - transcriptWindow)
+    }
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(chat.messages) { message in
+                    if hiddenMessageCount > 0 {
+                        Button {
+                            // Looking at older output means the user is no
+                            // longer following the live end of the chat, so
+                            // pause autoscroll until they jump back.
+                            transcriptAtBottom = false
+                            transcriptWindow += Self.transcriptWindowStep
+                        } label: {
+                            Label(
+                                "Show \(hiddenMessageCount) earlier message\(hiddenMessageCount == 1 ? "" : "s")",
+                                systemImage: "arrow.up"
+                            )
+                            .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.accentColor)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 2)
+                    }
+                    ForEach(visibleMessages) { message in
                         messageRow(message).id(message.id)
                     }
                     if chat.isGenerating {
@@ -406,8 +448,10 @@ struct AIChatView: View {
             // start at the bottom (which is all there is, usually).
             .onChange(of: chat.id) { _ in
                 expandedThinkingIDs = []
+                fullThinkingIDs = []
                 autoExpandedThinkingID = nil
                 liveThinkingExpanded = true
+                transcriptWindow = Self.transcriptWindowStep
                 transcriptAtBottom = true
                 followBottom(proxy, force: true)
             }
@@ -488,7 +532,7 @@ struct AIChatView: View {
     /// the thinking, so the reasoning doesn't vanish while a task runs.
     @ViewBuilder
     private var generatingRow: some View {
-        let reasoning = chat.liveReasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reasoning = chat.liveReasoning
         let statusText = chat.liveStatus ?? "Thinking…"
         VStack(alignment: .leading, spacing: 6) {
             if reasoning.isEmpty {
@@ -514,13 +558,24 @@ struct AIChatView: View {
         .cornerRadius(8)
     }
 
+    /// The newest slice of the live reasoning, and the only part laid out in
+    /// the panel. Very long thoughts would otherwise re-lay out the entire
+    /// transcript on every streamed token; the full text is kept on the
+    /// finished message.
+    private var liveReasoningPreview: String {
+        let limit = 1_500
+        let text = chat.liveReasoning
+        guard text.count > limit else { return text }
+        return "…\n" + String(text.suffix(limit))
+    }
+
     /// Expandable live reasoning, following the newest text as it streams.
     private func liveThinkingBox(statusText: String) -> some View {
         DisclosureGroup(isExpanded: $liveThinkingExpanded) {
             ScrollViewReader { innerProxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        Text(chat.liveReasoning)
+                        Text(liveReasoningPreview)
                             .font(.caption2.monospaced())
                             .foregroundColor(.secondary)
                             .textSelection(.enabled)
@@ -738,13 +793,21 @@ struct AIChatView: View {
     /// purely a window into what the model worked through. Expansion state
     /// is keyed by message id so "Collapse all thinking" in the header can
     /// close every one of these at once.
+    ///
+    /// Only a preview slice is laid out by default. A reasoning block can be
+    /// enormous, and rendering it all made the panel sluggish; the full text
+    /// is one click away and still saved on the message.
+    private static let thinkingPreviewLimit = 6_000
+
     @ViewBuilder
     private func thinkingDisclosure(_ reasoning: String, id: UUID) -> some View {
+        let showingFull = fullThinkingIDs.contains(id)
+        let isTruncated = reasoning.utf8.count > Self.thinkingPreviewLimit
         DisclosureGroup(isExpanded: thinkingBinding(for: id)) {
             // Scrollable and capped like the live box: an expanded thinking
             // section should never push the answer itself out of the panel.
             ScrollView {
-                Text(reasoning)
+                Text(showingFull || !isTruncated ? reasoning : thinkingPreview(reasoning))
                     .font(.caption2.monospaced())
                     .foregroundColor(.secondary)
                     .textSelection(.enabled)
@@ -752,6 +815,19 @@ struct AIChatView: View {
             }
             .frame(maxHeight: 180)
             .padding(.top, 4)
+            if isTruncated {
+                Button(showingFull ? "Show less" : "Show full thought") {
+                    if showingFull {
+                        fullThinkingIDs.remove(id)
+                    } else {
+                        fullThinkingIDs.insert(id)
+                    }
+                }
+                .font(.caption2)
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+                .padding(.top, 2)
+            }
         } label: {
             Label("Thought process", systemImage: "brain")
                 .font(.caption2)
@@ -760,6 +836,11 @@ struct AIChatView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.06))
         .cornerRadius(8)
+    }
+
+    private func thinkingPreview(_ reasoning: String) -> String {
+        String(reasoning.prefix(Self.thinkingPreviewLimit))
+            + "\n\n… (the rest is hidden to keep the panel responsive)"
     }
 
     private func thinkingBinding(for id: UUID) -> Binding<Bool> {

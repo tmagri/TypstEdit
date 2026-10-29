@@ -161,6 +161,7 @@ final class AIChatManager: ObservableObject {
         self.localTools.scope = scope
         self.scopeLabel = scope.label
         self.plan = AgentHarnessTools.plan(from: messages)
+        refreshContextEstimate()
     }
 
     /// Rebuilds a saved conversation.
@@ -309,6 +310,7 @@ final class AIChatManager: ObservableObject {
     /// the E2E test harness) nothing is written.
     func persist() {
         updatedAt = Date()
+        refreshContextEstimate()
         sessionStore?.chatSessionDidUpdate(self)
     }
 
@@ -388,6 +390,23 @@ final class AIChatManager: ObservableObject {
     }
 
     // MARK: - Sending Messages
+
+    /// Hard cap on the live reasoning preview kept while a response streams.
+    /// The complete text still arrives through `onReasoning` and lands on the
+    /// finished message; this only bounds the string the panel has to lay out
+    /// on every delta, which is what made very long thoughts crawl.
+    nonisolated static let liveReasoningCharacterLimit = 3_000
+    /// Trim in chunks instead of on every token — dropping the front each
+    /// time would cost more than the append it is keeping in check.
+    nonisolated static let liveReasoningTrimThreshold = 4_000
+
+    /// Appends a streamed reasoning delta, keeping only a recent window.
+    /// Internal for the bounds test.
+    func appendLiveReasoning(_ delta: String) {
+        liveReasoning += delta
+        guard liveReasoning.count > Self.liveReasoningTrimThreshold else { return }
+        liveReasoning = String(liveReasoning.suffix(Self.liveReasoningCharacterLimit))
+    }
 
     func sendMessage(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -559,7 +578,7 @@ final class AIChatManager: ObservableObject {
                     self?.recordSkippedToolCall(qualifiedName: name, argumentsJSON: arguments, note: note, isSubagent: false)
                 },
                 onReasoning: { capturedReasoning = $0 },
-                onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
+                onReasoningDelta: { [weak self] delta in self?.appendLiveReasoning(delta) },
                 onStatus: { [weak self] status in self?.liveStatus = status },
                 // Chat replies are shown as plain prose in the panel, so the
                 // Markdown→Typst sanitizer (right for AI Prompt, which inserts
@@ -664,18 +683,33 @@ final class AIChatManager: ObservableObject {
     // MARK: - Context Budget & Compaction
 
     /// Rough size of what the model will actually be sent, in tokens.
-    var estimatedContextTokens: Int {
-        let chars = messages
-            .filter { !$0.isCompacted && $0.role != .toolCall }
-            .reduce(0) { $0 + $1.text.count }
-        return chars / Self.charsPerToken
-    }
+    ///
+    /// Cached and refreshed from `persist()` rather than recomputed on every
+    /// read: the chat header renders it while tokens stream in, and scanning
+    /// every message's text that often made long conversations crawl.
+    @Published private(set) var estimatedContextTokens: Int = 0
 
     /// Token budget for this chat's model: the active saved model's own
     /// override when set (a paid long-context model can use its real window),
     /// else the global AI Chat → Context Budget setting.
     var contextBudgetTokens: Int {
         AISettingsManager.shared.effectiveContextBudgetTokens(for: chatModelContext)
+    }
+
+    /// Recomputes `estimatedContextTokens`. Called after transcript changes
+    /// (from `persist()`), never per streamed token. Counts UTF-8 bytes
+    /// (`O(1)` per string) rather than characters, so this stays cheap even
+    /// with a huge transcript; for ASCII — the common case — the estimate is
+    /// identical.
+    private func refreshContextEstimate() {
+        let bytes = messages.reduce(0) { total, message in
+            guard !message.isCompacted, message.role != .toolCall else { return total }
+            return total + message.text.utf8.count
+        }
+        let estimate = bytes / Self.charsPerToken
+        if estimate != estimatedContextTokens {
+            estimatedContextTokens = estimate
+        }
     }
 
     /// Replaces all but the last three user turns with a model-written summary.
@@ -1068,7 +1102,7 @@ final class AIChatManager: ObservableObject {
             onToolRefused: { [weak self] name, arguments, note in
                 self?.recordSkippedToolCall(qualifiedName: name, argumentsJSON: arguments, note: note, isSubagent: true)
             },
-            onReasoningDelta: { [weak self] delta in self?.liveReasoning += delta },
+            onReasoningDelta: { [weak self] delta in self?.appendLiveReasoning(delta) },
             onStatus: { [weak self] status in self?.liveStatus = status },
             sanitize: false,
             contextCharBudget: contextBudgetTokens * Self.charsPerToken,
