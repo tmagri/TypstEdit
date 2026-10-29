@@ -873,6 +873,19 @@ class AICompletionService: ObservableObject {
                 if cutOff == .truncatedText {
                     return sanitized + Self.cutOffAnswerNote(limit: replyTokens)
                 }
+                // opencode's approach: only "stop" (OpenAI) and "end_turn"
+                // (Anthropic) are clean terminal signals. Any other non-nil,
+                // non-empty reason that isn't a recognised tool-call or
+                // length signal means the provider stopped the model early
+                // for an unexpected reason (content-filter, server error,
+                // guardrail, etc.). Surface it so the user knows the reply
+                // may be incomplete, rather than silently returning whatever
+                // partial text arrived.
+                if let reason = stepMeta.finishReason,
+                   !reason.isEmpty,
+                   !Self.isCleanFinishReason(reason) {
+                    return sanitized + Self.unexpectedFinishReasonNote(reason: reason)
+                }
                 return sanitized
 
             case .toolCalls(let calls, let stepReasoning):
@@ -1223,6 +1236,34 @@ class AICompletionService: ObservableObject {
     /// Appended to an answer that was cut off and couldn't be retried.
     nonisolated static func cutOffAnswerNote(limit: Int) -> String {
         "\n\n[This answer was cut off at the \(limit)-token reply limit. Ask to continue, or raise Max reply tokens in Settings → AI Chat.]"
+    }
+
+    // MARK: - Finish Reason Helpers (opencode-style clean-exit classification)
+
+    /// Finish reasons that represent a clean, complete model stop — the model
+    /// said everything it wanted to say. opencode treats only these as true
+    /// terminal states; anything else means the session ended early for an
+    /// unexpected reason (content-filter, server error, guardrail, etc.).
+    ///
+    /// - `"stop"` — OpenAI-compatible clean stop
+    /// - `"end_turn"` — Anthropic's equivalent
+    /// - `"tool_calls"` / `"tool-calls"` — the step was classified as
+    ///   `.toolCalls`, not `.finalText`, so this branch is never reached; listed
+    ///   here for completeness so the set is easy to audit
+    nonisolated static func isCleanFinishReason(_ reason: String) -> Bool {
+        switch reason.lowercased() {
+        case "stop", "end_turn", "tool_calls", "tool-calls", "tool_use":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Inline note appended when the provider stopped the model for an
+    /// unexpected reason — mirrors `cutOffAnswerNote` so the user can
+    /// see that the reply may be incomplete.
+    nonisolated static func unexpectedFinishReasonNote(reason: String) -> String {
+        "\n\n[The model stopped early (\(reason)) — the reply may be incomplete. Try again or check your provider's status.]"
     }
 
     // MARK: Progress & Turn-Budget Steering
