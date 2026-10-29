@@ -397,8 +397,9 @@ struct CalculatorView: View {
     private func resultView(_ entry: CalculatorEntry) -> some View {
         if let answer = entry.aiAnswer, !answer.isEmpty {
             // AI-fallback entry: when the model's interpretation was
-            // computable, the exact CAS result shows as math with the
-            // model's prose underneath; otherwise the prose is the answer.
+            // computable or provided a math equation, the typeset result
+            // shows as math with the model's prose underneath; otherwise
+            // the prose is the answer.
             let computed = !entry.resultTypst.isEmpty
             VStack(alignment: .trailing, spacing: 4) {
                 Label("AI", systemImage: "sparkles")
@@ -408,11 +409,12 @@ struct CalculatorView: View {
                     MathImageView(typst: entry.resultTypst, dark: colorScheme == .dark)
                         .frame(maxHeight: 120)
                 }
-                Text(answer)
-                    .font(computed ? .caption : .callout)
-                    .foregroundColor(computed ? .secondary : themeManager.textColor)
-                    .multilineTextAlignment(.trailing)
-                    .textSelection(.enabled)
+                AIAnswerView(
+                    text: answer,
+                    dark: colorScheme == .dark,
+                    font: computed ? .caption : .callout,
+                    isSecondary: computed
+                )
             }
             .frame(maxWidth: 320, alignment: .trailing)
         } else if entry.isError {
@@ -567,15 +569,15 @@ struct CalculatorView: View {
             Button("Inline equation  $…$") {
                 insertIntoDocument(CalculatorSession.inlineEquation(entry.resultTypst))
             }
-            .disabled(!canInsert || entry.isError || entry.aiAnswer != nil)
+            .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty)
             Button("Block equation  $ … $") {
                 insertIntoDocument(CalculatorSession.blockEquation(entry.resultTypst))
             }
-            .disabled(!canInsert || entry.isError || entry.aiAnswer != nil)
+            .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty)
             Button("Input = Result") {
                 insertIntoDocument(CalculatorSession.inputEqualsResult(entry))
             }
-            .disabled(!canInsert || entry.isError || entry.aiAnswer != nil)
+            .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty || entry.inputTypst.isEmpty)
         }
         Section("Copy") {
             Button("Copy as Typst") {
@@ -692,6 +694,63 @@ struct MathImageView: View {
                 image = rendered
             } else {
                 failed = true
+            }
+        }
+    }
+}
+
+/// Displays an AI response's prose answer, automatically typesetting any
+/// inline equations ($...$) with Typst or falling back to native styled text.
+struct AIAnswerView: View {
+    let text: String
+    let dark: Bool
+    let font: Font
+    let isSecondary: Bool
+    @EnvironmentObject var themeManager: ThemeManager
+
+    @State private var image: NSImage?
+    @State private var renderFailed = false
+
+    private var hasMathNotation: Bool {
+        text.contains("$") || text.contains("\\(") || text.contains("\\[")
+            || text.contains("∑") || text.contains("∫") || text.contains("√")
+            || text.contains("π") || text.contains("∞") || text.contains("²")
+            || text.contains("³") || text.contains("ⁿ") || text.contains("₀")
+            || text.contains("ₙ")
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 320, alignment: .trailing)
+                    .help(text)
+            } else {
+                Text(text)
+                    .font(font)
+                    .foregroundColor(isSecondary ? .secondary : themeManager.textColor)
+                    .multilineTextAlignment(.trailing)
+                    .textSelection(.enabled)
+            }
+        }
+        .task(id: "\(text)|\(dark)|\(isSecondary)") {
+            guard hasMathNotation else {
+                image = nil
+                return
+            }
+            renderFailed = false
+            let markup = CalculatorAIFallback.normalizeAnswerMath(text)
+            let fontSize: CGFloat = isSecondary ? 10 : 12
+            if let rendered = await CASMathRenderer.shared.renderRichSnippet(
+                markup: markup,
+                dark: dark,
+                fontSize: fontSize,
+                maxWidth: 310) {
+                image = rendered
+            } else {
+                renderFailed = true
             }
         }
     }

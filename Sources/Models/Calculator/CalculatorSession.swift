@@ -108,11 +108,23 @@ final class CalculatorSession: ObservableObject {
                             }
                         }
 
+                        var resultTypst = computed?.resultTypst ?? ""
+                        var resultPlain = computed?.resultText ?? ""
+                        if resultTypst.isEmpty, let math = interpretation.typstMath, !math.isEmpty {
+                            resultTypst = math
+                            if resultPlain.isEmpty {
+                                resultPlain = math
+                            }
+                        }
+                        if resultPlain.isEmpty {
+                            resultPlain = interpretation.answer
+                        }
+
                         entries.append(CalculatorEntry(
                             input: trimmed,
                             approx: approx,
-                            resultTypst: computed?.resultTypst ?? "",
-                            resultPlain: computed?.resultText ?? interpretation.answer,
+                            resultTypst: resultTypst,
+                            resultPlain: resultPlain,
                             inputTypst: computed?.inputTypst ?? "",
                             aiAnswer: interpretation.answer))
                         hasUnsavedChanges = true

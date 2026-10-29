@@ -217,6 +217,49 @@ final class CalculatorAIFallbackTests: XCTestCase {
         XCTAssertTrue(parsed.answer.contains("pi*(1/2)^2"))
     }
 
+    func testParseTypstMathInterpretation() {
+        let input = """
+        EXPR: none
+        TYPST: x^2 = pi^2/3 + 4 sum_(n=1)^oo (-1)^n/n^2 cos(n x)
+        ANSWER: The Fourier series on $(-pi, pi)$ is $x^2 = pi^2/3 + 4 sum_(n=1)^oo (-1)^n/n^2 cos(n x)$.
+        """
+        let parsed = CalculatorAIFallback.parseInterpretation(input)
+        XCTAssertNil(parsed.expression)
+        XCTAssertEqual(parsed.typstMath, "x^2 = pi^2/3 + 4 sum_(n=1)^oo (-1)^n/n^2 cos(n x)")
+        XCTAssertTrue(parsed.answer.contains("$"))
+    }
+
+    func testExtractPrimaryEquationFromProse() {
+        let rawAnswer = "The Fourier series of f(x)=x² on (-π,π) with period 2π is x² = π²/3 + 4∑ₙ₌₁^∞ (-1)ⁿ/n² · cos(nx), since the function is even (all bₙ=0), a₀=2π²/3, and aₙ=4(-1)ⁿ/n²."
+        let parsed = CalculatorAIFallback.parseInterpretation(rawAnswer)
+        XCTAssertNotNil(parsed.typstMath)
+        XCTAssertTrue(parsed.typstMath?.contains("x^2") == true)
+        XCTAssertTrue(parsed.typstMath?.contains("sum") == true)
+    }
+
+    func testNormalizeToTypstMathConvertsLatexAndUnicode() {
+        let unicodeSample = "x² = π²/3 + 4∑ₙ₌₁^∞ (-1)ⁿ/n² · cos(nx)"
+        let normalizedUnicode = CalculatorAIFallback.normalizeToTypstMath(unicodeSample)
+        XCTAssertTrue(normalizedUnicode.contains("x^2"))
+        XCTAssertTrue(normalizedUnicode.contains("pi"))
+        XCTAssertTrue(normalizedUnicode.contains("sum"))
+        XCTAssertTrue(normalizedUnicode.contains("dot"))
+
+        let latexSample = "x^2 = \\frac{\\pi^2}{3} + 4 \\sum_{n=1}^{\\infty} \\frac{(-1)^n}{n^2} \\cos(nx)"
+        let normalizedLatex = CalculatorAIFallback.normalizeToTypstMath(latexSample)
+        XCTAssertTrue(normalizedLatex.contains("x^2"))
+        XCTAssertTrue(normalizedLatex.contains("pi"))
+        XCTAssertTrue(normalizedLatex.contains("sum"))
+    }
+
+    func testNormalizeAnswerMathReplacesLatexDelimiters() {
+        let answer = "The Fourier series of \\(f(x)=x^{2}\\) is \\(x^{2} = \\frac{\\pi^{2}}{3}\\)."
+        let normalized = CalculatorAIFallback.normalizeAnswerMath(answer)
+        XCTAssertFalse(normalized.contains("\\("))
+        XCTAssertFalse(normalized.contains("\\)"))
+        XCTAssertTrue(normalized.contains("$"))
+    }
+
     // MARK: - Expression cleanup (markdown, typographic math, sentence dots)
 
     func testInterpretationExpressionCleanup() {
