@@ -174,6 +174,23 @@ enum CalculatorAIFallback {
     /// Asks the user's configured chat model to interpret the entry. Throws
     /// so the caller can fall back to the CAS error entry on failure.
     static func interpret(_ question: String) async throws -> Interpretation {
+        let settings = AISettingsManager.shared
+        let ctx = settings.modelContext(for: .calculator)
+        // When the model is configured with an active reasoning effort
+        // (low/medium/high/xhigh), thinking tokens count against max_tokens on
+        // most providers (local Ollama/llama.cpp models, OpenAI reasoning,
+        // OpenRouter, etc.). A fixed ceiling causes the model to exhaust all
+        // tokens on its reasoning chain, leaving nothing for the EXPR/ANSWER.
+        // We therefore allocate:
+        //   answerBase   = user-configurable ceiling for the answer itself
+        //   thinkingBudget = generic per-effort estimate of thinking consumption
+        //   maxTokens    = answerBase + thinkingBudget
+        // Anthropic is the one provider that keeps thinking tokens in a
+        // separate pool; `applyReasoningEffort(toAnthropic:)` already raises
+        // `max_tokens` for that path, so the addition is harmless there too.
+        let answerBase = settings.calcAIFallbackMaxTokens
+        let thinkingBudget = ctx.reasoningEffort.thinkingTokenBudget
+        let maxTokens = answerBase + thinkingBudget
         let raw = try await AICompletionService.shared.fetchCompletion(
             prompt: """
             \(instructions)
@@ -181,14 +198,13 @@ enum CalculatorAIFallback {
             Question: \(question)
             """,
             systemPrompt: "You interpret questions for a calculator app and always reply in the exact two-line EXPR/ANSWER format. Reason carefully and count precisely before writing the ANSWER line.",
-            // Enough headroom that the ANSWER line is never cut off when the
-            // model writes a longer formula; the ceiling does not cost
-            // anything by itself.
-            maxTokens: 800,
+            // answerBase tokens for the EXPR/ANSWER reply, plus thinkingBudget
+            // when the model has an active reasoning effort (see above).
+            maxTokens: maxTokens,
             purpose: .chat,
             // Use the model picked for the calculator (Settings → General →
             // Calculator → AI Fallback), falling back to Chat & Actions.
-            model: AISettingsManager.shared.modelContext(for: .calculator),
+            model: ctx,
             sanitize: false)
         return parseInterpretation(raw)
     }

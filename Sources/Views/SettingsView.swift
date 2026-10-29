@@ -221,6 +221,18 @@ struct GeneralSettingsView: View {
                 }
                 .padding(.leading, 20)
 
+                SettingsRow(label: "Max Tokens:", caption: "Token ceiling for the EXPR/ANSWER reply. When the model has reasoning/thinking enabled, its thinking budget is added on top automatically.") {
+                    HStack {
+                        TextField("800", value: $aiSettings.calcAIFallbackMaxTokens, formatter: NumberFormatter())
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("tokens")
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.leading, 20)
+                .disabled(!aiSettings.chatEnabled || !aiSettings.calcAIFallbackEnabled)
+
                 Text("Off by default, and it needs AI Chat to be enabled (Settings → AI → Chat). Only entries that read like a question are routed — including word problems that embed units and equations. Formula-shaped input still shows the CAS error, so typos in formulas are never sent to the AI. With no model chosen here, the default Chat & Actions model is used.")
                     .font(.caption)
                     .foregroundColor(.secondary)

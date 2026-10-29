@@ -131,6 +131,17 @@ enum ReasoningEffort: String, CaseIterable, Identifiable, Codable {
         case .xhigh: return 16_384
         }
     }
+
+    /// Provider-generic estimate of how many tokens the thinking/reasoning
+    /// chain will consume for this effort level (0 = thinking off or
+    /// provider-decided). Used by callers that need to widen their
+    /// `max_tokens` budget to leave room for the actual answer, regardless
+    /// of whether the provider is Anthropic, OpenAI, a local model, or
+    /// anything else with a `reasoning_effort`/`<think>` mechanism.
+    /// The numbers match `anthropicBudgetTokens`; both live here so the
+    /// Anthropic-specific builder can stay named clearly while shared code
+    /// uses the generic name.
+    var thinkingTokenBudget: Int { anthropicBudgetTokens }
 }
 
 // MARK: - Model Context
@@ -389,6 +400,13 @@ class AISettingsManager: ObservableObject {
     @AppStorage("calcAIFallbackEnabled") var calcAIFallbackEnabled: Bool = false {
         willSet { objectWillChange.send() }
     }
+    /// Maximum output tokens for a single AI Fallback request in the
+    /// calculator. This is the answer-side ceiling; when the configured model
+    /// has an active reasoning/thinking effort the thinking budget is added on
+    /// top automatically (it counts against `max_tokens` on most providers).
+    /// 800 is enough for any EXPR/ANSWER reply; raise it if a verbose model
+    /// or a complex question consistently hits the ceiling.
+    @AppStorage("calcAIFallbackMaxTokens") var calcAIFallbackMaxTokens: Int = 800
 
     /// Skills that start enabled in new AI chats. Persisted as a
     /// comma-separated list of skill IDs (`scope:folderName`). Empty by
