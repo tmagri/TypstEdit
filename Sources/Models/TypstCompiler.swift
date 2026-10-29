@@ -432,6 +432,89 @@ class TypstCompiler: ObservableObject {
         }
     }
 
+    // MARK: - Compile Root
+
+    /// The `--root` to hand to `typst` for a shadow file, plus whether that root
+    /// had to be widened past the project directory to contain it.
+    struct CompileRoot {
+        var url: URL
+        /// True when the shadow source sits outside the project (the "Store Temp
+        /// Files Inside Project" setting is off), so root-absolute references
+        /// must be rewritten before compiling — see `rewriteRootAbsolutePaths`.
+        var isWidened: Bool
+    }
+
+    /// Typst refuses to compile a source file that is not inside the project
+    /// root ("source file must be contained in project root"). With in-project
+    /// temp files the project directory already contains the shadow copy. With
+    /// OS-temp temp files it does not, so the root is widened to the deepest
+    /// directory that contains both — usually `/` on macOS.
+    ///
+    /// Widening moves the anchor for root-absolute paths (`/lib.typ`), so the
+    /// shadow's own references are made relative first (see
+    /// `rewriteRootAbsolutePaths`). Files imported from the project are compiled
+    /// from their real location and are not rewritten: a `/…` reference *inside*
+    /// an imported library still resolves against the widened root.
+    nonisolated static func compileRoot(projectRoot: URL, shadowDirectory: URL) -> CompileRoot {
+        let project = projectRoot.standardizedFileURL.resolvingSymlinksInPath()
+        let shadow = shadowDirectory.standardizedFileURL.resolvingSymlinksInPath()
+
+        let projectPath = project.path
+        let prefix = projectPath.hasSuffix("/") ? projectPath : projectPath + "/"
+        if shadow.path == projectPath || shadow.path.hasPrefix(prefix) {
+            return CompileRoot(url: project, isWidened: false)
+        }
+
+        let projectComponents = project.pathComponents
+        let shadowComponents = shadow.pathComponents
+        var common = 0
+        while common < min(projectComponents.count, shadowComponents.count),
+              projectComponents[common] == shadowComponents[common] {
+            common += 1
+        }
+        // The filesystem root has a single component and needs no joining.
+        let commonComponents = Array(projectComponents.prefix(common))
+        let root: URL = commonComponents.count <= 1
+            ? URL(fileURLWithPath: "/")
+            : URL(fileURLWithPath: NSString.path(withComponents: commonComponents))
+        return CompileRoot(url: root, isWidened: true)
+    }
+
+    /// Rewrites root-absolute file references (`#import "/lib.typ"`,
+    /// `#image("/logo.png")`) to paths relative to the shadow file.
+    ///
+    /// Typst resolves a leading `/` against `--root`. When that root was widened
+    /// to contain an out-of-project shadow file, `/lib.typ` would no longer mean
+    /// `<project>/lib.typ`. Only quoted literals that name a file which actually
+    /// exists under the project directory are rewritten, so plain text that
+    /// happens to start with a slash is left untouched.
+    nonisolated static func rewriteRootAbsolutePaths(
+        in content: String, projectRoot: URL, shadowDirectory: URL
+    ) -> String {
+        guard content.contains("\"/") else { return content }
+
+        let project = projectRoot.standardizedFileURL
+        let matches = CompilerRegex.quotedString.matches(
+            in: content, options: [], range: NSRange(0..<content.utf16.count))
+        guard !matches.isEmpty else { return content }
+
+        // Replacing in reverse keeps the ranges of earlier matches valid.
+        var processed = content
+        for match in matches.reversed() {
+            let literal = (processed as NSString).substring(with: match.range(at: 1))
+            guard literal.count > 1, literal.hasPrefix("/"), !literal.hasPrefix("//") else { continue }
+
+            let target = project.appendingPathComponent(String(literal.dropFirst()))
+            guard FileManager.default.fileExists(atPath: target.path) else { continue }
+
+            let relative = relativePath(from: shadowDirectory, to: target)
+            guard !relative.isEmpty else { continue }
+            processed = (processed as NSString)
+                .replacingCharacters(in: match.range, with: "\"\(relative)\"")
+        }
+        return processed
+    }
+
     /// Creates the temp directory inside the project folder if it doesn't exist, and returns its URL.
     /// Prevents nested temp directories if the project is already in a temp folder.
     private func ensureTempDirectory(in projectRoot: URL) -> URL {
@@ -449,13 +532,18 @@ class TypstCompiler: ObservableObject {
         let workingDirectory = fileURL.deletingLastPathComponent()
         let filename = fileURL.lastPathComponent
         
-        // Use a 'temp/' subdirectory inside the project folder so Typst root restrictions are satisfied
-        // and the files are clearly visible (not hidden dot-files).
+        // Scratch files live either in a 'temp/' subdirectory of the project or,
+        // when the project opts out of in-project storage, in an OS-temp mirror
+        // (see `SafeDirectoryManager.safeTempDirectory`). In the latter case the
+        // shadow file is outside the project, so the compiler root is widened to
+        // contain it — otherwise Typst refuses to compile ("source file must be
+        // contained in project root").
         let projectTempDir = ensureTempDirectory(in: workingDirectory)
         let shadowSourceURL = projectTempDir.appendingPathComponent("\(filename).preview.typ")
         let shadowPDFURL = projectTempDir.appendingPathComponent("\(filename).preview.pdf")
         
         let projectRoot = workingDirectory
+        let compileRoot = Self.compileRoot(projectRoot: projectRoot, shadowDirectory: projectTempDir)
         
         // Write content to shadow file
         do {
@@ -639,10 +727,19 @@ class TypstCompiler: ObservableObject {
             }
             finalSource = injectedPreamble + finalSource
             
-            // Download web images and inject local paths before saving
-            finalSource = await resolveWebImages(in: finalSource, projectRoot: projectRoot)
-            
             finalSource = await self.rewriteRelativeImports(in: finalSource, sourceDirectory: workingDirectory, tempDirectory: projectTempDir)
+            
+            // With a widened root, `/…` no longer resolves to the project folder.
+            if compileRoot.isWidened {
+                finalSource = Self.rewriteRootAbsolutePaths(
+                    in: finalSource, projectRoot: projectRoot, shadowDirectory: projectTempDir)
+            }
+            
+            // Download web images and inject local paths before saving. Runs
+            // after the rewriters so the injected filenames — relative to the
+            // shadow file, which sits next to the downloads — are left alone.
+            finalSource = await resolveWebImages(
+                in: finalSource, projectRoot: projectRoot, shadowDirectory: projectTempDir)
             
             let finalSourceToWrite = finalSource
             try await Task.detached {
@@ -669,10 +766,10 @@ class TypstCompiler: ObservableObject {
         
         // Otherwise, stop previous watch and start new one
         cleanUp()
-        startWatching(sourceURL: shadowSourceURL, outputURL: shadowPDFURL, projectRoot: projectRoot)
+        startWatching(sourceURL: shadowSourceURL, outputURL: shadowPDFURL, root: compileRoot.url)
     }
     
-    private func startWatching(sourceURL: URL, outputURL: URL, projectRoot: URL) {
+    private func startWatching(sourceURL: URL, outputURL: URL, root: URL) {
         guard let typstPath = resolveTypstPath() else {
             self.compilationStatus = "Error: 'typst' executable not found."
             return
@@ -699,7 +796,7 @@ class TypstCompiler: ObservableObject {
         process.executableURL = URL(fileURLWithPath: typstPath)
         
         // Use --root to ensure relative imports from the temporary file work correctly
-        process.arguments = ["watch", sourceURL.path, outputURL.path, "--root", projectRoot.path]
+        process.arguments = ["watch", sourceURL.path, outputURL.path, "--root", root.path]
         
         let pipe = Pipe()
         process.standardError = pipe // typst often logs to stderr or stdout, check both? usually stderr for logs
@@ -2257,9 +2354,18 @@ class TypstCompiler: ObservableObject {
         // export compiles from).
         finalContent = await applyCalcPipeline(finalContent, fileExtension: ext, bridgeDirectory: tempDir).content
 
-        finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
-
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory, tempDirectory: tempDir)
+        
+        // The shadow may sit outside the project (OS-temp storage): widen the
+        // root to contain it and make `/…` references relative so they still
+        // point at project files.
+        let compileRoot = Self.compileRoot(projectRoot: preferredDirectory, shadowDirectory: tempDir)
+        if compileRoot.isWidened {
+            finalContent = Self.rewriteRootAbsolutePaths(
+                in: finalContent, projectRoot: preferredDirectory, shadowDirectory: tempDir)
+        }
+        finalContent = await resolveWebImages(
+            in: finalContent, projectRoot: preferredDirectory, shadowDirectory: tempDir)
         
         do {
             try finalContent.write(to: sourceURL, atomically: true, encoding: .utf8)
@@ -2271,7 +2377,7 @@ class TypstCompiler: ObservableObject {
             try? FileManager.default.removeItem(at: sourceURL)
         }
         
-        let effectiveRoot = preferredDirectory
+        let effectiveRoot = compileRoot.url
         let effectiveOutputURL = Self.exportDestinationURL(for: format, requested: outputURL)
         var arguments = ["compile", sourceURL.path, effectiveOutputURL.path, "--format", format]
         arguments.append(contentsOf: ["--root", effectiveRoot.path])
@@ -2338,6 +2444,12 @@ class TypstCompiler: ObservableObject {
         let tempID = UUID().uuidString
         let sourceURL = tempDir.appendingPathComponent(".clean-\(tempID.prefix(8)).typ")
         
+        // The shadow may sit outside the project (OS-temp storage): widen the
+        // root to contain it and make `/…` references relative so they still
+        // point at project files.
+        let rootSource = preferredDirectory ?? projectRoot ?? tempDir
+        let compileRoot = Self.compileRoot(projectRoot: rootSource, shadowDirectory: tempDir)
+        
         let pdfURL: URL
         if let original = originalFileURL {
             let tempFolder = tempDir.appendingPathComponent(tempID)
@@ -2386,9 +2498,16 @@ class TypstCompiler: ObservableObject {
         // Same calculator static compilation as the live preview.
         finalContent = await applyCalcPipeline(finalContent, fileExtension: ext, bridgeDirectory: tempDir).content
 
-        finalContent = await resolveWebImages(in: finalContent, projectRoot: projectRoot)
-
         finalContent = await self.rewriteRelativeImports(in: finalContent, sourceDirectory: preferredDirectory ?? tempDir, tempDirectory: tempDir)
+        
+        // With a widened root, `/…` no longer resolves to the project folder.
+        if compileRoot.isWidened {
+            finalContent = Self.rewriteRootAbsolutePaths(
+                in: finalContent, projectRoot: rootSource, shadowDirectory: tempDir)
+        }
+        
+        finalContent = await resolveWebImages(
+            in: finalContent, projectRoot: preferredDirectory ?? projectRoot, shadowDirectory: tempDir)
         
         do {
             try finalContent.write(to: sourceURL, atomically: true, encoding: .utf8)
@@ -2396,11 +2515,9 @@ class TypstCompiler: ObservableObject {
             return (false, nil, "Failed to write temp source: \(error.localizedDescription)")
         }
         
-        let effectiveRoot = preferredDirectory ?? projectRoot
+        let effectiveRoot = compileRoot.url
         var arguments = ["compile", sourceURL.path, pdfURL.path]
-        if let root = effectiveRoot {
-            arguments.append(contentsOf: ["--root", root.path])
-        }
+        arguments.append(contentsOf: ["--root", effectiveRoot.path])
         
         defer {
             // Clean up temp source file
@@ -2414,9 +2531,7 @@ class TypstCompiler: ObservableObject {
         while iteration < 3 {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: typstPath)
-            if let root = effectiveRoot {
-                process.currentDirectoryURL = root
-            }
+            process.currentDirectoryURL = effectiveRoot
             process.arguments = arguments
             
             let pipe = Pipe()
@@ -2455,7 +2570,7 @@ class TypstCompiler: ObservableObject {
 
     // MARK: - Web Image Resolver
     
-    func resolveWebImages(in text: String, projectRoot: URL?) async -> String {
+    func resolveWebImages(in text: String, projectRoot: URL?, shadowDirectory: URL? = nil) async -> String {
         let matches = CompilerRegex.webImage.matches(in: text, options: [], range: NSRange(0..<text.utf16.count))
         var urlsToFetch: Set<String> = []
         
@@ -2486,9 +2601,17 @@ class TypstCompiler: ObservableObject {
                 // Always overwrite to clear out any corrupted HTML 403 pages from previous runs
                 try? data.write(to: localURL, options: .atomic)
                 
-                // FIX: Use an absolute path from the Typst root to ensure it resolves 
-                // correctly regardless of where the shadow file is located.
-                processed = processed.replacingOccurrences(of: "\"\(url)\"", with: "\"/temp/\(safeName)\"")
+                // Point at the download from the shadow file, not from the
+                // project root: with OS-temp scratch files the shadow is not
+                // under `<project>/temp`, so a `/temp/…` reference would miss.
+                let rewrittenPath: String
+                if let shadowDirectory {
+                    let relative = Self.relativePath(from: shadowDirectory, to: localURL)
+                    rewrittenPath = relative.isEmpty ? safeName : relative
+                } else {
+                    rewrittenPath = "/temp/\(safeName)"
+                }
+                processed = processed.replacingOccurrences(of: "\"\(url)\"", with: "\"\(rewrittenPath)\"")
             }
         }
         
@@ -2510,7 +2633,7 @@ class TypstCompiler: ObservableObject {
             return await rewriteRelativeImports(in: content)
         }
 
-        let relativePrefix = (tempDirectory == sourceDirectory) ? "" : relativePath(from: tempDirectory, to: sourceDirectory)
+        let relativePrefix = (tempDirectory == sourceDirectory) ? "" : Self.relativePath(from: tempDirectory, to: sourceDirectory)
         let prefixForImports = relativePrefix.isEmpty || relativePrefix == "." ? "" : relativePrefix + "/"
 
         var processed = content
@@ -2600,9 +2723,9 @@ class TypstCompiler: ObservableObject {
         return processed
     }
 
-    private func relativePath(from tempDirectory: URL, to sourceDirectory: URL) -> String {
+    nonisolated static func relativePath(from tempDirectory: URL, to target: URL) -> String {
         let from = tempDirectory.standardizedFileURL.pathComponents
-        let to = sourceDirectory.standardizedFileURL.pathComponents
+        let to = target.standardizedFileURL.pathComponents
 
         var common = 0
         let count = min(from.count, to.count)

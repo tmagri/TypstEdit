@@ -746,4 +746,40 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(out.contains("PROJECT_WRITE_DENIED"), out)
         XCTAssertFalse(FileManager.default.fileExists(atPath: workDir.appendingPathComponent("bad.txt").path))
     }
+
+    /// Stop must abort a running script, not leave it to burn CPU until the
+    /// 20-second timeout while the chat looks stuck.
+    func testCancellingPythonTerminatesTheScript() async throws {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
+            throw XCTSkip("python3 unavailable")
+        }
+        executor.pythonToolEnabled = true
+        executor.pythonSandboxEnabled = false
+
+        let marker = workDir.appendingPathComponent("finished.txt")
+        let code = """
+        import time
+        time.sleep(30)
+        open(r"\(marker.path)", "w").write("done")
+        """
+
+        let started = Date()
+        let task = Task {
+            try await self.executor.execute(toolName: "run", arguments: ["code": code]) { _ in true }
+        }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("expected the cancelled run to throw CancellationError")
+        } catch is CancellationError {
+            // Expected: the tool reports a stopped task, not success/timeout.
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5,
+                          "Stop should terminate Python at once, not wait for its timeout")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path),
+                       "the script must not get to finish its work after Stop")
+    }
 }

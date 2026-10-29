@@ -40,7 +40,15 @@ struct AIChatView: View {
 
     /// Guards the one-pending follow-up scroll, so a burst of streaming
     /// updates schedules at most one extra `scrollTo` instead of one per token.
-    @State private var followScrollScheduled = false
+    /// Deliberately *not* `@State`: flagging every schedule as UI state would
+    /// rebuild the whole transcript many times a second, which is what made
+    /// the live row flicker while it streamed.
+    @StateObject private var transcriptScroller = TranscriptScroller()
+
+    /// Whether the transcript is scrolled to (or within a few points of) the
+    /// bottom. Autoscroll only follows while this is true, so scrolling up to
+    /// read an earlier step doesn't get yanked back down by the next token.
+    @State private var transcriptAtBottom = true
 
     @State private var showRename = false
     @State private var renameDraft: String = ""
@@ -341,6 +349,12 @@ struct AIChatView: View {
 
     // MARK: - Transcript
 
+    /// Bookkeeping for the coalesced bottom scroll. A reference type so
+    /// tracking a pending scroll doesn't invalidate the view.
+    private final class TranscriptScroller: ObservableObject {
+        var pending: Task<Void, Never>?
+    }
+
     /// Anchor id for the invisible row pinned to the end of the transcript.
     /// Scrolling targets this instead of the last message: the live
     /// "Thinking…"/tool row sits *below* the last message, so scrolling to the
@@ -374,17 +388,28 @@ struct AIChatView: View {
                         .id(Self.transcriptBottomID)
                 }
                 .padding(10)
+                // Passive probe for the real scroll position: it flips
+                // `transcriptAtBottom` when *you* scroll the transcript, so
+                // autoscroll can stop fighting you while you read earlier
+                // output. It never scrolls anything itself.
+                .background(TranscriptBottomProbe(isAtBottom: $transcriptAtBottom))
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if !transcriptAtBottom {
+                    jumpToLatestButton(proxy)
+                }
             }
             // Opened on an existing conversation (or a newly switched one):
             // start at the newest exchange, not the top of the history.
-            .onAppear { followBottom(proxy) }
+            .onAppear { followBottom(proxy, force: true) }
             // New chat / new session: reset the per-chat thinking state and
             // start at the bottom (which is all there is, usually).
             .onChange(of: chat.id) { _ in
                 expandedThinkingIDs = []
                 autoExpandedThinkingID = nil
                 liveThinkingExpanded = true
-                followBottom(proxy)
+                transcriptAtBottom = true
+                followBottom(proxy, force: true)
             }
             // Structural changes: a message, tool row or error was added or
             // updated, or the live row appeared/disappeared.
@@ -402,7 +427,9 @@ struct AIChatView: View {
                     autoExpandedThinkingID = last.id
                     expandedThinkingIDs.insert(last.id)
                 }
-                followBottom(proxy)
+                // Sending a message always returns you to the newest exchange,
+                // even if you were reading further up.
+                followBottom(proxy, force: messages.last?.role == .user)
             }
             .onChange(of: chat.isGenerating) { isGenerating in
                 if isGenerating { liveThinkingExpanded = true }
@@ -411,32 +438,45 @@ struct AIChatView: View {
             .onChange(of: chat.errorMessage) { _ in followBottom(proxy) }
             // Streaming updates only grow the live row, so they take the
             // coalesced path: a stream of deltas costs at most one scroll.
-            .onChange(of: chat.liveReasoning) { _ in followBottomSoon(proxy) }
-            .onChange(of: chat.liveStatus) { _ in followBottomSoon(proxy) }
-            .onChange(of: chat.runningTool) { _ in followBottomSoon(proxy) }
+            .onChange(of: chat.liveReasoning) { _ in followBottom(proxy) }
+            .onChange(of: chat.liveStatus) { _ in followBottom(proxy) }
+            .onChange(of: chat.runningTool) { _ in followBottom(proxy) }
         }
     }
 
-    /// Pins the transcript to its bottom. The second, delayed pass is
-    /// deliberate: `LazyVStack` lays a freshly appended row out with an
-    /// estimated height, so a single `scrollTo` fired in the same update
-    /// lands short and leaves the newest row just below the fold.
-    private func followBottom(_ proxy: ScrollViewProxy) {
-        proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
-        followBottomSoon(proxy)
+    /// The pill that brings you back after reading older output.
+    private func jumpToLatestButton(_ proxy: ScrollViewProxy) -> some View {
+        Button {
+            transcriptAtBottom = true
+            followBottom(proxy, force: true)
+        } label: {
+            Image(systemName: "arrow.down")
+                .font(.caption.bold())
+                .padding(7)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.secondary.opacity(0.25)))
+        }
+        .buttonStyle(.plain)
+        .padding(12)
+        .help("Jump to the newest part of the conversation")
+        .accessibilityLabel("Jump to latest message")
     }
 
-    /// At most one pending follow-up scroll per burst of updates. For
-    /// streaming reasoning this runs about a dozen times a second rather than
-    /// once per token, which keeps the bottom pinned without the transcript
-    /// stuttering.
-    private func followBottomSoon(_ proxy: ScrollViewProxy) {
-        guard !followScrollScheduled else { return }
-        followScrollScheduled = true
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 60_000_000)
-            proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
-            followScrollScheduled = false
+    /// Pins the transcript to its bottom. The single short delay lets a row
+    /// that was just appended finish being measured, which is what makes the
+    /// scroll land on the real bottom instead of one row short. Scheduling is
+    /// coalesced, so a burst of streamed reasoning costs one smooth scroll
+    /// rather than a visible jump per token.
+    private func followBottom(_ proxy: ScrollViewProxy, force: Bool = false) {
+        guard force || transcriptAtBottom else { return }
+        if force { transcriptAtBottom = true }
+        guard transcriptScroller.pending == nil else { return }
+        transcriptScroller.pending = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            withAnimation(.easeOut(duration: 0.12)) {
+                proxy.scrollTo(Self.transcriptBottomID, anchor: .bottom)
+            }
+            transcriptScroller.pending = nil
         }
     }
 
@@ -547,6 +587,7 @@ struct AIChatView: View {
                         }
                         HStack {
                             MarkdownText(text: message.text, font: .callout)
+                                .equatable()
                                 .textSelection(.enabled)
                                 .padding(8)
                                 .background(Color.secondary.opacity(0.12))
@@ -573,6 +614,7 @@ struct AIChatView: View {
                     text: message.text.replacingOccurrences(of: "[Summary of earlier conversation]\n\n", with: ""),
                     font: .caption
                 )
+                .equatable()
                 .textSelection(.enabled)
                 .padding(8)
                 .background(Color.secondary.opacity(0.07))
@@ -684,7 +726,7 @@ struct AIChatView: View {
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
-            .help("Stop this task and let the assistant continue without its result")
+            .help("Stop this task, aborting it if it is still running, and let the assistant continue without its result")
             .accessibilityLabel("Stop \(displayName(for: message.toolName ?? "task"))")
         }
     }
@@ -1031,7 +1073,7 @@ struct AIChatView: View {
                         Image(systemName: "stop.circle.fill").font(.system(size: 24)).foregroundColor(.red)
                     }
                     .buttonStyle(.plain)
-                    .help("Stop generating")
+                    .help("Stop generating and abort the task that is running (Python, compile, Git, and so on)")
                 } else {
                     Button {
                         send()
@@ -1221,5 +1263,102 @@ struct AIChatView: View {
             NSEvent.removeMonitor(monitor)
             shiftEnterMonitor = nil
         }
+    }
+}
+
+/// Reports whether the transcript's backing `NSScrollView` is scrolled to the
+/// bottom, by watching the clip view's bounds. SwiftUI has no scroll-position
+/// API on macOS 13, and without this the chat would keep jerking you back to
+/// the bottom while you were trying to read an earlier step. The probe is
+/// passive — it never scrolls, and if no scroll view can be found the binding
+/// simply stays at its initial `true` (the old always-follow behaviour).
+private struct TranscriptBottomProbe: NSViewRepresentable {
+    @Binding var isAtBottom: Bool
+
+    /// Distance from the bottom still treated as "at the bottom", so a
+    /// one-pixel rounding difference or a short scroll doesn't flip it.
+    private static let slack: CGFloat = 24
+
+    final class ProbeView: NSView {
+        var onWindowChange: (() -> Void)?
+
+        /// The probe is invisible bookkeeping, never a target: it must not
+        /// swallow clicks, text selection, or scroll-wheel events from the
+        /// transcript behind it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            onWindowChange?()
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var isAtBottom: Binding<Bool>
+        private var scrollView: NSScrollView?
+
+        init(isAtBottom: Binding<Bool>) {
+            self.isAtBottom = isAtBottom
+        }
+
+        /// Finds the enclosing scroll view once the probe is in the window
+        /// hierarchy. Called more than once because SwiftUI may attach the
+        /// view before the scroll view is in place.
+        func attach(to view: NSView) {
+            guard scrollView == nil, let scroll = view.enclosingScrollView else { return }
+            scrollView = scroll
+            let clipView = scroll.contentView
+            clipView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(boundsChanged),
+                name: NSView.boundsDidChangeNotification,
+                object: clipView
+            )
+            report()
+        }
+
+        @objc private func boundsChanged() {
+            report()
+        }
+
+        private func report() {
+            guard let scrollView, let document = scrollView.documentView else { return }
+            let clipView = scrollView.contentView
+            // SwiftUI's document view is flipped (y = 0 at the top), so the
+            // remaining distance is document height minus the visible bottom.
+            let distanceToBottom: CGFloat
+            if document.isFlipped {
+                let maxOffset = max(0, document.frame.height - clipView.bounds.height)
+                distanceToBottom = maxOffset - clipView.bounds.origin.y
+            } else {
+                distanceToBottom = clipView.bounds.origin.y
+            }
+            let atBottom = distanceToBottom <= TranscriptBottomProbe.slack
+            guard atBottom != isAtBottom.wrappedValue else { return }
+            isAtBottom.wrappedValue = atBottom
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isAtBottom: $isAtBottom)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ProbeView(frame: .zero)
+        view.onWindowChange = { [weak view, weak coordinator = context.coordinator] in
+            guard let view else { return }
+            coordinator?.attach(to: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isAtBottom = $isAtBottom
+        context.coordinator.attach(to: nsView)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        NotificationCenter.default.removeObserver(coordinator)
     }
 }

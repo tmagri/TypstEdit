@@ -1656,6 +1656,13 @@ final class LocalToolExecutor {
         let outText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let errText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
 
+        // A Stop — the chat's own or the one on this task's row — terminated
+        // the process above. Throw instead of returning, so the caller marks
+        // the call as stopped rather than reporting a bogus timeout/success.
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+
         if timedOut {
             return "Python script timed out after 20 seconds and was terminated.\nPartial stdout:\n\(outText)"
         }
@@ -1716,24 +1723,54 @@ final class LocalToolExecutor {
             }
         }
 
-        let timedOut = await withTaskGroup(of: Bool.self) { group -> Bool in
-            group.addTask {
-                await exited.value
-                return false
+        // A task group does not cancel its children by itself, so without the
+        // handler below a Stop would wait out the whole 20-second timeout
+        // while the script kept running. Terminating the process makes the
+        // `exited` child resume at once; `group.cancelAll()` then cancels the
+        // sleep. The force kill covers a script that ignores SIGTERM.
+        let timedOut = await withTaskCancellationHandler {
+            await withTaskGroup(of: Bool.self) { group -> Bool in
+                group.addTask {
+                    await exited.value
+                    return false
+                }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                    return true
+                }
+                let result = await group.next() ?? true
+                // A real timeout must terminate the process *inside* the
+                // group: the scope waits for the `exited` child, which only
+                // resumes once the process is gone.
+                if result {
+                    terminate(process)
+                }
+                group.cancelAll()
+                return result
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return true
-            }
-            let result = await group.next() ?? true
-            group.cancelAll()
-            return result
+        } onCancel: {
+            terminate(process)
         }
 
+        // Covers both the real timeout and a cancellation that raced the
+        // process exit; `terminate` is a no-op if it already stopped.
         if timedOut {
-            if process.isRunning { process.terminate() }
             _ = await exited.value
         }
         return timedOut
+    }
+
+    /// SIGTERM, then SIGKILL after a grace period, so a runaway script that
+    /// ignores or misses the terminate signal still stops promptly.
+    private nonisolated static func terminate(_ process: Process) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        process.terminate()
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 2)
+            if kill(pid, 0) == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
     }
 }

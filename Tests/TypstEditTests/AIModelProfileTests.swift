@@ -187,6 +187,123 @@ final class AIModelProfileTests: XCTestCase {
         }
     }
 
+    // MARK: - Per-model API keys
+
+    func testSavedModelFallsBackToTheSharedProviderKey() {
+        let settings = AISettingsManager.shared
+        let saved = (settings.customApiKey, settings.openAIApiKey)
+        defer {
+            settings.customApiKey = saved.0
+            settings.openAIApiKey = saved.1
+        }
+        settings.customApiKey = "shared-local"
+        settings.openAIApiKey = "shared-openai"
+
+        let local = AIModelProfile(source: .local, model: "llama3", endpoint: "http://localhost:11434/v1/chat/completions")
+        XCTAssertEqual(settings.modelContext(for: local).apiKey, "shared-local")
+
+        let cloud = AIModelProfile(source: .openAI, model: "gpt-4o-mini")
+        XCTAssertEqual(settings.modelContext(for: cloud).apiKey, "shared-openai")
+    }
+
+    /// Two local servers behind the same `.local` source can each need their
+    /// own token; the saved model's key must win over the shared one.
+    func testSavedModelOwnKeyWins() {
+        let settings = AISettingsManager.shared
+        let saved = settings.customApiKey
+        defer { settings.customApiKey = saved }
+        settings.customApiKey = "shared-local"
+
+        let profile = AIModelProfile(
+            source: .local,
+            model: "llama3",
+            endpoint: "http://localhost:1234/v1/chat/completions",
+            apiKey: " second-server "
+        )
+        let ctx = settings.modelContext(for: profile)
+        XCTAssertEqual(ctx.apiKey, "second-server")
+        XCTAssertEqual(ctx.authHeaders["Authorization"], "Bearer second-server")
+        XCTAssertEqual(ctx.chatEndpoint, "http://localhost:1234/v1/chat/completions")
+    }
+
+    func testFeatureUsesItsSavedModelKey() {
+        withCleanProfiles { settings in
+            var profile = settings.addModelProfile()
+            profile.source = .local
+            profile.model = "llama3"
+            profile.endpoint = "http://localhost:1234/v1/chat/completions"
+            profile.apiKey = "chat-only-key"
+            settings.updateModelProfile(profile)
+            settings.setModelProfileID(profile.id, for: .chat)
+
+            XCTAssertEqual(settings.modelContext(for: .chat).apiKey, "chat-only-key")
+        }
+    }
+
+    func testOlderSavedModelsWithoutAKeyUseTheSharedKey() {
+        let raw = """
+        [{"id":"\(UUID().uuidString)","name":"","source":"Local (Ollama/LMStudio)","model":"llama3","endpoint":"http://localhost:11434/v1/chat/completions","reasoningEffort":"auto"}]
+        """
+        let decoded = AISettingsManager.decodeProfiles(raw)
+        XCTAssertEqual(decoded.first?.apiKey, "")
+    }
+
+    func testModelKeySurvivesEncoding() {
+        let profile = AIModelProfile(
+            source: .local,
+            model: "llama3",
+            endpoint: "http://localhost:1234/v1/chat/completions",
+            apiKey: "secret"
+        )
+        let decoded = AISettingsManager.decodeProfiles(AISettingsManager.encodeProfiles([profile]))
+        XCTAssertEqual(decoded.first?.apiKey, "secret")
+    }
+
+    // MARK: - Per-task local API keys
+
+    /// Autocomplete and embeddings often run on different local servers than
+    /// chat, so each task can override the shared Local Server key.
+    func testCompletionAndEmbeddingLocalKeysOverrideTheSharedKey() {
+        let settings = AISettingsManager.shared
+        let saved = (
+            settings.customApiKey,
+            settings.completionApiKey,
+            settings.embeddingApiKey,
+            settings.source(for: .generation),
+            settings.source(for: .completion),
+            settings.source(for: .embedding),
+            settings.completionModel
+        )
+        defer {
+            settings.customApiKey = saved.0
+            settings.completionApiKey = saved.1
+            settings.embeddingApiKey = saved.2
+            settings.setSource(saved.3, for: .generation)
+            settings.setSource(saved.4, for: .completion)
+            settings.setSource(saved.5, for: .embedding)
+            settings.completionModel = saved.6
+        }
+
+        settings.customApiKey = "shared-local"
+        settings.completionApiKey = ""
+        settings.embeddingApiKey = ""
+        settings.setSource(.local, for: .generation)
+        settings.setSource(.local, for: .completion)
+        settings.setSource(.local, for: .embedding)
+        settings.completionModel = "qwen"
+
+        XCTAssertEqual(settings.modelContext(for: .generation).apiKey, "shared-local")
+        XCTAssertEqual(settings.modelContext(for: .completion).apiKey, "shared-local")
+        XCTAssertEqual(settings.modelContext(for: .embedding).apiKey, "shared-local")
+
+        settings.completionApiKey = " completion-key "
+        settings.embeddingApiKey = "embedding-key"
+
+        XCTAssertEqual(settings.modelContext(for: .completion).apiKey, "completion-key")
+        XCTAssertEqual(settings.modelContext(for: .embedding).apiKey, "embedding-key")
+        XCTAssertEqual(settings.modelContext(for: .generation).apiKey, "shared-local", "chat keeps the shared key")
+    }
+
     // MARK: - Per-model context budget
 
     func testOlderSavedModelsWithoutContextBudgetFollowTheGlobalSetting() {

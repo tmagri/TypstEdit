@@ -40,14 +40,18 @@ final class ModelCatalogService {
 
     /// The models available for `source`. `localEndpoint` is only used for
     /// `.local` (the chat or embeddings URL configured for that model).
+    /// `apiKeyOverride` lets a saved model browse with its own key instead of
+    /// the shared per-provider key (two local servers, different tokens).
     func models(
         for source: ModelSource,
         localEndpoint: String = "",
+        apiKeyOverride: String = "",
         kind: ModelListKind = .chat,
         forceRefresh: Bool = false
     ) async throws -> [AvailableModel] {
         let settings = AISettingsManager.shared
-        let apiKey = settings.apiKey(for: source)
+        let override = apiKeyOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = override.isEmpty ? settings.apiKey(for: source) : override
         let endpoint = source == .portkey ? settings.portkeyBaseURL : localEndpoint
         let extraHeaders: [String: String] = source == .portkey
             ? PortkeyGateway.routingHeaders(provider: settings.portkeyProvider, config: settings.portkeyConfig)

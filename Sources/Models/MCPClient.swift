@@ -291,15 +291,39 @@ final class MCPClient {
             "params": params
         ]
 
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingRequests[id] = continuation
-            do {
-                try write(payload, to: stdinHandle)
-            } catch {
-                pendingRequests.removeValue(forKey: id)
-                continuation.resume(throwing: error)
+        // The chat's Stop cancels the task waiting on this reply. Without
+        // this handler the continuation would sit until the server answers —
+        // even if the tool is running a long job — so the chat looked stuck.
+        // Cancel the request by id per MCP's own protocol, then resume
+        // ourselves so the tool loop unwinds immediately.
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingRequests[id] = continuation
+                do {
+                    try write(payload, to: stdinHandle)
+                } catch {
+                    pendingRequests.removeValue(forKey: id)
+                    continuation.resume(throwing: error)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelRequest(id: id)
             }
         }
+    }
+
+    /// Answers a cancelled request locally and tells the server to stop
+    /// working on it. Called on the main actor, where `pendingRequests` lives.
+    private func cancelRequest(id: Int) {
+        guard let continuation = pendingRequests.removeValue(forKey: id) else { return }
+        if isRunning {
+            sendNotification(method: "notifications/cancelled", params: [
+                "requestId": id,
+                "reason": "The user stopped this task."
+            ])
+        }
+        continuation.resume(throwing: CancellationError())
     }
 
     private func sendNotification(method: String, params: [String: Any]) {

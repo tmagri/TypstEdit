@@ -13,7 +13,7 @@ import Markdown
 /// and indented code blocks, tables, block quotes, thematic breaks, and
 /// inline bold/italic/strikethrough/code/links. Unknown nodes fall back to
 /// their inline text.
-struct MarkdownText: View {
+struct MarkdownText: View, Equatable {
     let text: String
     /// Base font for paragraphs and inline content.
     var font: Font = .callout

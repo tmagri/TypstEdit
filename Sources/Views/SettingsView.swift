@@ -851,12 +851,20 @@ struct AISettingsView: View {
     /// Shown under Portkey model fields: how model strings route.
     private let portkeyModelCaption = "Use a Model Catalog name, @provider-slug/model (e.g. @openai-prod/gpt-4o). A plain model name also works when a default provider or config is set in the API Keys & Limits tab."
 
+    /// Placeholder for a saved model's own key: says whether leaving it empty
+    /// still sends a key (the shared Local Server key).
+    private var localKeyPlaceholder: String {
+        settings.customApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Optional — no shared Local Server key set"
+            : "Optional — falling back to the shared Local Server key"
+    }
+
     @ViewBuilder
     private var savedModelsCard: some View {
         SettingsCard(
             title: "Saved Models",
             icon: "square.stack.3d.up",
-            description: "Save extra models, from any provider, to pick per feature below or to switch on the fly from the model menu in the AI Chat panel and the AI Prompt sheet. API keys are shared per provider (API Keys & Limits tab). Each saved model can also set its own AI Chat context budget and compaction method."
+            description: "Save extra models, from any provider, to pick per feature below or to switch on the fly from the model menu in the AI Chat panel and the AI Prompt sheet. API keys are shared per provider (API Keys & Limits tab), and a local model can set its own key when several local servers need different tokens. Each saved model can also set its own AI Chat context budget and compaction method."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 if settings.modelProfiles.isEmpty {
@@ -902,10 +910,15 @@ struct AISettingsView: View {
                     TextField(AIModelProfile.defaultLocalEndpoint, text: profile.endpoint)
                         .textFieldStyle(.roundedBorder)
                 }
+
+                SettingsRow(label: "API Key:", caption: "Optional. Used for this model instead of the shared Local Server key from API Keys & Limits — helpful when several local servers each need their own token. Leave empty to share that key.") {
+                    SecureField(localKeyPlaceholder, text: profile.apiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
             }
 
             SettingsRow(label: "Model:", caption: value.source == .portkey ? portkeyModelCaption : nil) {
-                ModelNameField(placeholder: modelPlaceholder(for: value.source), text: profile.model, source: value.source, localEndpoint: value.endpoint)
+                ModelNameField(placeholder: modelPlaceholder(for: value.source), text: profile.model, source: value.source, localEndpoint: value.endpoint, apiKey: value.source.isLocal ? value.apiKey : "")
             }
 
             SettingsRow(label: "Reasoning Effort:") {
@@ -938,7 +951,7 @@ struct AISettingsView: View {
                 }
             }
 
-            if !value.source.isLocal && settings.apiKey(for: value.source).isEmpty {
+            if !value.source.isLocal && settings.apiKey(for: value).isEmpty {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.orange)
@@ -1601,7 +1614,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Cloud Provider API Keys",
             icon: "key.horizontal",
-            description: "API keys configured here are shared across all tasks (Chat, Autocomplete, and Embeddings)."
+            description: "API keys configured here are shared across all tasks (Chat, Autocomplete, and Embeddings). A saved local model can override the Local Server key when several local servers each need their own token."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 SettingsRow(label: "OpenAI:") {
@@ -1624,7 +1637,7 @@ struct AISettingsView: View {
                     SecureField("Portkey API key", text: $settings.portkeyApiKey)
                         .textFieldStyle(.roundedBorder)
                 }
-                SettingsRow(label: "Local Server:") {
+                SettingsRow(label: "Local Server:", caption: "Shared default for local servers. Autocomplete, Embeddings, and each saved local model can set their own key when you run several servers.") {
                     SecureField("Optional for Ollama / LM Studio", text: $settings.customApiKey)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -1796,12 +1809,12 @@ struct AISettingsView: View {
                 TextField("http://localhost:11434/v1/chat/completions", text: $settings.completionEndpoint)
                     .textFieldStyle(.roundedBorder)
             }
-            SettingsRow(label: "API Key:") {
-                SecureField("Optional for local servers", text: $settings.customApiKey)
+            SettingsRow(label: "API Key:", caption: "Optional. Used for autocomplete instead of the shared Local Server key — autocomplete often runs on a different local server than chat.") {
+                SecureField(localKeyPlaceholder, text: $settings.completionApiKey)
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                ModelNameField(placeholder: "e.g. qwen2.5-coder:1.5b", text: $settings.completionModel, source: .local, localEndpoint: settings.completionEndpoint)
+                ModelNameField(placeholder: "e.g. qwen2.5-coder:1.5b", text: $settings.completionModel, source: .local, localEndpoint: settings.completionEndpoint, apiKey: settings.apiKey(for: .local, task: .completion))
             }
         }
     }
@@ -1822,12 +1835,12 @@ struct AISettingsView: View {
                 TextField("http://localhost:11434/v1/embeddings", text: $settings.embeddingEndpoint)
                     .textFieldStyle(.roundedBorder)
             }
-            SettingsRow(label: "API Key:") {
-                SecureField("Optional for local servers", text: $settings.customApiKey)
+            SettingsRow(label: "API Key:", caption: "Optional. Used for embeddings instead of the shared Local Server key — embeddings often run on a different local server.") {
+                SecureField(localKeyPlaceholder, text: $settings.embeddingApiKey)
                     .textFieldStyle(.roundedBorder)
             }
             SettingsRow(label: "Model:") {
-                ModelNameField(placeholder: "e.g. nomic-embed-text", text: $settings.embeddingModel, source: .local, localEndpoint: settings.embeddingEndpoint, kind: .embedding)
+                ModelNameField(placeholder: "e.g. nomic-embed-text", text: $settings.embeddingModel, source: .local, localEndpoint: settings.embeddingEndpoint, apiKey: settings.apiKey(for: .local, task: .embedding), kind: .embedding)
             }
         default:
             HStack(spacing: 8) {

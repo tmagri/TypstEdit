@@ -10,6 +10,9 @@ struct ModelNameField: View {
     let source: ModelSource
     /// Chat/embeddings URL — only used for local servers.
     var localEndpoint: String = ""
+    /// Key a saved model overrides its provider's shared key with (empty =
+    /// shared key), so browsing works against a server with its own token.
+    var apiKey: String = ""
     var kind: ModelListKind = .chat
 
     @State private var showPicker = false
@@ -136,6 +139,7 @@ struct ModelNameField: View {
                 models = try await ModelCatalogService.shared.models(
                     for: source,
                     localEndpoint: localEndpoint,
+                    apiKeyOverride: apiKey,
                     kind: kind,
                     forceRefresh: forceRefresh
                 )

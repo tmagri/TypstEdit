@@ -216,9 +216,10 @@ struct ModelContext {
 /// AI Assistant → Chat & Actions and then pick one per feature (AI Chat,
 /// AI Prompt, Refine) or switch on the fly from the chat panel / prompt sheet.
 ///
-/// API keys are deliberately *not* part of a profile: they stay shared per
-/// provider (Settings → API Keys & Limits), so adding a second OpenAI model
-/// doesn't mean pasting the key twice.
+/// API keys stay shared per provider by default (Settings → API Keys &
+/// Limits), so adding a second OpenAI model doesn't mean pasting the key
+/// twice. A profile can override that key (`apiKey`), which matters when
+/// several local servers each require their own token.
 struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     var id: UUID
     /// Optional friendly label ("Fast drafts", "Claude for review"). Empty →
@@ -228,6 +229,10 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     var model: String
     /// Only used for `.local` sources (OpenAI-compatible chat endpoint).
     var endpoint: String
+    /// Optional key for this model only. Empty (the default) = use the shared
+    /// per-provider key from API Keys & Limits. Set it when two local servers
+    /// behind the same source need different tokens.
+    var apiKey: String
     var reasoningEffort: ReasoningEffort
     /// How AI Chat compacts long conversations while this model is in use.
     /// `nil` = follow the global setting (AI Chat → Context Compression).
@@ -246,6 +251,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         source: ModelSource = .openAI,
         model: String = "",
         endpoint: String = AIModelProfile.defaultLocalEndpoint,
+        apiKey: String = "",
         reasoningEffort: ReasoningEffort = .auto,
         compressionMethod: ChatCompressionMethod? = nil,
         contextBudgetTokens: Int? = nil
@@ -255,6 +261,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         self.source = source
         self.model = model
         self.endpoint = endpoint
+        self.apiKey = apiKey
         self.reasoningEffort = reasoningEffort
         self.compressionMethod = compressionMethod
         self.contextBudgetTokens = contextBudgetTokens
@@ -271,6 +278,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         source = ModelSource(rawValue: sourceRaw) ?? .openAI
         model = (try? c.decode(String.self, forKey: .model)) ?? ""
         endpoint = (try? c.decode(String.self, forKey: .endpoint)) ?? Self.defaultLocalEndpoint
+        // Missing (older saved models) → use the shared provider key.
+        apiKey = (try? c.decode(String.self, forKey: .apiKey)) ?? ""
         let effortRaw = (try? c.decode(String.self, forKey: .reasoningEffort)) ?? ""
         reasoningEffort = ReasoningEffort(rawValue: effortRaw) ?? .auto
         // Missing (older saved models) or unknown → follow the global setting.
@@ -280,6 +289,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     }
 
     var trimmedModel: String { model.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var trimmedApiKey: String { apiKey.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     /// Label used in pickers: the friendly name if set, else the model name.
     var displayName: String {
@@ -645,7 +655,14 @@ class AISettingsManager: ObservableObject {
     @AppStorage("openRouterApiKey") var openRouterApiKey: String = ""
     @AppStorage("anthropicApiKey") var anthropicApiKey: String = ""
     @AppStorage("geminiApiKey") var geminiApiKey: String = ""
+    /// Shared key for local servers. Autocomplete and Embeddings can each
+    /// override it (they often run on different servers than chat), and a
+    /// saved model can override it per model.
     @AppStorage("customApiKey") var customApiKey: String = ""
+    /// Optional keys for local servers used only by these tasks. Empty = use
+    /// the shared `customApiKey`.
+    @AppStorage("completionApiKey") var completionApiKey: String = ""
+    @AppStorage("embeddingApiKey") var embeddingApiKey: String = ""
     @AppStorage("portkeyApiKey") var portkeyApiKey: String = ""
 
     // MARK: - Portkey AI Gateway
@@ -785,6 +802,30 @@ class AISettingsManager: ObservableObject {
         apiKey(for: source(for: .generation))
     }
 
+    /// The key a task actually sends to a local server: its own override when
+    /// set, else the shared Local Server key. Non-local sources always use
+    /// their single provider key.
+    func apiKey(for source: ModelSource, task: ModelTask) -> String {
+        guard source == .local else { return apiKey(for: source) }
+        let override: String
+        switch task {
+        case .generation: return customApiKey
+        case .completion: override = completionApiKey
+        case .embedding: override = embeddingApiKey
+        }
+        let trimmed = override.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? customApiKey : trimmed
+    }
+
+    /// The key a saved model actually sends: for local models, its own
+    /// override when set, else the shared Local Server key. Cloud sources
+    /// always use their single shared provider key.
+    func apiKey(for profile: AIModelProfile) -> String {
+        guard profile.source.isLocal else { return apiKey(for: profile.source) }
+        let own = profile.trimmedApiKey
+        return own.isEmpty ? customApiKey : own
+    }
+
     // MARK: - Model Context Resolution
 
     /// Resolves the full ModelContext for a given task.
@@ -827,20 +868,20 @@ class AISettingsManager: ObservableObject {
             source: src,
             model: modelName,
             endpoint: endpoint,
-            apiKey: apiKey(for: src),
+            apiKey: apiKey(for: src, task: task),
             reasoningEffort: reasoningEffort(for: task)
         )
     }
 
     /// A Portkey request context: the shared gateway URL, Portkey key, and
     /// optional default provider/config routing headers.
-    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort, compressionMethod: ChatCompressionMethod? = nil, contextBudgetTokens: Int? = nil) -> ModelContext {
+    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort, apiKey: String? = nil, compressionMethod: ChatCompressionMethod? = nil, contextBudgetTokens: Int? = nil) -> ModelContext {
         ModelContext(
             task: task,
             source: .portkey,
             model: model.trimmingCharacters(in: .whitespacesAndNewlines),
             endpoint: portkeyBaseURL,
-            apiKey: portkeyApiKey,
+            apiKey: apiKey ?? portkeyApiKey,
             reasoningEffort: reasoningEffort,
             extraHeaders: portkeyRoutingHeaders,
             compressionMethod: compressionMethod,
@@ -968,18 +1009,19 @@ class AISettingsManager: ObservableObject {
         modelProfileID(for: feature).flatMap { modelProfile(id: $0) }
     }
 
-    /// Resolves a saved model into a request-ready context. API keys come
-    /// from the shared per-provider keys.
+    /// Resolves a saved model into a request-ready context. The API key is the
+    /// profile's own override when set, else the shared per-provider key.
     func modelContext(for profile: AIModelProfile) -> ModelContext {
+        let resolvedKey = apiKey(for: profile)
         if profile.source == .portkey {
-            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort, compressionMethod: profile.compressionMethod, contextBudgetTokens: profile.contextBudgetTokens)
+            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort, apiKey: resolvedKey, compressionMethod: profile.compressionMethod, contextBudgetTokens: profile.contextBudgetTokens)
         }
         return ModelContext(
             task: .generation,
             source: profile.source,
             model: profile.trimmedModel,
             endpoint: profile.endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
-            apiKey: apiKey(for: profile.source),
+            apiKey: resolvedKey,
             reasoningEffort: profile.reasoningEffort,
             compressionMethod: profile.compressionMethod,
             contextBudgetTokens: profile.contextBudgetTokens

@@ -104,7 +104,7 @@ enum TypstErrorExplainer {
         let msg = error.message.lowercased()
 
         if msg.contains("source file must be contained in project root") {
-            return "Typst only reads files inside the project folder, but TypstEdit's temporary copy of this document is outside it. Turn on “Store Temp Files Inside Project” in Project Settings."
+            return "Typst could not find a folder it may read that contains both this document and its temporary copy. Reopen the document to restart the preview. If it keeps happening, turn on “Store Temp Files Inside Project” in Project Settings."
         }
         if msg.hasPrefix("expected expression") {
             if isNearHash(error) {
