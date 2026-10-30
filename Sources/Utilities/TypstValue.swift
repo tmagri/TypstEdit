@@ -79,6 +79,29 @@ public enum TypstFunction {
     case partial(TypstValue, [TypstArg])
 }
 
+/// A Typst selector — `figure.where(kind: image)`, `heading.where(level: 1)`.
+/// Selectors name elements to style, count, or list, and render nothing when
+/// placed in markup. The element they pick is kept because `#outline(target: …)`
+/// uses it to decide which list the outline becomes in Markdown (contents, list
+/// of figures, list of tables).
+public struct TypstSelector: Equatable {
+    /// Element function the selector starts from (`figure`, `heading`, …).
+    public let element: String
+    /// The `kind` refinement (`image`, `table`), when the selector gives one.
+    public let kind: String?
+
+    public init(element: String, kind: String? = nil) {
+        self.element = element
+        self.kind = kind
+    }
+
+    /// Code form, used by `repr()`.
+    public var code: String {
+        guard let kind else { return element }
+        return "\(element).where(kind: \(kind))"
+    }
+}
+
 /// A single call argument. `name == nil` → positional. Spreads are expanded before the
 /// callee sees the argument list.
 public struct TypstArg {
@@ -105,6 +128,9 @@ public indirect enum TypstValue {
     /// `.display(pattern)` can render real dates in Markdown footers.
     case datetime(Date)
     case str(String)
+    /// An element selector (`figure.where(kind: image)`). Displays as nothing, like
+    /// `none`; only `#outline(target: …)` reads it.
+    case selector(TypstSelector)
     case array([TypstValue])
     case dict(TypstDict)
     case content(TypstContent)
@@ -120,6 +146,7 @@ public indirect enum TypstValue {
         case .quantity: return "length"
         case .datetime: return "datetime"
         case .str: return "str"
+        case .selector: return "selector"
         case .array: return "array"
         case .dict: return "dictionary"
         case .content: return "content"
@@ -181,6 +208,9 @@ extension TypstValue {
             return .text(Self.displayFloat(value) + unit)
         case .str(let value):
             return .text(value)
+        case .selector:
+            // A selector names elements; it contributes no visible text.
+            return .empty
         case .array, .dict, .datetime, .function:
             return .code(repr())
         case .content(let content):
@@ -224,6 +254,7 @@ extension TypstValue {
         case .quantity(let value, let unit): return Self.displayFloat(value) + unit
         case .datetime(let date): return Self.reprDatetime(date)
         case .str(let value): return Self.reprString(value)
+        case .selector(let selector): return selector.code
         case .array(let items):
             if items.isEmpty { return "()" }
             let rendered = items.map { $0.repr() }
@@ -309,6 +340,7 @@ extension TypstValue: Equatable {
         case (.int(let a), .float(let b)), (.float(let b), .int(let a)):
             return Double(a) == b
         case (.str(let a), .str(let b)): return a == b
+        case (.selector(let a), .selector(let b)): return a == b
         case (.array(let a), .array(let b)): return a == b
         case (.dict(let a), .dict(let b)): return a.entries.map(\.key) == b.entries.map(\.key)
             && a.entries.map(\.value) == b.entries.map(\.value)

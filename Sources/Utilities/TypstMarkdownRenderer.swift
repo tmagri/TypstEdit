@@ -62,7 +62,7 @@ final class MarkdownRenderer {
         case "pagebreak", "line":
             return "\n---\n\n"
         case "outline":
-            return "\n[TOC]\n\n"
+            return renderOutline(args: args)
         case "figure":
             return renderFigure(args: args)
         case "link":
@@ -115,6 +115,70 @@ final class MarkdownRenderer {
             }.joined(separator: ", ")
             return "#\(name)(\(renderedArgs))"
         }
+    }
+
+    // MARK: Outlines
+
+    /// What an `#outline` lists. Typst builds all of them with the same function:
+    /// the default targets headings, while `figure.where(kind: image)` and
+    /// `figure.where(kind: table)` target figures and tables.
+    private enum OutlineList {
+        case contents, figures, tables
+    }
+
+    /// A heading outline is a table of contents (`[TOC]`). Typst's other outlines
+    /// — lists of figures and tables — have no Markdown syntax, so they become the
+    /// LaTeX commands that Pandoc and most Markdown-to-PDF pipelines pass through.
+    private func renderOutline(args: [TypstArg]) -> String {
+        switch outlineList(args) {
+        case .contents: return "\n[TOC]\n\n"
+        case .figures: return "\n\\listoffigures\n\n"
+        case .tables: return "\n\\listoftables\n\n"
+        }
+    }
+
+    private func outlineList(_ args: [TypstArg]) -> OutlineList {
+        // The target selector is authoritative when it survives evaluation.
+        if let target = args.first(where: { $0.name == "target" }) {
+            switch target.value {
+            case .selector(let selector):
+                if let list = outlineList(forElement: selector.element, kind: selector.kind) {
+                    return list
+                }
+            case .str(let name):
+                // A bare, unbound element name (`target: figure`) arrives as text.
+                if let list = outlineList(forElement: name, kind: nil) { return list }
+            case .array(let items):
+                for item in items {
+                    guard case .selector(let selector) = item,
+                          let list = outlineList(forElement: selector.element, kind: selector.kind)
+                    else { continue }
+                    return list
+                }
+            default:
+                break
+            }
+        }
+        // A mixed selector (`.and`/`.or`) or a target the interpreter could not
+        // resolve leaves the title as the only clue — `#outline(title: [List of
+        // Figures])` with no usable target is still a list of figures.
+        if let title = args.first(where: { $0.name == "title" }) {
+            let text = render(content: title.value.display()).lowercased()
+            // "Table of Contents" contains "table" — contents wins before tables.
+            if text.contains("content") { return .contents }
+            if text.contains("figure") || text.contains("illustration") { return .figures }
+            if text.contains("table") { return .tables }
+        }
+        return .contents
+    }
+
+    private func outlineList(forElement element: String, kind: String?) -> OutlineList? {
+        let name = element.lowercased()
+        if name == "heading" || name.hasSuffix(".heading") { return .contents }
+        guard name == "figure" || name.hasSuffix(".figure") else { return nil }
+        // An unrefined `figure` selector lists every figure; a `kind` picks one half.
+        if kind?.lowercased() == "table" { return .tables }
+        return .figures
     }
 
     private func renderLink(args: [TypstArg]) -> String {

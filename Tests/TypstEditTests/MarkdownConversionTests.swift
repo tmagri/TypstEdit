@@ -434,7 +434,8 @@ final class MarkdownConversionTests: XCTestCase {
     /// its content, never to raw source. `figure.where(kind: image)` reaches field
     /// access through the lenient unbound-name fallback (a string), so the lookup
     /// used to throw and the snippet-level recovery leaked the whole block into the
-    /// Markdown — the exact shape of the List of Figures block in Mugs.typ.
+    /// Markdown — the exact shape of the List of Figures block in Mugs.typ. A list
+    /// of figures is not a table of contents, so it becomes `\listoffigures`.
     func testBlockWithFigureWhereOutlineCompiles() {
         let input = """
         #block[
@@ -453,14 +454,73 @@ final class MarkdownConversionTests: XCTestCase {
         ]
         """
         let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
-        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "[TOC]")
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "\\listoffigures")
         XCTAssertFalse(output.contains("#block["), "block source must not leak: \(output)")
         XCTAssertFalse(output.contains("where("), "selector source must not leak: \(output)")
     }
 
+    // MARK: - Outlines
+
+    /// A heading outline stays a table of contents.
+    func testHeadingOutlineRendersTOC() {
+        let output = TypstToMarkdownConverter.convert("#outline(title: [Contents])", isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "[TOC]")
+    }
+
+    /// The target alone identifies a list of figures, even without a title.
+    func testFigureOutlineRendersListOfFigures() {
+        let output = TypstToMarkdownConverter.convert(
+            "#outline(target: figure.where(kind: image))", isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "\\listoffigures")
+    }
+
+    /// Tables are figures of kind `table`; they get their own list.
+    func testTableOutlineRendersListOfTables() {
+        let output = TypstToMarkdownConverter.convert(
+            "#outline(title: [List of Tables], target: figure.where(kind: table))",
+            isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "\\listoftables")
+    }
+
+    /// A bare `target: figure` (no kind) lists every figure.
+    func testBareFigureTargetRendersListOfFigures() {
+        let output = TypstToMarkdownConverter.convert(
+            "#outline(target: figure)", isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "\\listoffigures")
+    }
+
+    /// A selector stored in a variable keeps its element, so `target: figures`
+    /// is still recognized as a list of figures.
+    func testStoredFigureSelectorRendersListOfFigures() {
+        let input = """
+        #let figures = figure.where(kind: image)
+        #outline(target: figures)
+        """
+        let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "\\listoffigures")
+    }
+
+    /// With no usable target, the title decides which list is meant.
+    func testFigureOutlineTitleAloneRendersListOfFigures() {
+        let output = TypstToMarkdownConverter.convert(
+            "#outline(title: [List of Figures])", isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "\\listoffigures")
+    }
+
+    /// A selector placed in markup on its own is not text: it must render nothing
+    /// rather than leak its code form.
+    func testSelectorInMarkupRendersNothing() {
+        let output = TypstToMarkdownConverter.convert(
+            "Before #figure.where(kind: image) after", isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "Before  after")
+        XCTAssertFalse(output.contains("where("), "selector source must not leak: \(output)")
+    }
+
     /// `figure.where(...)` / `heading.where(...)` are selectors: their only visible
-    /// effect is styling, counting, or listing. They drop silently, and selector
-    /// refinements chain on that silence instead of failing the snippet.
+    /// effect is styling, counting, or listing. They never leak into the Markdown,
+    /// and selector refinements chain on that silence instead of failing the snippet.
+    /// A mixed figure+heading set has no single list, so the outline's title ("Figures")
+    /// is what decides its Markdown form.
     func testSelectorValuesDropSilently() {
         let input = """
         #let figures = figure.where(kind: image).and(heading.where(level: 1))
@@ -469,9 +529,17 @@ final class MarkdownConversionTests: XCTestCase {
         After
         """
         let output = TypstToMarkdownConverter.convert(input, isAlreadyMarkdown: false)
-        XCTAssertTrue(output.contains("[TOC]"), "outline must still render: \(output)")
+        XCTAssertTrue(output.contains("\\listoffigures"), "outline must still render: \(output)")
         XCTAssertTrue(output.contains("After"), "following text must survive: \(output)")
         XCTAssertFalse(output.contains("where("), "selector source must not leak: \(output)")
+    }
+
+    /// "Table of Contents" contains the word "table" — the contents title must win
+    /// over the list-of-tables rule.
+    func testTableOfContentsTitleStaysTOC() {
+        let output = TypstToMarkdownConverter.convert(
+            "#outline(title: [Table of Contents])", isAlreadyMarkdown: false)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "[TOC]")
     }
 
     /// A dictionary key named like a selector method stays an ordinary value; the

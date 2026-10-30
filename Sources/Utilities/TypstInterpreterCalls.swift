@@ -19,20 +19,62 @@ extension TypstInterpreter {
             return function
         }
         // Selector methods (`figure.where(kind: image)`, and the `.and`/`.or`
-        // refinements) have no Markdown meaning, so they evaluate to none and any
-        // further chain stays silent. The base is an element-function name
-        // (`figure`, `outline.entry`), never a value, so it must not be evaluated —
-        // a dotted base like `outline.entry` would otherwise fail before the
+        // refinements) have no Markdown meaning of their own, but `#outline`
+        // reads the element they select to choose between a table of contents
+        // and a list of figures/tables. The base is an element-function name
+        // (`figure`, `outline.entry`), never a value, so it must not be evaluated
+        // — a dotted base like `outline.entry` would otherwise fail before the
         // selector is seen. A dict may store a key with a selector's name; check
         // that first so real values still resolve.
         if TypstBuiltins.selectorMethods.contains(field) {
             if let resolvedBase = try? eval(expr: base), case .dict = resolvedBase {
                 return try fieldOf(resolvedBase, field)
             }
-            return .none
+            return selectorValue(base: base, method: field, args: [])
         }
         let baseValue = try eval(expr: base)
         return try fieldOf(baseValue, field)
+    }
+
+    /// `figure.where(kind: image)` and its refinements. A selector renders
+    /// nothing, but `#outline(target: …)` needs the element it picks, so the
+    /// element and its `kind` refinement survive as a `.selector` value.
+    private func selectorValue(base: TypstExpr, method: String, args: [TypstArg]) -> TypstValue {
+        // A selector can be refined further (`#let f = figure.where(…); f.where(…)`),
+        // in which case the element comes from the value rather than the name.
+        var inherited: TypstSelector?
+        if let value = try? eval(expr: base), case .selector(let selector) = value {
+            inherited = selector
+        }
+
+        switch method {
+        case "where":
+            guard let element = inherited?.element ?? Self.elementName(of: base) else { return .none }
+            var kind = inherited?.kind
+            for arg in args where arg.name == "kind" {
+                if case .str(let value) = arg.value { kind = value }
+            }
+            return .selector(TypstSelector(element: element, kind: kind))
+        case "before", "after", "within":
+            // Location/containment refinements narrow the same element set.
+            return inherited.map { .selector($0) } ?? .none
+        default:
+            // `.and`/`.or` combine element sets (and `heading.and(figure)` has no
+            // single Markdown list); the outline falls back to its contents form.
+            return .none
+        }
+    }
+
+    /// Element name a selector method hangs off: `figure` in `figure.where(…)`,
+    /// `math.equation` in `math.equation.where(…)`. Bound variables and computed
+    /// bases have no name, so their selector is already carried by the value.
+    private static func elementName(of expr: TypstExpr) -> String? {
+        switch expr {
+        case .ident(let name): return name
+        case .fieldAccess(let base, let field):
+            return elementName(of: base).map { "\($0).\(field)" }
+        default: return nil
+        }
     }
 
     private func fieldOf(_ baseValue: TypstValue, _ field: String) throws -> TypstValue {
@@ -93,10 +135,13 @@ extension TypstInterpreter {
 
         // Method desugaring: `items.len()` ≡ `array.len(items)`.
         if case .fieldAccess(let base, let field) = callee {
-            // Selector methods already resolved to none above; re-evaluating a
-            // dotted element name (`outline.entry.where(…), table.cell.where(…)`)
-            // would throw because the name itself is not a value.
-            if TypstBuiltins.selectorMethods.contains(field) { return .none }
+            // Selector methods resolve to a selector value (or none for a mixed
+            // set); re-evaluating a dotted element name (`outline.entry.where(…),
+            // table.cell.where(…)`) would throw because the name itself is not a
+            // value.
+            if TypstBuiltins.selectorMethods.contains(field) {
+                return selectorValue(base: base, method: field, args: evaluated)
+            }
             let receiver = try eval(expr: base)
             if case .function(.dropped) = receiver { return .none }
             if case .none = receiver { return .none }
