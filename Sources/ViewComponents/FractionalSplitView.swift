@@ -44,6 +44,14 @@ struct FractionalSplitView<Left: View, Right: View>: NSViewRepresentable {
 
         let leftHost = NSHostingController(rootView: left)
         let rightHost = NSHostingController(rootView: right)
+        // The split view sizes the sidebar pane (its minimum width is the
+        // delegate's `minimumLeftWidth`), so SwiftUI's own min/ideal/max sizes
+        // are never used — but by default the hosting view re-derives them and
+        // re-runs Auto Layout on every update. For the AI Chat streaming into a
+        // long transcript that was most of the main thread's work (36% vs 8%
+        // measured in ChatTranscriptLayoutTests), enough to make a slow Mac
+        // stutter while a reply streams.
+        leftHost.sizingOptions = []
         leftHost.view.translatesAutoresizingMaskIntoConstraints = false
         rightHost.view.translatesAutoresizingMaskIntoConstraints = false
         leftHost.view.wantsLayer = true

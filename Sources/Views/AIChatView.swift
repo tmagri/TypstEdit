@@ -33,8 +33,9 @@ struct AIChatView: View {
     /// How many of the most recent messages the transcript keeps in the view.
     /// The full history stays in the model (and on disk); the extra rows are
     /// loaded on demand, so a long chat doesn't rebuild a `ForEach` over
-    /// hundreds of messages on every update.
-    @State private var transcriptWindow = 120
+    /// hundreds of messages on every update. The transcript stack is eager
+    /// (see `transcript`), so this also bounds how many rows are laid out.
+    @State private var transcriptWindow = 60
     /// The answer whose thinking was opened automatically when it finished —
     /// replaced (and closed) by the next answer, so one open thinking section
     /// carries over from the live row without every old one piling up.
@@ -77,9 +78,8 @@ struct AIChatView: View {
     @State private var scrollToLatestRequest = 0
 
     /// Height of the transcript's viewport. Cards under it (plan, goal,
-    /// approval, compaction) come and go mid-run and resize it; a lazy stack
-    /// whose visible rect changed under it can end up showing nothing until
-    /// the next scroll, so a resize re-anchors the follow target.
+    /// approval, compaction) come and go mid-run and resize it, which moves
+    /// the bottom out of view; a resize re-anchors the follow target.
     @State private var transcriptViewportHeight: CGFloat = 0
 
     @State private var showRename = false
@@ -439,7 +439,7 @@ struct AIChatView: View {
     /// height off the bottom — the "always one short" behaviour this fixes.
     private static let transcriptBottomID = "transcript-bottom"
     /// How many extra messages "Show earlier messages" reveals each time.
-    private static let transcriptWindowStep = 120
+    private static let transcriptWindowStep = 60
 
     /// The newest slice of the transcript shown in the view. The manager still
     /// holds the whole conversation, so the model is unaffected.
@@ -456,7 +456,15 @@ struct AIChatView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
+                // Deliberately not lazy. A `LazyVStack` sizes rows it hasn't
+                // measured from an estimate; in a long chat of very uneven
+                // rows (tool calls, code, thinking) that estimate inflates the
+                // content height, and every bottom scroll then parks on empty
+                // space below the real rows — the "messages vanish while it
+                // runs" glitch, which only a manual scroll (re-measuring) fixed.
+                // An eager stack lays out exactly; the message window above
+                // keeps the row count bounded so that stays affordable.
+                VStack(alignment: .leading, spacing: 10) {
                     if hiddenMessageCount > 0 {
                         Button {
                             // Looking at older output means the user is no
@@ -476,9 +484,14 @@ struct AIChatView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 2)
                     }
-                    ForEach(visibleMessages) { message in
-                        messageRow(message).id(message.id)
-                    }
+                    // Isolated so a streamed update — which only changes the
+                    // live row below — doesn't re-render the whole history.
+                    TranscriptHistory(
+                        messages: visibleMessages,
+                        expandedThinkingIDs: expandedThinkingIDs,
+                        fullThinkingIDs: fullThinkingIDs,
+                        row: { messageRow($0) }
+                    )
                     if chat.isGenerating {
                         generatingRow.id("generating-indicator")
                     }
@@ -492,12 +505,16 @@ struct AIChatView: View {
                         .cornerRadius(6)
                     }
                     // Always present, so the bottom is reachable even in an
-                    // empty (new) conversation with no last message.
+                    // empty (new) conversation with no last message. It is
+                    // the very last thing in the content — no padding below
+                    // it — so scrolling to it lands on the true bottom, not
+                    // 10 points short; the stack's spacing above it gives the
+                    // last row the same breathing room the padding used to.
                     Color.clear
                         .frame(height: 1)
                         .id(Self.transcriptBottomID)
                 }
-                .padding(10)
+                .padding([.horizontal, .top], 10)
                 // Passive probe for the real scroll position: it flips
                 // `transcriptAtBottom` when *you* scroll the transcript, so
                 // autoscroll can stop fighting you while you read earlier
@@ -520,8 +537,7 @@ struct AIChatView: View {
                 }
             }
             // The viewport, not the content: a card appearing below the
-            // transcript shrinks it, and the lazy stack needs to re-resolve
-            // which rows are visible.
+            // transcript shrinks it and pushes the newest rows out of view.
             .background(
                 GeometryReader { geo in
                     Color.clear
@@ -1619,6 +1635,36 @@ struct AIChatView: View {
     }
 }
 
+/// The finished part of the transcript. Every `@Published` change on the chat
+/// re-renders the panel, and while a reply streams that is ten times a second
+/// for changes that only touch the live row; as an `Equatable` view whose
+/// inputs are only what the rows actually show, the history is skipped on
+/// those updates instead of being rebuilt and re-laid out row by row. Its
+/// body is a bare `ForEach`, so the rows still sit directly in the
+/// transcript's stack (spacing, ids and scroll targets unchanged).
+///
+/// `row` is left out of `==` on purpose: it is the panel's own row builder,
+/// and everything a row renders is covered by the other inputs (the stop
+/// action goes through the chat object, which doesn't change identity).
+private struct TranscriptHistory<Row: View>: View, Equatable {
+    let messages: [ChatMessage]
+    let expandedThinkingIDs: Set<UUID>
+    let fullThinkingIDs: Set<UUID>
+    let row: (ChatMessage) -> Row
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.messages == rhs.messages
+            && lhs.expandedThinkingIDs == rhs.expandedThinkingIDs
+            && lhs.fullThinkingIDs == rhs.fullThinkingIDs
+    }
+
+    var body: some View {
+        ForEach(messages) { message in
+            row(message).id(message.id)
+        }
+    }
+}
+
 /// Reports whether the transcript's backing `NSScrollView` is scrolled to the
 /// bottom, by watching the clip view's bounds. SwiftUI has no scroll-position
 /// API on macOS 13, and without this the chat would keep jerking you back to
@@ -1731,8 +1777,13 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
             report()
         }
 
+        /// Clamp only — never a report. Content growing below a pinned
+        /// viewport puts it "away from the bottom" until the follow scroll
+        /// lands; treating that as the user leaving would switch following
+        /// off at the start of every streamed burst.
         @objc private func contentResized() {
-            report()
+            guard let scrollView, let document = scrollView.documentView else { return }
+            clampIntoRange(scrollView: scrollView, document: document, clipView: scrollView.contentView)
         }
 
         @objc private func liveScrollBegan() {
@@ -1774,35 +1825,53 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
             // Not a report: the clamp runs even inside a programmatic-scroll
             // mute, because a bad landing is exactly what happens there.
             clampIntoRange(scrollView: scrollView, document: document, clipView: clipView)
-            // Our own scrolls (and the lazy-row height corrections right
-            // after them) are not the user moving; reacting to them would
-            // pause autoscroll in the middle of a generation. A live gesture
-            // is the exception: it is always the user.
-            guard force || isLiveUserScroll || !isProgrammaticScroll() else { return }
+            let originY = clipView.bounds.origin.y
+            let previousOriginY = lastOriginY
+            lastOriginY = originY
             // SwiftUI's document view is flipped (y = 0 at the top), so the
             // remaining distance is document height minus the visible bottom.
             let distanceToBottom: CGFloat
             if document.isFlipped {
                 let maxOffset = max(0, document.frame.height - clipView.bounds.height)
-                distanceToBottom = maxOffset - clipView.bounds.origin.y
+                distanceToBottom = maxOffset - originY
             } else {
-                distanceToBottom = clipView.bounds.origin.y
+                distanceToBottom = originY
             }
-            let atBottom = distanceToBottom <= TranscriptBottomProbe.slack
-            guard atBottom != isAtBottom.wrappedValue else { return }
-            isAtBottom.wrappedValue = atBottom
+
+            // Asymmetric on purpose. Reaching the bottom always (re)enables
+            // following, whatever moved us there. *Leaving* it only counts
+            // when the user did it: a live gesture, the end of one, or the
+            // viewport moving up outside our own scrolls (Page Up, scroller
+            // arrows — input that posts no live-scroll notifications). Being
+            // merely "not at the bottom" proves nothing: on open the view
+            // starts at the top before the first follow lands, and content
+            // streaming in below a pinned viewport does the same — both used
+            // to switch following off with nobody touching anything.
+            let following: Bool
+            if distanceToBottom <= TranscriptBottomProbe.slack {
+                following = true
+            } else if force || isLiveUserScroll {
+                following = false
+            } else if let previousOriginY, originY < previousOriginY - 1, !isProgrammaticScroll() {
+                following = false
+            } else {
+                return
+            }
+            guard following != isAtBottom.wrappedValue else { return }
+            isAtBottom.wrappedValue = following
         }
 
-        /// Keeps the viewport inside the document. A programmatic scroll is
-        /// resolved against the lazy stack's *estimated* row heights; when the
-        /// rows below then measure shorter (a big thinking preview replaced by
-        /// a finished answer, a collapsed disclosure, the tail of a long
-        /// transcript re-measured), the offset it picked can end up past the
-        /// real content. Nothing constrains the clip view afterwards, so the
-        /// panel would sit on empty space until the user scrolled — which is
-        /// what "the chat view went blank, scrolling brings it back" is. This
-        /// only ever pulls the viewport back to the last real position; it
-        /// never scrolls away from where the user put it.
+        /// Last clip origin the probe saw, to tell an upward move (the user)
+        /// from content growing underneath (not the user).
+        private var lastOriginY: CGFloat?
+
+        /// Keeps the viewport inside the document. When the content shrinks
+        /// under a viewport pinned to the bottom (the live "Thinking…" row
+        /// going away at the end of a turn, a disclosure collapsing), nothing
+        /// constrains the clip view, so the panel would sit on empty space
+        /// past the last row until the user scrolled. This only ever pulls
+        /// the viewport back to the last real position; it never scrolls
+        /// away from where the user put it.
         ///
         /// Skipped during a live gesture so the elastic overscroll at the end
         /// of a trackpad scroll isn't fought frame by frame.

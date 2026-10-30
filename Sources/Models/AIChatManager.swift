@@ -436,12 +436,64 @@ final class AIChatManager: ObservableObject {
     /// time would cost more than the append it is keeping in check.
     nonisolated static let liveReasoningTrimThreshold = 4_000
 
+    /// Longest the panel waits before showing newly streamed reasoning.
+    /// Every publish of `liveReasoning` re-renders the whole chat panel, and
+    /// models stream reasoning at 50–100 deltas a second; ten updates a
+    /// second reads as live while keeping a long transcript affordable on a
+    /// slow machine.
+    nonisolated static let liveReasoningPublishInterval: TimeInterval = 0.1
+
+    /// Deltas received but not yet published to `liveReasoning`.
+    private var unpublishedLiveReasoning = ""
+    private var liveReasoningFlush: Task<Void, Never>?
+    private var lastLiveReasoningPublish = Date.distantPast
+
     /// Appends a streamed reasoning delta, keeping only a recent window.
-    /// Internal for the bounds test.
+    /// Publishing is throttled (see `liveReasoningPublishInterval`): the
+    /// first delta after a quiet spell shows at once, later ones are batched
+    /// into one update at the end of the interval. Internal for the tests.
     func appendLiveReasoning(_ delta: String) {
-        liveReasoning += delta
-        guard liveReasoning.count > Self.liveReasoningTrimThreshold else { return }
-        liveReasoning = String(liveReasoning.suffix(Self.liveReasoningCharacterLimit))
+        unpublishedLiveReasoning += delta
+        if unpublishedLiveReasoning.count > Self.liveReasoningTrimThreshold {
+            unpublishedLiveReasoning = String(unpublishedLiveReasoning.suffix(Self.liveReasoningCharacterLimit))
+        }
+        let elapsed = Date().timeIntervalSince(lastLiveReasoningPublish)
+        if elapsed >= Self.liveReasoningPublishInterval {
+            flushLiveReasoning()
+            return
+        }
+        guard liveReasoningFlush == nil else { return }
+        let wait = Self.liveReasoningPublishInterval - elapsed
+        liveReasoningFlush = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.liveReasoningFlush = nil
+            self.flushLiveReasoning()
+        }
+    }
+
+    /// Publishes any buffered reasoning now. Internal for the tests.
+    func flushLiveReasoning() {
+        liveReasoningFlush?.cancel()
+        liveReasoningFlush = nil
+        guard !unpublishedLiveReasoning.isEmpty else { return }
+        var text = liveReasoning + unpublishedLiveReasoning
+        unpublishedLiveReasoning = ""
+        if text.count > Self.liveReasoningTrimThreshold {
+            text = String(text.suffix(Self.liveReasoningCharacterLimit))
+        }
+        liveReasoning = text
+        lastLiveReasoningPublish = Date()
+    }
+
+    /// Drops the live reasoning, including anything still buffered, so a
+    /// late flush can't resurrect the previous turn's thinking.
+    private func resetLiveReasoning() {
+        liveReasoningFlush?.cancel()
+        liveReasoningFlush = nil
+        unpublishedLiveReasoning = ""
+        liveReasoning = ""
+        lastLiveReasoningPublish = .distantPast
     }
 
     func sendMessage(_ text: String) async {
@@ -468,7 +520,7 @@ final class AIChatManager: ObservableObject {
         persist()
 
         isGenerating = true
-        liveReasoning = ""
+        resetLiveReasoning()
         liveStatus = nil
         errorMessage = nil
 
@@ -485,7 +537,7 @@ final class AIChatManager: ObservableObject {
             // `generationTask` is still `turn` when this runs — no comparison
             // needed, and `Task` is a struct, so there is none to make.
             isGenerating = false
-            liveReasoning = ""
+            resetLiveReasoning()
             liveStatus = nil
             generationTask = nil
         }

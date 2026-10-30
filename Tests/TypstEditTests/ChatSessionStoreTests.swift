@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import TypstEdit
 
 /// The pure rules behind AI chat sessions: record encode/decode (including
@@ -127,9 +128,32 @@ final class ChatSessionStoreTests: XCTestCase {
             chat.appendLiveReasoning(String(repeating: "a", count: 1_000))
         }
         chat.appendLiveReasoning("TAIL")
+        chat.flushLiveReasoning()
 
         XCTAssertLessThanOrEqual(chat.liveReasoning.count, AIChatManager.liveReasoningTrimThreshold)
         XCTAssertTrue(chat.liveReasoning.hasSuffix("TAIL"))
+    }
+
+    /// A burst of streamed deltas must cost one panel update per interval,
+    /// not one per token — but the first delta shows at once and nothing
+    /// is lost once the trailing flush lands.
+    @MainActor
+    func testLiveReasoningPublishesAreThrottled() async throws {
+        let chat = AIChatManager()
+        var publishes = 0
+        let observation = chat.$liveReasoning.dropFirst().sink { _ in publishes += 1 }
+        defer { observation.cancel() }
+
+        chat.appendLiveReasoning("first ")
+        XCTAssertEqual(chat.liveReasoning, "first ", "the first delta after a quiet spell shows immediately")
+        for index in 0..<200 {
+            chat.appendLiveReasoning("t\(index) ")
+        }
+        XCTAssertEqual(publishes, 1, "a burst within one interval must not publish per token")
+
+        try await Task.sleep(nanoseconds: UInt64(AIChatManager.liveReasoningPublishInterval * 3 * 1_000_000_000))
+        XCTAssertEqual(publishes, 2, "the rest of the burst lands in a single trailing update")
+        XCTAssertTrue(chat.liveReasoning.hasSuffix("t199 "))
     }
 
     @MainActor
