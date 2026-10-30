@@ -315,6 +315,37 @@ final class ChatSessionStoreTests: XCTestCase {
         XCTAssertEqual(AIChatSessionStore.indexURL(in: directory), directory.appendingPathComponent("index.json"))
     }
 
+    // MARK: - Composer Draft
+
+    /// The composer's unsent text belongs to the conversation, not to the
+    /// panel view: switching the sidebar to Files or the Calculator destroys
+    /// `AIChatView` (and any local `@State`), so the draft must live on the
+    /// manager to be there on return. Context updates and saves run in
+    /// between and must leave the text alone.
+    func testComposerDraftSurvivesPanelTeardown() {
+        let chat = AIChatManager()
+        chat.draft = "What is the area of a circle, if diameter is 1 cm?"
+
+        // Everything that happens while the panel is gone.
+        chat.updateContext(projectRoot: nil, currentFileURL: nil)
+        chat.persist()
+
+        XCTAssertEqual(chat.draft, "What is the area of a circle, if diameter is 1 cm?")
+        XCTAssertTrue(chat.messages.isEmpty, "a draft is not a sent message")
+    }
+
+    /// Drafts are per conversation, so leaving one chat for another and
+    /// coming back restores the half-written message that chat had.
+    func testEachConversationKeepsItsOwnDraft() {
+        let first = AIChatManager()
+        let second = AIChatManager()
+        first.draft = "About the table"
+        second.draft = "About the figure"
+
+        XCTAssertEqual(first.draft, "About the table")
+        XCTAssertEqual(second.draft, "About the figure")
+    }
+
     // MARK: - Record/Summary Bridge
 
     func testSummaryMirrorsRecord() {

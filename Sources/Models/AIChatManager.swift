@@ -88,6 +88,15 @@ final class AIChatManager: ObservableObject {
     /// (`ChatSessionRecord.planMode`) and survive a restart.
     @Published var planMode: Bool = false
 
+    /// The composer's text that hasn't been sent yet. It lives on the
+    /// conversation rather than in `AIChatView`'s `@State` because the panel
+    /// is torn down whenever the sidebar switches to Files or the Calculator
+    /// — a half-written message must still be there when the user comes back.
+    /// Per conversation, so switching to another chat (and back) restores that
+    /// chat's own draft. Not persisted: a draft belongs to the app run, like
+    /// YOLO mode.
+    @Published var draft: String = ""
+
     /// The armed goal loop (opencode's `/goal` plugin): an objective the
     /// chat keeps working toward. While it is `active`, every finished reply
     /// is reviewed — continue (a continuation is injected and the turn goes

@@ -20,7 +20,9 @@ struct AIChatView: View {
     @ObservedObject private var skillsManager = SkillsManager.shared
     @ObservedObject private var mcpManager = MCPManager.shared
 
-    @State private var draft: String = ""
+    /// The composer's text lives on the conversation (`chat.draft`), not here:
+    /// the panel is destroyed when the sidebar switches to Files or the
+    /// Calculator, and SwiftUI would take a local `@State` draft with it.
     @State private var showYoloConfirm = false
     @FocusState private var inputFocused: Bool
     @State private var shiftEnterMonitor: Any?
@@ -1281,7 +1283,7 @@ struct AIChatView: View {
             pickersRow
 
             HStack(alignment: .bottom, spacing: 8) {
-                TextEditor(text: $draft)
+                TextEditor(text: $chat.draft)
                     .focused($inputFocused)
                     .font(.callout)
                     .frame(height: 50)
@@ -1301,7 +1303,7 @@ struct AIChatView: View {
                     // pressable while generation runs — including while an
                     // approval is pending, since `isGenerating` covers that.
                     // A non-empty draft gets a steering send next to Stop.
-                    if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button {
                             send()
                         } label: {
@@ -1324,7 +1326,7 @@ struct AIChatView: View {
                         Image(systemName: "arrow.up.circle.fill").font(.system(size: 24))
                     }
                     .buttonStyle(.plain)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.isGenerating || chat.pendingApproval != nil)
+                    .disabled(chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.isGenerating || chat.pendingApproval != nil)
                 }
             }
         }
@@ -1599,8 +1601,8 @@ struct AIChatView: View {
     }
 
     private func send() {
-        let text = draft
-        draft = ""
+        let text = chat.draft
+        chat.draft = ""
         // A send is an explicit "take me to the newest exchange" — it ends
         // manual mode, so the reply that follows is followed live again.
         scrollToLatestRequest += 1
@@ -1620,7 +1622,7 @@ struct AIChatView: View {
                   let chat,
                   chat.pendingApproval == nil,
                   self.inputFocused,
-                  !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { return event }
             self.send()
             return nil // Consume it so the TextEditor doesn't also insert a newline
