@@ -433,6 +433,19 @@ struct CalculatorView: View {
         }
     }
 
+    /// NSTextView has no placeholder API; this sits over the container's
+    /// inset and lets clicks fall through to the field. "— or ask a question"
+    /// is only shown when the calculator's AI fallback is configured and active.
+    private var isCalculatorAIActive: Bool {
+        aiSettings.chatEnabled && aiSettings.calcAIFallbackEnabled && CalculatorAIFallback.isAvailable()
+    }
+
+    private var entryPlaceholder: String {
+        isCalculatorAIActive
+            ? "Enter an expression — or ask a question"
+            : "Enter an expression"
+    }
+
     // MARK: - Entry line
 
     /// Chat-style input bar: a framed multi-line entry box (like AI Chat's)
@@ -474,7 +487,7 @@ struct CalculatorView: View {
                 if session.entryLine.isEmpty {
                     // NSTextView has no placeholder; this sits over the
                     // text container's inset and lets clicks through.
-                    Text("Enter an expression — or ask a question")
+                    Text(entryPlaceholder)
                         .font(.system(size: 15, design: .monospaced))
                         .foregroundColor(themeManager.textColor.opacity(0.35))
                         .padding(.top, 2)

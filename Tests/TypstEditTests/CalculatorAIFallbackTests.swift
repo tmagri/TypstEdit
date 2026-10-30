@@ -21,7 +21,7 @@ final class CalculatorAIFallbackTests: XCTestCase {
         XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
             "Area of a circle, if diameter is 1 cm?"))
         XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
-            "WHat is the Area of a circle, if diameter is 1 cm?"))
+            "What is the Area of a circle, if diameter is 1 cm?"))
     }
 
     /// Word problems embed units and equations (`g = 9.8 m/s^2`) but are
@@ -106,7 +106,7 @@ final class CalculatorAIFallbackTests: XCTestCase {
             resultText: "\"WHat is the Area of a circle, if diameter is 1 cm?\"",
             resultTypst: "", inputTypst: "", errorMessage: "", ok: true)
         XCTAssertTrue(CalculatorAIFallback.isStringEcho(
-            quoted, input: "WHat is the Area of a circle, if diameter is 1 cm?"))
+            quoted, input: "What is the Area of a circle, if diameter is 1 cm?"))
     }
 
     func testRealResultsAreNotStringEchoes() {
@@ -333,5 +333,30 @@ final class CalculatorAIFallbackTests: XCTestCase {
         XCTAssertTrue(exported.contains("*Area of a circle, if diameter is 1 cm?*"))
         XCTAssertTrue(exported.contains("$ \\frac{\\pi}{4} $"))
         XCTAssertTrue(exported.contains("The area is pi/4"))
+    }
+
+    // MARK: - Availability
+
+    @MainActor
+    func testIsAvailableRequiresChatAndCalculatorToggle() {
+        let settings = AISettingsManager.shared
+        let originalChat = settings.chatEnabled
+        let originalCalc = settings.calcAIFallbackEnabled
+        defer {
+            settings.chatEnabled = originalChat
+            settings.calcAIFallbackEnabled = originalCalc
+        }
+
+        settings.chatEnabled = false
+        settings.calcAIFallbackEnabled = false
+        XCTAssertFalse(CalculatorAIFallback.isAvailable())
+
+        settings.chatEnabled = true
+        settings.calcAIFallbackEnabled = false
+        XCTAssertFalse(CalculatorAIFallback.isAvailable())
+
+        settings.chatEnabled = false
+        settings.calcAIFallbackEnabled = true
+        XCTAssertFalse(CalculatorAIFallback.isAvailable())
     }
 }
