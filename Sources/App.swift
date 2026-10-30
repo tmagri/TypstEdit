@@ -4,11 +4,12 @@ import AppKit
 @MainActor
 private struct ExternalDocumentWindowRoot: View {
     @State private var selectedFile: URL?
-    let initialFile: URL
+    /// `nil` starts the window with a new, untitled buffer.
+    let initialFile: URL?
     @StateObject private var themeManager = ThemeManager()
     @ObservedObject var editorController: EditorController
 
-    init(initialFile: URL, editorController: EditorController) {
+    init(initialFile: URL?, editorController: EditorController) {
         self.initialFile = initialFile
         // Inject the file directly into state. 
         // This avoids broadcasting a global notification that overwrites other windows.
@@ -26,6 +27,12 @@ private struct ExternalDocumentWindowRoot: View {
                     self.editorController.isSidebarVisible = false
                     self.editorController.projectRootURL = nil
                     RAGManager.shared.disableForStandaloneMode()
+                }
+                if initialFile == nil {
+                    // Give ContentView's subscriptions a moment to go live.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        NotificationCenter.default.post(name: .fileDidCreate, object: ["target": self.editorController])
+                    }
                 }
             }
     }
@@ -84,6 +91,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Files opened from Finder before the editor was connected
             // (cold launch) are handled now.
             flushPendingExternalOpens()
+            flushPendingMainWindowActions()
         }
     }
     var externalDelegates: [NSWindow: ExternalWindowDelegate] = [:]
@@ -91,6 +99,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Files that arrived from Finder before the main window connected its
     /// EditorController (i.e. the app was launched by opening a file).
     private var pendingExternalOpens: [URL] = []
+
+    /// The SwiftUI `WindowGroup(id: "main")` window. Weak: SwiftUI owns it
+    /// and destroys it on close.
+    private weak var mainWindow: NSWindow?
+
+    /// Work waiting for the main window to (re)appear after it was closed.
+    private var pendingMainWindowActions: [() -> Void] = []
+
+    /// Another TypstEdit copy (different bundle path) that was already
+    /// running when this one launched. Files go to it; this copy then quits,
+    /// so the user always works in one app instance.
+    private var forwardingTarget: NSRunningApplication?
 
     private var titleBarDoubleClickMonitor: Any?
     
@@ -121,12 +141,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Registering here means OUR handler consumes the raw event first,
             // so the shim never sees it and no duplicate window is spawned.
             installOpenDocumentsHandler()
+            forwardingTarget = Self.otherRunningInstance()
+            if let other = forwardingTarget {
+                Self.debugLog("another instance is running (pid \(other.processIdentifier)): forwarding and quitting")
+            }
             Self.debugLog("willFinishLaunching done")
         }
     }
 
     nonisolated func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
+            if let other = forwardingTarget {
+                NSApp.windows.forEach { $0.orderOut(nil) }
+                other.activate(options: [.activateAllWindows])
+                // Late odoc events still get forwarded during this delay.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    NSApp.windows.forEach { $0.orderOut(nil) }
+                    NSApp.terminate(nil)
+                }
+                return
+            }
             // Backstop only — the launch odoc event is delivered BEFORE this
             // (see applicationWillFinishLaunching above).
             installOpenDocumentsHandler()
@@ -173,7 +207,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard !hasVisibleWindows else { return false }
             Self.debugLog("Dock click with no visible windows: reopening main window")
             self.editorController?.pendingWelcomeReset = true
-            WindowOpener.shared.open?(id: "main")
+            self.withMainWindow {}
             return true
         }
     }
@@ -270,6 +304,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor
     func queueExternalOpen(_ url: URL) {
         Self.debugLog("queueExternalOpen: \(url.lastPathComponent)")
+        if let target = forwardingTarget {
+            Self.forward([url], to: target)
+            return
+        }
         if !pendingURLs.contains(url) {
             pendingURLs.append(url)
         }
@@ -332,101 +370,175 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     
-    func showSaveWarningAsync(for controller: EditorController? = nil, url: URL? = nil, completion: @escaping (Bool) -> Void) {
-        let activeController = controller ?? self.editorController
-        guard let controllerRef = activeController, controllerRef.hasUnsavedChanges else {
-            completion(true)
-            return
-        }
-        
-        let fileName = url?.lastPathComponent ?? controllerRef.currentFileURL?.lastPathComponent ?? "the document"
-        
+    private func makeSaveWarning(for controller: EditorController, url: URL?) -> NSAlert {
+        let fileURL = url ?? controller.currentFileURL
+        let fileName = fileURL?.lastPathComponent ?? "Untitled"
         let alert = NSAlert()
-        alert.messageText = "Do you want to save the changes made to \(fileName)?"
-        alert.informativeText = "Your changes will be lost if you don't save them."
+        if let fileURL, !FileManager.default.fileExists(atPath: fileURL.path) {
+            alert.messageText = "“\(fileName)” was deleted or moved. Do you want to save your changes?"
+            alert.informativeText = "Save writes the file again. Don't Save discards your changes."
+        } else {
+            alert.messageText = "Do you want to save the changes made to “\(fileName)”?"
+            alert.informativeText = "Your changes will be lost if you don't save them."
+        }
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Don't Save")
-        
-        guard let window = NSApplication.shared.windows.first(where: { $0.isVisible && $0.isKeyWindow }) ?? NSApplication.shared.mainWindow else {
-            let response = alert.runModal()
-            switch response {
-            case .alertFirstButtonReturn:
-                var payload: [String: Any] = ["target": controllerRef]
-                if let u = url { payload["url"] = u }
-                NotificationCenter.default.post(name: .requestSave, object: payload)
-                completion(true)
-            case .alertSecondButtonReturn:
-                completion(false)
-            default:
-                completion(true)
-            }
-            return
-        }
-        
-        alert.beginSheetModal(for: window) { response in
-            switch response {
-            case .alertFirstButtonReturn:
-                var payload: [String: Any] = ["target": controllerRef]
-                if let u = url { payload["url"] = u }
-                NotificationCenter.default.post(name: .requestSave, object: payload)
-                completion(true)
-            case .alertSecondButtonReturn:
-                completion(false)
-            case .alertThirdButtonReturn:
-                if let targetURL = url ?? activeController?.currentFileURL {
-                    AutoRecoveryManager.shared.clearRecovery(for: targetURL)
-                }
-                completion(true)
-            default:
-                completion(false)
-            }
-        }
+        return alert
     }
-    
-    func showSaveWarningIfNeeded(for controller: EditorController? = nil, url: URL? = nil) -> Bool {
-        let activeController = controller ?? self.editorController
-        guard let controllerRef = activeController, controllerRef.hasUnsavedChanges else {
-            return true
-        }
-        
-        let fileName = url?.lastPathComponent ?? controllerRef.currentFileURL?.lastPathComponent ?? "the document"
-        
-        let alert = NSAlert()
-        alert.messageText = "Do you want to save the changes made to \(fileName)?"
-        alert.informativeText = "Your changes will be lost if you don't save them."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Don't Save")
-        
-        let response = alert.runModal()
-        
+
+    /// Applies the user's answer. Returns true when the caller may go on
+    /// (close, quit, switch file).
+    private func resolveSaveWarning(_ response: NSApplication.ModalResponse, controller: EditorController, url: URL?) -> Bool {
         switch response {
         case .alertFirstButtonReturn:
-            var payload: [String: Any] = ["target": controllerRef]
-            if let u = url { payload["url"] = u }
+            var payload: [String: Any] = ["target": controller]
+            if let url { payload["url"] = url }
             NotificationCenter.default.post(name: .requestSave, object: payload)
-            return true
-        case .alertSecondButtonReturn:
-            return false
+            // Saving is synchronous. Edits that are still unsaved mean the
+            // write failed or the Save panel was cancelled: stop here, so
+            // the edits are neither lost nor asked about in a loop.
+            return !controller.hasUnsavedChanges
         case .alertThirdButtonReturn:
-            if let targetURL = url ?? activeController?.currentFileURL {
-                AutoRecoveryManager.shared.clearRecovery(for: targetURL)
-            }
+            controller.discardUnsavedChanges()
             return true
         default:
             return false
         }
     }
+
+    func showSaveWarningAsync(for controller: EditorController? = nil, url: URL? = nil, completion: @escaping (Bool) -> Void) {
+        guard let controllerRef = controller ?? self.editorController, controllerRef.hasUnsavedChanges else {
+            completion(true)
+            return
+        }
+        let alert = makeSaveWarning(for: controllerRef, url: url)
+        guard let window = self.window(for: controllerRef) ?? NSApp.keyWindow ?? NSApp.mainWindow else {
+            completion(resolveSaveWarning(alert.runModal(), controller: controllerRef, url: url))
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            completion(self.resolveSaveWarning(response, controller: controllerRef, url: url))
+        }
+    }
     
+    func showSaveWarningIfNeeded(for controller: EditorController? = nil, url: URL? = nil) -> Bool {
+        guard let controllerRef = controller ?? self.editorController, controllerRef.hasUnsavedChanges else {
+            return true
+        }
+        let alert = makeSaveWarning(for: controllerRef, url: url)
+        return resolveSaveWarning(alert.runModal(), controller: controllerRef, url: url)
+    }
+    
+    /// True when a window shows nothing worth keeping (no file, no project
+    /// or notebooks folder, no unsaved edits), so a newly opened file can
+    /// replace it instead of getting its own window.
     @MainActor
-    static func shouldOpenExternalFileInSeparateWindow(editorController: EditorController?) -> Bool {
-        guard let controller = editorController else { return false }
-        return controller.currentFileURL != nil || controller.projectRootURL != nil || controller.hasUnsavedChanges
+    static func isIdle(_ controller: EditorController) -> Bool {
+        controller.currentFileURL == nil && controller.projectRootURL == nil && !controller.hasUnsavedChanges
     }
 
     @MainActor
-    private func openExternalFileInNewWindow(_ url: URL) {
+    static func shouldOpenExternalFileInSeparateWindow(editorController: EditorController?) -> Bool {
+        guard let controller = editorController else { return false }
+        return !isIdle(controller)
+    }
+
+    // MARK: - Document windows
+
+    /// Called by the main window's `WindowAccessor` each time SwiftUI
+    /// (re)creates it.
+    func registerMainWindow(_ window: NSWindow) {
+        guard mainWindow !== window else { return }
+        mainWindow = window
+        window.tabbingMode = .disallowed
+    }
+
+    private var isMainWindowOpen: Bool {
+        guard let mainWindow else { return false }
+        return mainWindow.isVisible || mainWindow.isMiniaturized
+    }
+
+    private struct DocumentWindow {
+        let window: NSWindow?
+        let controller: EditorController
+        let isMain: Bool
+    }
+
+    /// Every open document window: the main window (when open) first, then
+    /// the extra document windows in the order they were created.
+    private func documentWindows() -> [DocumentWindow] {
+        var result: [DocumentWindow] = []
+        if isMainWindowOpen, let controller = editorController {
+            result.append(DocumentWindow(window: mainWindow, controller: controller, isMain: true))
+        }
+        let external = externalDelegates
+            .filter { $0.key.isVisible || $0.key.isMiniaturized }
+            .sorted { $0.key.windowNumber < $1.key.windowNumber }
+        for (window, delegate) in external {
+            result.append(DocumentWindow(window: window, controller: delegate.editorController, isMain: false))
+        }
+        return result
+    }
+
+    /// The window that shows `controller`, if it is open.
+    func window(for controller: EditorController) -> NSWindow? {
+        if controller === editorController, isMainWindowOpen { return mainWindow }
+        return externalDelegates.first { $0.value.editorController === controller }?.key
+    }
+
+    private func bringToFront(_ window: NSWindow?) {
+        guard let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// Runs `action` once the main window exists, reopening it (never a
+    /// second copy) when it was closed.
+    func withMainWindow(_ action: @escaping () -> Void) {
+        if isMainWindowOpen {
+            bringToFront(mainWindow)
+            action()
+            return
+        }
+        let alreadyOpening = !pendingMainWindowActions.isEmpty
+        pendingMainWindowActions.append(action)
+        guard !alreadyOpening else { return }
+        editorController?.pendingWelcomeReset = true
+        NSApp.activate(ignoringOtherApps: true)
+        WindowOpener.shared.open?(id: "main")
+    }
+
+    private func flushPendingMainWindowActions() {
+        guard !pendingMainWindowActions.isEmpty else { return }
+        let actions = pendingMainWindowActions
+        pendingMainWindowActions.removeAll()
+        // Same settle delay as external opens: ContentView's subscriptions
+        // must be live before the actions post to it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            actions.forEach { $0() }
+        }
+    }
+
+    /// Projects and notebooks live in the main window. Runs `action` there,
+    /// first asking about unsaved edits in the main window when
+    /// `replacingDocument` is set (the action replaces what it shows).
+    func performInMainWindow(replacingDocument: Bool = false, _ action: @escaping () -> Void) {
+        withMainWindow { [weak self] in
+            guard let self, let controller = self.editorController else { return }
+            guard replacingDocument, controller.hasUnsavedChanges else {
+                action()
+                return
+            }
+            self.showSaveWarningAsync(for: controller) { proceed in
+                if proceed { action() }
+            }
+        }
+    }
+
+    @MainActor
+    private func openExternalFileInNewWindow(_ url: URL?) {
         let externalEditorController = EditorController()
         let content = ExternalDocumentWindowRoot(initialFile: url, editorController: externalEditorController)
 
@@ -436,7 +548,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = url.lastPathComponent
+        window.title = url?.lastPathComponent ?? "Untitled"
+        window.representedURL = url
         window.identifier = NSUserInterfaceItemIdentifier("external-document-\(UUID().uuidString)")
         window.tabbingMode = .disallowed 
         window.isReleasedWhenClosed = false
@@ -445,58 +558,161 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = delegate
         self.externalDelegates[window] = delegate
         
-        window.center()
         window.contentView = NSHostingView(rootView: content)
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
+        // Cascade from the front document window so new windows never stack
+        // exactly on top of each other.
+        if let anchor = NSApp.keyWindow ?? documentWindows().last?.window, anchor !== window,
+           !anchor.styleMask.contains(.fullScreen) {
+            window.setContentSize(anchor.contentLayoutRect.size)
+            window.cascadeTopLeft(from: anchor.cascadeTopLeft(from: .zero))
+        } else {
+            window.center()
+        }
+        bringToFront(window)
     }
 
     @MainActor
     func handleExternalOpen(_ urls: [URL]) {
-        let busy = Self.shouldOpenExternalFileInSeparateWindow(editorController: editorController)
-        Self.debugLog("handleExternalOpen: \(urls.map(\.lastPathComponent)) editorConnected=\(editorController != nil) busy=\(busy) visibleWindows=\(NSApp.windows.filter(\.isVisible).count)")
+        Self.debugLog("handleExternalOpen: \(urls.map(\.lastPathComponent)) editorConnected=\(editorController != nil) visibleWindows=\(NSApp.windows.filter(\.isVisible).count)")
+        openDocuments(urls)
+    }
+
+    /// The one entry point for opening files as documents (Finder, File ▸
+    /// Open, Open Recent, the welcome screen, drag and drop, the CLI). A
+    /// file already open somewhere is brought forward; otherwise it goes to
+    /// an idle window, or a new window when every window is in use.
+    func openDocuments(_ urls: [URL]) {
         // Cold-launch case: queue until the editor controller is connected,
         // then flush from editorController's didSet.
-        guard editorController != nil else {
+        guard let mainController = editorController else {
             pendingExternalOpens.append(contentsOf: urls)
-            Self.debugLog("handleExternalOpen: queued for cold launch (\(pendingExternalOpens.count) pending)")
+            Self.debugLog("openDocuments: queued for cold launch (\(pendingExternalOpens.count) pending)")
             return
         }
 
-        var urlsToProcess = urls
-        var loadedInMainWindow = false
+        let windows = documentWindows()
+        var claimed = Set<Int>()
+        var mainReopenClaimed = false
 
-        // Target the main window specifically if it is completely idle
-        if !busy {
-            if let firstURL = urlsToProcess.first, let mainController = self.editorController {
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                performInMainWindow(replacingDocument: true) {
+                    NotificationCenter.default.post(name: .openProjectFolder, object: url)
+                }
+                continue
+            }
+
+            let slots = windows.map {
+                DocumentWindowRouter.Slot(
+                    fileURL: $0.controller.currentFileURL,
+                    isIdle: Self.isIdle($0.controller),
+                    isKey: $0.window?.isKeyWindow == true,
+                    isMain: $0.isMain
+                )
+            }
+            switch DocumentWindowRouter.destination(for: url, in: slots, claimed: claimed) {
+            case .focus(let index):
+                Self.debugLog("openDocuments: '\(url.lastPathComponent)' is already open, focusing its window")
+                bringToFront(windows[index].window)
+            case .load(let index):
+                claimed.insert(index)
+                Self.debugLog("openDocuments: '\(url.lastPathComponent)' -> idle \(windows[index].isMain ? "main" : "document") window")
                 NotificationCenter.default.post(name: .openStandaloneFile, object: [
-                    "url": firstURL,
-                    "target": mainController
+                    "url": url,
+                    "target": windows[index].controller
                 ])
-                urlsToProcess.removeFirst()
-                loadedInMainWindow = true
-                Self.debugLog("handleExternalOpen: routed '\(firstURL.lastPathComponent)' to idle main window")
+                bringToFront(windows[index].window)
+            case .newWindow:
+                if !isMainWindowOpen, !mainReopenClaimed, Self.isIdle(mainController) {
+                    // The main window was closed: bring it back for this file
+                    // rather than leaving it closed and adding another window.
+                    mainReopenClaimed = true
+                    withMainWindow {
+                        NotificationCenter.default.post(name: .openStandaloneFile, object: [
+                            "url": url,
+                            "target": mainController
+                        ])
+                    }
+                } else {
+                    openExternalFileInNewWindow(url)
+                }
             }
         }
+    }
 
-        for url in urlsToProcess {
-            openExternalFileInNewWindow(url)
-        }
-
-        // Only re-front the main window when a file was routed to it; otherwise
-        // the freshly opened external window stays in front, like standard apps.
-        if loadedInMainWindow,
-           let mainWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
-            mainWindow.makeKeyAndOrderFront(nil)
-            mainWindow.orderFrontRegardless()
+    /// The user deleted `url` (a file or a folder) inside the app. Every
+    /// window showing it, or a file inside it, drops its unsaved edits: they
+    /// were deleted on purpose, and a save prompt would only write the
+    /// deleted file back.
+    func discardEdits(forDeletedItemAt url: URL) {
+        let deleted = DocumentWindowRouter.canonicalPath(url)
+        let controllers = [editorController].compactMap { $0 } + externalDelegates.values.map(\.editorController)
+        for controller in controllers {
+            guard let open = controller.currentFileURL else { continue }
+            let path = DocumentWindowRouter.canonicalPath(open)
+            guard path == deleted || path.hasPrefix(deleted + "/") else { continue }
+            controller.discardUnsavedChanges()
+            controller.isFileDeletedOnDisk = true
         }
     }
+
+    /// File ▸ New File: an untitled buffer in an idle window, else in a new
+    /// window — never on top of another document.
+    func newDocument() {
+        let windows = documentWindows()
+        let target = windows.firstIndex { $0.window?.isKeyWindow == true && Self.isIdle($0.controller) }
+            ?? windows.firstIndex { Self.isIdle($0.controller) }
+        if let target {
+            NotificationCenter.default.post(name: .fileDidCreate, object: ["target": windows[target].controller])
+            bringToFront(windows[target].window)
+        } else if !isMainWindowOpen, let mainController = editorController, Self.isIdle(mainController) {
+            withMainWindow {
+                NotificationCenter.default.post(name: .fileDidCreate, object: ["target": mainController])
+            }
+        } else {
+            openExternalFileInNewWindow(nil)
+        }
+    }
+
+    // MARK: - Single instance
+
+    /// Another running TypstEdit with the same bundle identifier but a
+    /// different bundle location (e.g. the copy in /Applications and a
+    /// development build). LaunchServices would otherwise run both.
+    nonisolated static func otherRunningInstance() -> NSRunningApplication? {
+        guard let bundleID = Bundle.main.bundleIdentifier,
+              Bundle.main.bundleURL.pathExtension == "app" else { return nil }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let ownPath = Bundle.main.bundleURL.standardizedFileURL.path
+        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            $0.processIdentifier != ownPID
+                && !$0.isTerminated
+                // Headless `typstedit compile`/`mcp` runs share the bundle ID.
+                && $0.activationPolicy == .regular
+                // Same path means the user asked for a new instance (`open -n`);
+                // forwarding there could loop back to this process.
+                && $0.bundleURL?.standardizedFileURL.path != ownPath
+        }
+    }
+
+    private static func forward(_ urls: [URL], to app: NSRunningApplication) {
+        guard let bundleURL = app.bundleURL, !urls.isEmpty else { return }
+        debugLog("forwarding \(urls.map(\.lastPathComponent)) to pid \(app.processIdentifier)")
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(urls, withApplicationAt: bundleURL, configuration: configuration, completionHandler: nil)
+    }
+
+    // MARK: - Closing and quitting
 
     nonisolated func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         return MainActor.assumeIsolated {
             let allControllers = [self.editorController] + self.externalDelegates.values.map { $0.editorController }
             
-            for controller in allControllers.compactMap({ $0 }) {
+            for controller in allControllers.compactMap({ $0 }) where controller.hasUnsavedChanges {
+                // Show which window the question is about.
+                self.bringToFront(self.window(for: controller))
                 if !self.showSaveWarningIfNeeded(for: controller) {
                     return .terminateCancel
                 }
@@ -518,18 +734,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     @MainActor
     func handleWindowClose(for window: NSWindow, editorController: EditorController?, isMain: Bool) -> Bool {
-        if showSaveWarningIfNeeded(for: editorController) {
-            if let projectRoot = editorController?.projectRootURL {
-                TypstCompiler.cleanUpTempDirectory(in: projectRoot)
-            } else if let fileURL = editorController?.currentFileURL {
-                TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
-            }
-            if isMain {
-                NotificationCenter.default.post(name: .resetToWelcome, object: nil)
-            }
-            return true
+        guard showSaveWarningIfNeeded(for: editorController) else { return false }
+        if let projectRoot = editorController?.projectRootURL {
+            TypstCompiler.cleanUpTempDirectory(in: projectRoot)
+        } else if let fileURL = editorController?.currentFileURL {
+            TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
         }
-        return false
+        // Forget the document now. The main window's controller outlives
+        // its window, and a stale file (possibly deleted, possibly marked
+        // dirty) would otherwise trigger save prompts on quit or reopen.
+        editorController?.closeDocument()
+        if isMain {
+            editorController?.projectRootURL = nil
+            editorController?.pendingWelcomeReset = true
+            NotificationCenter.default.post(name: .resetToWelcome, object: nil)
+        }
+        return true
     }
     
     nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -601,6 +821,7 @@ struct TypstEditApp: App {
                         }
                     }
                     if isMainWindow {
+                        appDelegate.registerMainWindow(window)
                         appDelegate.setupTitleBarDoubleClick()
                     }
                 })

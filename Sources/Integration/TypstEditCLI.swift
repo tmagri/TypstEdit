@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// Headless command-line mode of the TypstEdit binary.
 ///
@@ -202,9 +203,18 @@ enum TypstEditCLI {
         guard !urls.isEmpty else { return (false, "Nothing to open.") }
         let missing = urls.filter { !FileManager.default.fileExists(atPath: $0.path) }
         if !missing.isEmpty { return (false, "File not found: \(missing.map(\.path).joined(separator: ", "))") }
-        let target: [String] = Bundle.main.bundleURL.pathExtension == "app"
-            ? ["-a", Bundle.main.bundlePath]
-            : ["-b", bundleIdentifier]
+        // Hand the files to a TypstEdit that is already running, so they open
+        // as windows of that one instance instead of starting a second copy.
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            .first { !$0.isTerminated && $0.activationPolicy == .regular && $0.bundleURL != nil }
+        let target: [String]
+        if let runningPath = running?.bundleURL?.path {
+            target = ["-a", runningPath]
+        } else if Bundle.main.bundleURL.pathExtension == "app" {
+            target = ["-a", Bundle.main.bundlePath]
+        } else {
+            target = ["-b", bundleIdentifier]
+        }
         let ok = runOpen(["/usr/bin/open"] + target + urls.map(\.path))
         return ok
             ? (true, "Opened \(urls.map(\.lastPathComponent).joined(separator: ", ")) in TypstEdit.")

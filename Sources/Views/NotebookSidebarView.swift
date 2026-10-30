@@ -330,6 +330,9 @@ struct NotebookRow: View {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
                 manager.deleteNotebook(url: notebook.url)
+                if !FileManager.default.fileExists(atPath: notebook.url.path) {
+                    AppDelegate.shared?.discardEdits(forDeletedItemAt: notebook.url)
+                }
             }
         } message: {
             Text("This will permanently delete the notebook and all its pages.")
@@ -409,6 +412,9 @@ struct NotebookPageRow: View {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
                 NotebookManager.shared.deletePage(url: page.url)
+                if !FileManager.default.fileExists(atPath: page.url.path) {
+                    AppDelegate.shared?.discardEdits(forDeletedItemAt: page.url)
+                }
                 if selectedFile == page.url {
                     selectedFile = nil
                 }

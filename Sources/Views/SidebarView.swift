@@ -31,6 +31,8 @@ class FileSystemModel: ObservableObject {
     /// took effect after switching to Notebooks and back (which recreated the
     /// List, and is exactly what this rebuild mimics).
     @Published var refreshGeneration: Int = 0
+    /// The editor of the window this model belongs to.
+    weak var documentController: EditorController?
     
     // ADD THIS METHOD:
     func openFile() {
@@ -39,8 +41,9 @@ class FileSystemModel: ObservableObject {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         
-        if panel.runModal() == .OK, let url = panel.url {
-            NotificationCenter.default.post(name: .openStandaloneFile, object: url)
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK, !panel.urls.isEmpty {
+            AppDelegate.shared?.openDocuments(panel.urls)
         }
     }
     
@@ -51,7 +54,14 @@ class FileSystemModel: ObservableObject {
         panel.allowsMultipleSelection = false
         
         if panel.runModal() == .OK, let url = panel.url {
-            NotificationCenter.default.post(name: .openProjectFolder, object: url)
+            // Projects live in the main window, wherever this was clicked.
+            if let appDelegate = AppDelegate.shared {
+                appDelegate.performInMainWindow(replacingDocument: true) {
+                    NotificationCenter.default.post(name: .openProjectFolder, object: url)
+                }
+            } else {
+                NotificationCenter.default.post(name: .openProjectFolder, object: url)
+            }
         }
     }
     
@@ -209,7 +219,9 @@ class FileSystemModel: ObservableObject {
     func createNewFile() {
         // Now "New File" starts as an unsaved buffer instead of immediate save
         self.isNewUnsavedFile = true
-        NotificationCenter.default.post(name: .fileDidCreate, object: nil)
+        // Only this model's window gets the new buffer.
+        let target: Any? = documentController.map { ["target": $0] }
+        NotificationCenter.default.post(name: .fileDidCreate, object: target)
     }
     
     func createProjectFile(extension fileExtension: String) -> URL? {
@@ -304,12 +316,15 @@ class FileSystemModel: ObservableObject {
         }
     }
     
-    func deleteFile(url: URL) {
+    @discardableResult
+    func deleteFile(url: URL) -> Bool {
         do {
             try FileManager.default.trashItem(at: url, resultingItemURL: nil)
             loadFiles()
+            return true
         } catch {
             print("Error deleting file: \(error)")
+            return false
         }
     }
 }
@@ -725,9 +740,14 @@ struct SidebarRow: View {
         .alert("Delete \(node.name)?", isPresented: $showDeleteAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Delete", role: .destructive) {
-                fileSystemModel.deleteFile(url: node.url)
+                // The user chose to delete the open file (or its folder):
+                // its unsaved edits go with it, without a save prompt that
+                // would only write the deleted file back.
+                guard fileSystemModel.deleteFile(url: node.url) else { return }
+                AppDelegate.shared?.discardEdits(forDeletedItemAt: node.url)
                 // If the deleted file was selected, clear the selection
-                if selectedFile == node.url {
+                if let selected = selectedFile,
+                   selected == node.url || selected.path.hasPrefix(node.url.path + "/") {
                     selectedFile = nil
                 }
             }

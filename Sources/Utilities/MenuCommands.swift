@@ -10,29 +10,12 @@ struct AppMenuCommands: Commands {
     @AppStorage("aiChatEnabled") private var chatEnabled = false
     @ObservedObject private var generalSettings = GeneralSettingsManager.shared
     
-    @Environment(\.openWindow) private var openWindow
-    
-    private func ensureWindowAndPost(name: Notification.Name, object: Any? = nil) {
-        let hasWindow = !NSApp.windows.filter({ $0.isVisible && $0.className != "NSStatusBarWindow" && $0.className != "NSMenu" }).isEmpty
-        
-        if !hasWindow {
-            openWindow(id: "main")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                NotificationCenter.default.post(name: name, object: object)
-            }
-        } else {
-            NotificationCenter.default.post(name: name, object: object)
-        }
-    }
-    
-    private func ensureWindowAndExecute(action: @escaping () -> Void) {
-        let hasWindow = !NSApp.windows.filter({ $0.isVisible && $0.className != "NSStatusBarWindow" && $0.className != "NSMenu" }).isEmpty
-        
-        if !hasWindow {
-            openWindow(id: "main")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                action()
-            }
+    /// Projects, notebooks and imports belong to the main window. Reopens it
+    /// when closed (never a second copy) and, when the action replaces its
+    /// document, asks about unsaved edits first.
+    private func inMainWindow(replacingDocument: Bool = false, _ action: @escaping () -> Void) {
+        if let appDelegate = AppDelegate.shared {
+            appDelegate.performInMainWindow(replacingDocument: replacingDocument, action)
         } else {
             action()
         }
@@ -42,7 +25,7 @@ struct AppMenuCommands: Commands {
         // MARK: - File Menu
         CommandGroup(replacing: .newItem) {
             Button("New File") {
-                ensureWindowAndPost(name: .menuCommand, object: "newFile")
+                AppDelegate.shared?.newDocument()
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
             
@@ -50,10 +33,10 @@ struct AppMenuCommands: Commands {
                 let panel = NSOpenPanel()
                 panel.canChooseFiles = true
                 panel.canChooseDirectories = false
-                panel.allowsMultipleSelection = false
+                panel.allowsMultipleSelection = true
                 
-                if panel.runModal() == .OK, let url = panel.url {
-                    ensureWindowAndPost(name: .openStandaloneFile, object: url)
+                if panel.runModal() == .OK, !panel.urls.isEmpty {
+                    AppDelegate.shared?.openDocuments(panel.urls)
                 }
             }
             .keyboardShortcut("o", modifiers: .command)
@@ -65,7 +48,9 @@ struct AppMenuCommands: Commands {
                 panel.allowsMultipleSelection = false
                 
                 if panel.runModal() == .OK, let url = panel.url {
-                    ensureWindowAndPost(name: .openProjectFolder, object: url)
+                    inMainWindow(replacingDocument: true) {
+                        NotificationCenter.default.post(name: .openProjectFolder, object: url)
+                    }
                 }
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
@@ -78,9 +63,11 @@ struct AppMenuCommands: Commands {
                     ForEach(recentFilesManager.recentFiles) { file in
                         Button(action: {
                             if file.isProject {
-                                ensureWindowAndPost(name: .openProjectAndFile, object: file.url)
+                                inMainWindow(replacingDocument: true) {
+                                    NotificationCenter.default.post(name: .openProjectAndFile, object: file.url)
+                                }
                             } else {
-                                ensureWindowAndPost(name: .openStandaloneFile, object: file.url)
+                                AppDelegate.shared?.openDocuments([file.url])
                             }
                         }) {
                             HStack {
@@ -110,12 +97,14 @@ struct AppMenuCommands: Commands {
             }
 
             Button("Open Notes") {
-                ensureWindowAndPost(name: NSNotification.Name("openNotebooks"), object: nil)
+                inMainWindow(replacingDocument: true) {
+                    NotificationCenter.default.post(name: NSNotification.Name("openNotebooks"), object: nil)
+                }
             }
             .keyboardShortcut("n", modifiers: [.command, .option])
             
             Button("Import LyX File...") {
-                ensureWindowAndExecute {
+                inMainWindow {
                     editorController.importLyx()
                 }
             }

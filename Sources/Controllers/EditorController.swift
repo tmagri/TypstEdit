@@ -716,9 +716,37 @@ class EditorController: NSObject, ObservableObject {
         externalDiskChangeAvailable = false
         guard let url else {
             knownDiskModificationDate = nil
+            isFileDeletedOnDisk = false
             return
         }
         knownDiskModificationDate = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        isFileDeletedOnDisk = !FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// True while the open file no longer exists on disk (deleted or moved in
+    /// Finder, the sidebar, or by Git). The buffer stays open; nothing writes
+    /// the file back except an explicit Save.
+    @Published var isFileDeletedOnDisk: Bool = false
+
+    /// "Don't Save": accepts the buffer as-is so no later close, quit or file
+    /// switch asks about the same edits again.
+    func discardUnsavedChanges() {
+        if let url = currentFileURL {
+            AutoRecoveryManager.shared.clearRecovery(for: url)
+        }
+        savedContent = sourceCode
+        hasUnsavedChanges = false
+    }
+
+    /// Forgets the open document entirely (window closed, file deleted).
+    /// Clears the URL first so selection observers see nothing to save.
+    func closeDocument() {
+        currentFileURL = nil
+        savedContent = ""
+        hasUnsavedChanges = false
+        sourceCode = ""
+        editorState = .init()
+        noteDiskState(for: nil)
     }
     @Published var targetLineNumber: String = ""
     @Published var showFoundationEditor: Bool = false

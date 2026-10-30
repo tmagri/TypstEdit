@@ -141,13 +141,52 @@ struct ContentView: View {
     }
 
     private func handleStandaloneLoad(url: URL) {
-        self.selectedFile = url
-        self.loadFile(url: url)
-        fileSystem.currentFolder = nil
-        fileSystem.rootNodes = []
-        editorController.projectRootURL = nil
-        editorController.isSidebarVisible = false
-        RAGManager.shared.disableForStandaloneMode()
+        let apply = {
+            // Load directly and keep `onChange(of: selectedFile)` from
+            // starting a second load (or a second save prompt).
+            if self.selectedFile != url { self.isInternalSelectionChange = true }
+            self.selectedFile = url
+            self.loadFile(url: url)
+            self.fileSystem.currentFolder = nil
+            self.fileSystem.rootNodes = []
+            self.fileSystem.isNewUnsavedFile = false
+            self.editorController.projectRootURL = nil
+            self.editorController.isSidebarVisible = false
+            RAGManager.shared.disableForStandaloneMode()
+        }
+        // Ask before replacing unsaved edits; the old code loaded first and
+        // asked afterwards, so "Save" could write the new file's text over
+        // the old file.
+        if editorController.hasUnsavedChanges, let appDelegate = AppDelegate.shared {
+            appDelegate.showSaveWarningAsync(for: editorController) { proceed in
+                if proceed { apply() }
+            }
+        } else {
+            apply()
+        }
+    }
+
+    /// Clears the open document without a prompt (the caller already dealt
+    /// with unsaved edits). Keeps the window and any project folder.
+    private func closeCurrentDocument() {
+        currentLoadID = UUID()
+        editorController.closeDocument()
+        currentPDFURL = nil
+        externalChangeURL = nil
+    }
+
+    /// Keeps the window title, proxy icon and close-button "edited" dot in
+    /// step with the document, so the Window menu lists every file.
+    private func syncWindowDocumentState() {
+        guard let window = hostingWindow else { return }
+        let url = editorController.currentFileURL
+        let title = url?.lastPathComponent ?? (fileSystem.isNewUnsavedFile ? "Untitled" : "TypstEdit")
+        if window.title != title { window.title = title }
+        let represented = editorController.isFileDeletedOnDisk ? nil : url
+        if window.representedURL != represented { window.representedURL = represented }
+        if window.isDocumentEdited != editorController.hasUnsavedChanges {
+            window.isDocumentEdited = editorController.hasUnsavedChanges
+        }
     }
 
     @ViewBuilder
@@ -161,9 +200,14 @@ struct ContentView: View {
                     guard target === self.editorController else { return }
                     if let url = dict["url"] as? URL { self.handleStandaloneLoad(url: url) }
                 } else if let url = notification.object as? URL {
-                    // Legacy un-targeted load (protect external windows from it)
+                    // Legacy un-targeted request: let the app pick the window
+                    // (an already-open copy, an idle window, or a new one).
                     guard isMain else { return }
-                    self.handleStandaloneLoad(url: url)
+                    if let appDelegate = AppDelegate.shared {
+                        appDelegate.openDocuments([url])
+                    } else {
+                        self.handleStandaloneLoad(url: url)
+                    }
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
@@ -209,16 +253,18 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
-                guard self.editorController === AppDelegate.shared?.editorController else { return }
+                if let dict = notification.object as? [String: Any], let target = dict["target"] as? EditorController {
+                    // Directed "new untitled buffer" for one window.
+                    guard target === self.editorController else { return }
+                } else {
+                    guard self.editorController === AppDelegate.shared?.editorController else { return }
+                }
                 if let url = notification.object as? URL {
                     self.selectedFile = url
                     fileSystem.isNewUnsavedFile = false
                 } else {
+                    self.closeCurrentDocument()
                     self.selectedFile = nil
-                    self.editorController.currentFileURL = nil
-                    self.editorController.sourceCode = ""
-                    self.editorController.editorState = .init()
-                    self.editorController.syncSavedContent("")
                     fileSystem.isNewUnsavedFile = true
                     self.editorController.isSidebarVisible = false
                 }
@@ -257,11 +303,17 @@ struct ContentView: View {
                 guard FileManager.default.fileExists(atPath: openURL.path) else {
                     // The file is not on this branch, or Git removed it. Keep
                     // the buffer instead of a "file not found" alert.
+                    editorController.isFileDeletedOnDisk = true
                     editorController.showStatus("\(openURL.lastPathComponent) no longer exists in the working tree", duration: 4.0)
                     return
                 }
                 self.handleExternalDiskChange(at: openURL, userInitiated: false)
             }
+            .onChange(of: editorController.currentFileURL) { _ in syncWindowDocumentState() }
+            .onChange(of: editorController.hasUnsavedChanges) { _ in syncWindowDocumentState() }
+            .onChange(of: editorController.isFileDeletedOnDisk) { _ in syncWindowDocumentState() }
+            .onChange(of: fileSystem.isNewUnsavedFile) { _ in syncWindowDocumentState() }
+            .onChange(of: hostingWindow) { _ in syncWindowDocumentState() }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 // Catches edits made in another app while this one was in the
                 // background — snappier than waiting for the next poll tick.
@@ -284,8 +336,23 @@ struct ContentView: View {
     /// Never reloads by itself — only `handleExternalDiskChange` decides what
     /// to do with that, and only once there's actually somewhere to look.
     private func checkForExternalDiskChange() {
-        guard let url = editorController.currentFileURL,
-              let known = editorController.knownDiskModificationDate,
+        guard let url = editorController.currentFileURL else { return }
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        if !exists {
+            if !editorController.isFileDeletedOnDisk {
+                editorController.isFileDeletedOnDisk = true
+                editorController.externalDiskChangeAvailable = false
+                editorController.showStatus("“\(url.lastPathComponent)” was deleted or moved on disk", duration: 4.0)
+            }
+            return
+        }
+        if editorController.isFileDeletedOnDisk {
+            // The file came back (Git branch switch, undo in Finder, ...).
+            editorController.isFileDeletedOnDisk = false
+            handleExternalDiskChange(at: url, userInitiated: false)
+            return
+        }
+        guard let known = editorController.knownDiskModificationDate,
               let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let mtime = attrs[.modificationDate] as? Date,
               mtime > known else { return }
@@ -356,6 +423,7 @@ struct ContentView: View {
             }
             .preferredColorScheme(themeManager.appTheme.colorScheme)
             .onAppear {
+                fileSystem.documentController = editorController
                 if editorController.pendingWelcomeReset {
                     // Dock-click reopen: land on the welcome screen, not the
                     // last file (whose URL lingers in `selectedFile`).
@@ -404,7 +472,7 @@ struct ContentView: View {
                         editorController.isSidebarVisible = true
                     } else {
                         // Re-open as standalone single file (no sidebar)
-                        NotificationCenter.default.post(name: .openStandaloneFile, object: file.url)
+                        AppDelegate.shared?.openDocuments([file.url])
                     }
                 })
                 .background(themeManager.mainBackground)
@@ -1139,7 +1207,28 @@ struct ContentView: View {
             // change AND unsaved edits in the way — a clean file already
             // reloaded itself silently). Mirrors the PDF preview's
             // "Stale preview" badge one panel over.
-            if editorController.externalDiskChangeAvailable {
+            if editorController.isFileDeletedOnDisk {
+                Button(action: { saveFile() }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(editorController.hasUnsavedChanges
+                             ? "Deleted on disk — Save to keep your changes"
+                             : "Deleted on disk")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.white.opacity(0.95))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.red.opacity(0.85))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .help("This file no longer exists on disk. Click to save it again.")
+                .padding(10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            } else if editorController.externalDiskChangeAvailable {
                 Button(action: reloadCurrentFileFromDisk) {
                     HStack(spacing: 5) {
                         Image(systemName: "arrow.triangle.2.circlepath")
@@ -1183,7 +1272,7 @@ struct ContentView: View {
                 // 2. Any single file (typ, note, md, …) opens in standalone mode:
                 // no parent folder as project, no sidebar, no RAG indexing — so
                 // opening a lone file never scatters vectorcaches/ into its folder.
-                NotificationCenter.default.post(name: .openStandaloneFile, object: url)
+                AppDelegate.shared?.openDocuments([url])
             }
         }
     }
@@ -1195,21 +1284,39 @@ struct ContentView: View {
         if newValue == currentlyLoadedFile { return }
         // Reject before the unsaved-changes prompt: nothing will be opened.
         if let newValue, rejectHiddenCalculatorFile(newValue) { return }
+        // A missing file will not open, so don't ask about the current
+        // document first: loadFile reports it and restores the selection.
+        if let newValue, !FileManager.default.fileExists(atPath: newValue.path) {
+            loadFile(url: newValue)
+            return
+        }
         
         if self.editorController.hasUnsavedChanges, let prev = currentlyLoadedFile {
            if let appDelegate = AppDelegate.shared {
                 appDelegate.showSaveWarningAsync(for: self.editorController, url: prev) { proceed in
                     if proceed {
-                        self.loadFile(url: newValue)
+                        self.openSelection(newValue)
                     } else {
-                        self.isInternalSelectionChange = true
+                        if self.selectedFile != prev { self.isInternalSelectionChange = true }
                         self.selectedFile = prev
                     }
                 }
                 return
             }
         }
-        self.loadFile(url: newValue)
+        self.openSelection(newValue)
+    }
+
+    /// Loads the newly selected file, or closes the document when the
+    /// selection was cleared (e.g. the open file was deleted in the
+    /// sidebar). Leaving the old document loaded behind an empty selection
+    /// made every later close, quit, or file switch ask to save it again.
+    private func openSelection(_ url: URL?) {
+        if let url {
+            loadFile(url: url)
+        } else if editorController.currentFileURL != nil {
+            closeCurrentDocument()
+        }
     }
     
     /// A `.tcalc` file cannot open while the Calculator is hidden. Restores
@@ -1342,7 +1449,17 @@ struct ContentView: View {
                         self.editorController.missingFileName = url.lastPathComponent
                         self.editorController.showFileNotFoundAlert = true
                         RecentFilesManager.shared.remove(url: url)
-                        if self.selectedFile == url { self.selectedFile = nil }
+                        let previous = self.editorController.currentFileURL
+                        if previous == url {
+                            // Reloading the open file failed: it is gone.
+                            self.editorController.isFileDeletedOnDisk = true
+                        } else if self.selectedFile == url {
+                            // Point the selection back at the document that
+                            // is still loaded, so the title, Save target and
+                            // unsaved-changes state keep matching it.
+                            if self.selectedFile != previous { self.isInternalSelectionChange = true }
+                            self.selectedFile = previous
+                        }
                     } else {
                          // File exists but read failed (e.g. binary?)
                          self.editorController.currentFileURL = url
@@ -1362,24 +1479,50 @@ struct ContentView: View {
             panel.allowedContentTypes = [UTType(filenameExtension: "typ")!]
             panel.nameFieldStringValue = "untitled.typ"
             if panel.runModal() == .OK, let savedURL = panel.url {
-                 performSave(to: savedURL)
+                 guard performSave(to: savedURL) else { return }
                  fileSystem.isNewUnsavedFile = false
                  self.selectedFile = savedURL
-                 self.editorController.isSidebarVisible = true
-                 // If no current folder, maybe set it to the saved location?
-                 if fileSystem.currentFolder == nil {
-                     fileSystem.currentFolder = savedURL.deletingLastPathComponent()
-                     fileSystem.loadFiles()
+                 // Only the main window hosts projects; other document
+                 // windows stay single-file windows.
+                 if self.editorController === AppDelegate.shared?.editorController {
+                     self.editorController.isSidebarVisible = true
+                     // If no current folder, maybe set it to the saved location?
+                     if fileSystem.currentFolder == nil {
+                         fileSystem.currentFolder = savedURL.deletingLastPathComponent()
+                         fileSystem.loadFiles()
+                     }
                  }
             }
             return
         }
         
         guard let url = targetURL else { return }
+
+        // The file's folder is gone too (deleted or moved): writing there
+        // would fail, so ask where to save instead.
+        let folder = url.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: folder.path) {
+            let panel = NSSavePanel()
+            panel.title = "Save “\(url.lastPathComponent)”"
+            panel.message = "The original folder no longer exists."
+            panel.nameFieldStringValue = url.lastPathComponent
+            if let type = UTType(filenameExtension: url.pathExtension) { panel.allowedContentTypes = [type] }
+            guard panel.runModal() == .OK, let newURL = panel.url else { return }
+            let wasShowing = (selectedFile == url)
+            if editorController.currentFileURL == url { editorController.currentFileURL = newURL }
+            guard performSave(to: newURL) else { return }
+            if wasShowing {
+                isInternalSelectionChange = true
+                selectedFile = newURL
+            }
+            return
+        }
+
         performSave(to: url)
     }
     
-    private func performSave(to url: URL) {
+    @discardableResult
+    private func performSave(to url: URL) -> Bool {
         // Capture a rotating backup of the CURRENT on-disk content before overwriting.
         // Only fires on explicit Save (not on .note auto-save), guarding against the
         // insert-clears-text class of bugs where a save would otherwise destroy good work.
@@ -1388,21 +1531,35 @@ struct ContentView: View {
         do {
             try editorController.sourceCode.write(to: url, atomically: true, encoding: .utf8)
             RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
+            // Mark the buffer saved right away (not on the next run-loop
+            // turn): the close/quit prompts check it straight after asking
+            // for the save. The document is the one loaded in the editor,
+            // even while the selection already points at the next file.
+            if url == editorController.currentFileURL || url == selectedFile || fileSystem.isNewUnsavedFile {
+                editorController.syncSavedContent(editorController.sourceCode)
+                editorController.noteDiskState(for: url)
+                AutoRecoveryManager.shared.clearRecovery(for: url) // Clear recovery on save
+            }
             DispatchQueue.main.async {
                 if url == self.selectedFile || fileSystem.isNewUnsavedFile {
-                    self.editorController.syncSavedContent(self.editorController.sourceCode)
-                    self.editorController.noteDiskState(for: url)
                     self.scheduleCompilation(with: self.editorController.sourceCode, force: true)
                     self.exportPDF(from: url) // Update clean PDF on disk on save
                     self.lastSaved = Date()
                     self.editorController.showStatus("File Saved")
-                    AutoRecoveryManager.shared.clearRecovery(for: url) // Clear recovery on save
                     withAnimation { self.showSavePopup = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { withAnimation { self.showSavePopup = false } }
                 }
             }
-
-        } catch { print("[ERROR] Failed to save file \(url.lastPathComponent): \(error)") }
+            return true
+        } catch {
+            print("[ERROR] Failed to save file \(url.lastPathComponent): \(error)")
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "“\(url.lastPathComponent)” couldn't be saved."
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return false
+        }
     }
     
     @MainActor
@@ -1602,7 +1759,10 @@ struct ContentView: View {
             // Auto-save is only needed when the buffer actually holds unsaved
             // edits; rewriting an unchanged file would pointlessly bump its
             // modification date (and trip anything watching it).
+            // Never auto-save a note that was deleted on disk: that would
+            // silently bring the deleted file back. An explicit Save still can.
             let needsAutoSave = self.editorController.hasUnsavedChanges
+                && FileManager.default.fileExists(atPath: url.path)
             Task {
                 compiler.isDarkMode = isDark
 
