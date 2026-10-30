@@ -11,8 +11,11 @@ private struct GitChangeActions {
     /// False while the open file has unsaved edits: accepting a version
     /// overwrites the file on disk.
     let canAcceptVersions: Bool
+    /// False when the file is not in the working tree (e.g. it was deleted).
+    let canOpenExternal: (GitChange) -> Bool
     let onDiff: (GitChange) -> Void
     let onOpen: (GitChange) -> Void
+    let onOpenExternal: (GitChange) -> Void
     let onStage: (GitChange) -> Void
     let onDiscard: (GitChange) -> Void
     let canIgnore: (GitChange) -> Bool
@@ -34,9 +37,11 @@ struct GitChangesGroupView: View {
     let canStage: (GitChange) -> Bool
     let canDiscard: (GitChange) -> Bool
     let canAcceptVersions: Bool
+    let canOpenExternal: (GitChange) -> Bool
     let onStageAll: () -> Void
     let onDiff: (GitChange) -> Void
     let onOpen: (GitChange) -> Void
+    let onOpenExternal: (GitChange) -> Void
     let onStage: (GitChange) -> Void
     let onDiscard: (GitChange) -> Void
     let canIgnore: (GitChange) -> Bool
@@ -53,7 +58,8 @@ struct GitChangesGroupView: View {
         GitChangeActions(
             group: group, isConflictGroup: isConflictGroup, isBusy: isBusy,
             canStage: canStage, canDiscard: canDiscard, canAcceptVersions: canAcceptVersions,
-            onDiff: onDiff, onOpen: onOpen, onStage: onStage, onDiscard: onDiscard,
+            canOpenExternal: canOpenExternal,
+            onDiff: onDiff, onOpen: onOpen, onOpenExternal: onOpenExternal, onStage: onStage, onDiscard: onDiscard,
             canIgnore: canIgnore, onIgnore: onIgnore, onIgnoreFolder: onIgnoreFolder,
             onAcceptCurrent: onAcceptCurrent, onAcceptIncoming: onAcceptIncoming, onMarkResolved: onMarkResolved
         )
@@ -265,6 +271,11 @@ private struct GitChangeRowView: View {
     private var rowMenu: some View {
         Button("View Changes") { actions.onDiff(change) }.disabled(actions.isBusy)
         Button("Open File") { actions.onOpen(change) }
+        Button("Open in External Program") { actions.onOpenExternal(change) }
+            .disabled(!actions.canOpenExternal(change))
+            .help(actions.canOpenExternal(change)
+                  ? "Open the file on disk with your default application"
+                  : "The file does not exist in the working tree")
         Divider()
         Button("Add to .gitignore…") { actions.onIgnore(change) }
             .disabled(actions.isBusy || !actions.canIgnore(change))

@@ -425,6 +425,7 @@ struct SourceControlSidebarView: View {
             },
             canDiscard: { change in canDiscard(change, protected: protected) },
             canAcceptVersions: canChangeWorkingTree,
+            canOpenExternal: { change in workingTreeURL(for: change) != nil },
             onStageAll: {
                 if group == .staged { Task { await manager.unstageAll() } } else { requestStageAll() }
             },
@@ -434,6 +435,7 @@ struct SourceControlSidebarView: View {
                 }
             },
             onOpen: openFile,
+            onOpenExternal: openFileExternally,
             onStage: { change in
                 if isConflictGroup || change.isConflicted {
                     confirmation = .markResolved(change)
@@ -490,6 +492,22 @@ struct SourceControlSidebarView: View {
             return
         }
         selectedFile = url
+    }
+
+    /// Absolute URL of a change's file, or nil when it is missing from the
+    /// working tree (deleted, for example).
+    private func workingTreeURL(for change: GitChange) -> URL? {
+        guard let root = manager.repositoryRoot else { return nil }
+        let url = root.appendingPathComponent(change.path)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private func openFileExternally(_ change: GitChange) {
+        guard let url = workingTreeURL(for: change) else {
+            manager.errorMessage = "'\(change.path)' does not exist in the working tree."
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     /// Untracked files move to the Trash; tracked files return to their
