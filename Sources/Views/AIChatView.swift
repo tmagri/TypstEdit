@@ -64,7 +64,23 @@ struct AIChatView: View {
     /// Whether the transcript is scrolled to (or within a few points of) the
     /// bottom. Autoscroll only follows while this is true, so scrolling up to
     /// read an earlier step doesn't get yanked back down by the next token.
+    /// Cleared by a genuine user scroll (see `TranscriptBottomProbe`), and set
+    /// again only by an explicit "give me the newest part" action: the
+    /// jump-to-latest pill, sending a message, or switching chats.
     @State private var transcriptAtBottom = true
+
+    /// Bumped by the composer's send path. The transcript watches it to jump
+    /// to the newest exchange on a real send — deliberately not inferred from
+    /// a new `.user` message, because the goal loop appends user-role
+    /// continuations while the turn is still running, and those are not the
+    /// user asking to be taken back to the bottom.
+    @State private var scrollToLatestRequest = 0
+
+    /// Height of the transcript's viewport. Cards under it (plan, goal,
+    /// approval, compaction) come and go mid-run and resize it; a lazy stack
+    /// whose visible rect changed under it can end up showing nothing until
+    /// the next scroll, so a resize re-anchors the follow target.
+    @State private var transcriptViewportHeight: CGFloat = 0
 
     @State private var showRename = false
     @State private var renameDraft: String = ""
@@ -131,6 +147,7 @@ struct AIChatView: View {
             Button("Set & Start") {
                 let draft = goalDraft
                 goalDraft = ""
+                scrollToLatestRequest += 1
                 Task { await chat.armGoal(draft) }
             }
         } message: {
@@ -405,6 +422,14 @@ struct AIChatView: View {
         var isAutoScrolling: Bool {
             Date() < autoScrollGraceUntil
         }
+
+        /// True from the moment a trackpad/wheel/scroller gesture starts
+        /// until it (and its momentum) ends. Set from the probe's live-scroll
+        /// notifications, i.e. only by the user. Following is suspended while
+        /// this is set: a scroll we issue mid-gesture would fight the hand on
+        /// the trackpad, and the gesture is precisely when its result must not
+        /// be overwritten.
+        var userIsScrolling = false
     }
 
     /// Anchor id for the invisible row pinned to the end of the transcript.
@@ -476,11 +501,17 @@ struct AIChatView: View {
                 // Passive probe for the real scroll position: it flips
                 // `transcriptAtBottom` when *you* scroll the transcript, so
                 // autoscroll can stop fighting you while you read earlier
-                // output. It never scrolls anything itself, and it stays
-                // muted while the panel's own follow scrolls are in flight.
+                // output. It never scrolls anything itself, it stays muted
+                // while the panel's own follow scrolls are in flight, and it
+                // still reports real gestures during those mutes — otherwise
+                // a stream of follow scrolls would hide the user's scroll for
+                // the whole generation.
                 .background(TranscriptBottomProbe(
                     isAtBottom: $transcriptAtBottom,
-                    isProgrammaticScroll: { [transcriptScroller] in transcriptScroller.isAutoScrolling }
+                    isProgrammaticScroll: { [transcriptScroller] in transcriptScroller.isAutoScrolling },
+                    userIsScrolling: { [transcriptScroller] isScrolling in
+                        transcriptScroller.userIsScrolling = isScrolling
+                    }
                 ))
             }
             .overlay(alignment: .bottomTrailing) {
@@ -488,6 +519,19 @@ struct AIChatView: View {
                     jumpToLatestButton(proxy)
                 }
             }
+            // The viewport, not the content: a card appearing below the
+            // transcript shrinks it, and the lazy stack needs to re-resolve
+            // which rows are visible.
+            .background(
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { transcriptViewportHeight = geo.size.height }
+                        .onChange(of: geo.size.height) { height in
+                            transcriptViewportHeight = height
+                        }
+                }
+            )
+            .onChange(of: transcriptViewportHeight) { _ in followBottom(proxy) }
             // Opened on an existing conversation (or a newly switched one):
             // start at the newest exchange, not the top of the history.
             .onAppear { followBottom(proxy, force: true, animate: true) }
@@ -518,9 +562,16 @@ struct AIChatView: View {
                     autoExpandedThinkingID = last.id
                     expandedThinkingIDs.insert(last.id)
                 }
-                // Sending a message always returns you to the newest exchange,
-                // even if you were reading further up.
-                followBottom(proxy, force: messages.last?.role == .user)
+                // A row was added or re-measured: keep following, but only if
+                // the user hasn't taken the viewport over (see `followBottom`).
+                followBottom(proxy)
+            }
+            // An explicit send (new turn or steer) is the user asking for the
+            // newest exchange, so it overrides a manual scroll. Kept separate
+            // from the message change above so machine-appended user-role
+            // messages (goal continuations) never count as that request.
+            .onChange(of: scrollToLatestRequest) { _ in
+                followBottom(proxy, force: true)
             }
             .onChange(of: chat.isGenerating) { isGenerating in
                 if isGenerating { liveThinkingExpanded = true }
@@ -553,11 +604,21 @@ struct AIChatView: View {
         .accessibilityLabel("Jump to latest message")
     }
 
-    /// Pins the transcript to its bottom. The single short delay lets a row
-    /// that was just appended finish being measured, which is what makes the
-    /// scroll land on the real bottom instead of one row short. Scheduling is
-    /// coalesced, so a burst of streamed reasoning costs one scroll rather
-    /// than a visible jump per token.
+    /// Pins the transcript to its bottom — unless the user has taken over.
+    /// A manual scroll (or a click on "Show earlier messages") puts the
+    /// transcript in manual mode: `transcriptAtBottom` goes false and nothing
+    /// here moves the viewport, however much the answer streams. It stays
+    /// that way until the user asks for the newest part again — the
+    /// jump-to-latest pill, a new send, or a session switch. The only
+    /// exception is while a scroll gesture is *in progress*, where following
+    /// is suspended outright so the view can't be yanked out from under the
+    /// hand on the trackpad.
+    ///
+    /// The single short delay lets a row that was just appended finish being
+    /// measured, which is what makes the scroll land on the real bottom
+    /// instead of one row short. Scheduling is coalesced, so a burst of
+    /// streamed reasoning costs one scroll rather than a visible jump per
+    /// token.
     ///
     /// Streaming follows scroll without animation: an animated scroll over a
     /// lazy stack lands on estimated row heights, and the corrections that
@@ -570,11 +631,19 @@ struct AIChatView: View {
     /// the jump-to-latest button), where the layout is settled.
     private func followBottom(_ proxy: ScrollViewProxy, force: Bool = false, animate: Bool = false) {
         guard force || transcriptAtBottom else { return }
+        // Never move the transcript under a hand that is currently scrolling
+        // it: the gesture decides where the viewport ends up, and the probe
+        // will report that position when the gesture finishes.
+        guard force || !transcriptScroller.userIsScrolling else { return }
         if force { transcriptAtBottom = true }
         guard transcriptScroller.pending == nil else { return }
         transcriptScroller.pending = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 50_000_000)
             transcriptScroller.pending = nil
+            // Re-checked after the delay: a token can land in the same tick
+            // the user starts scrolling, and the scroll scheduled here must
+            // not drag them back after they have moved away.
+            guard force || (transcriptAtBottom && !transcriptScroller.userIsScrolling) else { return }
             transcriptScroller.markProgrammaticScroll()
             if animate {
                 withAnimation(.easeOut(duration: 0.12)) {
@@ -1408,7 +1477,10 @@ struct AIChatView: View {
                     Button("Pause goal") { chat.pauseGoal() }
                     Button("Clear goal", role: .destructive) { chat.clearGoal() }
                 case .paused:
-                    Button("Resume goal") { Task { await chat.resumeGoal() } }
+                    Button("Resume goal") {
+                        scrollToLatestRequest += 1
+                        Task { await chat.resumeGoal() }
+                    }
                     Button("Clear goal", role: .destructive) { chat.clearGoal() }
                 case .complete:
                     Button("Clear goal") { chat.clearGoal() }
@@ -1513,6 +1585,9 @@ struct AIChatView: View {
     private func send() {
         let text = draft
         draft = ""
+        // A send is an explicit "take me to the newest exchange" — it ends
+        // manual mode, so the reply that follows is followed live again.
+        scrollToLatestRequest += 1
         Task { await chat.sendMessage(text) }
     }
 
@@ -1557,9 +1632,16 @@ struct AIChatView: View {
 /// otherwise read as one — which is what used to disable autoscroll mid-
 /// generation and leave the transcript stranded on blank space until the next
 /// click.
+///
+/// That mute must never swallow a real gesture, though: while a response
+/// streams, follow scrolls keep extending the mute window, so for most of a
+/// generation the probe would be blind. A live scroll (trackpad, wheel, or
+/// scroller knob) is reported through `userIsScrolling` and *bypasses* the
+/// mute — it is the one movement we know is not ours.
 private struct TranscriptBottomProbe: NSViewRepresentable {
     @Binding var isAtBottom: Bool
     var isProgrammaticScroll: () -> Bool
+    var userIsScrolling: (Bool) -> Void
 
     /// Distance from the bottom still treated as "at the bottom", so a
     /// one-pixel rounding difference or a short scroll doesn't flip it.
@@ -1582,11 +1664,20 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
     final class Coordinator: NSObject {
         var isAtBottom: Binding<Bool>
         var isProgrammaticScroll: () -> Bool
+        var userIsScrolling: (Bool) -> Void
         private var scrollView: NSScrollView?
+        /// Mirrors the live-scroll state of `scrollView`; the probe reports
+        /// from a gesture even while the programmatic-scroll mute is open.
+        private var isLiveUserScroll = false
 
-        init(isAtBottom: Binding<Bool>, isProgrammaticScroll: @escaping () -> Bool) {
+        init(
+            isAtBottom: Binding<Bool>,
+            isProgrammaticScroll: @escaping () -> Bool,
+            userIsScrolling: @escaping (Bool) -> Void
+        ) {
             self.isAtBottom = isAtBottom
             self.isProgrammaticScroll = isProgrammaticScroll
+            self.userIsScrolling = userIsScrolling
         }
 
         /// Finds the enclosing scroll view once the probe is in the window
@@ -1597,26 +1688,97 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
             scrollView = scroll
             let clipView = scroll.contentView
             clipView.postsBoundsChangedNotifications = true
-            NotificationCenter.default.addObserver(
+            let center = NotificationCenter.default
+            center.addObserver(
                 self,
                 selector: #selector(boundsChanged),
                 name: NSView.boundsDidChangeNotification,
                 object: clipView
             )
+            // Live-scroll notifications fire only for user input (trackpad and
+            // wheel gestures, scroller-knob drags), so they are what separates
+            // "the user moved the transcript" from "the panel followed along".
+            center.addObserver(
+                self,
+                selector: #selector(liveScrollBegan),
+                name: NSScrollView.willStartLiveScrollNotification,
+                object: scroll
+            )
+            center.addObserver(
+                self,
+                selector: #selector(liveScrollMoved),
+                name: NSScrollView.didLiveScrollNotification,
+                object: scroll
+            )
+            center.addObserver(
+                self,
+                selector: #selector(liveScrollEnded),
+                name: NSScrollView.didEndLiveScrollNotification,
+                object: scroll
+            )
+            // The content can also change size without the clip view moving —
+            // a lazy row measuring shorter than estimated is the blank-space
+            // case, and the clamp has to hear about it.
+            if let document = scroll.documentView {
+                document.postsFrameChangedNotifications = true
+                center.addObserver(
+                    self,
+                    selector: #selector(contentResized),
+                    name: NSView.frameDidChangeNotification,
+                    object: document
+                )
+            }
             report()
+        }
+
+        @objc private func contentResized() {
+            report()
+        }
+
+        @objc private func liveScrollBegan() {
+            isLiveUserScroll = true
+            userIsScrolling(true)
+        }
+
+        @objc private func liveScrollMoved() {
+            isLiveUserScroll = true
+            userIsScrolling(true)
+            report()
+        }
+
+        @objc private func liveScrollEnded() {
+            isLiveUserScroll = false
+            userIsScrolling(false)
+            // Authoritative: where the gesture left the viewport decides
+            // whether following resumes, even if a follow scroll issued just
+            // before the gesture opened is still inside its mute window.
+            report(force: true)
+        }
+
+        /// Drops a gesture flag that would otherwise outlive its scroll view.
+        func detach() {
+            NotificationCenter.default.removeObserver(self)
+            if isLiveUserScroll {
+                isLiveUserScroll = false
+                userIsScrolling(false)
+            }
         }
 
         @objc private func boundsChanged() {
             report()
         }
 
-        private func report() {
-            // Our own scrolls (and the lazy-row height corrections right
-            // after them) are not the user moving; reacting to them would
-            // pause autoscroll in the middle of a generation.
-            guard !isProgrammaticScroll() else { return }
+        private func report(force: Bool = false) {
             guard let scrollView, let document = scrollView.documentView else { return }
             let clipView = scrollView.contentView
+            // Not a report: the clamp runs even inside a programmatic-scroll
+            // mute, because a bad landing is exactly what happens there.
+            clampIntoRange(scrollView: scrollView, document: document, clipView: clipView)
+            // Our own scrolls (and the lazy-row height corrections right
+            // after them) are not the user moving; reacting to them would
+            // pause autoscroll in the middle of a generation. A live gesture
+            // is the exception: it is always the user.
+            guard force || isLiveUserScroll || !isProgrammaticScroll() else { return }
             // SwiftUI's document view is flipped (y = 0 at the top), so the
             // remaining distance is document height minus the visible bottom.
             let distanceToBottom: CGFloat
@@ -1630,10 +1792,51 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
             guard atBottom != isAtBottom.wrappedValue else { return }
             isAtBottom.wrappedValue = atBottom
         }
+
+        /// Keeps the viewport inside the document. A programmatic scroll is
+        /// resolved against the lazy stack's *estimated* row heights; when the
+        /// rows below then measure shorter (a big thinking preview replaced by
+        /// a finished answer, a collapsed disclosure, the tail of a long
+        /// transcript re-measured), the offset it picked can end up past the
+        /// real content. Nothing constrains the clip view afterwards, so the
+        /// panel would sit on empty space until the user scrolled — which is
+        /// what "the chat view went blank, scrolling brings it back" is. This
+        /// only ever pulls the viewport back to the last real position; it
+        /// never scrolls away from where the user put it.
+        ///
+        /// Skipped during a live gesture so the elastic overscroll at the end
+        /// of a trackpad scroll isn't fought frame by frame.
+        private func clampIntoRange(scrollView: NSScrollView, document: NSView, clipView: NSClipView) {
+            guard !isLiveUserScroll else { return }
+            // Before the first layout pass the document has no height yet;
+            // clamping then would yank the view to the top.
+            guard document.frame.height > 0 else { return }
+            let maxOffset = max(0, document.frame.height - clipView.bounds.height)
+            let origin = clipView.bounds.origin
+            let clampedY: CGFloat
+            if document.isFlipped {
+                // Beyond the bottom is the blank-space case; above the top is
+                // elastic overscroll, which AppKit settles itself.
+                guard origin.y > maxOffset + Self.clampTolerance else { return }
+                clampedY = maxOffset
+            } else {
+                guard origin.y < -Self.clampTolerance else { return }
+                clampedY = 0
+            }
+            clipView.scroll(to: NSPoint(x: origin.x, y: clampedY))
+            scrollView.reflectScrolledClipView(clipView)
+        }
+
+        /// A hair of slack so a sub-point rounding difference isn't a clamp.
+        private static let clampTolerance: CGFloat = 1
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(isAtBottom: $isAtBottom, isProgrammaticScroll: isProgrammaticScroll)
+        Coordinator(
+            isAtBottom: $isAtBottom,
+            isProgrammaticScroll: isProgrammaticScroll,
+            userIsScrolling: userIsScrolling
+        )
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -1648,10 +1851,11 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.isAtBottom = $isAtBottom
         context.coordinator.isProgrammaticScroll = isProgrammaticScroll
+        context.coordinator.userIsScrolling = userIsScrolling
         context.coordinator.attach(to: nsView)
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        NotificationCenter.default.removeObserver(coordinator)
+        coordinator.detach()
     }
 }
