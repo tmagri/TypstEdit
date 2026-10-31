@@ -65,6 +65,10 @@ final class AIChatManager: ObservableObject {
     }
     @Published private(set) var runningTool: RunningTool?
     @Published private(set) var pendingApproval: PendingApproval?
+    /// The question set the assistant is waiting on (`ask_question`). Non-nil
+    /// only while a question card is on screen; the tool call stays suspended
+    /// until it is answered or dismissed, so the run resumes in place.
+    @Published private(set) var pendingQuestion: PendingQuestion?
     @Published private(set) var scopeLabel: String = "Standalone — no file tools available"
     @Published var errorMessage: String?
 
@@ -153,6 +157,9 @@ final class AIChatManager: ObservableObject {
     /// The document in the active editor tab, if any.
     private var openFileURL: URL?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
+    /// The suspended `ask_question` call. Cancelled (resumed with a dismissal)
+    /// by `stop()`, a scope change, or the card's own buttons.
+    private var questionContinuation: CheckedContinuation<[UUID: AgentQuestionAnswer]?, Never>?
     /// The child task running the current generation turn (model request,
     /// tool loop, any subagent) — created in `sendMessage` so `stop()` can
     /// cancel it and every layer in the chain can observe `Task.isCancelled`.
@@ -292,10 +299,14 @@ final class AIChatManager: ObservableObject {
         if newScope != localTools.scope {
             // This conversation is being viewed against a different scope
             // than it was written in (e.g. its folder was reopened after a
-            // standalone stretch) — an approval from the old scope is moot.
+            // standalone stretch) — an approval from the old scope is moot,
+            // and a question asked about it is stale.
             approvalContinuation?.resume(returning: false)
             approvalContinuation = nil
             pendingApproval = nil
+            questionContinuation?.resume(returning: nil)
+            questionContinuation = nil
+            pendingQuestion = nil
             localTools.scope = newScope
             scopeLabel = newScope.label
         }
@@ -678,10 +689,16 @@ final class AIChatManager: ObservableObject {
         }
         // Plan mode strips every mutating tool from what the model is
         // offered (the checklist and the read-only subagent stay), so the
-        // turn can't touch files even if the model wanted to.
+        // turn can't touch files even if the model wanted to. The question
+        // tool rides along in both modes when opted into: it mutates
+        // nothing, and planning is exactly where it earns its keep.
+        var harnessTools = [AgentHarnessTools.updatePlanTool, AgentHarnessTools.delegateTaskTool]
+        if AISettingsManager.shared.chatAskQuestionEnabled {
+            harnessTools.append(AgentHarnessTools.askQuestionTool)
+        }
         let builtInTools = localTools.toolDescriptors()
             + GitTools.descriptors(permissions: AISettingsManager.shared.chatGitPermissions)
-            + [AgentHarnessTools.updatePlanTool, AgentHarnessTools.delegateTaskTool]
+            + harnessTools
         let tools = (planMode ? Self.descriptorsForPlanMode(builtInTools) : builtInTools) + mcpTools
         // For argument repair (opencode's tool-input-repair): the schema
         // tells the repairer which fields are numbers, booleans, objects.
@@ -960,6 +977,11 @@ final class AIChatManager: ObservableObject {
         generationTask?.cancel()
         if approvalContinuation != nil {
             resolveApproval(approved: false)
+        }
+        // A question card suspended the run; Stop must not leave it on screen
+        // waiting for an answer to a request that is already cancelled.
+        if questionContinuation != nil {
+            dismissQuestion()
         }
     }
 
@@ -1762,7 +1784,19 @@ final class AIChatManager: ObservableObject {
                 return await self.requestApproval(kind, toolCallName: qualifiedName)
             }
         }
-        return try await MCPManager.shared.callTool(serverName: namespace, toolName: toolName, arguments: arguments)
+        // A user-configured MCP server's output is the same risk as a Python
+        // script's: one call can return a whole document. Same bound, same
+        // retained file, so the rest stays reachable with read_file.
+        let output = try await MCPManager.shared.callTool(
+            serverName: namespace,
+            toolName: toolName,
+            arguments: arguments
+        )
+        return ToolOutputStore.truncate(
+            output,
+            scope: localTools.scope,
+            toolName: "\(namespace)-\(toolName)"
+        )
     }
 
     // MARK: - Agent-Level Tools
@@ -1807,8 +1841,87 @@ final class AIChatManager: ObservableObject {
             let findings = try await runSubagent(task: task, files: files)
             return "Subagent findings:\n\n\(findings)"
 
+        case "ask_question":
+            let questions = Self.parseQuestions(arguments)
+            guard !questions.isEmpty else {
+                throw LocalToolError.invalidArguments(
+                    "questions must contain at least one {question: …} entry."
+                )
+            }
+            guard let answers = await requestQuestionAnswers(questions) else {
+                return PendingQuestion.dismissedText(questions: questions)
+            }
+            return PendingQuestion.resultText(questions: questions, answers: answers)
+
         default:
             throw LocalToolError.invalidArguments("Unknown agent tool '\(toolName)'")
+        }
+    }
+
+    /// Reads the `ask_question` argument shape. Tolerant on purpose: a model
+    /// that omits `header` or sends `options` as bare strings still gets a
+    /// usable card instead of an error that wastes the call.
+    nonisolated static func parseQuestions(_ arguments: [String: Any]) -> [AgentQuestion] {
+        let raw = arguments["questions"] as? [[String: Any]] ?? []
+        return raw.compactMap { entry -> AgentQuestion? in
+            guard let text = (entry["question"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+            let header = (entry["header"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let options = (entry["options"] as? [Any] ?? []).compactMap { option -> AgentQuestionOption? in
+                if let label = option as? String {
+                    let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty ? nil : AgentQuestionOption(label: trimmed)
+                }
+                guard let object = option as? [String: Any],
+                      let label = (object["label"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !label.isEmpty else { return nil }
+                let detail = (object["detail"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return AgentQuestionOption(label: label, detail: (detail?.isEmpty ?? true) ? nil : detail)
+            }
+            return AgentQuestion(
+                question: text,
+                header: header?.isEmpty ?? true ? "Question" : header!,
+                options: options,
+                multiple: (entry["multiple"] as? Bool) ?? false
+            )
+        }
+    }
+
+    /// Records the choice for one question. Called from the card; the card
+    /// stays up until every question is answered or the user sends it.
+    func setQuestionAnswer(_ answer: AgentQuestionAnswer) {
+        guard var pending = pendingQuestion else { return }
+        pending.answers[answer.questionID] = answer
+        pendingQuestion = pending
+    }
+
+    /// Hands the accumulated answers back to the suspended tool call and
+    /// resumes the run. Questions the user left untouched come back as
+    /// "Unanswered" so the model knows they were considered and refused.
+    func submitQuestionAnswers() {
+        guard let pending = pendingQuestion else { return }
+        pendingQuestion = nil
+        questionContinuation?.resume(returning: pending.answers)
+        questionContinuation = nil
+    }
+
+    /// Dismisses the card without answering. The model is told to proceed on
+    /// a stated assumption rather than being left to guess, and the run
+    /// continues — a dismissed question must not cost the whole turn.
+    func dismissQuestion() {
+        pendingQuestion = nil
+        questionContinuation?.resume(returning: nil)
+        questionContinuation = nil
+    }
+
+    /// Suspends the `ask_question` tool call until the card is answered or
+    /// dismissed. Returns nil for a dismissal.
+    private func requestQuestionAnswers(_ questions: [AgentQuestion]) async -> [UUID: AgentQuestionAnswer]? {
+        pendingQuestion = PendingQuestion(questions: questions, toolCallName: "ask_question")
+        return await withCheckedContinuation { continuation in
+            questionContinuation = continuation
         }
     }
 

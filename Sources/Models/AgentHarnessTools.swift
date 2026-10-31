@@ -63,6 +63,48 @@ enum AgentHarnessTools {
         ]
     ) }
 
+    /// Asks the user a structured question and waits for the answer in place,
+    /// instead of ending the turn and hoping the reply covers it. Only offered
+    /// while Settings → AI Chat → Ask Questions is on, since a question blocks
+    /// the run until someone answers — the wrong default for an unattended
+    /// job, but a good one while planning.
+    static var askQuestionTool: MCPTool { MCPTool(
+        serverName: namespace,
+        name: "ask_question",
+        description: "Ask the user one or more questions and wait for the answers before continuing. Use it when a decision would otherwise be a guess: which of several structures they want, what a vague requirement means, or which of two conflicting instructions wins. Prefer it over asking in your reply, because the run resumes with the answer attached instead of ending. Keep it to what blocks you — a question costs the user's attention. The user can always type an answer that isn't in your options, and can dismiss the whole card, in which case you should proceed on a stated assumption. Do not use it to confirm something you were already asked to do.",
+        inputSchema: [
+            "type": "object",
+            "properties": [
+                "questions": [
+                    "type": "array",
+                    "description": "One or more questions to ask at once. Asking them together is cheaper than several rounds.",
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "question": ["type": "string", "description": "The question itself, in one sentence."],
+                            "header": ["type": "string", "description": "Two or three words naming the topic, shown as the card's title."],
+                            "options": [
+                                "type": "array",
+                                "description": "Suggested answers. If you recommend one, put it first and end its label with \" (Recommended)\".",
+                                "items": [
+                                    "type": "object",
+                                    "properties": [
+                                        "label": ["type": "string", "description": "The answer, as short text."],
+                                        "detail": ["type": "string", "description": "Optional one line on what choosing this means."]
+                                    ],
+                                    "required": ["label"]
+                                ]
+                            ],
+                            "multiple": ["type": "boolean", "description": "Allow more than one option to be chosen. Default false."]
+                        ],
+                        "required": ["question"]
+                    ]
+                ]
+            ],
+            "required": ["questions"]
+        ]
+    ) }
+
     /// Rebuilds the plan from the most recent `update_plan` tool call in a
     /// persisted transcript, so the checklist survives app restarts without
     /// a second storage format.

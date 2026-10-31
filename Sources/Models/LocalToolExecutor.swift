@@ -10,7 +10,10 @@ enum LocalToolError: LocalizedError {
     case invalidArguments(String)
     case fileNotReadYet(String, tool: String)
     case fileChangedSinceRead(String)
-    case editNoMatch(String, tool: String)
+    /// `hints` carries the file's closest lines, or a note that the change is
+    /// already there, so the model can correct itself in one call instead of
+    /// re-reading the whole file to find out what it got wrong.
+    case editNoMatch(String, tool: String, hints: [String] = [])
     case editAmbiguous(String, count: Int)
     case sandboxUnavailable
 
@@ -27,8 +30,13 @@ enum LocalToolError: LocalizedError {
             return "'\(path)' hasn't been read in this request yet. Call read_file on it first, then retry \(tool)."
         case .fileChangedSinceRead(let path):
             return "'\(path)' changed on disk since it was last read. Read it again before editing, so you're not working from stale content."
-        case .editNoMatch(let path, let tool):
-            return "old_string was not found in '\(path)'. \(tool) needs an exact match, including indentation and punctuation — re-read the region and copy it verbatim."
+        case .editNoMatch(let path, let tool, let hints):
+            var message = "old_string was not found in '\(path)'. \(tool) needs an exact match, including indentation and punctuation — re-read the region and copy it verbatim."
+            if !hints.isEmpty {
+                message += "\n\nThe closest lines in the file are:\n" + hints.joined(separator: "\n")
+                message += "\n\nIf one of those is the text you meant, copy it exactly from there (or from a fresh read_file) and retry."
+            }
+            return message
         case .editAmbiguous(let path, let count):
             return "old_string matches \(count) places in '\(path)'. Include more surrounding context so it identifies exactly one spot, or pass replace_all: true if you really mean every occurrence."
         case .sandboxUnavailable:
@@ -870,38 +878,79 @@ final class LocalToolExecutor {
         let oldNormalized = oldString.replacingOccurrences(of: "\r\n", with: "\n")
         let newNormalized = newString.replacingOccurrences(of: "\r\n", with: "\n")
 
-        let occurrences = Self.occurrenceCount(of: oldNormalized, in: normalized)
-        guard occurrences > 0 else {
-            throw LocalToolError.editNoMatch(path, tool: "edit_file")
+        // Two tiers, per opencode's edit: an exact search first (cheap and
+        // unambiguous), then a line-based one that ignores trailing
+        // whitespace and typographic variants — the usual reason a model
+        // misses is that it quoted a curly dash or a smart quote out of
+        // rendered text where the source has ASCII. The loose tier runs
+        // against the file's *original* text so the line endings it sees are
+        // the real ones; the exact tier keeps working on the LF copy.
+        let exactRanges = TolerantTextMatch.findExact(oldNormalized, in: normalized)
+        let matchedLoosely = exactRanges.isEmpty
+        let ranges = matchedLoosely
+            ? TolerantTextMatch.findLineBased(oldNormalized, in: decoded.text)
+            : exactRanges
+        guard !ranges.isEmpty else {
+            throw LocalToolError.editNoMatch(
+                path,
+                tool: "edit_file",
+                hints: TolerantTextMatch.alreadyPresent(replacementFirstLines: newNormalized, in: normalized)
+                    ? ["That change appears to already be in the file — the text you asked for is there now. Read the region again to see what is left to do."]
+                    : TolerantTextMatch.closestLines(to: oldNormalized, in: normalized)
+            )
         }
+        let occurrences = ranges.count
         guard occurrences == 1 || replaceAll else {
             throw LocalToolError.editAmbiguous(path, count: occurrences)
         }
 
-        let updatedNormalized: String
+        // A loose match found whole lines, so the replacement is re-joined
+        // with the matched region's own endings — a file that mixes `\n` and
+        // `\r\n` keeps every untouched line's bytes exact. An exact match is
+        // already byte-identical, so it just splices the text as written and
+        // the global ending restore below puts the file back as it was.
+        let working = matchedLoosely ? decoded.text : normalized
+        func replacement(for range: Range<String.Index>) -> String {
+            guard matchedLoosely else { return newNormalized }
+            return TolerantTextMatch.reconcileEndings(
+                region: String(decoded.text[range]),
+                replacement: newNormalized,
+                fallback: usesCRLF ? "\r\n" : "\n"
+            )
+        }
+
+        // Splice back to front so earlier ranges keep their indices.
+        var updated: String
         if replaceAll {
-            updatedNormalized = normalized.replacingOccurrences(of: oldNormalized, with: newNormalized)
-        } else if let range = normalized.range(of: oldNormalized) {
-            updatedNormalized = normalized.replacingCharacters(in: range, with: newNormalized)
+            updated = working
+            for range in ranges.reversed() {
+                updated.replaceSubrange(range, with: replacement(for: range))
+            }
         } else {
-            throw LocalToolError.editNoMatch(path, tool: "edit_file")
+            updated = working.replacingCharacters(in: ranges[0], with: replacement(for: ranges[0]))
         }
 
         let approved = await requestApproval(.fileEdit(
             relativePath: path,
-            oldSnippet: oldNormalized,
+            oldSnippet: matchedLoosely ? String(decoded.text[ranges[0]]) : oldNormalized,
             newSnippet: newNormalized,
             occurrences: occurrences
         ))
         guard approved else { throw LocalToolError.approvalDenied }
 
-        let finalText = usesCRLF ? updatedNormalized.replacingOccurrences(of: "\n", with: "\r\n") : updatedNormalized
+        // A loose match already carries the file's own endings; an exact one
+        // was spliced into the LF copy and needs the file's style restored.
+        let finalText = matchedLoosely ? updated : (usesCRLF ? updated.replacingOccurrences(of: "\n", with: "\r\n") : updated)
+
         try Self.write(text: finalText, to: url, originalData: data, encoding: decoded.encoding)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
         Self.notifyFileChangedOnDisk(url)
 
         let what = occurrences == 1 ? "1 place" : "\(occurrences) places"
-        let summary = "Edited '\(path)': replaced \(what) with \(newNormalized.count) character\(newNormalized.count == 1 ? "" : "s") of new text."
+        var summary = "Edited '\(path)': replaced \(what) with \(newNormalized.count) character\(newNormalized.count == 1 ? "" : "s") of new text."
+        if matchedLoosely {
+            summary += " (Matched on whole lines, ignoring trailing whitespace and differences in quotes or dashes.)"
+        }
         return summary + (await validationNote(for: url, path: path))
     }
 
@@ -1664,7 +1713,12 @@ final class LocalToolExecutor {
         }
 
         if timedOut {
-            return "Python script timed out after 20 seconds and was terminated.\nPartial stdout:\n\(outText)"
+            let partial = ToolOutputStore.truncate(
+                outText,
+                scope: scope,
+                toolName: "python-run-timeout"
+            )
+            return "Python script timed out after 20 seconds and was terminated.\nPartial stdout:\n\(partial)"
         }
 
         var result = outText
@@ -1674,7 +1728,9 @@ final class LocalToolExecutor {
         if pythonSandboxEnabled {
             result += (result.isEmpty ? "" : "\n") + "Sandboxed run: network denied; writable scratch folder was \(scratchDir.path)."
         }
-        return result.isEmpty ? "(no output)" : result
+        return result.isEmpty
+            ? "(no output)"
+            : ToolOutputStore.truncate(result, scope: scope, toolName: "python-run")
     }
 
     private static var sandboxExecPath: String? {

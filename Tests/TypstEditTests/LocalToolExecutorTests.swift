@@ -261,6 +261,126 @@ final class LocalToolExecutorTests: XCTestCase {
         }
     }
 
+    func testEditMissingTextPointsAtTheClosestLines() async throws {
+        try write("doc.typ", "# Intro\nThis is the opening paragraph.\n# Results\n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+
+        var thrown: LocalToolError?
+        do {
+            _ = try await run("edit_file", [
+                "path": "doc.typ",
+                "old_string": "This is the opening paragraf.",
+                "new_string": "This is the opening paragraph!"
+            ])
+        } catch let error as LocalToolError {
+            thrown = error
+        }
+
+        guard case .editNoMatch(_, _, let hints)? = thrown else {
+            return XCTFail("expected .editNoMatch, got \(String(describing: thrown))")
+        }
+        XCTAssertTrue(
+            hints.contains { $0.hasPrefix("2: ") && $0.contains("opening paragraph") },
+            "expected a hint pointing at line 2, got \(hints)"
+        )
+        XCTAssertEqual(try read("doc.typ"), "# Intro\nThis is the opening paragraph.\n# Results\n")
+    }
+
+    func testEditAlreadyAppliedSaysSo() async throws {
+        try write("doc.typ", "one\nnew text\nthree\n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+
+        var thrown: LocalToolError?
+        do {
+            _ = try await run("edit_file", [
+                "path": "doc.typ", "old_string": "one\nold text", "new_string": "new text"
+            ])
+        } catch let error as LocalToolError {
+            thrown = error
+        }
+
+        guard case .editNoMatch(_, _, let hints)? = thrown else {
+            return XCTFail("expected .editNoMatch, got \(String(describing: thrown))")
+        }
+        XCTAssertTrue(
+            hints.contains { $0.contains("already be in the file") },
+            "expected an already-applied hint, got \(hints)"
+        )
+    }
+
+    /// The case this tier exists for: the model typed a sentence it saw
+    /// rendered — curly quotes and an em dash — where the source has ASCII.
+    func testEditMatchesTypographicVariants() async throws {
+        try write("doc.typ", "The editor said \"no\" - clearly.\n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+
+        let out = try await run("edit_file", [
+            "path": "doc.typ",
+            "old_string": "The editor said \u{201C}no\u{201D} \u{2014} clearly.",
+            "new_string": "The editor said \"yes\" - clearly."
+        ])
+        XCTAssertTrue(out.contains("Matched on whole lines"), out)
+        XCTAssertEqual(try read("doc.typ"), "The editor said \"yes\" - clearly.\n")
+    }
+
+    func testEditLooseMatchIgnoresTrailingWhitespace() async throws {
+        try write("doc.typ", "alpha   \nbeta\t\n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+
+        _ = try await run("edit_file", ["path": "doc.typ", "old_string": "alpha\nbeta", "new_string": "alpha\nBETA"])
+        XCTAssertEqual(try read("doc.typ"), "alpha   \nBETA\n")
+    }
+
+    /// A loose match splices with the *file's* endings, so a CRLF file stays
+    /// CRLF even though the model wrote bare "\n".
+    func testEditLooseMatchPreservesCRLF() async throws {
+        let url = workDir.appendingPathComponent("crlf.typ")
+        try Data("one \u{201C}quoted\u{201D}\r\ntwo\r\n".utf8).write(to: url)
+
+        _ = try await run("read_file", ["path": "crlf.typ"])
+        _ = try await run("edit_file", [
+            "path": "crlf.typ", "old_string": "one \"quoted\"\ntwo", "new_string": "one \"quoted\"\nTWO"
+        ])
+
+        let data = try Data(contentsOf: url)
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "one \u{201C}quoted\u{201D}\r\nTWO\r\n")
+    }
+
+    func testEditLooseMatchStillRejectsAmbiguity() async throws {
+        try write("doc.typ", "same   \nmiddle\nsame   \n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+
+        await assertThrows({ if case .editAmbiguous(_, let count) = $0 { return count == 2 }; return false }) {
+            try await self.run("edit_file", ["path": "doc.typ", "old_string": "same", "new_string": "other"])
+        }
+        XCTAssertEqual(try read("doc.typ"), "same   \nmiddle\nsame   \n")
+    }
+
+    func testEditLooseMatchHonoursReplaceAll() async throws {
+        // An em dash in the file where the model typed a hyphen forces the
+        // loose tier, so replace_all is exercised there rather than exactly.
+        try write("doc.typ", "same\u{2014}one   \nmiddle\nsame\u{2014}one   \n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+
+        _ = try await run("edit_file", [
+            "path": "doc.typ", "old_string": "same-one", "new_string": "other", "replace_all": true
+        ])
+        XCTAssertEqual(try read("doc.typ"), "other\nmiddle\nother\n")
+    }
+
+    /// The exact tier still wins when it can: replacing one word must not
+    /// rewrite the rest of the line, including whitespace the model omitted.
+    func testExactMatchLeavesSurroundingWhitespaceAlone() async throws {
+        try write("doc.typ", "same   \nmiddle\nsame   \n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+
+        let out = try await run("edit_file", [
+            "path": "doc.typ", "old_string": "same", "new_string": "other", "replace_all": true
+        ])
+        XCTAssertFalse(out.contains("Matched on whole lines"), out)
+        XCTAssertEqual(try read("doc.typ"), "other   \nmiddle\nother   \n")
+    }
+
     func testFileChangedSinceReadIsDetected() async throws {
         let url = try write("doc.typ", "alpha\n")
         _ = try await run("read_file", ["path": "doc.typ"])

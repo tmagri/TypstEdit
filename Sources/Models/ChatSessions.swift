@@ -195,6 +195,12 @@ final class AIChatSessionStore: ObservableObject {
         scope = newScope
         migrateLegacyIfNeeded()
         sessions = Self.loadIndex(from: recordDirectory.map(Self.indexURL(in:)))
+        // Retained tool outputs live in the scope's own `.typstedit/`, so a
+        // project's stale ones are pruned when it is opened — the only moment
+        // the app knows that folder exists and is safe to touch.
+        if let scopeRoot = newScope.root {
+            ToolOutputStore.pruneStale(scopeRoots: [scopeRoot])
+        }
 
         if let latest = sessions.first {
             activate(latest.id)

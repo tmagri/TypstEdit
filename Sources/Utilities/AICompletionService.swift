@@ -681,16 +681,24 @@ class AICompletionService: ObservableObject {
         // The last cap the provider accepted, to fall back to if it rejects
         // a raised one.
         var acceptedReplyTokens = maxTokens
+        // The prompt budget for this request. It starts at the caller's budget
+        // and shrinks when a provider rejects the prompt as too long — the
+        // estimate behind the caller's number is a byte count, so a model with
+        // a different tokenizer, or a provider that counts tool schemas and
+        // images, can refuse a prompt that looked like it fit.
+        var effectiveCharBudget = contextCharBudget
+        // How many shrink steps have been spent recovering from that.
+        var overflowAttempt = 0
 
         var turn = 0
         while true {
             // A cancelled task (the chat's Stop button) unwinds here instead
             // of burning another model request.
             try Task.checkCancellation()
-            if let contextCharBudget {
+            if let budget = effectiveCharBudget {
                 await Self.elideOldToolOutputs(
                     in: &messages,
-                    charBudget: contextCharBudget,
+                    charBudget: budget,
                     compressor: compression?.compressor,
                     keepRate: compression?.keepRate ?? 0.5
                 )
@@ -707,10 +715,17 @@ class AICompletionService: ObservableObject {
                     ])
                 }
                 do {
-                    (step, stepMeta) = try await requestChatStep(ctx: ctx, messages: messages, tools: tools, maxTokens: replyTokens, reasoningDelta: { text in
-                        attemptReasoning += text
-                        onReasoningDelta?(text)
-                    })
+                    (step, stepMeta) = try await requestChatStep(
+                        ctx: ctx,
+                        messages: messages,
+                        tools: tools,
+                        maxTokens: replyTokens,
+                        reasoningDelta: { text in
+                            attemptReasoning += text
+                            onReasoningDelta?(text)
+                        },
+                        onStatus: { line in onStatus?(line) }
+                    )
                     if AgentTrace.isEnabled {
                         Self.traceStep(step, meta: stepMeta, turn: turn, seconds: Date().timeIntervalSince(requestStart), streamedReasoningChars: attemptReasoning.count)
                     }
@@ -723,6 +738,31 @@ class AICompletionService: ObservableObject {
                     AgentTrace.log("token_cap_rejected", ["turn": turn, "maxTokens": replyTokens, "message": AgentTrace.preview(message)])
                     replyTokens = acceptedReplyTokens
                     replyTokenCeiling = acceptedReplyTokens
+                } catch AIError.apiError(let message) where Self.isContextOverflowMessage(message)
+                            && overflowAttempt < Self.contextOverflowShrinkSteps.count {
+                    // The provider refused the prompt as too long. The chat's
+                    // own budget estimate is a byte count, so it can be wrong
+                    // by a wide margin for a different tokenizer, or for a
+                    // provider that counts tool schemas and images too. Rather
+                    // than failing the turn with a message the user can't act
+                    // on, send less: shrink the prompt budget and try again.
+                    let step = Self.contextOverflowShrinkSteps[overflowAttempt]
+                    overflowAttempt += 1
+                    AgentTrace.log("context_overflow", [
+                        "turn": turn, "attempt": overflowAttempt,
+                        "chars": Self.totalChars(messages),
+                        "from": effectiveCharBudget ?? 0,
+                        "step": step
+                    ])
+                    let current = effectiveCharBudget ?? Self.totalChars(messages)
+                    effectiveCharBudget = max(2_000, Int(Double(current) * step))
+                    onStatus?(Self.contextOverflowStatusLine(
+                        attempt: overflowAttempt,
+                        total: Self.contextOverflowShrinkSteps.count
+                    ))
+                    // The prompt is rebuilt at the top of the loop, where the
+                    // elision pass picks up the smaller budget.
+                    continue
                 } catch AIError.stalledResponse(let idleSeconds, let timeoutSeconds) {
                     AgentTrace.log("stall", ["turn": turn, "idleSeconds": idleSeconds, "attempt": autoContinues + 1])
                     // The stream went silent past the stall window and the
@@ -909,17 +949,31 @@ class AICompletionService: ObservableObject {
                         messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: note)))
                         continue
                     }
-                    if let refusal = repeatGuard.refusal(name: call.name, argumentsJSON: call.argumentsJSON) {
-                        AgentTrace.log("tool_refused", ["turn": turn, "name": call.name, "args": AgentTrace.preview(call.argumentsJSON)])
-                        onToolRefused?(call.name, call.argumentsJSON, refusal)
-                        messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: refusal)))
+                    // A model that knows `bash` or `todo_write` from another
+                    // harness will sometimes call them here. Run the closest
+                    // real tool and say which one ran, so the next call uses
+                    // the right name instead of discovering it by failing.
+                    let resolvedName = ToolAliases.resolve(
+                        call.name,
+                        against: tools.map(\.qualifiedName)
+                    )
+                    let executedName = resolvedName ?? call.name
+                    if let resolvedName {
+                        AgentTrace.log("tool_alias", [
+                            "turn": turn, "called": call.name, "ran": resolvedName
+                        ])
+                    }
+                    if let refusal = repeatGuard.refusal(name: executedName, argumentsJSON: call.argumentsJSON) {
+                        AgentTrace.log("tool_refused", ["turn": turn, "name": executedName, "args": AgentTrace.preview(call.argumentsJSON)])
+                        onToolRefused?(executedName, call.argumentsJSON, refusal)
+                        messages.append(.toolResult(AIToolResult(callID: call.id, name: executedName, output: refusal)))
                         continue
                     }
-                    onToolCall(call.name, call.argumentsJSON)
+                    onToolCall(executedName, call.argumentsJSON)
                     let toolStart = Date()
                     var output: String
                     do {
-                        output = try await executeTool(call.name, call.argumentsJSON)
+                        output = try await executeTool(executedName, call.argumentsJSON)
                     } catch {
                         // A cancelled task must unwind the whole loop, not be
                         // folded into an "Error: …" result the model would
@@ -927,16 +981,21 @@ class AICompletionService: ObservableObject {
                         if Task.isCancelled { throw CancellationError() }
                         output = "Error: \(error.localizedDescription)"
                     }
-                    output = repeatGuard.record(name: call.name, argumentsJSON: call.argumentsJSON, output: output)
+                    // The redirect note rides on a successful result only: a
+                    // failure's own message is what the model needs to act on.
+                    if let resolvedName, !output.hasPrefix("Error: ") {
+                        output = ToolAliases.redirectNote(called: call.name, ran: resolvedName) + "\n\n" + output
+                    }
+                    output = repeatGuard.record(name: executedName, argumentsJSON: call.argumentsJSON, output: output)
                     if AgentTrace.isEnabled {
                         AgentTrace.log("tool", [
-                            "turn": turn, "name": call.name, "args": AgentTrace.preview(call.argumentsJSON),
+                            "turn": turn, "name": executedName, "args": AgentTrace.preview(call.argumentsJSON),
                             "argsChars": call.argumentsJSON.count, "outputChars": output.count,
                             "output": AgentTrace.preview(output, max: 200),
                             "seconds": Date().timeIntervalSince(toolStart)
                         ])
                     }
-                    messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
+                    messages.append(.toolResult(AIToolResult(callID: call.id, name: executedName, output: output)))
                 }
 
                 // Steering notes ride on the round's last tool result, which
@@ -1214,6 +1273,78 @@ class AICompletionService: ObservableObject {
         let lower = message.lowercased()
         return ["max_tokens", "max_completion_tokens", "max tokens", "maximum tokens", "output tokens", "max_output_tokens"]
             .contains { lower.contains($0) }
+    }
+
+    // MARK: - Context Overflow Recovery
+
+    /// Fraction of the current budget attempted after each "too long"
+    /// rejection. Modeled on opencode's `SHRINK_STEPS`: the first retry aims
+    /// just below the size that was refused (so most of the conversation and
+    /// its cache prefix survive), and only a provider that rejects again and
+    /// again pushes the budget down hard.
+    nonisolated static let contextOverflowShrinkSteps: [Double] = [0.85, 0.7, 0.5, 0.35]
+
+    /// Messages that mean "the request was too big for this model", which
+    /// compaction can fix by *sending less*. Kept separate from a plain
+    /// request error because the recovery is completely different: shrink and
+    /// retry, rather than surface.
+    ///
+    /// The patterns are the shapes providers actually emit (a lean port of
+    /// opencode's `provider-error` list); the exclusions matter just as much,
+    /// because a rate limit phrased as "too many tokens" is a 429 to wait on,
+    /// not a prompt to shrink.
+    nonisolated static func isContextOverflowMessage(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        let exclusions = [
+            "throttling error",
+            "rate limit",
+            "too many requests",
+            "max_tokens must be less than",
+            "too many tokens, please wait",
+            "too many tokens per day"
+        ]
+        guard !exclusions.contains(where: { lower.contains($0) }) else { return false }
+
+        let patterns = [
+            "prompt is too long",
+            "input is too long for",
+            "exceeds the context window",
+            "context window exceeded",
+            "context window exceeds limit",
+            "exceeded this model context window limit",
+            "maximum context length",
+            "context length exceeded",
+            "context length is only",
+            "context_length_exceeded",
+            "input length exceeds context length",
+            "input length .* exceeds maximum input length",
+            "exceeded model token limit",
+            "number of input tokens exceeds maximum length",
+            "tokens in request more than max tokens allowed",
+            "input token count .* exceeds the maximum",
+            "maximum prompt length is",
+            "reduce the length of the messages",
+            "requested input length .* exceeds maximum input length",
+            "exceeds the maximum allowed input length",
+            "is longer than the model's context length",
+            "exceeds the available context size",
+            "greater than the context length",
+            "inputs .* tokens .* max_new_tokens",
+            "prompt too long",
+            "prompt exceeds max length",
+            "too large for model with .* maximum context length",
+            "model_context_window_exceeded",
+            "range of input length should be",
+            "too many tokens",
+            "token limit exceeded",
+            "request_too_large"
+        ]
+        return patterns.contains { lower.contains($0) || lower.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    /// What the chat's status line says while it re-sends a smaller prompt.
+    nonisolated static func contextOverflowStatusLine(attempt: Int, total: Int) -> String {
+        "The prompt was too long for this model — trimming and retrying (\(attempt) of \(total))…"
     }
 
     nonisolated static func tokenLimitRetryStatusLine(from previous: Int, to next: Int) -> String {
@@ -1671,7 +1802,20 @@ class AICompletionService: ObservableObject {
     /// `reasoningDelta` is non-nil the request is made with `"stream": true`
     /// and parsed event-by-event, forwarding reasoning fragments as they
     /// arrive; the returned step is the same either way.
-    private func requestChatStep(ctx: ModelContext, messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int, reasoningDelta: (@MainActor (String) -> Void)? = nil) async throws -> (AIChatStep, AIChatStepMeta) {
+    ///
+    /// Retries are confined to the window where nothing has been shown yet:
+    /// a connection failure, or a retryable status (429, 408, 5xx) on the
+    /// response. Once tokens have streamed, re-sending would duplicate output,
+    /// so a mid-stream failure falls through to the stall/auto-continue path
+    /// instead.
+    private func requestChatStep(
+        ctx: ModelContext,
+        messages: [AIChatMessage],
+        tools: [MCPTool],
+        maxTokens: Int,
+        reasoningDelta: (@MainActor (String) -> Void)? = nil,
+        onStatus: (@MainActor (String?) -> Void)? = nil
+    ) async throws -> (AIChatStep, AIChatStepMeta) {
         let settings = AISettingsManager.shared
         guard let url = URL(string: ctx.chatEndpoint) else { throw AIError.invalidURL }
 
@@ -1689,84 +1833,179 @@ class AICompletionService: ObservableObject {
             ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, reasoningEffort: ctx.reasoningEffort)
             : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter, reasoningEffort: ctx.reasoningEffort)
 
-        if !streaming {
-            let data: Data
-            let response: URLResponse
+        let retries = ModelRetryPolicy.effectiveRetries(settings.chatTransportRetries)
+        // 0-based: `attempt` counts retries already spent, so `attempt < retries`
+        // means "another one is allowed".
+        var attempt = 0
+
+        while true {
+            if !streaming {
+                let data: Data
+                let response: URLResponse
+                do {
+                    (data, response) = try await URLSession.shared.data(for: request)
+                } catch let error as URLError where error.code == .timedOut {
+                    // No complete reply within the request timeout — funnel into
+                    // the same stall recovery as the streaming path below, so a
+                    // hung server costs a continue attempt instead of the turn.
+                    throw AIError.stalledResponse(
+                        idleSeconds: Int(settings.timeoutSeconds),
+                        timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
+                    )
+                } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) && attempt < retries {
+                    if Task.isCancelled { throw CancellationError() }
+                    attempt += 1
+                    try await Self.waitBeforeRetry(
+                        attempt: attempt,
+                        retries: retries,
+                        retryAfter: nil,
+                        reason: "The connection to the provider failed",
+                        onStatus: onStatus
+                    )
+                    continue
+                } catch {
+                    // A cancelled task can surface as an arbitrary URLSession
+                    // error; normalize it so callers can tell a user-initiated
+                    // stop apart from a real failure.
+                    if Task.isCancelled { throw CancellationError() }
+                    throw error
+                }
+                guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
+
+                guard httpResponse.statusCode == 200 else {
+                    if ModelRetryPolicy.isRetryable(status: httpResponse.statusCode), attempt < retries {
+                        attempt += 1
+                        try await Self.waitBeforeRetry(
+                            attempt: attempt,
+                            retries: retries,
+                            retryAfter: ModelRetryPolicy.retryAfter(from: httpResponse),
+                            reason: ModelRetryPolicy.reason(forStatus: httpResponse.statusCode),
+                            onStatus: onStatus
+                        )
+                        continue
+                    }
+                    throw AIError.apiError(Self.apiErrorMessage(status: httpResponse.statusCode, body: data))
+                }
+
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw AIError.parsingError("Invalid JSON structure returned by provider.")
+                }
+
+                return ctx.isAnthropic ? try Self.parseAnthropicStep(json) : try Self.parseOpenAIStep(json)
+            }
+
+            let (bytes, response): (URLSession.AsyncBytes, URLResponse)
             do {
-                (data, response) = try await URLSession.shared.data(for: request)
+                (bytes, response) = try await URLSession.shared.bytes(for: request)
             } catch let error as URLError where error.code == .timedOut {
-                // No complete reply within the request timeout — funnel into
-                // the same stall recovery as the streaming path below, so a
-                // hung server costs a continue attempt instead of the turn.
+                // The server never even started responding within the request
+                // timeout — same stall recovery as a mid-stream hang.
                 throw AIError.stalledResponse(
                     idleSeconds: Int(settings.timeoutSeconds),
                     timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
                 )
+            } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) && attempt < retries {
+                if Task.isCancelled { throw CancellationError() }
+                attempt += 1
+                try await Self.waitBeforeRetry(
+                    attempt: attempt,
+                    retries: retries,
+                    retryAfter: nil,
+                    reason: "The connection to the provider failed",
+                    onStatus: onStatus
+                )
+                continue
             } catch {
-                // A cancelled task can surface as an arbitrary URLSession
-                // error; normalize it so callers can tell a user-initiated
-                // stop apart from a real failure.
+                // Same normalization as the non-streaming path above.
                 if Task.isCancelled { throw CancellationError() }
                 throw error
             }
             guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
 
             guard httpResponse.statusCode == 200 else {
-                var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                    parsedErrorMsg = msg
+                // Read the (small) error body so streamed failures report the
+                // same clean message the non-streaming path produces.
+                let data = await Self.collectBytes(bytes, upTo: 1 << 20)
+                if ModelRetryPolicy.isRetryable(status: httpResponse.statusCode), attempt < retries {
+                    attempt += 1
+                    try await Self.waitBeforeRetry(
+                        attempt: attempt,
+                        retries: retries,
+                        retryAfter: ModelRetryPolicy.retryAfter(from: httpResponse),
+                        reason: ModelRetryPolicy.reason(forStatus: httpResponse.statusCode),
+                        onStatus: onStatus
+                    )
+                    continue
                 }
-                throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
+                throw AIError.apiError(Self.apiErrorMessage(status: httpResponse.statusCode, body: data))
             }
 
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                throw AIError.parsingError("Invalid JSON structure returned by provider.")
-            }
-
-            return ctx.isAnthropic ? try Self.parseAnthropicStep(json) : try Self.parseOpenAIStep(json)
-        }
-
-        let (bytes, response): (URLSession.AsyncBytes, URLResponse)
-        do {
-            (bytes, response) = try await URLSession.shared.bytes(for: request)
-        } catch let error as URLError where error.code == .timedOut {
-            // The server never even started responding within the request
-            // timeout — same stall recovery as a mid-stream hang.
-            throw AIError.stalledResponse(
-                idleSeconds: Int(settings.timeoutSeconds),
-                timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
+            // Connected with a 200: from here a failure is no longer safe to
+            // retry by re-sending, so hand off to the stall/continue path.
+            return try await Self.consumeStreamingStep(
+                bytes: bytes,
+                ctx: ctx,
+                settings: settings,
+                reasoningDelta: reasoningDelta!
             )
-        } catch {
-            // Same normalization as the non-streaming path above.
-            if Task.isCancelled { throw CancellationError() }
-            throw error
         }
-        guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
+    }
 
-        guard httpResponse.statusCode == 200 else {
-            // Read the (small) error body so streamed failures report the
-            // same clean message the non-streaming path produces.
-            let data = await Self.collectBytes(bytes, upTo: 1 << 20)
-            var parsedErrorMsg = String(data: data, encoding: .utf8) ?? "Unknown Error"
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                parsedErrorMsg = msg
+    /// Sleeps out a retry gap, keeping the chat's status line honest about why
+    /// nothing is arriving.
+    private static func waitBeforeRetry(
+        attempt: Int,
+        retries: Int,
+        retryAfter: TimeInterval?,
+        reason: String,
+        onStatus: (@MainActor (String?) -> Void)?
+    ) async throws {
+        let delay = ModelRetryPolicy.delay(
+            forAttempt: attempt,
+            retryAfter: retryAfter,
+            jitter: Double.random(in: 0.85...1.15)
+        )
+        onStatus?(ModelRetryPolicy.statusLine(attempt: attempt, retries: retries, delay: delay, reason: reason))
+        let nanoseconds = UInt64(max(0, delay) * 1_000_000_000)
+        try await Task.sleep(nanoseconds: nanoseconds)
+        onStatus?(nil)
+    }
+
+    /// A provider error message with the status code kept for diagnostics.
+    /// The body is parsed for the common error shapes; when it has none, the
+    /// status is still the most useful thing to show.
+    private static func apiErrorMessage(status: Int, body: Data) -> String {
+        var message = String(data: body, encoding: .utf8) ?? "Unknown Error"
+        if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                message = msg
+            } else if let errorArray = json["error"] as? [[String: Any]],
+                      let first = errorArray.first, let msg = first["message"] as? String {
+                message = msg
             }
-            throw AIError.apiError("API Error (\(httpResponse.statusCode)): \(parsedErrorMsg)")
         }
+        return "API Error (\(status)): \(message)"
+    }
 
-        // Streaming parse under a stall watchdog. Some local servers stop
-        // emitting tokens mid-reply without ever closing the stream (seen
-        // with large reasoning models like Qwen on slow hardware), which
-        // would otherwise leave the chat panel on "Thinking…" forever. The
-        // parse races a watchdog child task that polls a thread-safe
-        // activity clock — touched on every received SSE line — and throws
-        // `.stalledResponse` once the silence passes the configured stall
-        // window. Losing the race cancels the parse (and with it the
-        // underlying URLSession transfer), and `fetchCompletionWithTools`
+    /// Parses a 200 response's SSE stream, under the stall watchdog. Split
+    /// out of `requestChatStep` so the retry loop above stays readable: this
+    /// part never retries, because tokens may already have reached the user.
+    private static func consumeStreamingStep(
+        bytes: URLSession.AsyncBytes,
+        ctx: ModelContext,
+        settings: AISettingsManager,
+        reasoningDelta: @escaping @MainActor (String) -> Void
+    ) async throws -> (AIChatStep, AIChatStepMeta) {
+        // Some local servers stop emitting tokens mid-reply without ever
+        // closing the stream (seen with large reasoning models like Qwen on
+        // slow hardware), which would otherwise leave the chat panel on
+        // "Thinking…" forever. The parse races a watchdog child task that
+        // polls a thread-safe activity clock — touched on every received SSE
+        // line — and throws `.stalledResponse` once the silence passes the
+        // configured stall window. Losing the race cancels the parse (and with
+        // it the underlying URLSession transfer), and `fetchCompletionWithTools`
         // can auto-continue from there.
-        let stallTimeout = Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds)
+        let stallTimeout = effectiveStallTimeout(from: settings.chatStallTimeoutSeconds)
         let pollNanoseconds: UInt64 = 1_000_000_000
         let isAnthropic = ctx.isAnthropic
         let activity = StreamActivity()
@@ -1791,8 +2030,8 @@ class AICompletionService: ObservableObject {
             }
             group.addTask {
                 try await isAnthropic
-                    ? Self.parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!, onActivity: { activity.touch() })
-                    : Self.parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta!, onActivity: { activity.touch() })
+                    ? parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onActivity: { activity.touch() })
+                    : parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onActivity: { activity.touch() })
             }
             guard let first = try await group.next() else { throw AIError.noData }
             group.cancelAll()

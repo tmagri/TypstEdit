@@ -1284,9 +1284,27 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Stalled Responses & Auto-Continue",
             icon: "hourglass.bottomhalf.filled",
-            description: "Local reasoning models (large Qwen and DeepSeek distills in particular) sometimes go quiet mid-reply — the panel shows \"Thinking…\" for minutes and nothing more ever arrives. After this many seconds of total silence the stuck attempt is abandoned and the model is asked to pick up where it left off, up to the number of attempts below. The same budget covers replies that come back empty (a reasoning model can spend the whole reply on thinking and write nothing) — the chat's status line names each retry, so a pause is never unexplained. 0 attempts turns auto-continue off."
+            description: "Two separate recoveries. First, a request that fails before anything arrives — a rate limit, an overloaded endpoint, a dropped connection — is re-sent after a jittered backoff (2 s, 4 s, 8 s… capped at 10 s), honouring the provider's own Retry-After when it sends one. Second, local reasoning models (large Qwen and DeepSeek distills in particular) sometimes go quiet mid-reply — the panel shows \"Thinking…\" for minutes and nothing more ever arrives. After this many seconds of total silence the stuck attempt is abandoned and the model is asked to pick up where it left off, up to the number of attempts below. The same budget covers replies that come back empty (a reasoning model can spend the whole reply on thinking and write nothing) — the chat's status line names each retry, so a pause is never unexplained. 0 turns an option off."
         ) {
             VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Text("Retry a failed request")
+                        .font(.caption)
+                    TextField("\(ModelRetryPolicy.defaultRetries)", value: $settings.chatTransportRetries, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("times (0 = off)")
+                        .font(.caption)
+                    Spacer()
+                }
+                Text("Only while nothing has been shown yet: a 429, 408, 5xx, or a connection that never came up. A request that already started streaming is handled by the auto-continue below instead, so a retry can never duplicate output. 400/401/403/404 are not retried — they would fail the same way again. Capped at \(ModelRetryPolicy.maxRetries).")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider()
+
                 HStack(spacing: 10) {
                     Text("Stall after")
                         .font(.caption)
@@ -1507,6 +1525,23 @@ struct AISettingsView: View {
                 Text("Defaults: \(ToolCallRepeatGuard.defaultMaxIdenticalRuns) runs, \(AICompletionService.defaultNoProgressRoundThreshold) rounds, \(AICompletionService.defaultTurnBudgetWarningRemaining) replies. With 1 for the turn-limit warning, only the final reply gets a notice; with 2 or more, there is also an early heads-up. The turn-limit warning does nothing when turns are unlimited. Values are capped at 20, 100 and 20.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+            }
+        }
+
+        SettingsCard(
+            title: "Ask Questions",
+            icon: "questionmark.bubble",
+            description: "Off by default. When on, the assistant can pause mid-run and ask you a structured question — which of several structures you want, what a vague requirement means — and the run resumes with your answer attached, instead of ending and making you restate it. Left off, the assistant has to end its reply to ask anything, which suits an unattended run: a question blocks everything until someone answers. It pairs well with Plan mode, where a decision or two up front saves rewriting later."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Let the assistant ask questions during a run", isOn: $settings.chatAskQuestionEnabled)
+                    .font(.body.weight(.medium))
+
+                Text("The card offers suggested answers and always allows a typed one. Dismissing it does not abandon the run: the assistant is told to continue on a stated assumption and not to ask again in the same run. The tool is never given to a read-only delegate_task subagent, which cannot reach you.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
 

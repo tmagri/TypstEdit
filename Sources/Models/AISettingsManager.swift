@@ -486,6 +486,17 @@ class AISettingsManager: ObservableObject {
     /// emitting tokens mid-reply without closing the stream, which would
     /// otherwise leave "Thinking…" on screen forever.
     @AppStorage("aiChatStallTimeoutSeconds") var chatStallTimeoutSeconds: Double = 150.0
+    /// How many times a request that failed *before any output arrived* is
+    /// re-sent — a rate limit (429), an overloaded endpoint (503/529), a
+    /// request timeout (408), or a dropped connection. Each retry waits a
+    /// jittered exponential gap (2 s, 4 s, 8 s… capped at 10 s) and honours a
+    /// provider `Retry-After` header as a floor. 0 turns it off.
+    ///
+    /// This is separate from the auto-continue settings below: those cover a
+    /// turn that already produced output and then stalled or came back empty,
+    /// where a fresh request is a *continuation*. Retrying here replays the
+    /// same request, which is only safe while nothing has been shown yet.
+    @AppStorage("aiChatTransportRetries") var chatTransportRetries: Int = ModelRetryPolicy.defaultRetries
     /// How many times a stuck turn is automatically continued before the
     /// error is surfaced. Covers both triggers: a response that went silent
     /// past the stall timeout, and a response that ended empty because the
@@ -558,6 +569,16 @@ class AISettingsManager: ObservableObject {
     var effectiveChatThinkingReseedMaxChars: Int {
         Int(min(max(chatThinkingReseedMaxChars, 500), 20_000))
     }
+
+    /// Whether the assistant may ask structured questions mid-run    /// (`ask_question`). Off by default: a question suspends the run until
+    /// someone answers, which is exactly wrong for an unattended job. It is
+    /// most useful with Plan mode, where a couple of decisions up front save
+    /// a lot of rewriting. A `delegate_task` subagent never gets it, since it
+    /// has no way to reach the user.
+    @AppStorage("aiChatAskQuestionEnabled") var chatAskQuestionEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+
     /// How many model turns (one model request + the tool calls it makes) a
     /// single chat message may take before the run fails with an error. Much
     /// higher than the old 6 because a real editing job (read → search → plan

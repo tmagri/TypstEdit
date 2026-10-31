@@ -121,6 +121,10 @@ struct AIChatView: View {
                     Divider()
                     approvalCard(approval)
                 }
+                if let question = chat.pendingQuestion {
+                    Divider()
+                    questionCard(question)
+                }
                 if let autoProceed = chat.autoProceed {
                     Divider()
                     autoProceedCard(autoProceed)
@@ -1106,6 +1110,122 @@ struct AIChatView: View {
         }
         .padding(10)
         .background(Color.orange.opacity(0.08))
+    }
+
+    /// The `ask_question` card: one block per question, each with its
+    /// suggested options, an always-available free-text field, and a skip.
+    /// The run is suspended until Send or Dismiss, so this card is the whole
+    /// interaction — nothing else in the panel is actionable meanwhile.
+    private func questionCard(_ pending: PendingQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.bubble.fill")
+                    .foregroundColor(.accentColor)
+                Text(pending.questions.count == 1 ? "The assistant has a question" : "The assistant has \(pending.questions.count) questions")
+                    .font(.subheadline.bold())
+                Spacer()
+            }
+
+            ForEach(pending.questions) { question in
+                questionBlock(question, answer: pending.answers[question.id])
+                if question.id != pending.questions.last?.id {
+                    Divider()
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button("Dismiss") { chat.dismissQuestion() }
+                    .controlSize(.small)
+                    .help("Skip these questions — the assistant will state an assumption and carry on")
+                Spacer()
+                Button("Send answer\(pending.questions.count == 1 ? "" : "s")") {
+                    chat.submitQuestionAnswers()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!pending.hasAnyAnswer)
+            }
+
+            Text("The run is paused until you answer. Dismissing lets it continue on a stated assumption.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.06))
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    @ViewBuilder
+    private func questionBlock(_ question: AgentQuestion, answer: AgentQuestionAnswer?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(question.header)
+                .font(.caption2.bold())
+                .foregroundColor(.accentColor)
+            Text(question.question)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(question.options) { option in
+                let selected = answer?.selections.contains(option.label) ?? false
+                Button {
+                    toggleQuestionOption(question, label: option.label)
+                } label: {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: selected
+                              ? (question.multiple ? "checkmark.square.fill" : "largecircle.fill.circle")
+                              : (question.multiple ? "square" : "circle"))
+                            .foregroundColor(selected ? .accentColor : .secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(option.label)
+                                .font(.caption)
+                                .multilineTextAlignment(.leading)
+                            if let detail = option.detail {
+                                Text(detail)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.leading)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Always available, per the tool's description: the options are a
+            // shortcut, never a limit on what the user may answer.
+            TextField(
+                "Or type your own answer",
+                text: Binding(
+                    get: { answer?.custom ?? "" },
+                    set: { text in
+                        var next = answer ?? AgentQuestionAnswer(questionID: question.id)
+                        next.custom = text.isEmpty ? nil : text
+                        chat.setQuestionAnswer(next)
+                    }
+                )
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.caption)
+        }
+    }
+
+    /// Single-select replaces the selection; multi-select toggles one entry.
+    private func toggleQuestionOption(_ question: AgentQuestion, label: String) {
+        var answer = chat.pendingQuestion?.answers[question.id]
+            ?? AgentQuestionAnswer(questionID: question.id)
+        if question.multiple {
+            if let index = answer.selections.firstIndex(of: label) {
+                answer.selections.remove(at: index)
+            } else {
+                answer.selections.append(label)
+            }
+        } else {
+            answer.selections = answer.selections.contains(label) ? [] : [label]
+        }
+        chat.setQuestionAnswer(answer)
     }
 
     @ViewBuilder
