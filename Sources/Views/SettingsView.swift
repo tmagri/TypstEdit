@@ -1349,6 +1349,63 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
+            title: "Auto-proceed",
+            icon: "forward.end.circle.fill",
+            description: "For unattended runs, especially on local models: when a reply finishes by naming work that is still left (\"Next steps\", \"Still to do\", \"I haven't finished …\"), the chat waits out a short countdown and then sends the continuation by itself. Set it going and walk away. The countdown is shown in the panel with Continue now and Cancel, typing a message cancels it, and Stop always ends the run. This is separate from the retries above, which only cover stalled or empty replies."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Continue automatically when a reply says work is left", isOn: $settings.chatAutoProceedEnabled)
+                    .font(.body.weight(.medium))
+
+                if settings.chatAutoProceedEnabled {
+                    HStack(spacing: 10) {
+                        Text("Countdown")
+                            .font(.caption)
+                        TextField("10", value: $settings.chatAutoProceedSeconds, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("seconds (1–120) — time to read the reply and cancel")
+                            .font(.caption)
+                        Spacer()
+                    }
+                    .padding(.leading, 20)
+
+                    HStack(spacing: 10) {
+                        Text("Maximum continuations")
+                            .font(.caption)
+                        TextField("10", value: $settings.chatAutoProceedMaxRounds, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 70)
+                        Text("per request (0 = unlimited, capped at 200)")
+                            .font(.caption)
+                        Spacer()
+                    }
+                    .padding(.leading, 20)
+
+                    Toggle("Also retry after a failure", isOn: $settings.chatAutoProceedOnFailure)
+                        .font(.caption)
+                        .padding(.leading, 20)
+                    Text("When the turn ends in an error — a dropped connection, a timeout, or a provider hiccup — another attempt is sent after the same countdown, with the error given to the model as context. A run set up for \"set and forget\" keeps going instead of stopping quietly. The round cap still applies.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 40)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("The continuation is a real message in the transcript (marked Auto-proceed), so you can see exactly what was sent and when. A goal armed from the chat panel takes over continuations while it is active, so the two never both run.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Detection looks only at the end of the reply: a heading such as Next steps / Remaining work / Still to do, or a plain statement like \"I still need to …\" or \"not yet implemented\". Friendly closing offers (\"let me know if you'd like me to …\") do not trigger it, so an ordinary finished answer stays finished.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+
+        SettingsCard(
             title: "Tool-Calling Turn Limits",
             icon: "arrow.triangle.2.circlepath",
             description: "One turn = one model request plus any tool calls it makes. A real editing job (read → search → plan → several edits → verify) routinely takes a dozen or more turns, and hitting the limit mid-job fails the whole message with an error. Raise it for long tool-calling runs, or set 0 for unlimited."

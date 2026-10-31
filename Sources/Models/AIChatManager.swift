@@ -68,6 +68,24 @@ final class AIChatManager: ObservableObject {
     @Published private(set) var scopeLabel: String = "Standalone — no file tools available"
     @Published var errorMessage: String?
 
+    /// The pending automatic continuation, while its countdown runs (Settings
+    /// → AI Chat → Auto-proceed). Non-nil only between a finished reply and
+    /// the moment the next step is sent; the panel shows it as a card with
+    /// "Continue now" and "Cancel". `nil` means nothing is waiting.
+    @Published private(set) var autoProceed: AutoProceedState?
+    /// Why Auto-proceed stopped without finishing — the round cap was reached
+    /// while the reply still named outstanding work, or an attempt failed with
+    /// retries spent. The panel shows it with a "Keep going" button, so a
+    /// set-and-forget run never ends silently.
+    @Published private(set) var autoProceedStoppedReason: String?
+    /// Consecutive automatic continuations in the current run, counted from
+    /// the user's own message. Reset by `sendMessage`, so a new request always
+    /// gets the full round budget.
+    private var autoProceedRound = 0
+    /// Set by "Continue now" so the countdown ends at the next tick instead of
+    /// waiting out the remaining seconds.
+    private var autoProceedSkipped = false
+
     /// The visible task list (`update_plan` tool), rebuilt from the transcript
     /// on load so it survives restarts without its own storage format.
     @Published private(set) var plan: [AgentPlanItem] = []
@@ -517,11 +535,18 @@ final class AIChatManager: ObservableObject {
             // was already writing it.
             messages.append(ChatMessage(role: .user, text: trimmed))
             pendingSteers.append(trimmed)
+            // A message during an Auto-proceed countdown is the user taking
+            // over: cancel the countdown and let this message be the next
+            // exchange instead of the automatic continuation.
+            cancelAutoProceed()
             refreshTitleAfterTurnActivity()
             persist()
             return
         }
 
+        // A message typed by the user starts a fresh run: the Auto-proceed
+        // round budget begins again from here.
+        autoProceedRound = 0
         messages.append(ChatMessage(role: .user, text: trimmed))
         // Names the chat from this message (if it's the first) and asks the
         // model for a proper title once there's a reply to summarize.
@@ -532,13 +557,14 @@ final class AIChatManager: ObservableObject {
         resetLiveReasoning()
         liveStatus = nil
         errorMessage = nil
+        autoProceedStoppedReason = nil
 
         // The turn runs in a child task so `stop()` can cancel it by
         // reference — the standard library offers no way to fetch the task
         // you're currently running in. The child inherits the main actor, so
         // everything stays serialized exactly as before; `await turn.value`
         // simply waits for it to finish or unwind.
-        let turn = Task { await self.runTurn(trimmed) }
+        let turn = Task { await self.runTurnSequence(trimmed) }
         generationTask = turn
         defer {
             // `isGenerating` (set above, cleared here) blocks any other
@@ -548,9 +574,48 @@ final class AIChatManager: ObservableObject {
             isGenerating = false
             resetLiveReasoning()
             liveStatus = nil
+            autoProceed = nil
             generationTask = nil
         }
         await turn.value
+    }
+
+    /// One user request, including any Auto-proceed continuations after a
+    /// failed attempt. A reply that names outstanding work continues inside
+    /// `runTurn` itself (so the tool state and read-before-edit memory are
+    /// kept); a turn that *threw* has already unwound that loop, so it is
+    /// retried here as a fresh exchange with the error as context.
+    private func runTurnSequence(_ firstText: String) async {
+        var text = firstText
+        while !Task.isCancelled {
+            let failure = await runTurn(text)
+            // A message the user sent while the turn was ending — including
+            // one that arrived during an Auto-proceed countdown and cancelled
+            // it — is the next exchange, not a fresh send.
+            if let steer = dequeueSteers(joining: true) {
+                autoProceedStoppedReason = nil
+                text = steer
+                continue
+            }
+            guard let failure else { return }
+            let settings = AISettingsManager.shared
+            guard settings.chatAutoProceedEnabled, settings.chatAutoProceedOnFailure, goal == nil else { return }
+            if autoProceedBudgetSpent {
+                autoProceedStoppedReason = "Stopped after \(autoProceedRound) automatic \(autoProceedRound == 1 ? "continuation" : "continuations") — the last attempt still failed. Keep going to send another."
+                return
+            }
+            if await waitForAutoProceed(.failure(failure)) {
+                text = beginAutoProceedRound(.failure(failure))
+                continue
+            }
+            return
+        }
+    }
+
+    /// True when the configured per-request continuation budget is used up.
+    private var autoProceedBudgetSpent: Bool {
+        guard let cap = AISettingsManager.shared.effectiveChatAutoProceedMaxRounds else { return false }
+        return autoProceedRound >= cap
     }
 
     /// What the model is told about the Git tools, only while they are on.
@@ -579,7 +644,12 @@ final class AIChatManager: ObservableObject {
     /// `sendMessage` stores in `generationTask`, so `stop()`'s cancellation
     /// is what the `Task.isCancelled` checks here (and in the completion
     /// service) observe.
-    private func runTurn(_ trimmed: String) async {
+    ///
+    /// Returns the error message when the turn failed (nil when it finished,
+    /// or was stopped): `runTurnSequence` uses it to decide whether
+    /// Auto-proceed should try again.
+    @discardableResult
+    private func runTurn(_ trimmed: String) async -> String? {
         // A new turn means a fresh context: the model must look at a file
         // again before changing it, and subagent nesting restarts at zero.
         localTools.beginRequest()
@@ -755,45 +825,65 @@ final class AIChatManager: ObservableObject {
                 // go idle with an objective armed. The reviewer decides
                 // whether to keep going — and its continuation is injected
                 // as the next exchange of this same turn.
-                guard var goal, goal.status == .active else { break }
-                if goal.rounds >= goal.maxRounds {
-                    settleGoal(.paused, "Reached the limit of \(goal.maxRounds) rounds")
-                    break
+                if var goal, goal.status == .active {
+                    if goal.rounds >= goal.maxRounds {
+                        settleGoal(.paused, "Reached the limit of \(goal.maxRounds) rounds")
+                        break
+                    }
+                    let review = await reviewGoal(goal)
+                    guard case .verdict(let verdict) = review else {
+                        if case .failure(let why) = review { settleGoal(.paused, why) }
+                        break
+                    }
+                    if verdict.verdict == "done" {
+                        settleGoal(.complete, verdict.reason)
+                        break
+                    }
+                    if verdict.verdict == "blocked" {
+                        settleGoal(.paused, verdict.reason)
+                        break
+                    }
+                    // "continue": stall detection before injecting another round
+                    // (opencode's rule) — the same reason twice in a row, or no
+                    // tool activity since the last continuation, means the loop
+                    // is spinning.
+                    let toolCalls = messages.filter { $0.role == .toolCall }.count
+                    let stalled = Self.sameReason(goal.reason, verdict.reason) || toolCalls <= goal.toolCallsAtBaseline
+                    let stalls = stalled ? goal.stalls + 1 : 0
+                    if stalls >= Self.goalMaxStalls {
+                        settleGoal(.paused, "Not making progress: \(verdict.reason)")
+                        break
+                    }
+                    goal.rounds += 1
+                    goal.stalls = stalls
+                    goal.reason = verdict.reason
+                    goal.toolCallsAtBaseline = toolCalls
+                    goal.updatedAt = Date()
+                    self.goal = goal
+                    let continuation = Self.goalContinuationText(goal: goal, verdict: verdict)
+                    messages.append(ChatMessage(role: .user, text: continuation))
+                    persist()
+                    userText = continuation
+                    continue
                 }
-                let review = await reviewGoal(goal)
-                guard case .verdict(let verdict) = review else {
-                    if case .failure(let why) = review { settleGoal(.paused, why) }
-                    break
+
+                // Auto-proceed (Settings → AI Chat → Auto-proceed): a reply
+                // that names outstanding work keeps the run going by itself
+                // after a visible countdown. The goal loop above owns
+                // continuations while a goal is armed, and the planner is a
+                // different tool — so this only applies when neither is on.
+                if !planMode, AIChatAutoProceed.looksUnfinished(result) {
+                    if AISettingsManager.shared.chatAutoProceedEnabled, autoProceedBudgetSpent {
+                        autoProceedStoppedReason = "Stopped after \(autoProceedRound) automatic \(autoProceedRound == 1 ? "continuation" : "continuations") — the reply still named outstanding work. Keep going to send another."
+                        break
+                    }
+                    if await waitForAutoProceed(.unfinished) {
+                        let text = beginAutoProceedRound(.unfinished)
+                        userText = text
+                        continue
+                    }
                 }
-                if verdict.verdict == "done" {
-                    settleGoal(.complete, verdict.reason)
-                    break
-                }
-                if verdict.verdict == "blocked" {
-                    settleGoal(.paused, verdict.reason)
-                    break
-                }
-                // "continue": stall detection before injecting another round
-                // (opencode's rule) — the same reason twice in a row, or no
-                // tool activity since the last continuation, means the loop
-                // is spinning.
-                let toolCalls = messages.filter { $0.role == .toolCall }.count
-                let stalled = Self.sameReason(goal.reason, verdict.reason) || toolCalls <= goal.toolCallsAtBaseline
-                let stalls = stalled ? goal.stalls + 1 : 0
-                if stalls >= Self.goalMaxStalls {
-                    settleGoal(.paused, "Not making progress: \(verdict.reason)")
-                    break
-                }
-                goal.rounds += 1
-                goal.stalls = stalls
-                goal.reason = verdict.reason
-                goal.toolCallsAtBaseline = toolCalls
-                goal.updatedAt = Date()
-                self.goal = goal
-                let continuation = Self.goalContinuationText(goal: goal, verdict: verdict)
-                messages.append(ChatMessage(role: .user, text: continuation))
-                persist()
-                userText = continuation
+                break
             }
         } catch {
             if Task.isCancelled || error is CancellationError {
@@ -812,14 +902,17 @@ final class AIChatManager: ObservableObject {
                 // on the next message unannounced.
                 pauseGoalIfActive("Stopped by the user")
                 persist()
+                return nil
             } else {
                 errorMessage = error.localizedDescription
                 // A turn that failed (including the turn-budget error) parks
                 // the goal with the failure as the reason — the banner shows
                 // what went wrong instead of silently re-arming next turn.
                 pauseGoalIfActive("The turn failed: \(error.localizedDescription)")
+                return error.localizedDescription
             }
         }
+        return nil
     }
 
     /// `file` relative to `root`, or `nil` when there's no file or it lies
@@ -863,10 +956,118 @@ final class AIChatManager: ObservableObject {
     func stop() {
         guard isGenerating else { return }
         pendingSteers.removeAll()
+        autoProceed = nil
         generationTask?.cancel()
         if approvalContinuation != nil {
             resolveApproval(approved: false)
         }
+    }
+
+    // MARK: - Auto-proceed
+
+    /// Waits out the Auto-proceed countdown and reports whether the
+    /// continuation should be sent. Returns false — without starting anything
+    /// — when the setting is off, the round budget is spent, or the countdown
+    /// was cancelled (Cancel button, Stop, or a message typed by the user).
+    ///
+    /// The wait is main-actor and cancellation-aware: every second publishes
+    /// a decremented `autoProceed` so the card counts down, and a Stop ends
+    /// the sleep immediately with the turn's `Task.isCancelled`.
+    private func waitForAutoProceed(_ trigger: AIChatAutoProceed.Trigger) async -> Bool {
+        let settings = AISettingsManager.shared
+        guard settings.chatAutoProceedEnabled else { return false }
+        if case .failure = trigger, !settings.chatAutoProceedOnFailure { return false }
+        if let cap = settings.effectiveChatAutoProceedMaxRounds, autoProceedRound >= cap {
+            return false
+        }
+
+        let seconds = settings.effectiveChatAutoProceedSeconds
+        autoProceedSkipped = false
+        autoProceed = AutoProceedState(trigger: trigger, totalSeconds: seconds, remainingSeconds: seconds)
+        liveStatus = "Waiting to continue automatically…"
+
+        defer {
+            autoProceed = nil
+            if liveStatus == "Waiting to continue automatically…" { liveStatus = nil }
+        }
+
+        // Short ticks keep "Continue now" and Cancel immediate, while the
+        // displayed count only changes once a second.
+        let tick: UInt64 = 100_000_000 // 0.1 s
+        let ticksPerSecond = 10
+        var elapsedTicks = 0
+        var displayed = seconds
+        while displayed > 0 {
+            if Task.isCancelled { return false }
+            // The user typed something while the countdown ran: their message
+            // is the next exchange, so the automatic one is dropped.
+            if !pendingSteers.isEmpty { return false }
+            // Cancel cleared the state (and Stop already cancelled the task).
+            guard autoProceed != nil else { return false }
+            if autoProceedSkipped { return true }
+            do {
+                try await Task.sleep(nanoseconds: tick)
+            } catch {
+                return false
+            }
+            elapsedTicks += 1
+            let remaining = seconds - elapsedTicks / ticksPerSecond
+            if remaining != displayed {
+                displayed = max(remaining, 0)
+                autoProceed?.remainingSeconds = displayed
+            }
+        }
+        return !Task.isCancelled
+    }
+
+    /// "Continue now" from the countdown card: end the wait without sending
+    /// anything else.
+    func continueAutoProceedNow() {
+        guard autoProceed != nil else { return }
+        autoProceedSkipped = true
+    }
+
+    /// Cancel button on the countdown card (and a user message arriving
+    /// mid-countdown): drop the pending continuation and go idle.
+    func cancelAutoProceed() {
+        guard autoProceed != nil else { return }
+        autoProceed = nil
+        autoProceedSkipped = false
+        if liveStatus == "Waiting to continue automatically…" { liveStatus = nil }
+    }
+
+    /// "Keep going" on the stopped notice: grant a fresh continuation budget
+    /// and ask the model to carry on, without the user having to type. The
+    /// reason is carried into the message, so the model knows what stalled.
+    func keepGoingAfterAutoProceedStop() async {
+        guard !isGenerating, let reason = autoProceedStoppedReason else { return }
+        autoProceedStoppedReason = nil
+        let text = AIChatAutoProceed.continuationText(
+            trigger: .failure(reason),
+            round: 1,
+            maxRounds: AISettingsManager.shared.effectiveChatAutoProceedMaxRounds ?? 0
+        )
+        await sendMessage(text)
+    }
+
+    /// Dismisses the stopped notice without continuing.
+    func dismissAutoProceedStop() {
+        autoProceedStoppedReason = nil
+    }
+
+    /// Books the continuation as a user-role transcript message (so the
+    /// transcript shows why another exchange appeared) and returns the text
+    /// sent to the model. The round counter is bumped here.
+    private func beginAutoProceedRound(_ trigger: AIChatAutoProceed.Trigger) -> String {
+        autoProceedRound += 1
+        let text = AIChatAutoProceed.continuationText(
+            trigger: trigger,
+            round: autoProceedRound,
+            maxRounds: AISettingsManager.shared.effectiveChatAutoProceedMaxRounds ?? 0
+        )
+        messages.append(ChatMessage(role: .user, text: text))
+        persist()
+        return text
     }
 
     /// Folds the non-compacted conversation into the single prompt string the

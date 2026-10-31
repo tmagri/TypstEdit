@@ -121,6 +121,14 @@ struct AIChatView: View {
                     Divider()
                     approvalCard(approval)
                 }
+                if let autoProceed = chat.autoProceed {
+                    Divider()
+                    autoProceedCard(autoProceed)
+                }
+                if let reason = chat.autoProceedStoppedReason, !chat.isGenerating {
+                    Divider()
+                    autoProceedStoppedCard(reason)
+                }
                 Divider()
                 inputBar
             }
@@ -600,6 +608,7 @@ struct AIChatView: View {
             // coalesced path: a stream of deltas costs at most one scroll.
             .onChange(of: chat.liveReasoning) { _ in followBottom(proxy) }
             .onChange(of: chat.liveStatus) { _ in followBottom(proxy) }
+            .onChange(of: chat.autoProceed) { _ in followBottom(proxy) }
             .onChange(of: chat.runningTool) { _ in followBottom(proxy) }
         }
     }
@@ -1023,6 +1032,81 @@ struct AIChatView: View {
     }
 
     // MARK: - Approval Card
+
+    /// The Auto-proceed countdown: shown between the finished reply and the
+    /// automatic continuation, with a live second count. "Continue now" sends
+    /// at once; "Cancel" goes idle (and a message typed in the composer also
+    /// cancels it, since that message becomes the next exchange instead).
+    private func autoProceedCard(_ state: AutoProceedState) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: state.trigger.isFailure ? "arrow.clockwise.circle.fill" : "forward.end.fill")
+                    .foregroundColor(.accentColor)
+                Text(state.trigger.isFailure ? "Retrying automatically…" : "Continuing automatically…")
+                    .font(.subheadline.bold())
+                Spacer()
+                Text("\(state.remainingSeconds)s")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+            Text(autoProceedExplanation(state.trigger))
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button("Continue now") { chat.continueAutoProceedNow() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                Button("Cancel") { chat.cancelAutoProceed() }
+                    .controlSize(.small)
+                Spacer()
+            }
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.06))
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func autoProceedExplanation(_ trigger: AIChatAutoProceed.Trigger) -> String {
+        switch trigger {
+        case .unfinished:
+            return "The reply said work was still left, so the next step will be sent when the countdown ends. Type a message or click Cancel to take over."
+        case .failure(let message):
+            let clipped = message.count > 200 ? String(message.prefix(200)) + "…" : message
+            return "The last attempt failed (\(clipped)). Another try will be sent when the countdown ends — Cancel to stop, or turn this off in Settings → AI Chat → Auto-proceed."
+        }
+    }
+
+    /// Shown when Auto-proceed stopped itself (round cap reached, or a failed
+    /// attempt with the budget spent) so an unattended run never just goes
+    /// quiet. "Keep going" grants a fresh budget and continues.
+    private func autoProceedStoppedCard(_ reason: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "pause.circle.fill").foregroundColor(.orange)
+                Text("Auto-proceed stopped").font(.subheadline.bold())
+                Spacer()
+            }
+            Text(reason)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Keep going") {
+                    scrollToLatestRequest += 1
+                    Task { await chat.keepGoingAfterAutoProceedStop() }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Button("Dismiss") { chat.dismissAutoProceedStop() }
+                    .controlSize(.small)
+                Spacer()
+            }
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.08))
+    }
 
     @ViewBuilder
     private func approvalCard(_ approval: PendingApproval) -> some View {

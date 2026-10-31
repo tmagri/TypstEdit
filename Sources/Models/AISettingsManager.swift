@@ -500,6 +500,46 @@ class AISettingsManager: ObservableObject {
         willSet { objectWillChange.send() }
     }
 
+    /// Auto-proceed: when a finished reply implies that work is still left
+    /// ("Next steps", "still to do", "I haven't finished …"), the chat waits
+    /// out a short visible countdown and then sends the continuation itself.
+    /// Built for unattended runs against local models — set it going and walk
+    /// away. Off by default; Stop always wins, and the panel shows the
+    /// countdown with "Continue now" and "Cancel".
+    @AppStorage("aiChatAutoProceedEnabled") var chatAutoProceedEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    /// Seconds of countdown before the continuation is sent. Long enough to
+    /// read the reply and cancel; clamped to 1–120.
+    @AppStorage("aiChatAutoProceedSeconds") var chatAutoProceedSeconds: Double = 10 {
+        willSet { objectWillChange.send() }
+    }
+    /// Consecutive automatic continuations allowed per run, counted from the
+    /// user's own message. 0 = unlimited (a long job on a slow local model may
+    /// legitimately need many rounds). Reset whenever the user sends a
+    /// message themselves.
+    @AppStorage("aiChatAutoProceedMaxRounds") var chatAutoProceedMaxRounds: Int = 10 {
+        willSet { objectWillChange.send() }
+    }
+    /// Also continue after a turn that failed with an error (a dropped
+    /// connection, a timeout, a provider hiccup). On by default when
+    /// Auto-proceed is on — the point is to leave a long local run alone —
+    /// but failures still respect the round cap, and Stop ends it.
+    @AppStorage("aiChatAutoProceedOnFailure") var chatAutoProceedOnFailure: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+
+    /// Countdown actually used, clamped so a fat-fingered value can't make the
+    /// wait either invisible or endless.
+    var effectiveChatAutoProceedSeconds: Int {
+        Int(min(max(chatAutoProceedSeconds, 1), 120))
+    }
+
+    /// Round cap actually used: `nil` = unlimited (0 in Settings).
+    var effectiveChatAutoProceedMaxRounds: Int? {
+        chatAutoProceedMaxRounds <= 0 ? nil : min(chatAutoProceedMaxRounds, 200)
+    }
+
     /// Thought re-seeding: when a reply is interrupted (stall) or ends empty
     /// after a long thinking run, the abandoned reasoning is compressed
     /// verbatim (LLMLingua-2 model if installed, else the heuristic filter)
