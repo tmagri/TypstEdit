@@ -214,3 +214,74 @@ Rules of thumb:
   breaks always break; use them only for deliberate empty space.
 - **Scope rules** with `block[ … ]` or `#[ … ]` when one region needs
   different styling (e.g. a List of Figures that differs from the ToC).
+
+## 9. Custom `ref` formatting (e.g. "Gen 1:1" instead of "Figure 1")
+
+Typst has **no `is` operator**, `location` has no `.field()` method, and
+`figure()` rejects unknown named arguments — so the "obvious" patterns all
+fail. The working recipe: guard `it.element` against `none`, match with
+`.func()`/`.kind`, and pull per-item data from a dict keyed by
+`str(el.label)`:
+
+```typst
+#let verse-data = (
+  "gen-1-1": (chapter: "1", verse: "1"),
+  "gen-2-3": (chapter: "2", verse: "3"),
+)
+
+#show ref: it => {
+  let el = it.element
+  if el != none and el.func() == figure and el.kind == "verse" {
+    let d = verse-data.at(str(el.label), default: none)
+    if d != none {
+      link(it.target, [Gen #d.chapter:#d.verse])
+    } else {
+      it
+    }
+  } else {
+    it
+  }
+}
+
+#figure([In the beginning], kind: "verse", caption: [Creation],
+        supplement: [Gen]) <gen-1-1>
+
+See @gen-1-1.   // renders: "See Gen 1:1."
+```
+
+Why each piece:
+
+- `#if`, `#else`, `#link` inside the `{ … }` code block are syntax errors —
+  bare `if`/`else`/`link` only (the `#` prefix belongs to markup mode).
+- `if it.element is figure` → `expected block` (no `is` operator).
+  `el.func() == figure` and `el.kind == "verse"` are the real checks.
+- `it.element` is `none` during resolution — calling `.func()` on it errors
+  with `type none has no method 'func'`. Guard first.
+- `it.element.location().field("chapter")` → `type location has no method
+  'field'`; locations are positions, not data carriers.
+- `#figure(…, chapter: "1")` → `unexpected argument: chapter`. Data lives in
+  the side dict above (or in `metadata` elements queried by label).
+- Custom-`kind` figures also need `supplement:` (else `please specify the
+  figure's supplement`) — or scope a
+  `#show figure.where(kind: "verse"): set figure(supplement: [Gen])`.
+
+## 10. One heading per page, no blank first page
+
+`pagebreak(weak: true)` is skipped when the heading is already at the top
+of a page — no fragile `counter(heading).get().first() >= 2` guard needed:
+
+```typst
+#show heading.where(level: 1): it => {
+  pagebreak(weak: true)
+  it
+}
+
+= Introduction   // page 1 — no blank page before it
+Text.
+= Design         // forced onto page 2 by the weak break
+Text.
+```
+
+Verified: three chapters compile to exactly three pages. Only reach for
+the counter guard when genuinely skipping the first *N* headings (front
+matter).

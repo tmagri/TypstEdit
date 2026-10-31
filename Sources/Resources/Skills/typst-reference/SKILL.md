@@ -18,8 +18,9 @@ You have three attached reference files, readable on demand with
 - **`styling-recipes.md`** — custom-formatting cookbook: breakable tables,
   restyling raw blocks without losing syntax highlighting, ToC/outline entry
   styling, page-break-per-heading guards, title pages, custom lists of
-  figures, and context/counter patterns. Read it before writing any
-  transformational `#show` rule or custom layout.
+  figures, custom `ref` formatting (`Gen 1:1`-style cross-references), and
+  context/counter patterns. Read it before writing any transformational
+  `#show` rule or custom layout.
 - **`dates-and-times.md`** — date printing patterns and traps: the display
   grammar (component + modifiers), why `datetime.now()` and `strftime` don't
   exist, why `datetime.today()` is date-only, and date math/comparison
@@ -85,6 +86,10 @@ until the next compile.
 | `expected semicolon or line break` | type annotations (`let x: int = 3`) | Typst has none — drop them |
 | `unknown variable: rac` / `lpha` | LaTeX in math (`\frac`, `\alpha` — the `\` eats one char) | `frac(a, b)`, `alpha` |
 | `label '<x>' does not exist in the document` | `@ref` with no matching `<x>`, or `@` in an email (`user@example.com`) | add the label or escape: `user\@example.com` |
+| `expected block` (points at an operand) | a type test `x is figure` — Typst has **no `is` operator** | compare instead: `el.func() == figure`, `el.kind == "verse"`, or `type(x)` |
+| `type location has no method 'field'` | `loc.field("chapter")` — hallucinated API | read the *element*: `el.fields().at("chapter", default: …)`; `location` is only a position |
+| `unexpected argument: chapter` (on `figure`) | `#figure(…, chapter: "1")` — `figure` rejects unknown named args | keep per-item data in a dict keyed by `str(el.label)` or in `metadata`; match it in the show rule |
+| `please specify the figure's supplement` | custom-`kind` figure without `supplement:` | pass `supplement: [Gen]` (or show-set it for that kind) |
 
 ### Silent failures — compiles, renders wrong
 
@@ -107,6 +112,22 @@ These produce **no error**, so check for them by eye:
 - Dashed identifiers are legal, so `dict.a-b` works; quoted keys need
   `dict.at("a-b")`.
 - Duplicate labels compile; a *reference* to a missing label does not.
+- Typst has **no `is` operator**: `if x is figure` fails with `expected
+  block`. Test types with `el.func() == figure` and kinds with
+  `el.kind == "verse"`.
+- Inside a code block `{ ... }`, code-mode keywords are **bare**: `if … { }
+  else { }`, `link(it.target)[…]` — never `#if`, `#else`, `#link` (the `#`
+  is only for markup/math mode).
+- `location` values (from `el.location()`, `here()`) carry no payload:
+  there is no `loc.field("x")`. Read element data with
+  `el.fields().at("x", default: …)` instead.
+- `#figure()` rejects unknown named arguments (`unexpected argument:
+  chapter`). Attach per-item data via a dict keyed by `str(el.label)` or
+  `metadata`, then match it inside the show rule (see
+  `styling-recipes.md` §9).
+- In `#show ref:` rules, `it.element` can be `none` while resolving —
+  guard with `if it.element != none` before calling `.func()`; `it.target`
+  is the label being referenced.
 - `7 / 2` is `3.5`; integer division is `calc.quot(7, 2)`.
 - Labels `<x>` attach to the *previous* element; put them right after it.
 - Reading `counter`/`state`/`page` requires `context`:
