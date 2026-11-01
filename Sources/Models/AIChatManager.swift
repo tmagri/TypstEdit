@@ -969,6 +969,10 @@ final class AIChatManager: ObservableObject {
                     sanitize: false,
                     contextCharBudget: contextBudgetTokens * Self.charsPerToken,
                     model: chatModelContext,
+                    executeParallel: { [weak self] batch in
+                        guard let self else { return [:] }
+                        return await self.runParallelReadOnlyCalls(batch, isSubagent: false)
+                    },
                     executeTool: { [weak self] qualifiedName, argumentsJSON in
                         guard let self else { throw LocalToolError.invalidArguments("Chat session ended") }
                         return try await self.trackedToolCall(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON)
@@ -2041,6 +2045,93 @@ final class AIChatManager: ObservableObject {
         }
     }
 
+    /// Runs a round of read-only calls concurrently, recording a transcript
+    /// row for each one.
+    ///
+    /// Returns outputs keyed by the caller's index. A call this manager can't
+    /// batch — Plan mode withholding it, a subagent restriction, an argument
+    /// error, or simply not being one of the concurrent-safe tools — is absent
+    /// from the result, and the caller runs it on the sequential path instead.
+    /// That keeps this an optimization: anything unusual falls back rather
+    /// than failing.
+    func runParallelReadOnlyCalls(
+        _ calls: [(index: Int, qualifiedName: String, argumentsJSON: String)],
+        isSubagent: Bool
+    ) async -> [Int: String] {
+        // Rows are appended before the work starts, in the model's order, so
+        // the transcript reads the same as a sequential round.
+        var rows: [Int: UUID] = [:]
+        var plans: [(index: Int, plan: ReadOnlyToolPlan)] = []
+
+        for call in calls {
+            guard (try? Self.validateToolAccess(
+                qualifiedName: call.qualifiedName,
+                isSubagent: isSubagent,
+                planMode: planMode
+            )) != nil else { continue }
+
+            let toolName = call.qualifiedName
+                .range(of: "__")
+                .map { String(call.qualifiedName[$0.upperBound...]) } ?? call.qualifiedName
+            let arguments = (try? JSONSerialization.jsonObject(
+                with: Data(call.argumentsJSON.utf8)
+            )) as? [String: Any] ?? [:]
+
+            guard let plan = (try? localTools.readOnlyPlan(toolName: toolName, arguments: arguments)) ?? nil else {
+                continue
+            }
+
+            let messageID = UUID()
+            rows[call.index] = messageID
+            messages.append(ChatMessage(
+                id: messageID,
+                role: .toolCall,
+                isSubagent: isSubagent,
+                toolName: call.qualifiedName,
+                toolArgumentsJSON: call.argumentsJSON,
+                toolStatus: .running
+            ))
+            plans.append((call.index, plan))
+        }
+
+        guard !plans.isEmpty else { return [:] }
+        persist()
+
+        // The live row names the batch rather than one tool: several are
+        // running, so naming just one of them would be misleading.
+        let previousRunning = runningTool
+        runningTool = RunningTool(
+            messageID: rows.values.first ?? UUID(),
+            displayName: plans.count == 1
+                ? Self.toolDisplayName(calls.first(where: { $0.index == plans[0].index })?.qualifiedName ?? "")
+                : "\(plans.count) lookups in parallel",
+            startedAt: Date()
+        )
+        defer { runningTool = previousRunning }
+
+        let results = await localTools.runReadOnlyBatch(plans)
+
+        var outputs: [Int: String] = [:]
+        for (index, result) in results {
+            guard let messageID = rows[index] else { continue }
+            switch result {
+            case .success(let outcome):
+                let bounded = ToolOutputStore.truncate(
+                    outcome.output,
+                    scope: localTools.scope,
+                    toolName: "parallel-read"
+                )
+                updateToolMessage(id: messageID, status: .succeeded, output: bounded)
+                outputs[index] = bounded
+            case .failure(let message):
+                updateToolMessage(id: messageID, status: .failed, output: message)
+                outputs[index] = "Error: \(message)"
+            }
+        }
+        persist()
+        return outputs
+    }
+
     /// Adds a transcript row for a call the loop did not run (an identical
     /// repeat, or cut-off arguments), so the trace shows it instead of
     /// silently dropping it. Nothing ran, so the
@@ -2333,6 +2424,10 @@ final class AIChatManager: ObservableObject {
             sanitize: false,
             contextCharBudget: contextBudgetTokens * Self.charsPerToken,
             model: chatModelContext,
+            executeParallel: { [weak self] batch in
+                guard let self else { return [:] }
+                return await self.runParallelReadOnlyCalls(batch, isSubagent: true)
+            },
             executeTool: { [weak self] qualifiedName, argumentsJSON in
                 guard let self else { throw LocalToolError.invalidArguments("Chat session ended") }
                 return try await self.trackedToolCall(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON, isSubagent: true)

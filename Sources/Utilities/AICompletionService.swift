@@ -624,6 +624,12 @@ class AICompletionService: ObservableObject {
         /// An explicit model to use (e.g. the saved model chosen for AI Chat).
         /// `nil` = the default Chat & Actions model.
         model: ModelContext? = nil,
+        /// Runs a round's read-only calls at once, keyed by their index in the
+        /// round. A call the caller can't batch is simply absent from the
+        /// result and runs through `executeTool` instead, so this stays an
+        /// optimization rather than a second code path to keep in step.
+        /// `nil` disables batching entirely.
+        executeParallel: (@MainActor (_ calls: [(index: Int, qualifiedName: String, argumentsJSON: String)]) async -> [Int: String])? = nil,
         executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
     ) async throws -> String {
         guard !tools.isEmpty else {
@@ -986,8 +992,56 @@ class AICompletionService: ObservableObject {
                         ? call
                         : AIToolCallRequest(id: call.id, name: call.name, argumentsJSON: "{}")
                 }))
-                for call in calls {
+
+                // Independent lookups in one reply run at the same time. Only
+                // calls that can't modify anything and never ask for approval
+                // are eligible, and each is still screened by the repeat guard
+                // first, so the batch sees exactly the calls a sequential round
+                // would have run. Anything the caller declines to batch falls
+                // through to the loop below.
+                var batched: [Int: String] = [:]
+                if let executeParallel {
+                    var eligible: [(index: Int, qualifiedName: String, argumentsJSON: String)] = []
+                    for (index, call) in calls.enumerated() {
+                        guard Self.isValidToolArguments(call.argumentsJSON) else { continue }
+                        let resolved = ToolAliases.resolve(call.name, against: tools.map(\.qualifiedName)) ?? call.name
+                        // An aliased call keeps the sequential path: its result
+                        // carries a redirect note, which is clearer to assemble
+                        // in one place.
+                        guard resolved == call.name, ParallelToolCalls.isSafe(resolved) else { continue }
+                        guard repeatGuard.refusal(name: resolved, argumentsJSON: call.argumentsJSON) == nil else { continue }
+                        eligible.append((index, resolved, call.argumentsJSON))
+                    }
+                    if eligible.count > 1 {
+                        AgentTrace.log("tool_parallel", ["turn": turn, "calls": eligible.count])
+                        let started = Date()
+                        batched = await executeParallel(eligible)
+                        if AgentTrace.isEnabled {
+                            AgentTrace.log("tool_parallel_done", [
+                                "turn": turn, "ran": batched.count,
+                                "seconds": Date().timeIntervalSince(started)
+                            ])
+                        }
+                        // The guard's history has to record what ran, or the
+                        // next identical call wouldn't be recognized as a repeat.
+                        for entry in eligible.sorted(by: { $0.index < $1.index }) {
+                            guard let output = batched[entry.index] else { continue }
+                            _ = repeatGuard.record(
+                                name: entry.qualifiedName,
+                                argumentsJSON: entry.argumentsJSON,
+                                output: output
+                            )
+                        }
+                    }
+                }
+
+                for (index, call) in calls.enumerated() {
                     try Task.checkCancellation()
+                    // Already run as part of the concurrent batch above.
+                    if let output = batched[index] {
+                        messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
+                        continue
+                    }
                     guard Self.isValidToolArguments(call.argumentsJSON) else {
                         let note = Self.invalidArgumentsNote(cutOffAtLimit: stepMeta.hitTokenLimit ? replyTokens : nil)
                         AgentTrace.log("tool_invalid_args", ["turn": turn, "name": call.name, "argsChars": call.argumentsJSON.count])

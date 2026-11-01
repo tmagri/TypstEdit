@@ -40,7 +40,7 @@ final class ProjectSettingsManager: ObservableObject {
 
     // MARK: - Paths
 
-    static let dotFolderName = ".typstedit"
+    nonisolated static let dotFolderName = ".typstedit"
 
     static func dotFolderURL(for projectRoot: URL) -> URL {
         projectRoot.appendingPathComponent(dotFolderName, isDirectory: true)

@@ -134,9 +134,9 @@ final class LocalToolExecutor {
     /// Upper bound on `grep_project` matches per call, and the cap on how many
     /// files it will scan — enough for a normal project, bounded enough that a
     /// pathological pattern can't hang the UI.
-    private static let maxGrepResults = 500
-    private static let maxGrepFileCount = 5000
-    private static let maxGrepFileBytes = 1_000_000
+    private nonisolated static let maxGrepResults = 500
+    private nonisolated static let maxGrepFileCount = 5000
+    private nonisolated static let maxGrepFileBytes = 1_000_000
 
     /// One active skill's attachment folder, so `read_skill_file` can hand
     /// the model supplementary reference material (specs, templates,
@@ -553,7 +553,14 @@ final class LocalToolExecutor {
     /// traversal, absolute-path smuggling, and symlink escapes. Every tool
     /// that touches the filesystem must go through this.
     private func resolvePath(_ relativePath: String) throws -> URL {
-        guard let root = scope.root else { throw LocalToolError.noScope }
+        try Self.resolve(relativePath, within: scope.root)
+    }
+
+    /// The path-safety boundary itself, with the root passed in so the
+    /// concurrent read-only path (which cannot touch `scope`) uses exactly
+    /// this implementation rather than a second copy of the rules.
+    nonisolated static func resolve(_ relativePath: String, within root: URL?) throws -> URL {
+        guard let root else { throw LocalToolError.noScope }
         let cleaned = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { throw LocalToolError.invalidArguments("path is required") }
 
@@ -569,6 +576,238 @@ final class LocalToolExecutor {
             throw LocalToolError.pathEscapesScope(relativePath)
         }
         return candidate
+    }
+
+    // MARK: - Concurrent Read-Only Calls
+
+    /// Builds a `Sendable` plan for a read-only call, or `nil` when the call
+    /// isn't one of the concurrent-safe tools.
+    ///
+    /// Everything that needs main-actor state — the scope root, the enabled
+    /// skills, the limits — is read here, so the returned plan can run off the
+    /// main actor. Argument errors surface here too, at full fidelity, rather
+    /// than inside a task group.
+    func readOnlyPlan(toolName: String, arguments: [String: Any]) throws -> ReadOnlyToolPlan? {
+        switch toolName {
+        case "read_file":
+            guard let path = arguments["path"] as? String else {
+                throw LocalToolError.invalidArguments("path is required")
+            }
+            let url = try resolvePath(path)
+            return .readFile(
+                url: url,
+                label: path,
+                offset: Self.intValue(arguments["offset"]),
+                limit: Self.intValue(arguments["limit"]),
+                outline: Self.boolValue(arguments["outline"]) == true,
+                maxBytes: maxScannableBytes,
+                defaultLineLimit: defaultReadLineLimit,
+                maxLineLimit: maxReadLineLimit
+            )
+
+        case "grep_project":
+            guard let root = scope.root else { throw LocalToolError.noScope }
+            guard let pattern = arguments["pattern"] as? String, !pattern.isEmpty else {
+                throw LocalToolError.invalidArguments("pattern is required")
+            }
+            let literal = (arguments["literal"] as? Bool) ?? false
+            // Validated here so a bad pattern fails with a clear message
+            // instead of inside the concurrent runner, which recompiles it.
+            let probe = literal ? NSRegularExpression.escapedPattern(for: pattern) : pattern
+            do {
+                _ = try NSRegularExpression(pattern: probe)
+            } catch {
+                throw LocalToolError.invalidArguments("Invalid regular expression: \(error.localizedDescription)")
+            }
+            let requestedMax = Self.intValue(arguments["max_results"]) ?? 100
+            return .grep(
+                root: root,
+                pattern: pattern,
+                literal: literal,
+                caseSensitive: (arguments["case_sensitive"] as? Bool) ?? false,
+                glob: arguments["glob"] as? String,
+                maxResults: min(max(requestedMax, 1), Self.maxGrepResults),
+                noteIfEmpty: false
+            )
+
+        case "read_skill_file":
+            guard let skillID = arguments["skill"] as? String, let path = arguments["path"] as? String else {
+                throw LocalToolError.invalidArguments("skill and path are required")
+            }
+            guard let info = activeSkillAttachments.first(where: { $0.skillID == skillID }) else {
+                throw LocalToolError.invalidArguments("'\(skillID)' isn't one of the currently enabled skills with attachments.")
+            }
+            let cleaned = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Checked against the list this app itself produced from the
+            // folder, so a plan can never name a file outside it.
+            guard !cleaned.isEmpty, info.files.contains(cleaned) else {
+                throw LocalToolError.fileNotFound(path)
+            }
+            return .readSkillFile(
+                folder: info.folder,
+                skillID: skillID,
+                fileName: cleaned,
+                offset: Self.intValue(arguments["offset"]),
+                limit: Self.intValue(arguments["limit"]),
+                maxBytes: maxScannableBytes,
+                defaultLineLimit: defaultReadLineLimit,
+                maxLineLimit: maxReadLineLimit
+            )
+
+        default:
+            return nil
+        }
+    }
+
+    /// Runs one read-only plan. `nonisolated`, so a task group of these
+    /// actually overlaps instead of queueing on the main actor.
+    nonisolated static func runReadOnly(_ plan: ReadOnlyToolPlan) throws -> ReadOnlyToolOutcome {
+        switch plan {
+        case .readFile(let url, let label, let offset, let limit, let outline,
+                       let maxBytes, let defaultLineLimit, let maxLineLimit):
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw LocalToolError.fileNotFound(label)
+            }
+            let data = try Data(contentsOf: url)
+            guard data.count <= maxBytes else { throw LocalToolError.fileTooLarge(label) }
+            let fullText = TextFileEncoding.decode(data).text
+            // An outline shows structure, not the exact text edit_file needs
+            // to match, so it deliberately doesn't satisfy read-before-edit.
+            if outline {
+                return ReadOnlyToolOutcome(output: DocumentOutline.render(fullText, label: label))
+            }
+            return ReadOnlyToolOutcome(
+                output: windowed(
+                    fullText,
+                    label: label,
+                    offset: offset,
+                    limit: limit,
+                    defaultLimit: defaultLineLimit,
+                    maxLimit: maxLineLimit
+                ),
+                readFilePath: url.standardizedFileURL.path,
+                readFileDate: modificationDate(of: url)
+            )
+
+        case .grep(let root, let pattern, let literal, let caseSensitive,
+                   let glob, let maxResults, let noteIfEmpty):
+            let source = literal ? NSRegularExpression.escapedPattern(for: pattern) : pattern
+            guard let regex = try? NSRegularExpression(
+                pattern: source,
+                options: caseSensitive ? [] : [.caseInsensitive]
+            ) else {
+                throw LocalToolError.invalidArguments("Invalid regular expression: \(pattern)")
+            }
+            let result = scan(
+                root: root,
+                rootPath: root.standardizedFileURL.path,
+                regex: regex,
+                globRegex: glob.flatMap { globToRegex($0) },
+                excluded: excludedDirectories,
+                fileCap: maxGrepFileCount,
+                byteCap: maxGrepFileBytes,
+                maxResults: maxResults
+            )
+            if result.lines.isEmpty {
+                return ReadOnlyToolOutcome(output: noteIfEmpty
+                    ? "(no literal matches for \"\(pattern)\")"
+                    : "No matches for \"\(pattern)\"\(glob.map { " in \($0)" } ?? "").")
+            }
+            var output = result.lines.joined(separator: "\n")
+            if result.capped {
+                output += "\n… (stopped after \(result.files) files and \(result.hits) match\(result.hits == 1 ? "" : "es"); showing \(result.lines.count) line\(result.lines.count == 1 ? "" : "s"). Narrow the pattern or pass a glob to see more.)"
+            }
+            return ReadOnlyToolOutcome(output: output)
+
+        case .readSkillFile(let folder, let skillID, let fileName, let offset, let limit,
+                            let maxBytes, let defaultLineLimit, let maxLineLimit):
+            // Belt-and-suspenders against traversal even though `fileName`
+            // must already match a name listed from this folder.
+            let candidate = folder.appendingPathComponent(fileName).standardizedFileURL
+            let resolvedCandidate = candidate.resolvingSymlinksInPath()
+            let resolvedFolder = folder.standardizedFileURL.resolvingSymlinksInPath()
+            guard resolvedCandidate.path.hasPrefix(resolvedFolder.path + "/") else {
+                throw LocalToolError.pathEscapesScope(fileName)
+            }
+            guard FileManager.default.fileExists(atPath: candidate.path) else {
+                throw LocalToolError.fileNotFound(fileName)
+            }
+            let data = try Data(contentsOf: candidate)
+            guard data.count <= maxBytes else { throw LocalToolError.fileTooLarge(fileName) }
+            return ReadOnlyToolOutcome(output: windowed(
+                TextFileEncoding.decode(data).text,
+                label: "\(skillID)/\(fileName)",
+                offset: offset,
+                limit: limit,
+                defaultLimit: defaultLineLimit,
+                maxLimit: maxLineLimit
+            ))
+        }
+    }
+
+    /// Records the read-before-edit ledger entry a concurrent read produced.
+    /// Called on the main actor once the batch finishes, because `readFiles`
+    /// is main-actor state the runner cannot touch.
+    func applyReadOnlyOutcome(_ outcome: ReadOnlyToolOutcome) {
+        guard let path = outcome.readFilePath else { return }
+        readFiles[path] = outcome.readFileDate
+    }
+
+    /// Runs several read-only plans at once and returns their results keyed by
+    /// the caller's index.
+    ///
+    /// This is the method that actually overlaps the work: the task group
+    /// carries only `Sendable` plans and calls `nonisolated` functions, so
+    /// nothing queues on the main actor. Concurrency is capped
+    /// (`ParallelToolCalls.maxConcurrent`) because a dozen simultaneous file
+    /// opens trade one bottleneck for another on a slow or networked disk.
+    ///
+    /// The read-before-edit ledger is written here, after the batch, in index
+    /// order — so the state the next tool sees is the same whether the round
+    /// ran concurrently or one call at a time.
+    func runReadOnlyBatch(_ plans: [(index: Int, plan: ReadOnlyToolPlan)]) async -> [Int: ReadOnlyToolResult] {
+        guard !plans.isEmpty else { return [:] }
+
+        var results: [Int: ReadOnlyToolResult] = [:]
+        let limit = max(1, ParallelToolCalls.maxConcurrent)
+
+        await withTaskGroup(of: (Int, ReadOnlyToolResult).self) { group in
+            var next = 0
+            var running = 0
+
+            func addTask(_ entry: (index: Int, plan: ReadOnlyToolPlan)) {
+                group.addTask {
+                    do {
+                        return (entry.index, .success(try Self.runReadOnly(entry.plan)))
+                    } catch {
+                        return (entry.index, .failure(error.localizedDescription))
+                    }
+                }
+            }
+
+            while next < plans.count, running < limit {
+                addTask(plans[next])
+                next += 1
+                running += 1
+            }
+            while let finished = await group.next() {
+                results[finished.0] = finished.1
+                running -= 1
+                if next < plans.count {
+                    addTask(plans[next])
+                    next += 1
+                    running += 1
+                }
+            }
+        }
+
+        // Apply side effects in the model's order, not completion order.
+        for entry in plans.sorted(by: { $0.index < $1.index }) {
+            if case .success(let outcome)? = results[entry.index] {
+                applyReadOnlyOutcome(outcome)
+            }
+        }
+        return results
     }
 
     // MARK: - Tool Implementations
@@ -636,7 +875,7 @@ final class LocalToolExecutor {
         return Self.windowed(fullText, label: path, arguments: arguments, defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
     }
 
-    private static func boolValue(_ any: Any?) -> Bool? {
+    private nonisolated static func boolValue(_ any: Any?) -> Bool? {
         if let b = any as? Bool { return b }
         if let s = any as? String { return ["true", "1", "yes"].contains(s.lowercased()) }
         if let i = any as? Int { return i != 0 }
@@ -648,7 +887,27 @@ final class LocalToolExecutor {
     /// that paging would just be noise. Shared by `read_file` and
     /// `read_skill_file` so both page the same way.
     private static func windowed(_ text: String, label: String, arguments: [String: Any], defaultLimit: Int, maxLimit: Int) -> String {
-        let hasExplicitWindow = arguments["offset"] != nil || arguments["limit"] != nil
+        windowed(
+            text,
+            label: label,
+            offset: Self.intValue(arguments["offset"]),
+            limit: Self.intValue(arguments["limit"]),
+            defaultLimit: defaultLimit,
+            maxLimit: maxLimit
+        )
+    }
+
+    /// The paging rule itself, with the window passed explicitly so the
+    /// concurrent read path can use it off the main actor.
+    nonisolated static func windowed(
+        _ text: String,
+        label: String,
+        offset requestedOffset: Int?,
+        limit requestedLimit: Int?,
+        defaultLimit: Int,
+        maxLimit: Int
+    ) -> String {
+        let hasExplicitWindow = requestedOffset != nil || requestedLimit != nil
         let lines = text.components(separatedBy: "\n")
         let totalLines = lines.count
 
@@ -656,9 +915,8 @@ final class LocalToolExecutor {
             return text
         }
 
-        let requestedOffset = Self.intValue(arguments["offset"]) ?? 1
-        let offset = max(1, requestedOffset)
-        let limit = min(Self.intValue(arguments["limit"]) ?? defaultLimit, maxLimit)
+        let offset = max(1, requestedOffset ?? 1)
+        let limit = min(requestedLimit ?? defaultLimit, maxLimit)
 
         guard offset <= max(totalLines, 1) else {
             return "'\(label)' only has \(totalLines) line\(totalLines == 1 ? "" : "s"); offset \(offset) is past the end."
@@ -675,7 +933,7 @@ final class LocalToolExecutor {
         return header + slice
     }
 
-    private static func intValue(_ any: Any?) -> Int? {
+    private nonisolated static func intValue(_ any: Any?) -> Int? {
         if let i = any as? Int { return i }
         if let d = any as? Double { return Int(d) }
         if let s = any as? String { return Int(s) }
@@ -877,11 +1135,11 @@ final class LocalToolExecutor {
         return (lines, hits, filesScanned, capped)
     }
 
-    private static let excludedDirectories: Set<String> = ["backups", "temp", "vectorcaches", ProjectSettingsManager.dotFolderName]
+    private nonisolated static let excludedDirectories: Set<String> = ["backups", "temp", "vectorcaches", ProjectSettingsManager.dotFolderName]
 
     /// Minimal glob support for `grep_project`'s `glob` argument:
     /// `**` matches across folders, `*` within a segment, `?` one character.
-    private static func globToRegex(_ glob: String) -> NSRegularExpression? {
+    private nonisolated static func globToRegex(_ glob: String) -> NSRegularExpression? {
         var pattern = glob.trimmingCharacters(in: .whitespaces)
         if pattern.hasPrefix("/") {
             pattern = String(pattern.dropFirst())
@@ -965,7 +1223,7 @@ final class LocalToolExecutor {
         }
     }
 
-    private static func modificationDate(of url: URL) -> Date? {
+    private nonisolated static func modificationDate(of url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
