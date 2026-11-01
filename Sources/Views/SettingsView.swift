@@ -1193,6 +1193,31 @@ struct AISettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Text("Keep")
+                    .font(.caption)
+                TextField("15", value: $settings.chatCompactionBufferPercent, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 60)
+                Text("% of the budget free before compacting")
+                    .font(.caption)
+                Spacer()
+            }
+            Text("A margin under the limit absorbs one big step past it — a long file read, a large paste — so the conversation can still be sent unchanged and reuse the provider's cached prefix, instead of the request being rejected and re-sent smaller. A share of the budget (not a token count) is what lets one setting fit both a small local model and a million-token cloud model. 0 compacts exactly at the budget.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Write the summary ahead of time", isOn: $settings.chatCompactionPrecompute)
+                .font(.caption)
+            Text("Once the conversation is close to the trigger, the summary is written in the background after a reply finishes, so compacting is instant when it is actually needed instead of showing \"Summarizing older turns…\" at the start of a turn. Runs only after a turn, so it never competes with a request you are waiting on. Short conversations are skipped, where a summary would cost more context than it saves.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.leading, 20)
+                .fixedSize(horizontal: false, vertical: true)
         }
 
         SettingsCard(

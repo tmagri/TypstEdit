@@ -57,7 +57,7 @@ final class ModelRetryPolicyTests: XCTestCase {
         XCTAssertEqual(ModelRetryPolicy.delay(forAttempt: 3, retryAfter: 1), 8)
     }
 
-    func testRetryAfterIsClampedAgainstAJeckyllHeader() {
+    func testRetryAfterIsClampedAgainstAHostileHeader() {
         // A hostile or buggy header must not stall a request for hours.
         XCTAssertEqual(
             ModelRetryPolicy.delay(forAttempt: 1, retryAfter: 60 * 60 * 24),

@@ -117,6 +117,11 @@ final class MCPClient {
 
     private(set) var isRunning = false
     private(set) var tools: [MCPTool] = []
+    /// The guidance the server sent in its `initialize` response — usage notes
+    /// the author wrote for the model ("call search first, then fetch"). The
+    /// handshake used to discard it. Kept so the chat can put it in the system
+    /// prompt instead of the model learning the server's quirks by failing.
+    private(set) var instructions: String?
 
     private var process: Process?
     private var stdinHandle: FileHandle?
@@ -182,11 +187,18 @@ final class MCPClient {
         self.isRunning = true
 
         do {
-            _ = try await sendRequest(method: "initialize", params: [
+            let result = try await sendRequest(method: "initialize", params: [
                 "protocolVersion": "2024-11-05",
                 "capabilities": [String: Any](),
                 "clientInfo": ["name": "TypstEdit", "version": "1.0"]
             ])
+            // Usage guidance the server's author wrote for the model. It was
+            // discarded here before, which left the model to discover each
+            // server's quirks by failing a call.
+            if let text = (result["instructions"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                self.instructions = text
+            }
             sendNotification(method: "notifications/initialized", params: [:])
         } catch {
             stop()

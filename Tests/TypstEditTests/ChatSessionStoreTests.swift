@@ -157,6 +157,41 @@ final class ChatSessionStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveAnswerKeepsOnlyARecentWindow() {
+        let chat = AIChatManager()
+        for _ in 0..<8 {
+            chat.appendLiveAnswer(String(repeating: "a", count: 1_000))
+        }
+        chat.appendLiveAnswer("TAIL")
+        chat.flushLiveAnswer()
+
+        XCTAssertLessThanOrEqual(chat.liveAnswer.count, AIChatManager.liveAnswerTrimThreshold)
+        XCTAssertTrue(chat.liveAnswer.hasSuffix("TAIL"))
+    }
+
+    /// The answer stream is throttled the same way as the reasoning stream: a
+    /// burst costs one panel update per interval, and the first delta shows at
+    /// once so the row starts moving immediately.
+    @MainActor
+    func testLiveAnswerPublishesAreThrottled() async throws {
+        let chat = AIChatManager()
+        var publishes = 0
+        let observation = chat.$liveAnswer.dropFirst().sink { _ in publishes += 1 }
+        defer { observation.cancel() }
+
+        chat.appendLiveAnswer("first ")
+        XCTAssertEqual(chat.liveAnswer, "first ", "the first delta after a quiet spell shows immediately")
+        for index in 0..<200 {
+            chat.appendLiveAnswer("t\(index) ")
+        }
+        XCTAssertEqual(publishes, 1, "a burst within one interval must not publish per token")
+
+        try await Task.sleep(nanoseconds: UInt64(AIChatManager.liveAnswerPublishInterval * 3 * 1_000_000_000))
+        XCTAssertEqual(publishes, 2, "the rest of the burst lands in a single trailing update")
+        XCTAssertTrue(chat.liveAnswer.hasSuffix("t199 "))
+    }
+
+    @MainActor
     func testContextEstimateCountsOnlyWhatIsSentAndRefreshesOnPersist() {
         let long = String(repeating: "a", count: 400)
         let chat = AIChatManager(messages: [

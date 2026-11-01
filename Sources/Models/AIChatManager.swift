@@ -47,6 +47,13 @@ final class AIChatManager: ObservableObject {
     /// Cleared as soon as the turn ends; the same content, assembled, lands
     /// on the finished message via `onReasoning` so it isn't lost.
     @Published private(set) var liveReasoning: String = ""
+    /// The answer text streamed so far for the reply being written. Shown under
+    /// the thinking box so a slow model visibly makes progress instead of
+    /// landing the whole answer at once after a long silence.
+    ///
+    /// Bounded like `liveReasoning`: the complete text still arrives on the
+    /// finished message, so this only needs to hold what is being read.
+    @Published private(set) var liveAnswer: String = ""
     /// One-line explanation of what the assistant is doing while the live row
     /// is showing — set by auto-continue retries ("Empty reply — asking the
     /// model to answer again (1 of 5)…") and cleared as soon as a request
@@ -64,7 +71,13 @@ final class AIChatManager: ObservableObject {
         let startedAt: Date
     }
     @Published private(set) var runningTool: RunningTool?
+    /// The approval card on screen, or `nil`. With parallel tool calls several
+    /// requests can be waiting at once; this is the one the user is looking at,
+    /// and `pendingApprovalCount` says how many are behind it.
     @Published private(set) var pendingApproval: PendingApproval?
+    /// How many calls are blocked on approval, including `pendingApproval`.
+    /// Shown on the card so a queued request is never invisible.
+    @Published private(set) var pendingApprovalCount: Int = 0
     /// The question set the assistant is waiting on (`ask_question`). Non-nil
     /// only while a question card is on screen; the tool call stays suspended
     /// until it is answered or dismissed, so the run resumes in place.
@@ -130,6 +143,32 @@ final class AIChatManager: ObservableObject {
     /// True while an automatic/manual compaction summary is being written.
     @Published private(set) var isCompacting: Bool = false
 
+    /// A summary being written in the background once the context nears the
+    /// compaction trigger, so the swap-in is instant when it is actually
+    /// needed instead of the user watching "Summarizing older turns…" at the
+    /// start of a turn.
+    ///
+    /// Deliberately one-shot and cancel-on-use: it holds the summary text and
+    /// the transcript length it was built from, and is discarded if the
+    /// conversation has moved on by the time it is used.
+    /// A summary built ahead of time, with the transcript state it was built
+    /// from. Internal rather than private so the applicability rule can be
+    /// unit-tested directly.
+    struct PrecomputedSummary: Equatable {
+        let text: String
+        let label: String
+        /// Index of the first message the summary covers. Everything before
+        /// it becomes compacted when the summary lands.
+        let cutIndex: Int
+        /// Transcript length, in the estimator's character measure, when the
+        /// summary was built. A transcript that has since shrunk means the
+        /// conversation was reset or compacted by something else, so the
+        /// summary describes turns that are no longer there.
+        let builtAtChars: Int
+    }
+    private var precomputedSummary: PrecomputedSummary?
+    private var precomputeTask: Task<Void, Never>?
+
     /// Skill/MCP server selections, mirroring `EditorController`'s AI Prompt
     /// selections but kept independent since chat and prompt requests can
     /// reasonably want different tools enabled.
@@ -156,7 +195,16 @@ final class AIChatManager: ObservableObject {
     private let localTools = LocalToolExecutor()
     /// The document in the active editor tab, if any.
     private var openFileURL: URL?
-    private var approvalContinuation: CheckedContinuation<Bool, Never>?
+    /// Calls blocked on approval, oldest first. A queue rather than a single
+    /// slot because parallel tool calls can each need approval: a single
+    /// continuation would drop one request on the floor when a second arrived.
+    private var approvalQueue: [PendingApprovalRequest] = []
+
+    /// One call waiting for the user's decision.
+    private struct PendingApprovalRequest {
+        let approval: PendingApproval
+        let continuation: CheckedContinuation<Bool, Never>
+    }
     /// The suspended `ask_question` call. Cancelled (resumed with a dismissal)
     /// by `stop()`, a scope change, or the card's own buttons.
     private var questionContinuation: CheckedContinuation<[UUID: AgentQuestionAnswer]?, Never>?
@@ -301,9 +349,7 @@ final class AIChatManager: ObservableObject {
             // than it was written in (e.g. its folder was reopened after a
             // standalone stretch) — an approval from the old scope is moot,
             // and a question asked about it is stale.
-            approvalContinuation?.resume(returning: false)
-            approvalContinuation = nil
-            pendingApproval = nil
+            denyAllApprovals()
             questionContinuation?.resume(returning: nil)
             questionContinuation = nil
             pendingQuestion = nil
@@ -451,6 +497,8 @@ final class AIChatManager: ObservableObject {
         messages = []
         plan = []
         goal = nil
+        // The measured anchor described a transcript that no longer exists.
+        resetContextAnchor()
         title = ""
         titleIsAutoGenerated = true
         titleGenerationAttempted = false
@@ -534,6 +582,68 @@ final class AIChatManager: ObservableObject {
         lastLiveReasoningPublish = .distantPast
     }
 
+    // MARK: - Live Answer
+
+    /// Hard cap on the streamed answer kept for the panel to lay out. The
+    /// complete text still lands on the finished message; this only bounds
+    /// what is re-rendered on every delta.
+    nonisolated static let liveAnswerCharacterLimit = 3_000
+    nonisolated static let liveAnswerTrimThreshold = 4_000
+    /// Same cadence as the reasoning box: ten updates a second reads as live
+    /// without making a long transcript expensive to lay out.
+    nonisolated static let liveAnswerPublishInterval: TimeInterval = 0.1
+
+    private var unpublishedLiveAnswer = ""
+    private var liveAnswerFlush: Task<Void, Never>?
+    private var lastLiveAnswerPublish = Date.distantPast
+
+    /// Appends a streamed answer fragment, keeping only a recent window.
+    /// Throttled the same way as the reasoning preview. Internal for the tests.
+    func appendLiveAnswer(_ delta: String) {
+        unpublishedLiveAnswer += delta
+        if unpublishedLiveAnswer.count > Self.liveAnswerTrimThreshold {
+            unpublishedLiveAnswer = String(unpublishedLiveAnswer.suffix(Self.liveAnswerCharacterLimit))
+        }
+        let elapsed = Date().timeIntervalSince(lastLiveAnswerPublish)
+        if elapsed >= Self.liveAnswerPublishInterval {
+            flushLiveAnswer()
+            return
+        }
+        guard liveAnswerFlush == nil else { return }
+        let wait = Self.liveAnswerPublishInterval - elapsed
+        liveAnswerFlush = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.liveAnswerFlush = nil
+            self.flushLiveAnswer()
+        }
+    }
+
+    /// Publishes any buffered answer text now. Internal for the tests.
+    func flushLiveAnswer() {
+        liveAnswerFlush?.cancel()
+        liveAnswerFlush = nil
+        guard !unpublishedLiveAnswer.isEmpty else { return }
+        var text = liveAnswer + unpublishedLiveAnswer
+        unpublishedLiveAnswer = ""
+        if text.count > Self.liveAnswerTrimThreshold {
+            text = String(text.suffix(Self.liveAnswerCharacterLimit))
+        }
+        liveAnswer = text
+        lastLiveAnswerPublish = Date()
+    }
+
+    /// Clears the streamed answer. Called when an attempt is abandoned (a
+    /// stall, an empty reply, a cut-off retry) because its partial text is not
+    /// part of the answer that eventually lands, and when the turn ends.
+    private func resetLiveAnswer() {
+        liveAnswerFlush?.cancel()
+        liveAnswerFlush = nil
+        unpublishedLiveAnswer = ""
+        liveAnswer = ""
+        lastLiveAnswerPublish = .distantPast
+    }
+
     func sendMessage(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -566,6 +676,7 @@ final class AIChatManager: ObservableObject {
 
         isGenerating = true
         resetLiveReasoning()
+        resetLiveAnswer()
         liveStatus = nil
         errorMessage = nil
         autoProceedStoppedReason = nil
@@ -584,9 +695,17 @@ final class AIChatManager: ObservableObject {
             // needed, and `Task` is a struct, so there is none to make.
             isGenerating = false
             resetLiveReasoning()
+            resetLiveAnswer()
             liveStatus = nil
             autoProceed = nil
             generationTask = nil
+            // Now that the turn is over, opportunistically write the next
+            // compaction summary while the user reads the answer, so the
+            // swap-in is instant when the context actually reaches the
+            // trigger. Started here rather than before a turn so it never
+            // competes with a request the user is waiting on — which matters
+            // on a local server that serves one request at a time.
+            startCompactionPrecomputeIfUseful()
         }
         await turn.value
     }
@@ -666,7 +785,7 @@ final class AIChatManager: ObservableObject {
         localTools.beginRequest()
         delegateDepth = 0
 
-        if estimatedContextTokens > contextBudgetTokens {
+        if estimatedContextTokens > compactionTriggerTokens {
             await compactHistory()
         }
 
@@ -686,6 +805,19 @@ final class AIChatManager: ObservableObject {
             let files = skill.attachments
             guard !files.isEmpty else { return nil }
             return LocalToolExecutor.SkillAttachmentInfo(skillID: skill.id, folder: skill.folderURL, files: files)
+        }
+        // The same skills, with their bodies, so a large reference pack can be
+        // read on demand (`read_skill`) instead of being written into every
+        // prompt. `SkillPrompt` decides which of the two applies.
+        localTools.activeSkills = activeSkills.map { skill in
+            LocalToolExecutor.SkillInfo(
+                skillID: skill.id,
+                name: skill.name,
+                description: skill.description,
+                body: skill.body,
+                folder: skill.folderURL,
+                files: skill.attachments
+            )
         }
         // Plan mode strips every mutating tool from what the model is
         // offered (the checklist and the read-only subagent stay), so the
@@ -749,15 +881,40 @@ final class AIChatManager: ObservableObject {
         if let workLogBlock = AgentHarnessTools.workLogPromptBlock(from: messages) {
             baseSystemPrompt += "\n\n" + workLogBlock
         }
-        if !activeSkills.isEmpty {
-            baseSystemPrompt += "\n\n" + activeSkills.map { skill in
-                var block = "SKILL (id: \(skill.id)): \(skill.name)\n\(skill.body)"
-                let files = skill.attachments
-                if !files.isEmpty {
-                    block += "\n\nAttached files you can pull in with read_skill_file (skill: \"\(skill.id)\"): \(files.joined(separator: ", "))"
+        if let skillBlock = SkillPrompt.block(
+            skills: activeSkills,
+            readable: true,
+            attachmentFiles: Dictionary(uniqueKeysWithValues: localTools.activeSkillAttachments.map { ($0.skillID, $0.files) })
+        ) {
+            baseSystemPrompt += "\n\n" + skillBlock
+        }
+        // A short per-family style note, rather than a separate long prompt
+        // per model: the families respond to different phrasing, and keeping
+        // one base prompt avoids several near-identical copies drifting apart.
+        if let style = ModelPromptStyle.detect(model: chatModelContext.model).guidance {
+            baseSystemPrompt += "\n\n" + style
+        }
+        // Usage guidance each MCP server's author wrote for the model. Without
+        // it the model discovers a server's conventions by failing calls.
+        let mcpInstructions = MCPManager.shared.instructions(for: scopedServers)
+        if !mcpInstructions.isEmpty {
+            var block = "<mcp_instructions>"
+            for server in scopedServers where mcpInstructions[server.config.name] != nil {
+                block += "\n  <server name=\"\(server.config.name)\">"
+                for line in mcpInstructions[server.config.name]!.components(separatedBy: "\n") {
+                    block += "\n    \(line)"
                 }
-                return block
-            }.joined(separator: "\n\n---\n\n")
+                block += "\n  </server>"
+            }
+            block += "\n</mcp_instructions>"
+            baseSystemPrompt += "\n\n" + block
+        }
+        // The project's own house rules, if it has any. Read here rather than
+        // cached, so an edit to TYPSTEDIT.md takes effect on the next turn.
+        if let instructionsBlock = ProjectInstructions.block(
+            ProjectInstructions.find(from: localTools.scope.root, root: localTools.scope.root)
+        ) {
+            baseSystemPrompt += "\n\n" + instructionsBlock
         }
 
         // fetchCompletionWithTools only takes a single prompt string, so prior
@@ -802,7 +959,9 @@ final class AIChatManager: ObservableObject {
                     },
                     onReasoning: { capturedReasoning = $0 },
                     onReasoningDelta: { [weak self] delta in self?.appendLiveReasoning(delta) },
+                    onTextDelta: { [weak self] delta in self?.appendLiveAnswer(delta) },
                     onStatus: { [weak self] status in self?.liveStatus = status },
+                    onUsage: { [weak self] usage in self?.recordUsage(usage) },
                     onSteer: { [weak self] in self?.dequeueSteers(joining: true) },
                     // Chat replies are shown as plain prose in the panel, so the
                     // Markdown→Typst sanitizer (right for AI Prompt, which inserts
@@ -975,9 +1134,9 @@ final class AIChatManager: ObservableObject {
         pendingSteers.removeAll()
         autoProceed = nil
         generationTask?.cancel()
-        if approvalContinuation != nil {
-            resolveApproval(approved: false)
-        }
+        // Every call blocked on approval is denied, not just the visible one:
+        // with parallel tool calls the rest are queued behind it.
+        denyAllApprovals()
         // A question card suspended the run; Stop must not leave it on screen
         // waiting for an answer to a request that is already cancelled.
         if questionContinuation != nil {
@@ -1128,12 +1287,32 @@ final class AIChatManager: ObservableObject {
 
     // MARK: - Context Budget & Compaction
 
-    /// Rough size of what the model will actually be sent, in tokens.
+    /// How big the next request will be, in tokens.
+    ///
+    /// A character count alone can be wrong by a wide margin — a different
+    /// tokenizer, non-English prose, tool schemas and images all break the
+    /// `bytes / 4` rule of thumb. When a provider has told us how big the last
+    /// request actually was, that number is exact, so it becomes the anchor
+    /// and only the text added since needs estimating. That is what makes the
+    /// header figure and the compaction trigger honest.
     ///
     /// Cached and refreshed from `persist()` rather than recomputed on every
-    /// read: the chat header renders it while tokens stream in, and scanning
-    /// every message's text that often made long conversations crawl.
-    @Published private(set) var estimatedContextTokens: Int = 0
+    /// read: the header renders it while tokens stream in, and scanning every
+    /// message's text that often made long conversations crawl.
+    @Published private(set) var contextEstimate = ContextEstimate(measured: nil, estimated: 0)
+
+    /// The number the header shows and the compaction trigger compares
+    /// against the budget. Rests on a real measurement whenever the provider
+    /// has reported one.
+    var estimatedContextTokens: Int { contextEstimate.total }
+
+    /// The provider's own prompt size for the last request it answered, and
+    /// how much text has been appended to the transcript since. Kept as the
+    /// raw parts because only the *difference* needs re-estimating.
+    private var measuredPromptTokens: Int?
+    /// Transcript length, in the same character measure used for estimation,
+    /// at the moment `measuredPromptTokens` was recorded.
+    private var measuredAfterChars = 0
 
     /// Token budget for this chat's model: the active saved model's own
     /// override when set (a paid long-context model can use its real window),
@@ -1142,20 +1321,102 @@ final class AIChatManager: ObservableObject {
         AISettingsManager.shared.effectiveContextBudgetTokens(for: chatModelContext)
     }
 
-    /// Recomputes `estimatedContextTokens`. Called after transcript changes
-    /// (from `persist()`), never per streamed token. Counts UTF-8 bytes
-    /// (`O(1)` per string) rather than characters, so this stays cheap even
-    /// with a huge transcript; for ASCII — the common case — the estimate is
-    /// identical.
+    /// The size at which compaction actually starts: the budget minus the
+    /// configured buffer. The margin absorbs one large step past the trigger —
+    /// a big file read, a long paste — so the conversation can still go out
+    /// unchanged and reuse the provider's cached prefix, instead of the
+    /// request failing and having to be shrunk and re-sent.
+    ///
+    /// A share of the budget rather than a fixed count, so one setting fits a
+    /// 32k local model and a 1M-token cloud model alike.
+    var compactionTriggerTokens: Int {
+        CompactionBuffer.trigger(
+            budget: contextBudgetTokens,
+            bufferPercent: AISettingsManager.shared.effectiveCompactionBufferPercent
+        )
+    }
+
+    /// Token accounting for the whole conversation, added up across every
+    /// request the chat has made. Shown in the header's tooltip.
+    @Published private(set) var sessionUsage = TokenUsage()
+
+    /// What this conversation has cost so far in USD, or `nil` when it can't
+    /// be known. A provider that reports its own charge is authoritative even
+    /// when it reports zero; otherwise a saved model's own rates are used when
+    /// the user entered them. With neither, this stays `nil` rather than
+    /// showing a number that was guessed.
+    var sessionCostUSD: Double? {
+        if let reported = sessionUsage.reportedCostUSD { return reported }
+        guard let pricing = chatModelContext.pricing else { return nil }
+        return pricing.cost(for: sessionUsage)
+    }
+
+    /// Folds in one response's token accounting. The prompt size becomes the
+    /// new anchor — it is exact for the transcript as it stood when the
+    /// request was made — and the character count then only grows by what has
+    /// been added afterwards.
+    ///
+    /// A provider that reports zeros (some local servers do) must not reset
+    /// the anchor, so an unusable report is ignored rather than trusted.
+    func recordUsage(_ usage: TokenUsage) {
+        // Totals accumulate even from a report too empty to anchor on: a
+        // server that omits input tokens but reports output still spent them.
+        if !usage.isEmpty {
+            sessionUsage += usage
+        }
+        guard usage.isUsableAsAnchor else { return }
+        measuredPromptTokens = usage.promptTotal
+        measuredAfterChars = Self.estimatedChars(in: messages)
+        refreshContextEstimate()
+    }
+
+    /// Total characters the estimate is computed from. Tool calls are counted
+    /// through their recorded output, which is what the model actually reads
+    /// back, rather than through their arguments.
+    private nonisolated static func estimatedChars(in messages: [ChatMessage]) -> Int {
+        messages.reduce(0) { total, message in
+            guard !message.isCompacted else { return total }
+            switch message.role {
+            case .toolCall:
+                return total + (message.toolOutput?.utf8.count ?? 0)
+            case .user, .assistant:
+                return total + message.text.utf8.count
+            }
+        }
+    }
+
+    /// Recomputes the estimate. Called after transcript changes (from
+    /// `persist()`), never per streamed token. When there is no measurement
+    /// yet — a new conversation, or a provider that sends no `usage` — this
+    /// falls back to the old character-based guess, so the header is never
+    /// blank.
     private func refreshContextEstimate() {
-        let bytes = messages.reduce(0) { total, message in
-            guard !message.isCompacted, message.role != .toolCall else { return total }
-            return total + message.text.utf8.count
+        let chars = Self.estimatedChars(in: messages)
+        let next: ContextEstimate
+        if let measuredPromptTokens {
+            // Only what was appended since the measurement needs estimating,
+            // and never a negative amount (compaction can shrink the
+            // transcript below the anchor's snapshot).
+            let added = max(0, chars - measuredAfterChars)
+            next = ContextEstimate(
+                measured: measuredPromptTokens,
+                estimated: added / Self.charsPerToken
+            )
+        } else {
+            next = ContextEstimate(measured: nil, estimated: chars / Self.charsPerToken)
         }
-        let estimate = bytes / Self.charsPerToken
-        if estimate != estimatedContextTokens {
-            estimatedContextTokens = estimate
+        if next != contextEstimate {
+            contextEstimate = next
         }
+    }
+
+    /// Drops the anchor. Called when the transcript is cleared or compacted
+    /// away: the measured prompt described a conversation that no longer
+    /// exists, and keeping it would under- or over-state the next request.
+    private func resetContextAnchor() {
+        measuredPromptTokens = nil
+        measuredAfterChars = 0
+        refreshContextEstimate()
     }
 
     /// Replaces all but the last three user turns with a model-written summary.
@@ -1163,80 +1424,173 @@ final class AIChatManager: ObservableObject {
     /// the "Compact" button. The cut is made at a *user-message* boundary so a
     /// kept question never loses its answer (or vice versa), and the recent
     /// tail stays verbatim so the model doesn't lose the thread it's on.
+    ///
+    /// A summary precomputed in the background is used when it is still
+    /// applicable, which is what makes the swap-in instant instead of the user
+    /// waiting out a model request at the start of a turn.
     func compactHistory() async {
         guard !isCompacting else { return }
 
+        // Any in-flight background work is superseded: this call is going to
+        // produce the summary itself.
+        precomputeTask?.cancel()
+        precomputeTask = nil
+
+        isCompacting = true
+        defer { isCompacting = false }
+
+        do {
+            let summary: PrecomputedSummary
+            if let cached = precomputedSummary, Self.isStillApplicable(cached, to: messages) {
+                summary = cached
+            } else if let built = try await buildCompactionSummary() {
+                summary = built
+            } else {
+                // Nothing old enough to summarize yet, or too few user turns.
+                return
+            }
+            precomputedSummary = nil
+            apply(summary)
+            // The plan itself isn't rebuilt here: it is the live state (and
+            // may have been closed out at the end of a turn), while the
+            // `update_plan` rows it came from stay in the transcript anyway.
+            //
+            // The measured anchor described the pre-compaction prompt, so it
+            // is dropped rather than carried over — the next response will
+            // measure the much smaller transcript and re-anchor on that.
+            resetContextAnchor()
+            persist()
+        } catch {
+            errorMessage = "Couldn't compact the conversation: \(error.localizedDescription)"
+        }
+    }
+
+    /// Where a summary would cut the transcript, and the older turns it would
+    /// cover. `nil` when there is nothing worth compacting yet.
+    ///
+    /// Extracted so the cut rule is testable and so the background precompute
+    /// builds exactly the same summary the foreground path would.
+    nonisolated static func compactionCut(in messages: [ChatMessage]) -> (cutIndex: Int, covered: ArraySlice<ChatMessage>)? {
         let userIndices = messages.indices.filter {
             !messages[$0].isCompacted && messages[$0].role == .user
         }
-        guard userIndices.count > 3 else { return }
+        // Keep the last three exchanges verbatim: a summary of them would cost
+        // more context than it saves, and they are what the model is working on.
+        guard userIndices.count > 3 else { return nil }
         let cutIndex = userIndices[userIndices.count - 3]
-        let toSummarize = messages[..<cutIndex].filter { !$0.isCompacted && $0.role != .toolCall }
-        guard !toSummarize.isEmpty else { return }
+        let covered = messages[..<cutIndex]
+        guard covered.contains(where: { !$0.isCompacted && $0.role != .toolCall }) else { return nil }
+        return (cutIndex, covered)
+    }
+
+    /// Builds the summary text without changing the transcript, so the work can
+    /// happen in the background and be applied later.
+    ///
+    /// Returns `nil` when there is nothing old enough to summarize. Throws only
+    /// for a real failure (the summary request itself), which the foreground
+    /// path surfaces and the background path discards.
+    private func buildCompactionSummary() async throws -> PrecomputedSummary? {
+        guard let cut = Self.compactionCut(in: messages) else { return nil }
 
         var transcript = ""
-        for message in toSummarize {
+        for message in cut.covered where !message.isCompacted && message.role != .toolCall {
             let speaker = message.role == .user ? "User" : "Assistant"
             let body = message.text.count > 2_000 ? String(message.text.prefix(2_000)) + "…" : message.text
             transcript += "\(speaker): \(body)\n\n"
         }
         let clipped = transcript.count > 24_000 ? String(transcript.prefix(24_000)) + "\n…" : transcript
 
-        isCompacting = true
-        defer { isCompacting = false }
-
-        do {
-            // Token-filter fast path: when a verbatim compressor is
-            // configured (and it fits in half the budget, leaving room for
-            // the new turn), no LLM summary is needed at all — the older
-            // turns survive as *their own words*, which is exactly what
-            // small local models handle best. nil → fall back to the
-            // classic model-written summary.
-            let compressed = await compressedTranscriptIfFits(clipped)
-            let summary: String
-            let summaryLabel: String
-            if let compressed {
-                // Verbatim extract: the transcript's own words, filler removed.
-                summary = compressed
-                summaryLabel = "Earlier conversation kept as a filtered extract (original wording, filler words removed)"
-            } else {
-                summary = try await AICompletionService.shared.fetchCompletion(
-                    prompt: """
-                    Summarize this conversation for another pass by the same assistant. Preserve: the user's goal and constraints, decisions made, files read or changed (with paths), facts verified from the documents, and anything still outstanding. Drop pleasantries and superseded details. Write plain prose, no headings.
-
-                    \(clipped)
-                    """,
-                    systemPrompt: "You compress conversations faithfully and concisely. Never invent facts that aren't in the transcript.",
-                    maxTokens: 800,
-                    purpose: .chat,
-                    model: chatModelContext,
-                    sanitize: false
-                )
-                summaryLabel = "Summary of earlier conversation"
-            }
-
-            // The request is main-actor and nothing else mutates `messages`
-            // while it's in flight, so the original cut index is still valid.
-            for index in messages.indices where index < cutIndex {
-                if !messages[index].isCompacted {
-                    messages[index].isCompacted = true
-                }
-            }
-            messages.insert(
-                ChatMessage(
-                    role: .assistant,
-                    text: "[\(summaryLabel)]\n\n\(summary)",
-                    isSummary: true
-                ),
-                at: cutIndex
+        // Token-filter fast path: when a verbatim compressor is configured
+        // (and it fits in half the budget, leaving room for the new turn), no
+        // LLM summary is needed at all — the older turns survive as *their own
+        // words*, which is exactly what small local models handle best.
+        if let compressed = await compressedTranscriptIfFits(clipped) {
+            return PrecomputedSummary(
+                text: compressed,
+                label: "Earlier conversation kept as a filtered extract (original wording, filler words removed)",
+                cutIndex: cut.cutIndex,
+                builtAtChars: Self.estimatedChars(in: messages)
             )
-            // The plan itself isn't rebuilt here: it is the live state (and
-            // may have been closed out at the end of a turn), while the
-            // `update_plan` rows it came from stay in the transcript anyway.
-            persist()
-        } catch {
-            errorMessage = "Couldn't compact the conversation: \(error.localizedDescription)"
         }
+
+        let summary = try await AICompletionService.shared.fetchCompletion(
+            prompt: """
+            Summarize this conversation for another pass by the same assistant. Preserve: the user's goal and constraints, decisions made, files read or changed (with paths), facts verified from the documents, and anything still outstanding. Drop pleasantries and superseded details. Write plain prose, no headings.
+
+            \(clipped)
+            """,
+            systemPrompt: "You compress conversations faithfully and concisely. Never invent facts that aren't in the transcript.",
+            maxTokens: 800,
+            purpose: .chat,
+            model: chatModelContext,
+            sanitize: false
+        )
+        return PrecomputedSummary(
+            text: summary,
+            label: "Summary of earlier conversation",
+            cutIndex: cut.cutIndex,
+            builtAtChars: Self.estimatedChars(in: messages)
+        )
+    }
+
+    /// Folds a built summary into the transcript: everything before the cut
+    /// becomes compacted and the summary takes its place.
+    private func apply(_ summary: PrecomputedSummary) {
+        guard Self.isStillApplicable(summary, to: messages) else { return }
+        for index in messages.indices where index < summary.cutIndex {
+            if !messages[index].isCompacted {
+                messages[index].isCompacted = true
+            }
+        }
+        messages.insert(
+            ChatMessage(
+                role: .assistant,
+                text: "[\(summary.label)]\n\n\(summary.text)",
+                isSummary: true
+            ),
+            at: summary.cutIndex
+        )
+    }
+
+    /// Whether a summary still describes this transcript. Appending at the end
+    /// leaves earlier indices stable, so the cut only becomes invalid if the
+    /// transcript was cleared or already compacted in the meantime.
+    nonisolated static func isStillApplicable(_ summary: PrecomputedSummary, to messages: [ChatMessage]) -> Bool {
+        guard summary.cutIndex > 0, summary.cutIndex <= messages.count else { return false }
+        return messages[..<summary.cutIndex].contains(where: { !$0.isCompacted })
+    }
+
+    /// Starts writing a summary in the background when the context is close
+    /// enough to the trigger that it will likely be needed next turn. Runs
+    /// once; the result is held until `compactHistory` uses it or the
+    /// conversation moves on.
+    ///
+    /// Called after a turn finishes rather than before one starts, so the
+    /// summary request never competes with the user's own request for the
+    /// model — which matters a lot on a local server that serves one at a time.
+    private func startCompactionPrecomputeIfUseful() {
+        guard shouldPrecomputeCompaction else { return }
+        precomputeTask = Task { [weak self] in
+            guard let self else { return }
+            // Errors here are expected (offline, model busy) and must stay
+            // silent: this is opportunistic work behind a turn the user
+            // already got an answer from.
+            let built = try? await self.buildCompactionSummary()
+            guard !Task.isCancelled else { return }
+            self.precomputeTask = nil
+            self.precomputedSummary = built
+        }
+    }
+
+    @MainActor
+    private var shouldPrecomputeCompaction: Bool {
+        guard AISettingsManager.shared.chatCompactionPrecompute else { return false }
+        return CompactionBuffer.shouldPrecompute(
+            estimatedTokens: estimatedContextTokens,
+            triggerTokens: compactionTriggerTokens,
+            alreadyPrecomputed: precomputedSummary != nil || precomputeTask != nil,
+            isBusy: isCompacting || isGenerating
+        )
     }
 
     /// Token-filter fast path for `compactHistory`. Compresses the clipped
@@ -1292,7 +1646,7 @@ final class AIChatManager: ObservableObject {
     /// and `convert_markdown_to_typst` (both pure in-memory checks, which a
     /// plan needs to verify proposed snippets), stay available.
     nonisolated static let planModeBlockedLocalToolNames: Set<String> = [
-        "edit_file", "move_lines", "write_file",
+        "edit_file", "move_lines", "write_file", "apply_patch",
         "export_document", "export_markdown", "copy_files", "create_folder",
     ]
 
@@ -1711,10 +2065,9 @@ final class AIChatManager: ObservableObject {
         stoppedToolMessageIDs.insert(messageID)
         toolTasks[messageID]?.cancel()
         // A task suspended on an approval prompt never observes cancellation
-        // until the prompt is answered: deny it so the task can unwind.
-        if pendingApproval != nil {
-            resolveApproval(approved: false)
-        }
+        // until the prompt is answered: deny its own request so it can unwind,
+        // while any other queued call keeps waiting.
+        denyApproval { _ in true }
     }
 
     /// Schema-guided argument repair for one call. Returns the input
@@ -1989,17 +2342,51 @@ final class AIChatManager: ObservableObject {
 
     // MARK: - Approval Gate
 
+    /// Suspends a call until the user decides. Safe to call from several
+    /// parallel tool calls: each gets its own queue entry and its own
+    /// continuation, so one request can never replace another's.
     private func requestApproval(_ kind: PendingApprovalKind, toolCallName: String) async -> Bool {
         if kind.canAutoApprove(yoloMode: yoloMode) { return true }
-        pendingApproval = PendingApproval(kind: kind, toolCallName: toolCallName)
+        let approval = PendingApproval(kind: kind, toolCallName: toolCallName)
         return await withCheckedContinuation { continuation in
-            approvalContinuation = continuation
+            approvalQueue.append(PendingApprovalRequest(approval: approval, continuation: continuation))
+            publishApprovalState()
         }
     }
 
+    /// Answers the card on screen. Any further queued requests move up, so a
+    /// parallel round works through them one at a time.
     func resolveApproval(approved: Bool) {
-        pendingApproval = nil
-        approvalContinuation?.resume(returning: approved)
-        approvalContinuation = nil
+        guard !approvalQueue.isEmpty else { return }
+        let request = approvalQueue.removeFirst()
+        request.continuation.resume(returning: approved)
+        publishApprovalState()
+    }
+
+    /// Denies everything waiting. Used by Stop and by a scope change, where an
+    /// answer to any queued request is moot.
+    private func denyAllApprovals() {
+        let waiting = approvalQueue
+        approvalQueue.removeAll()
+        for request in waiting {
+            request.continuation.resume(returning: false)
+        }
+        publishApprovalState()
+    }
+
+    /// Denies one specific waiting call, leaving the others queued — what
+    /// stopping a single tool from its row needs.
+    private func denyApproval(matching predicate: (PendingApprovalKind) -> Bool) {
+        guard let index = approvalQueue.firstIndex(where: { predicate($0.approval.kind) }) else { return }
+        let request = approvalQueue.remove(at: index)
+        request.continuation.resume(returning: false)
+        publishApprovalState()
+    }
+
+    /// Publishes the head of the queue and the depth behind it.
+    private func publishApprovalState() {
+        pendingApproval = approvalQueue.first?.approval
+        pendingApprovalCount = approvalQueue.count
     }
 }
+

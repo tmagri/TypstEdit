@@ -94,6 +94,10 @@ enum PendingApprovalKind {
     /// Creating a folder (for an empty delivery/evidence folder, or before
     /// copying into it).
     case createFolder(relativePath: String)
+    /// A multi-file `apply_patch`. Reviewed as one batch — that is the whole
+    /// point — so the user sees every file's change and approves once, instead
+    /// of approving a six-file restructure six times.
+    case batchPatch(changes: [PatchChange])
     /// Staging or unstaging files through `git_stage`. Contents never change,
     /// but the index does, so the exact paths are shown.
     case gitStage(paths: [String], stage: Bool)

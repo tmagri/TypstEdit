@@ -249,8 +249,16 @@ enum AIChatStep {
 struct AIChatStepMeta {
     /// `finish_reason` (OpenAI-compatible) or `stop_reason` (Anthropic), as sent.
     var finishReason: String?
-    var promptTokens: Int?
-    var completionTokens: Int?
+    /// Normalized token accounting for this response, when the provider
+    /// reported any. `nil` for servers that send no `usage` at all — a local
+    /// llama.cpp build, for instance — which is why every reader treats it as
+    /// optional rather than assuming zeros.
+    var usage: TokenUsage?
+
+    /// The prompt's size as the provider counted it. This is the number a
+    /// context estimate should anchor on.
+    var promptTokens: Int? { usage?.promptTotal }
+    var completionTokens: Int? { usage.map(\.outputTotal) }
 
     /// The reply was cut off by `max_tokens`. Hidden reasoning counts
     /// against the same budget, so a reasoning model can hit this with no
@@ -587,12 +595,22 @@ class AICompletionService: ObservableObject {
         /// Main-actor isolated (and therefore implicitly Sendable) so the
         /// stall watchdog can race the streaming parse in a child task.
         onReasoningDelta: (@MainActor (String) -> Void)? = nil,
+        /// Every visible answer fragment, as it arrives. Without this the
+        /// panel streams the model's thinking and then the whole answer lands
+        /// at once, which on a slow model looks like a long silence followed
+        /// by a wall of text. Tool-call rounds stream nothing here; the
+        /// callback is for the reply the user is reading.
+        onTextDelta: (@MainActor (String) -> Void)? = nil,
         /// Live status line for the caller's "generating" row — set while an
         /// auto-continue retry is running ("Empty reply — asking again
         /// (1 of 5)…") and cleared as soon as a request produces a usable
         /// step. `nil` clears it. Without this the chat shows an unexplained
         /// "Thinking…" while the model is silently being re-prompted.
         onStatus: (@MainActor (String?) -> Void)? = nil,
+        /// Reports each response's token accounting as the provider gives it.
+        /// The chat anchors its context estimate on the last prompt size
+        /// instead of extrapolating the whole conversation from characters.
+        onUsage: ((TokenUsage) -> Void)? = nil,
         /// Steering (opencode's session-inbox "steer" delivery): called at
         /// each step boundary — after a tool round's results are in, before
         /// the next model request. A non-nil return is user input that
@@ -691,6 +709,9 @@ class AICompletionService: ObservableObject {
         var overflowAttempt = 0
 
         var turn = 0
+        // Set when the turn cap is reached: tools are withdrawn and one final
+        // request asks for a written summary, instead of discarding the work.
+        var toolsDisabled = false
         while true {
             // A cancelled task (the chat's Stop button) unwinds here instead
             // of burning another model request.
@@ -718,16 +739,22 @@ class AICompletionService: ObservableObject {
                     (step, stepMeta) = try await requestChatStep(
                         ctx: ctx,
                         messages: messages,
-                        tools: tools,
+                        // With tools withdrawn, the model has no way to keep
+                        // calling them and must answer in prose.
+                        tools: toolsDisabled ? [] : tools,
                         maxTokens: replyTokens,
                         reasoningDelta: { text in
                             attemptReasoning += text
                             onReasoningDelta?(text)
                         },
+                        textDelta: onTextDelta,
                         onStatus: { line in onStatus?(line) }
                     )
                     if AgentTrace.isEnabled {
                         Self.traceStep(step, meta: stepMeta, turn: turn, seconds: Date().timeIntervalSince(requestStart), streamedReasoningChars: attemptReasoning.count)
+                    }
+                    if let usage = stepMeta.usage {
+                        onUsage?(usage)
                     }
                     acceptedReplyTokens = replyTokens
                     break
@@ -932,6 +959,25 @@ class AICompletionService: ObservableObject {
                 if let stepReasoning, !stepReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     collectedReasoning.append(stepReasoning)
                 }
+                // Tools were withdrawn at the step limit, but a model can still
+                // emit a call from habit. Running it would defeat the point of
+                // the withdrawal (and the result could never be seen, since
+                // the next request is the last one), so the round is answered
+                // with a text-only reminder instead.
+                guard !toolsDisabled else {
+                    AgentTrace.log("turn_limit_tool_ignored", ["turn": turn, "calls": calls.count])
+                    messages.append(.assistantToolCalls(calls.map {
+                        AIToolCallRequest(id: $0.id, name: $0.name, argumentsJSON: "{}")
+                    }))
+                    for call in calls {
+                        messages.append(.toolResult(AIToolResult(
+                            callID: call.id,
+                            name: call.name,
+                            output: "Not run: the step limit for this request is reached and tools are disabled. Reply with text only."
+                        )))
+                    }
+                    continue
+                }
                 // A call whose arguments aren't a JSON object (usually cut off
                 // by the reply cap) is echoed back as `{}`: some providers
                 // reject a conversation that carries malformed arguments.
@@ -1034,8 +1080,18 @@ class AICompletionService: ObservableObject {
                 }
 
                 if let maxTurns, turn == maxTurns - 1 {
-                    AgentTrace.log("turn_limit", ["turn": turn, "maxTurns": maxTurns])
-                    throw AIError.apiError("The AI kept calling tools without producing a final answer after \(maxTurns) turns.")
+                    // The cap is reached while the model still wants tools.
+                    // Failing here would throw away everything the turn
+                    // achieved, so instead withdraw the tools and ask once for
+                    // a written summary: what is done, what is left, and what
+                    // the user should do next. One extra request buys a usable
+                    // answer where an error would have bought nothing.
+                    AgentTrace.log("turn_limit", ["turn": turn, "maxTurns": maxTurns, "mode": "graceful"])
+                    toolsDisabled = true
+                    onStatus?(Self.stepLimitStatusLine(maxTurns: maxTurns))
+                    Self.appendHarnessNote(Self.stepLimitNote(maxTurns: maxTurns), to: &messages)
+                    turn += 1
+                    continue
                 }
                 turn += 1
             }
@@ -1469,6 +1525,29 @@ class AICompletionService: ObservableObject {
         "\(harnessNotePrefix) STEERING — the user sent this while you were working. Finish your current step, then adjust course to include it. Don't restart what is already done, and don't drop it:\n\n\(text)"
     }
 
+    /// The note that withdraws the tools at the turn cap and asks for a
+    /// written summary instead of failing the request.
+    ///
+    /// Modelled on opencode's `MAX_STEPS_PROMPT`: it has to be unambiguous
+    /// that a tool call now counts as a violation, because the model has been
+    /// calling tools freely until this point.
+    nonisolated static func stepLimitNote(maxTurns: Int) -> String {
+        """
+        \(harnessNotePrefix) MAXIMUM STEPS REACHED — this request has used all \(maxTurns) turns, and tools are now disabled. Any tool call you write will not run.
+
+        Reply with text only, and make it useful:
+        1. Say plainly that the step limit for this request was reached.
+        2. Summarize what you actually did: files and line ranges you changed, facts you verified, decisions you made.
+        3. List what is still not done, naming the file or section, in enough detail that you or the user can pick it up next.
+        4. Say what you would do next, in one or two concrete steps.
+        """
+    }
+
+    /// The chat's status line while that final summary is being written.
+    nonisolated static func stepLimitStatusLine(maxTurns: Int) -> String {
+        "Step limit reached after \(maxTurns) turns — asking for a summary of the work instead…"
+    }
+
     /// Appends `note` to the newest tool result.
     nonisolated static func appendHarnessNote(_ note: String, to messages: inout [AIChatMessage]) {        guard let index = messages.lastIndex(where: {
             if case .toolResult = $0 { return true }
@@ -1799,9 +1878,14 @@ class AICompletionService: ObservableObject {
 
     /// Sends one turn of a tool-calling conversation and returns either the
     /// model's final text or the tool calls it wants executed next. When
-    /// `reasoningDelta` is non-nil the request is made with `"stream": true`
-    /// and parsed event-by-event, forwarding reasoning fragments as they
-    /// arrive; the returned step is the same either way.
+    /// `reasoningDelta` or `textDelta` is non-nil the request is made with
+    /// `"stream": true` and parsed event-by-event, forwarding fragments as
+    /// they arrive; the returned step is the same either way.
+    ///
+    /// `textDelta` carries the visible answer. Without it the panel shows the
+    /// model's thinking as it streams but the answer lands all at once, which
+    /// on a slow local model looks like nothing is happening for a minute and
+    /// then a whole reply appears.
     ///
     /// Retries are confined to the window where nothing has been shown yet:
     /// a connection failure, or a retryable status (429, 408, 5xx) on the
@@ -1814,6 +1898,7 @@ class AICompletionService: ObservableObject {
         tools: [MCPTool],
         maxTokens: Int,
         reasoningDelta: (@MainActor (String) -> Void)? = nil,
+        textDelta: (@MainActor (String) -> Void)? = nil,
         onStatus: (@MainActor (String?) -> Void)? = nil
     ) async throws -> (AIChatStep, AIChatStepMeta) {
         let settings = AISettingsManager.shared
@@ -1828,10 +1913,20 @@ class AICompletionService: ObservableObject {
             request.addValue(value, forHTTPHeaderField: field)
         }
 
-        let streaming = reasoningDelta != nil
+        // Either callback is enough to justify streaming: an answer-only
+        // caller still benefits from the tokens arriving as they are written.
+        let streaming = reasoningDelta != nil || textDelta != nil
+        // A terser answer on the models that accept the hint. Detection lives
+        // in `ModelVerbosity` so an unknown parameter is never sent to a
+        // provider that would reject it with a 400.
+        let verbosity = ModelVerbosity.value(
+            model: ctx.model,
+            source: ctx.source,
+            enabled: AISettingsManager.shared.chatConciseReplies
+        )
         request.httpBody = ctx.isAnthropic
             ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, reasoningEffort: ctx.reasoningEffort)
-            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter, reasoningEffort: ctx.reasoningEffort)
+            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter, reasoningEffort: ctx.reasoningEffort, verbosity: verbosity)
 
         let retries = ModelRetryPolicy.effectiveRetries(settings.chatTransportRetries)
         // 0-based: `attempt` counts retries already spent, so `attempt < retries`
@@ -1946,7 +2041,8 @@ class AICompletionService: ObservableObject {
                 bytes: bytes,
                 ctx: ctx,
                 settings: settings,
-                reasoningDelta: reasoningDelta!
+                reasoningDelta: reasoningDelta,
+                textDelta: textDelta
             )
         }
     }
@@ -1994,7 +2090,8 @@ class AICompletionService: ObservableObject {
         bytes: URLSession.AsyncBytes,
         ctx: ModelContext,
         settings: AISettingsManager,
-        reasoningDelta: @escaping @MainActor (String) -> Void
+        reasoningDelta: (@MainActor (String) -> Void)?,
+        textDelta: (@MainActor (String) -> Void)?
     ) async throws -> (AIChatStep, AIChatStepMeta) {
         // Some local servers stop emitting tokens mid-reply without ever
         // closing the stream (seen with large reasoning models like Qwen on
@@ -2030,8 +2127,8 @@ class AICompletionService: ObservableObject {
             }
             group.addTask {
                 try await isAnthropic
-                    ? parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onActivity: { activity.touch() })
-                    : parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onActivity: { activity.touch() })
+                    ? parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() })
+                    : parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() })
             }
             guard let first = try await group.next() else { throw AIError.noData }
             group.cancelAll()
@@ -2129,7 +2226,7 @@ class AICompletionService: ObservableObject {
 
     // MARK: Provider wire-format conversion (OpenAI-compatible)
 
-    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, includeReasoning: Bool = false, reasoningEffort: ReasoningEffort = .auto) throws -> Data {
+    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, includeReasoning: Bool = false, reasoningEffort: ReasoningEffort = .auto, verbosity: String? = nil) throws -> Data {
         var wireMessages: [[String: Any]] = []
         for message in messages {
             switch message {
@@ -2175,6 +2272,12 @@ class AICompletionService: ObservableObject {
         }
         // A configured effort overrides the blanket opt-in above.
         Self.applyReasoningEffort(reasoningEffort, toOpenAI: &body, isOpenRouter: includeReasoning)
+        // A terser answer, where the model supports the hint. This trims
+        // padding (restatements, closing offers) without changing content, so
+        // it is a direct saving in output tokens on every reply.
+        if let verbosity {
+            body["verbosity"] = verbosity
+        }
         if !tools.isEmpty {
             body["tools"] = tools.map { tool in
                 [
@@ -2191,11 +2294,9 @@ class AICompletionService: ObservableObject {
     }
 
     private static func parseOpenAIStep(_ json: [String: Any]) throws -> (AIChatStep, AIChatStepMeta) {
-        let usage = json["usage"] as? [String: Any]
         let meta = AIChatStepMeta(
             finishReason: (json["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String,
-            promptTokens: usage?["prompt_tokens"] as? Int,
-            completionTokens: usage?["completion_tokens"] as? Int
+            usage: TokenUsage.fromOpenAI(json["usage"] as? [String: Any])
         )
         return (try parseOpenAIStepBody(json), meta)
     }
@@ -2276,11 +2377,9 @@ class AICompletionService: ObservableObject {
     }
 
     private static func parseAnthropicStep(_ json: [String: Any]) throws -> (AIChatStep, AIChatStepMeta) {
-        let usage = json["usage"] as? [String: Any]
         let meta = AIChatStepMeta(
             finishReason: json["stop_reason"] as? String,
-            promptTokens: usage?["input_tokens"] as? Int,
-            completionTokens: usage?["output_tokens"] as? Int
+            usage: TokenUsage.fromAnthropic(json["usage"] as? [String: Any])
         )
         return (try parseAnthropicStepBody(json), meta)
     }
@@ -2332,12 +2431,12 @@ class AICompletionService: ObservableObject {
     //
     // Only reached when the caller supplies `onReasoningDelta` (currently
     // just AI Chat): same request the non-streaming path above makes, but
-    // with `"stream": true`, parsed event-by-event so reasoning fragments
-    // reach the UI while the model is still working. Each function
+    // with `"stream": true`, parsed event-by-event so reasoning and answer
+    // fragments reach the UI while the model is still working. Each function
     // accumulates fragments across the whole response and returns the same
     // `AIChatStep` shape its non-streaming counterpart does.
 
-    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: @MainActor (String) -> Void, onActivity: @Sendable () -> Void = {}) async throws -> (AIChatStep, AIChatStepMeta) {
+    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}) async throws -> (AIChatStep, AIChatStepMeta) {
         var text = ""
         var reasoning = ""
         var meta = AIChatStepMeta()
@@ -2355,9 +2454,8 @@ class AICompletionService: ObservableObject {
                 throw AIError.apiError(msg)
             }
             // Usage (when the server sends it) usually rides on the last chunk.
-            if let usage = json["usage"] as? [String: Any] {
-                meta.promptTokens = usage["prompt_tokens"] as? Int ?? meta.promptTokens
-                meta.completionTokens = usage["completion_tokens"] as? Int ?? meta.completionTokens
+            if let usage = TokenUsage.fromOpenAI(json["usage"] as? [String: Any]) {
+                meta.usage = usage
             }
 
             guard let choice = (json["choices"] as? [[String: Any]])?.first else { continue }
@@ -2368,10 +2466,11 @@ class AICompletionService: ObservableObject {
 
             if let piece = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String), !piece.isEmpty {
                 reasoning += piece
-                onReasoningDelta(piece)
+                onReasoningDelta?(piece)
             }
             if let piece = delta["content"] as? String, !piece.isEmpty {
                 text += piece
+                onTextDelta?(piece)
             }
             if let deltas = delta["tool_calls"] as? [[String: Any]] {
                 for fragment in deltas {
@@ -2396,7 +2495,7 @@ class AICompletionService: ObservableObject {
         return (.finalText(text, reasoning: stepReasoning), meta)
     }
 
-    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: @MainActor (String) -> Void, onActivity: @Sendable () -> Void = {}) async throws -> (AIChatStep, AIChatStepMeta) {
+    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}) async throws -> (AIChatStep, AIChatStepMeta) {
         var text = ""
         var reasoning = ""
         var meta = AIChatStepMeta()
@@ -2423,10 +2522,13 @@ class AICompletionService: ObservableObject {
                 case "thinking_delta":
                     if let piece = delta["thinking"] as? String, !piece.isEmpty {
                         reasoning += piece
-                        onReasoningDelta(piece)
+                        onReasoningDelta?(piece)
                     }
                 case "text_delta":
-                    if let piece = delta["text"] as? String, !piece.isEmpty { text += piece }
+                    if let piece = delta["text"] as? String, !piece.isEmpty {
+                        text += piece
+                        onTextDelta?(piece)
+                    }
                 case "input_json_delta":
                     if let piece = delta["partial_json"] as? String, let index = json["index"] as? Int {
                         fragments[index]?.arguments += piece
@@ -2435,15 +2537,25 @@ class AICompletionService: ObservableObject {
                     break
                 }
             case "message_start":
-                if let usage = (json["message"] as? [String: Any])?["usage"] as? [String: Any] {
-                    meta.promptTokens = usage["input_tokens"] as? Int
+                // Anthropic reports input tokens (and the cache fields) here,
+                // output tokens later in `message_delta`. Build the usage in
+                // two halves rather than overwriting it.
+                if let usage = TokenUsage.fromAnthropic((json["message"] as? [String: Any])?["usage"] as? [String: Any]) {
+                    var merged = meta.usage ?? TokenUsage()
+                    merged.input = usage.input
+                    merged.cacheRead = usage.cacheRead
+                    merged.cacheWrite = usage.cacheWrite
+                    merged.reportedCostUSD = usage.reportedCostUSD
+                    meta.usage = merged
                 }
             case "message_delta":
                 if let reason = (json["delta"] as? [String: Any])?["stop_reason"] as? String {
                     meta.finishReason = reason
                 }
                 if let output = (json["usage"] as? [String: Any])?["output_tokens"] as? Int {
-                    meta.completionTokens = output
+                    var merged = meta.usage ?? TokenUsage()
+                    merged.output = output
+                    meta.usage = merged
                 }
             case "error":
                 if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {

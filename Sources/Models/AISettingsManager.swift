@@ -165,6 +165,10 @@ struct ModelContext {
     /// global AI Chat → Context Budget setting. Resolve with
     /// `AISettingsManager.effectiveContextBudgetTokens(for:)`.
     var contextBudgetTokens: Int? = nil
+    /// What this model charges, when the user entered its rates on the saved
+    /// model. `nil` = unknown, so no cost is invented. A provider that reports
+    /// its own charge always wins over this.
+    var pricing: ModelPricing? = nil
 
     var isGemini: Bool { source == .gemini }
     var isAnthropic: Bool { source == .anthropic }
@@ -253,6 +257,11 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     /// long-context models can use their real window here (e.g. 200,000)
     /// without raising the global budget for every model.
     var contextBudgetTokens: Int?
+    /// What this model charges, when the user has entered its rates. `nil`
+    /// means unknown — the token counts are still shown, but no cost is
+    /// invented. A provider that reports its own charge (OpenRouter does)
+    /// always wins over this.
+    var pricing: ModelPricing?
 
     static let defaultLocalEndpoint = "http://localhost:11434/v1/chat/completions"
 
@@ -265,7 +274,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         apiKey: String = "",
         reasoningEffort: ReasoningEffort = .auto,
         compressionMethod: ChatCompressionMethod? = nil,
-        contextBudgetTokens: Int? = nil
+        contextBudgetTokens: Int? = nil,
+        pricing: ModelPricing? = nil
     ) {
         self.id = id
         self.name = name
@@ -276,6 +286,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         self.reasoningEffort = reasoningEffort
         self.compressionMethod = compressionMethod
         self.contextBudgetTokens = contextBudgetTokens
+        self.pricing = pricing
     }
 
     /// Lenient decoding: an unknown source/effort raw value (e.g. from a
@@ -297,6 +308,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         compressionMethod = (try? c.decode(String.self, forKey: .compressionMethod)).flatMap(ChatCompressionMethod.init(rawValue:))
         // Missing (older saved models) → follow the global budget.
         contextBudgetTokens = try? c.decode(Int.self, forKey: .contextBudgetTokens)
+        // Missing (older saved models) → no cost is computed for it.
+        pricing = try? c.decode(ModelPricing.self, forKey: .pricing)
     }
 
     var trimmedModel: String { model.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -435,6 +448,15 @@ class AISettingsManager: ObservableObject {
     /// read-only (compiles to a throwaway temp file) and is the main defense
     /// against a model leaving behind a document with mismatched delimiters.
     @AppStorage("aiChatAutoValidateTypstEdits") var chatAutoValidateTypstEdits: Bool = true
+    /// Ask the provider for a terser answer where the model supports it
+    /// (OpenAI's `verbosity: low` on the GPT-5.x/6 chat families, direct or
+    /// through a gateway). Trims padding — restated requests, closing offers —
+    /// without changing content, so it is a direct saving in output tokens on
+    /// every reply. Off by default because it changes the assistant's voice,
+    /// and not every provider accepts the parameter.
+    @AppStorage("aiChatConciseReplies") var chatConciseReplies: Bool = false {
+        willSet { objectWillChange.send() }
+    }
     /// Extra opt-in for the `web_fetch` tool — network egress is a meaningfully
     /// higher-risk tier than local file access (a fetch is also a request the
     /// destination server sees), so it's off by default like the Python tool,
@@ -480,6 +502,31 @@ class AISettingsManager: ObservableObject {
     /// (`AIModelProfile.contextBudgetTokens`), so a paid long-context model
     /// doesn't need one global, conservative number.
     @AppStorage("aiChatContextBudgetTokens") var chatContextBudgetTokens: Int = 16_000
+    /// Share of the budget kept free *below* the limit before compacting, as a
+    /// percentage. A margin absorbs one large step past the trigger — a big
+    /// file read, a long paste — so the conversation can still be sent
+    /// unchanged (and reuse the provider's cached prefix) instead of
+    /// overflowing. 0 = compact exactly at the budget.
+    ///
+    /// A percentage rather than a token count is what lets one setting fit
+    /// both a 32k local model and a 1M-token cloud model.
+    @AppStorage("aiChatCompactionBufferPercent") var chatCompactionBufferPercent: Double = 15 {
+        willSet { objectWillChange.send() }
+    }
+    /// Start writing the summary in the background once the context gets close
+    /// to the compaction trigger, so the swap-in is instant when it is needed
+    /// instead of the user watching "Summarizing older turns…" at turn start.
+    /// Skipped for short conversations, where the summary would cost more than
+    /// it saves.
+    @AppStorage("aiChatCompactionPrecompute") var chatCompactionPrecompute: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+
+    /// Buffer actually applied, clamped so a fat-fingered value can't leave no
+    /// room to work in or effectively disable compaction.
+    var effectiveCompactionBufferPercent: Double {
+        min(max(chatCompactionBufferPercent, 0), 50)
+    }
     /// Seconds of total silence (no new output arriving at all) before an
     /// in-flight chat response is treated as stalled. Some local reasoning
     /// models (large Qwen/DeepSeek distills on slow hardware) simply stop
@@ -1103,7 +1150,8 @@ class AISettingsManager: ObservableObject {
             apiKey: resolvedKey,
             reasoningEffort: profile.reasoningEffort,
             compressionMethod: profile.compressionMethod,
-            contextBudgetTokens: profile.contextBudgetTokens
+            contextBudgetTokens: profile.contextBudgetTokens,
+            pricing: profile.pricing
         )
     }
 

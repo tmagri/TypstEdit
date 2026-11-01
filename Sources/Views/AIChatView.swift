@@ -213,11 +213,11 @@ struct AIChatView: View {
             }
             Spacer()
             if aiSettings.chatEnabled {
-                Text("≈\(Self.contextLabel(chat.estimatedContextTokens)) / \(Self.contextLabel(chat.contextBudgetTokens))")
+                Text("\(chat.contextEstimate.isMeasured ? "" : "≈")\(Self.contextLabel(chat.estimatedContextTokens)) / \(Self.contextLabel(chat.contextBudgetTokens))")
                     .font(.caption2.monospacedDigit())
                     .lineLimit(1)
                     .foregroundColor(chat.estimatedContextTokens > chat.contextBudgetTokens ? .orange : .secondary)
-                    .help("Rough estimate of the conversation context sent with the next message, against this model's budget (a saved model can override the global setting). Older turns are summarized automatically when this is exceeded.")
+                    .help(contextHelpText)
                 Button {
                     Task { await chat.compactHistory() }
                 } label: {
@@ -387,6 +387,31 @@ struct AIChatView: View {
         }
         let thousands = Double(tokens) / 1_000
         return thousands < 10 ? String(format: "%.1fk", thousands) : "\(Int(thousands.rounded()))k"
+    }
+
+    /// Tooltip for the header's context figure. Spells out whether the number
+    /// is measured or estimated, and adds the conversation's running token and
+    /// cost totals when they are known.
+    private var contextHelpText: String {
+        var text = chat.contextEstimate.isMeasured
+            ? "The provider's own token count for the last request, plus an estimate of what has been added since, against this model's budget (a saved model can override the global setting)."
+            : "Rough estimate of the conversation context sent with the next message, against this model's budget (a saved model can override the global setting). It becomes exact once the provider reports token usage."
+
+        let usage = chat.sessionUsage
+        if !usage.isEmpty {
+            var totals = "\n\nThis conversation so far: \(Self.contextLabel(usage.promptTotal)) input"
+            if usage.cacheRead > 0 {
+                totals += " (\(Self.contextLabel(usage.cacheRead)) cached)"
+            }
+            totals += ", \(Self.contextLabel(usage.outputTotal)) output."
+            if let cost = chat.sessionCostUSD {
+                totals += String(format: " Cost ≈ $%.4f.", cost)
+            }
+            text += totals
+        }
+
+        text += " Older turns are summarized automatically when the budget is exceeded."
+        return text
     }
 
     // MARK: - Disabled (opt-in) State
@@ -686,23 +711,24 @@ struct AIChatView: View {
         }
     }
 
-    /// The live "Thinking…" row shown while a response is being generated.
-    /// While the model streams reasoning, the box is open by default so the
-    /// thinking is actually visible as it arrives; it can be collapsed (and
-    /// the header's "Collapse all thinking" closes it too) without stopping
-    /// the response. A running tool call is reported on its own line beneath
-    /// the thinking, so the reasoning doesn't vanish while a task runs.
+    /// The live row shown while a response is being generated.
+    ///
+    /// Two independent streams feed it: the model's reasoning (in the
+    /// collapsible box) and the answer it is writing. Showing the answer as it
+    /// arrives is what stops a slow model from looking stuck for a minute and
+    /// then dropping a whole reply at once. A running tool call is reported on
+    /// its own line, so neither stream has to hide while a task runs.
     @ViewBuilder
     private var generatingRow: some View {
         let reasoning = chat.liveReasoning
+        let answer = chat.liveAnswer
         let statusText = chat.liveStatus ?? "Thinking…"
         VStack(alignment: .leading, spacing: 6) {
             if reasoning.isEmpty {
-                // Nothing to show yet (or the model doesn't expose its
-                // reasoning): spinner plus why it's still working.
+                // No thinking to show (or the model doesn't expose any).
                 if let running = chat.runningTool {
                     runningTaskRow(running)
-                } else {
+                } else if answer.isEmpty {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text(statusText).font(.caption).foregroundColor(.secondary)
@@ -714,9 +740,30 @@ struct AIChatView: View {
                     runningTaskRow(running)
                 }
             }
+            if !answer.isEmpty {
+                liveAnswerPreview(answer)
+            }
         }
         .padding(8)
         .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
+
+    /// The newest slice of the answer being written. Bounded for the same
+    /// reason as the reasoning preview: a long reply would otherwise re-lay
+    /// out on every token. The finished message carries the full text.
+    private func liveAnswerPreview(_ answer: String) -> some View {
+        let limit = 1_500
+        let text = answer.count > limit ? "…\n" + String(answer.suffix(limit)) : answer
+        return HStack(alignment: .top, spacing: 6) {
+            ProgressView().controlSize(.small).padding(.top, 2)
+            MarkdownText(text: text, font: .callout)
+                .equatable()
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.10))
         .cornerRadius(8)
     }
 
@@ -1289,6 +1336,42 @@ struct AIChatView: View {
                 .background(Color.black.opacity(0.06))
                 .cornerRadius(6)
 
+            case .batchPatch(let changes):
+                HStack(spacing: 6) {
+                    Image(systemName: "square.stack.3d.up.fill").foregroundColor(.orange)
+                    Text("Apply a patch to \(changes.count) file\(changes.count == 1 ? "" : "s")?")
+                        .font(.subheadline.bold())
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(changes) { change in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 4) {
+                                    Text(patchChangeLetter(change.kind))
+                                        .font(.caption.bold().monospaced())
+                                        .foregroundColor(patchChangeColor(change.kind))
+                                    Text(change.path)
+                                        .font(.caption.monospaced())
+                                        .textSelection(.enabled)
+                                    if let from = change.fromPath {
+                                        Text("← \(from)")
+                                            .font(.caption2.monospaced())
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                if change.kind != .deleted {
+                                    diffPreview(old: change.oldContent, new: change.newContent)
+                                        .frame(maxHeight: 120)
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+                Text("Reviewed as one batch. Every listed file changes together, so approving is a single step and denying leaves all of them untouched.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+
             case .fileCopy(let sources, let destination, let overwrite):
                 HStack(spacing: 6) {
                     Image(systemName: "doc.on.doc").foregroundColor(.orange)
@@ -1395,6 +1478,11 @@ struct AIChatView: View {
             }
 
             HStack {
+                if chat.pendingApprovalCount > 1 {
+                    Text("\(chat.pendingApprovalCount - 1) more waiting")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
                 Button("Deny") { chat.resolveApproval(approved: false) }
                 Button("Approve") { chat.resolveApproval(approved: true) }
@@ -1403,6 +1491,25 @@ struct AIChatView: View {
         }
         .padding(10)
         .background(Color.orange.opacity(0.08))
+    }
+
+    /// Short letter for a batch-patch row, matching the diff convention.
+    private func patchChangeLetter(_ kind: PatchChange.Kind) -> String {
+        switch kind {
+        case .added: return "A"
+        case .deleted: return "D"
+        case .modified, .moved: return "M"
+        }
+    }
+
+    /// Colour for that letter: green for a new file, red for a deletion,
+    /// orange for a change in place.
+    private func patchChangeColor(_ kind: PatchChange.Kind) -> Color {
+        switch kind {
+        case .added: return .green
+        case .deleted: return .red
+        case .modified, .moved: return .orange
+        }
     }
 
     @ViewBuilder

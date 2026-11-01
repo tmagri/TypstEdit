@@ -157,6 +157,21 @@ final class MCPManager: ObservableObject {
         return result
     }
 
+    /// Usage guidance each server's author wrote for the model, keyed by server
+    /// name. Servers that send none are absent.
+    ///
+    /// Read after `availableTools(for:)` has started the servers, since the
+    /// text only arrives in the `initialize` handshake.
+    func instructions(for scopedServers: [ScopedMCPServer]) -> [String: String] {
+        var result: [String: String] = [:]
+        for scoped in scopedServers where scoped.config.enabled {
+            guard let client = clients[scoped.id], client.isRunning,
+                  let text = client.instructions else { continue }
+            result[scoped.config.name] = text
+        }
+        return result
+    }
+
     func callTool(serverName: String, toolName: String, arguments: [String: Any]) async throws -> String {
         guard let (scoped, client) = findRunningClient(serverName: serverName) else {
             throw MCPError.toolNotFound(toolName)

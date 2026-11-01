@@ -150,6 +150,24 @@ final class LocalToolExecutor {
     }
     var activeSkillAttachments: [SkillAttachmentInfo] = []
 
+    /// Every enabled skill, with its body, so `read_skill` can hand a large
+    /// one to the model on request instead of writing it into every prompt.
+    ///
+    /// A skill whose body is small is inlined by `SkillPrompt` and never needs
+    /// this call; a large reference pack is listed by name only and read here.
+    struct SkillInfo {
+        let skillID: String
+        let name: String
+        let description: String
+        let body: String
+        let folder: URL
+        let files: [String]
+    }
+    var activeSkills: [SkillInfo] = []
+    /// Skills whose bodies have already been handed to the model this request,
+    /// so a repeated `read_skill` says so instead of re-spending the context.
+    private var loadedSkillIDs: Set<String> = []
+
     /// Whether the Python tool runs under `sandbox-exec` (no network, no
     /// writes outside a scratch folder) — on by default, mirroring the
     /// Settings toggle. Off means "runs with your full user permissions",
@@ -174,6 +192,20 @@ final class LocalToolExecutor {
     /// Called by the chat manager at the start of each user turn.
     func beginRequest() {
         readFiles.removeAll()
+        // A new turn is a new context: a skill the previous turn loaded must
+        // be loadable again, since its body is no longer in the prompt.
+        loadedSkillIDs.removeAll()
+    }
+
+    /// Enabled skills whose bodies are too large to inline, so they are
+    /// offered through `read_skill` instead. Kept in step with `SkillPrompt`,
+    /// which decides the same split for the system prompt — if the two
+    /// disagreed, a skill could be listed as available and have no tool to
+    /// read it with.
+    private var deferredSkills: [SkillInfo] {
+        let split = SkillPrompt.split(activeSkills.map { (id: $0.skillID, body: $0.body) })
+        let deferred = Set(split.deferred)
+        return activeSkills.filter { deferred.contains($0.skillID) }
     }
 
     // MARK: - Tool Descriptors
@@ -286,6 +318,37 @@ final class LocalToolExecutor {
             ))
             tools.append(MCPTool(
                 serverName: Self.namespace,
+                name: "apply_patch",
+                description: """
+                Change several files in one call, and get one approval instead of one per file. Use it for a restructure: moving a section between chapters, splitting one document into several, or renaming a file with "*** Move to:". Prefer edit_file for a single localized change — it is cheaper and its diff is easier to read.
+
+                The patch is a line-oriented format:
+                *** Begin Patch
+                *** Add File: path/to/new.typ   (every following line starts with "+")
+                *** Update File: path/to/existing.typ   (optionally followed by "*** Move to: path/to/new-name.typ")
+                @@ optional label
+                 an unchanged line starts with a space
+                -a line to remove
+                +a line to add
+                *** Delete File: path/to/obsolete.typ
+                *** End Patch
+
+                Rules that matter:
+                - Every Update hunk needs at least one unchanged context line, or the new text has no position.
+                - Each hunk must match exactly one place in the file. Copy the context lines from read_file verbatim; include enough of them to be unique.
+                - Files must have been read in this request before an Update or Delete.
+                - Nothing is written if any hunk fails to match, so a bad patch changes nothing.
+                """,
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "patch": ["type": "string", "description": "The complete patch text, from \"*** Begin Patch\" to \"*** End Patch\"."]
+                    ],
+                    "required": ["patch"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
                 name: "export_document",
                 description: "Compile a .typ, .md or .note document to PDF, PNG or SVG with TypstEdit's own compiler and Markdown/Note pipeline — the same result as the editor's Export As. `output` is relative to the \(scope.noun) root and defaults to the source file's name with the format's extension; a folder is allowed, and PNG/SVG write one numbered file per page. The user reviews the destination and approves before anything is written. Use this for deliverables: a PDF to email or a page image for slides.",
                 inputSchema: [
@@ -360,6 +423,24 @@ final class LocalToolExecutor {
                         "path": ["type": "string", "description": "Attachment filename as listed for that skill"]
                     ],
                     "required": ["skill", "path"]
+                ]
+            ))
+        }
+
+        if !deferredSkills.isEmpty {
+            let listing = deferredSkills.map { info in
+                "\(info.skillID) — \(info.name)"
+            }.joined(separator: " | ")
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "read_skill",
+                description: "Load the full instructions of one of the reference skills listed in your prompt. Their bodies are deliberately not inlined — they are large — so read one only when it applies to the job at hand. Available right now: \(listing)",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "skill": ["type": "string", "description": "Skill id exactly as listed, e.g. \"builtin:typst-reference\""]
+                    ],
+                    "required": ["skill"]
                 ]
             ))
         }
@@ -446,6 +527,7 @@ final class LocalToolExecutor {
         case "list_files": return try listFiles(arguments)
         case "read_file": return try readFile(arguments)
         case "read_skill_file": return try readSkillFile(arguments)
+        case "read_skill": return try readSkill(arguments)
         case "grep_project": return try await grepProject(arguments)
         case "edit_file": return try await editFile(arguments, requestApproval: requestApproval)
         case "move_lines": return try await moveLines(arguments, requestApproval: requestApproval)
@@ -457,6 +539,7 @@ final class LocalToolExecutor {
         case "export_markdown": return try await exportMarkdown(arguments, requestApproval: requestApproval)
         case "copy_files": return try await copyFiles(arguments, requestApproval: requestApproval)
         case "create_folder": return try await createFolder(arguments, requestApproval: requestApproval)
+        case "apply_patch": return try await applyPatch(arguments, requestApproval: requestApproval)
         case "web_fetch": return try await webFetch(arguments, requestApproval: requestApproval)
         case "run": return try await runPython(arguments, requestApproval: requestApproval)
         default: throw LocalToolError.invalidArguments("Unknown built-in tool '\(toolName)'")
@@ -629,6 +712,41 @@ final class LocalToolExecutor {
         }
         let fullText = TextFileEncoding.decode(data).text
         return Self.windowed(fullText, label: "\(skillID)/\(cleaned)", arguments: arguments, defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+    }
+
+    /// Hands a deferred skill's body to the model on request.
+    ///
+    /// The `read_skill` tool exists so a large reference pack does not have to
+    /// sit in every prompt: `SkillPrompt` lists such a skill by name and
+    /// description, and the model loads the body here when it decides the
+    /// skill applies. A second call for the same skill in one request is
+    /// answered without repeating the text, which would only spend context.
+    private func readSkill(_ arguments: [String: Any]) throws -> String {
+        guard let skillID = (arguments["skill"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !skillID.isEmpty else {
+            throw LocalToolError.invalidArguments("skill is required — use the id exactly as listed in the prompt.")
+        }
+        let available = deferredSkills.map(\.skillID)
+        guard let info = activeSkills.first(where: { $0.skillID == skillID }) else {
+            let listed = available.isEmpty ? "none are enabled right now" : available.joined(separator: ", ")
+            throw LocalToolError.invalidArguments("'\(skillID)' isn't one of the enabled skills (available: \(listed)).")
+        }
+        guard SkillPrompt.split([(id: info.skillID, body: info.body)]).deferred.contains(info.skillID) else {
+            throw LocalToolError.invalidArguments(
+                "'\(skillID)' is already written into your instructions above — call read_skill_file if you need one of its attached files."
+            )
+        }
+        if loadedSkillIDs.contains(skillID) {
+            return "(The full text of '\(skillID)' was already loaded earlier in this request. Use what you have, or read one of its files with read_skill_file.)"
+        }
+        loadedSkillIDs.insert(skillID)
+        return SkillPrompt.loadedBody(
+            name: info.name,
+            id: info.skillID,
+            body: info.body,
+            directory: info.folder,
+            files: info.files
+        )
     }
 
     private func searchProject(_ arguments: [String: Any]) async -> String {
@@ -1516,6 +1634,155 @@ final class LocalToolExecutor {
         try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
         Self.notifyProjectFilesChanged()
         return "Created folder '\(relativePath(for: folderURL))'."
+    }
+
+    /// Applies a multi-file patch as one reviewed batch.
+    ///
+    /// Nothing is written until the whole patch has parsed and matched, so a
+    /// bad hunk in the third file cannot leave the first two renamed. That is
+    /// why the checks live in two passes: `BatchPatch.parse`, then per-file
+    /// matching against the current contents.
+    private func applyPatch(
+        _ arguments: [String: Any],
+        requestApproval: @escaping (PendingApprovalKind) async -> Bool
+    ) async throws -> String {
+        let fm = FileManager.default
+        guard let text = arguments["patch"] as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw LocalToolError.invalidArguments("patch is required — include the \"*** Begin Patch\" and \"*** End Patch\" lines.")
+        }
+        guard scope.root != nil else { throw LocalToolError.noScope }
+
+        let operations: [BatchPatch.Operation]
+        do {
+            operations = try BatchPatch.parse(text)
+        } catch let error as BatchPatch.PatchError {
+            throw LocalToolError.invalidArguments(error.errorDescription ?? "The patch could not be parsed.")
+        }
+
+        // Pass 1: work out every change without touching the disk.
+        var changes: [PatchChange] = []
+        var writes: [(url: URL, change: PatchChange, originalData: Data?, encoding: String.Encoding)] = []
+
+        for operation in operations {
+            switch operation {
+            case .add(let path, let content):
+                let url = try resolvePath(path)
+                if fm.fileExists(atPath: url.path) {
+                    throw LocalToolError.invalidArguments(
+                        "Add File '\(path)' already exists. Use Update File to change it, or Delete File first."
+                    )
+                }
+                guard content.utf8.count <= maxReadableBytes else { throw LocalToolError.fileTooLarge(path) }
+                let change = PatchChange(
+                    path: relativePath(for: url),
+                    oldContent: "",
+                    newContent: content,
+                    kind: .added
+                )
+                changes.append(change)
+                writes.append((url, change, nil, .utf8))
+
+            case .delete(let path):
+                let url = try resolvePath(path)
+                guard fm.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
+                try requireFreshRead(of: url, path: path, tool: "apply_patch")
+                let data = try Data(contentsOf: url)
+                let old = TextFileEncoding.decode(data).text
+                changes.append(PatchChange(
+                    path: relativePath(for: url),
+                    oldContent: old,
+                    newContent: "",
+                    kind: .deleted
+                ))
+                writes.append((url, changes[changes.count - 1], data, .utf8))
+
+            case .update(let path, let moveTo, let hunks):
+                let url = try resolvePath(path)
+                guard fm.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
+                try requireFreshRead(of: url, path: path, tool: "apply_patch")
+                let data = try Data(contentsOf: url)
+                guard data.count <= maxScannableBytes else { throw LocalToolError.fileTooLarge(path) }
+                let decoded = TextFileEncoding.decode(data)
+
+                let updated: String
+                do {
+                    updated = try BatchPatch.apply(hunks: hunks, to: decoded.text, path: path)
+                } catch let error as BatchPatch.PatchError {
+                    throw LocalToolError.invalidArguments(error.errorDescription ?? "The hunk did not apply.")
+                }
+
+                let targetURL: URL
+                if let moveTo {
+                    targetURL = try resolvePath(moveTo)
+                    if targetURL.standardizedFileURL.path != url.standardizedFileURL.path,
+                       fm.fileExists(atPath: targetURL.path) {
+                        throw LocalToolError.invalidArguments(
+                            "Can't move '\(path)' to '\(moveTo)': that path already exists."
+                        )
+                    }
+                } else {
+                    targetURL = url
+                }
+
+                let change = PatchChange(
+                    path: moveTo ?? relativePath(for: url),
+                    oldContent: decoded.text,
+                    newContent: updated,
+                    kind: moveTo == nil ? .modified : .moved,
+                    fromPath: moveTo == nil ? nil : relativePath(for: url)
+                )
+                changes.append(change)
+                writes.append((targetURL, change, data, decoded.encoding))
+            }
+        }
+
+        guard !changes.isEmpty else { throw LocalToolError.invalidArguments("The patch produced no changes.") }
+
+        // Pass 2: one approval for the whole batch, showing every file.
+        let approved = await requestApproval(.batchPatch(changes: changes))
+        guard approved else { throw LocalToolError.approvalDenied }
+
+        // Apply in the order given. A delete is the only destructive step, and
+        // it comes after its approval, so a denial leaves everything intact.
+        for (index, operation) in operations.enumerated() {
+            let (url, change, originalData, encoding) = writes[index]
+            switch operation {
+            case .delete:
+                try fm.removeItem(at: url)
+            case .update(_, let moveTo, _):
+                if let originalData {
+                    try Self.write(text: change.newContent, to: url, originalData: originalData, encoding: encoding)
+                } else {
+                    try change.newContent.write(to: url, atomically: true, encoding: .utf8)
+                }
+                if moveTo != nil {
+                    let source = try resolvePath(operation.path)
+                    if source.standardizedFileURL.path != url.standardizedFileURL.path {
+                        try fm.removeItem(at: source)
+                    }
+                }
+                readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+                Self.notifyFileChangedOnDisk(url)
+            case .add:
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try change.newContent.write(to: url, atomically: true, encoding: .utf8)
+                readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+                Self.notifyFileChangedOnDisk(url)
+            }
+        }
+
+        // Compile any .typ file the patch touched, so a restructure that broke
+        // an #include is reported in this same result.
+        var notes: [String] = []
+        for change in changes where change.path.hasSuffix(".typ") && change.kind != .deleted {
+            let url = try resolvePath(change.path)
+            if fm.fileExists(atPath: url.path) {
+                notes.append(await validationNote(for: url, path: change.path))
+            }
+        }
+
+        return BatchPatch.resultText(changes) + notes.joined()
     }
 
     /// Loader passed to `TypstToMarkdownConverter` so `#include`/`#import`
