@@ -41,7 +41,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TypstEditTests",
-            dependencies: ["TypstEdit"]
+            dependencies: ["TypstEdit", "CSQLite"]
         ),
     ]
 )

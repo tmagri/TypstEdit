@@ -10,6 +10,46 @@ enum RAGRegex {
     static let xmlTags = try! NSRegularExpression(pattern: "<[^>]+>")
 }
 
+// MARK: - Safe SQLite bindings
+
+/// `SQLITE_TRANSIENT` is a `#define` cast that Swift cannot import, so it has
+/// to be built by hand. Internal (not `private`) so the bind-safety tests can
+/// exercise the same helpers the manager uses.
+let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+/// Binding helpers that keep the bound bytes alive until `sqlite3_step`.
+///
+/// Passing `nil` as the destructor means `SQLITE_STATIC`: SQLite stores the
+/// raw pointer and reads it later, at `sqlite3_step`. Binding a temporary's
+/// pointer that way (`sqlite3_bind_text(stmt, 1, (s as NSString).utf8String,
+/// -1, nil)`) is a use-after-free — the temporary is released at the end of
+/// the statement, so SQLite can read freed memory. That corrupts the heap
+/// silently and intermittently, which is exactly the kind of damage that
+/// surfaces later as a crash in unrelated code (a refcount write into a
+/// read-only page, for example) minutes after the faulty write.
+///
+/// Both helpers ask SQLite to take its own copy instead, so no Swift buffer
+/// outlives its own statement. Internal (not `private`) for the bind-safety
+/// tests.
+extension OpaquePointer {
+    func bind(_ text: String, at index: Int32) {
+        sqlite3_bind_text(self, index, text, -1, sqliteTransient)
+    }
+
+    /// Binds `data` as a blob. `SQLITE_TRANSIENT` copies it, so the caller's
+    /// buffer only has to survive this call — an empty blob binds as zero bytes
+    /// rather than a null pointer.
+    func bind(blob data: Data, at index: Int32) {
+        if data.isEmpty {
+            sqlite3_bind_zeroblob(self, index, 0)
+        } else {
+            _ = data.withUnsafeBytes { rawBuffer in
+                sqlite3_bind_blob(self, index, rawBuffer.baseAddress, Int32(rawBuffer.count), sqliteTransient)
+            }
+        }
+    }
+}
+
 // MARK: - Core Data Models
 struct DocumentChunk: Codable {
     let fileURL: URL
@@ -367,7 +407,7 @@ class RAGManager: ObservableObject {
             var checkStmt: OpaquePointer?
             var storedHash = ""
             if sqlite3_prepare_v2(db, checkSQL, -1, &checkStmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(checkStmt, 1, (fileKey as NSString).utf8String, -1, nil)
+                checkStmt?.bind(fileKey, at: 1)
                 if sqlite3_step(checkStmt) == SQLITE_ROW {
                     fileId = sqlite3_column_int64(checkStmt, 0)
                     let storedModified = sqlite3_column_double(checkStmt, 1)
@@ -437,10 +477,10 @@ class RAGManager: ObservableObject {
             let insertFileSQL = "INSERT INTO files (path, last_modified, file_size, content_hash) VALUES (?, ?, ?, ?);"
             var insertFileStmt: OpaquePointer?
             if sqlite3_prepare_v2(db, insertFileSQL, -1, &insertFileStmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(insertFileStmt, 1, (fileKey as NSString).utf8String, -1, nil)
+                insertFileStmt?.bind(fileKey, at: 1)
                 sqlite3_bind_double(insertFileStmt, 2, lastModified)
                 sqlite3_bind_int64(insertFileStmt, 3, currentFileSize)
-                sqlite3_bind_text(insertFileStmt, 4, (newHash as NSString).utf8String, -1, nil)
+                insertFileStmt?.bind(newHash, at: 4)
                 if sqlite3_step(insertFileStmt) == SQLITE_DONE {
                     fileId = sqlite3_last_insert_rowid(db)
                 }
@@ -455,12 +495,10 @@ class RAGManager: ObservableObject {
                 do {
                     let vector = try await provider.getEmbedding(for: textChunk)
                     sqlite3_bind_int64(insertChunkStmt, 1, fileId)
-                    sqlite3_bind_text(insertChunkStmt, 2, (textChunk as NSString).utf8String, -1, nil)
+                    insertChunkStmt?.bind(textChunk, at: 2)
                     
                     let vectorData = vector.withUnsafeBufferPointer { Data(buffer: $0) }
-                    _ = vectorData.withUnsafeBytes { rawBuffer in
-                        sqlite3_bind_blob(insertChunkStmt, 3, rawBuffer.baseAddress, Int32(rawBuffer.count), nil)
-                    }
+                    insertChunkStmt?.bind(blob: vectorData, at: 3)
                     
                     sqlite3_step(insertChunkStmt)
                     sqlite3_reset(insertChunkStmt)
@@ -577,14 +615,12 @@ class RAGManager: ObservableObject {
                 }
             }
             
-            _ = vectorData.withUnsafeBytes { rawBuffer in
-                sqlite3_bind_blob(stmt, 1, rawBuffer.baseAddress, Int32(rawBuffer.count), nil)
-            }
+            stmt?.bind(blob: vectorData, at: 1)
             sqlite3_bind_int64(stmt, 2, Int64(fetchLimit))
             
             // Bind the excluded path to the WHERE clause if we have one
             if let excludedPath = excludedPath {
-                sqlite3_bind_text(stmt, 3, (excludedPath as NSString).utf8String, -1, nil)
+                stmt?.bind(excludedPath, at: 3)
             }
             
             var results: [DocumentChunk] = []
