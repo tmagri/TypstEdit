@@ -508,10 +508,11 @@ final class AgentCompileService {
             } catch {
                 return (Int32(-1), "Failed to launch \(executable): \(error.localizedDescription)")
             }
-            // Drain before waiting so a large diagnostic dump can't fill the pipe and block Typst.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+            // Drain concurrently with the wait so a large diagnostic dump
+            // can't fill the pipe and block Typst (wait-then-read deadlocks
+            // once the ~64 KB pipe buffer is full).
+            let result = BlockingProcess.run(process, draining: [pipe.fileHandleForReading])
+            return (result.status, result.output)
         }.value
     }
 

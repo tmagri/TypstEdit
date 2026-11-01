@@ -77,11 +77,14 @@ class TypstValidator {
             process.standardOutput = pipe
             
             try process.run()
-            process.waitUntilExit()
+            // Drain concurrently with the wait: a document with many errors can
+            // emit more output than the pipe buffer holds, and wait-then-read
+            // would deadlock with the child blocked on a full pipe.
+            let result = BlockingProcess.run(process, draining: [pipe.fileHandleForReading])
             
-            if process.terminationStatus != 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let output = String(data: data, encoding: .utf8) {
+            if result.status != 0 {
+                let output = result.output
+                if !output.isEmpty {
                     return output.components(separatedBy: .newlines).filter { !$0.isEmpty }
                 }
                 return ["Unknown Typst Compiler Error"]

@@ -1520,6 +1520,9 @@ final class LocalToolExecutor {
             return "Failed to launch Typst: \(error.localizedDescription)"
         }
 
+        // Drain before waiting so a large diagnostic dump can't fill the pipe and block Typst.
+        let collectStderr = BlockingProcess.startDraining(stderrPipe.fileHandleForReading)
+
         // Unlike `runPython` (whose `waitWithTimeout` bounds the wait), this
         // waits on the process with no timeout — a pathological document could
         // hang the chat forever. Terminate the process when the surrounding
@@ -1528,8 +1531,7 @@ final class LocalToolExecutor {
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 process.terminationHandler = { finishedProcess in
-                    let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                    let errText = String(data: errData, encoding: .utf8) ?? ""
+                    let errText = String(data: collectStderr(), encoding: .utf8) ?? ""
                     if finishedProcess.terminationStatus == 0 {
                         continuation.resume(returning: "Compiled successfully with no errors.")
                     } else {

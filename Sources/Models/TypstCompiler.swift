@@ -1854,6 +1854,25 @@ class TypstCompiler: ObservableObject {
         CompilerRegex.mathRegion.enumerateMatches(in: source, options: [], range: NSRange(0..<length)) { m, _, _ in
             if let m = m { blank(m.range) }
         }
+        // Live Typst code regions: a line whose first non-space character is
+        // `#` opens a region that continues while its bracket depth is unclosed
+        // (the same scanner the hybrid sanitizer uses to extract them). The
+        // operators inside are Typst code — `parts.len() >= 3`, comparison
+        // chains, ref targets — and MUST NOT be escaped: `\>` is invalid in
+        // code mode and one such escape cascades into thousands of compile
+        // errors (which is also what floods the stderr pipe on Save).
+        let lineStarts = Self.lineStartOffsets(in: ns)
+        for span in AICompletionService.typstRegionLineSpans(in: source) {
+            guard span.start < lineStarts.count else { continue }
+            let start = lineStarts[span.start]
+            let end: Int
+            if span.end + 1 < lineStarts.count {
+                end = lineStarts[span.end + 1] - 1          // up to (excluding) that "\n"
+            } else {
+                end = length
+            }
+            blank(NSRange(location: start, length: end - start))
+        }
         // Typst string literals: a backslash inside "…" is a STRING escape, so
         // auto-inserting `\@` there would be an invalid escape sequence that
         // breaks the compile (`#link("mailto:a@b.com")`). When a line carries a
@@ -2171,14 +2190,16 @@ class TypstCompiler: ObservableObject {
         process.standardOutput = pipe
         do {
             try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
+            // Drain concurrently with the wait: a broken document can emit
+            // megabytes of diagnostics, enough to fill the pipe buffer and
+            // deadlock a wait-then-read sequence.
+            let result = BlockingProcess.run(process, draining: [pipe.fileHandleForReading])
+            if result.status == 0 {
                 export.success = true
                 export.notes.append("Verified: the exported file compiles with the standard typst compiler.")
             } else {
                 export.error = "The exported file was written, but it does not compile with standard Typst:\n"
-                    + (String(data: data, encoding: .utf8) ?? "")
+                    + result.output
             }
         } catch {
             export.error = "Could not run typst to verify the export: \(error.localizedDescription)"
@@ -2258,6 +2279,19 @@ class TypstCompiler: ObservableObject {
         text.reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
     }
 
+    /// UTF-16 offsets where each line of `text` starts (line 0 starts at 0).
+    /// `components(separatedBy:)`-style indices in one pass over the NSString,
+    /// for mapping line indices (e.g. from `typstRegionLineSpans`) to ranges.
+    nonisolated static func lineStartOffsets(in text: NSString) -> [Int] {
+        var offsets: [Int] = [0]
+        var index = 0
+        while index < text.length {
+            if text.character(at: index) == 0x0A { offsets.append(index + 1) }
+            index += 1
+        }
+        return offsets
+    }
+
     func export(sourceURL: URL, outputURL: URL, format: String, projectRoot: URL? = nil) async -> (success: Bool, error: String?) {
         guard let typstPath = resolveTypstPath() else {
             return (false, "Error: 'typst' executable not found.")
@@ -2284,16 +2318,17 @@ class TypstCompiler: ObservableObject {
         
         do {
             try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
+            // Drain concurrently: a large diagnostic dump would otherwise fill
+            // the pipe buffer and block typst while we wait for it to exit.
+            let result = BlockingProcess.run(process, draining: [pipe.fileHandleForReading])
+            let output = result.output
             
-            if process.terminationStatus != 0 {
+            if result.status != 0 {
                 print("[TYPST-EXPORT-ERROR]: \(output)")
                 if output.contains("error:") {
                     parseErrors(from: output, sourceFileName: sourceURL.lastPathComponent)
                 }
-                return (false, output.isEmpty ? "Unknown Typst error (exit code \(process.terminationStatus))" : output)
+                return (false, output.isEmpty ? "Unknown Typst error (exit code \(result.status))" : output)
             }
             
             print("[TYPST-EXPORT-SUCCESS]: \(effectiveOutputURL.lastPathComponent)")
@@ -2398,12 +2433,13 @@ class TypstCompiler: ObservableObject {
             
             do {
                 try process.run()
-                process.waitUntilExit()
+                // Drain concurrently with the wait: a broken document's
+                // diagnostic dump can exceed the pipe buffer and deadlock a
+                // wait-then-read sequence (the Save freeze).
+                let result = BlockingProcess.run(process, draining: [pipe.fileHandleForReading])
+                lastOutput = result.output
                 
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                lastOutput = String(data: data, encoding: .utf8) ?? ""
-                
-                if process.terminationStatus == 0 {
+                if result.status == 0 {
                     return (true, nil)
                 }
                 
@@ -2418,7 +2454,7 @@ class TypstCompiler: ObservableObject {
                     }
                 }
                 
-                return (false, lastOutput.isEmpty ? "Unknown Typst error (exit code \(process.terminationStatus))" : lastOutput)
+                return (false, lastOutput.isEmpty ? "Unknown Typst error (exit code \(result.status))" : lastOutput)
             } catch {
                 return (false, error.localizedDescription)
             }
@@ -2539,14 +2575,17 @@ class TypstCompiler: ObservableObject {
             
             do {
                 try process.run()
-                process.waitUntilExit()
+                // Drain concurrently with the wait: this is the Save path's
+                // clean compile, and a broken note can dump megabytes of
+                // diagnostics — a wait-then-read sequence deadlocks on the
+                // full pipe buffer while the whole app waits on this task.
+                let result = BlockingProcess.run(process, draining: [pipe.fileHandleForReading])
                 
-                if process.terminationStatus == 0 {
+                if result.status == 0 {
                     return (true, pdfURL, nil)
                 }
                 
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                lastOutput = String(data: data, encoding: .utf8) ?? "Unknown error"
+                lastOutput = result.output.isEmpty ? "Unknown error" : result.output
                 
                 if ext == "note" || ext == "md" {
                     let rawLines = parseRawErrorLines(from: lastOutput)
@@ -2784,6 +2823,108 @@ class TypstCompiler: ObservableObject {
     }
     #endif
 } // End of TypstCompiler class
+
+// MARK: - Blocking process helper
+
+/// Runs short-lived helper processes (`typst compile`, `typst --version`, …)
+/// without the two classic pipe deadlocks:
+///
+/// 1. **Full pipe buffer.** `Process.waitUntilExit()` blocks until the child
+///    exits — but a child attached to an unread `Pipe` blocks once the pipe's
+///    ~64 KB buffer fills, so both sides wait forever. A broken `.note`
+///    produces megabytes of typst diagnostics, which reliably triggered this
+///    deadlock on Save (the app runs on the main actor) and hung it for good.
+///    Draining concurrently with the wait keeps both sides making progress.
+/// 2. **Main-actor blocking.** `TypstCompiler` is `@MainActor`, so a
+///    synchronous `waitUntilExit()` also froze the UI for the whole compile.
+///    `launch(…)` runs the child in a detached task instead.
+enum BlockingProcess {
+    struct Result: Sendable {
+        let status: Int32
+        let output: String
+    }
+
+    /// Starts draining `handle` on a background queue immediately. The
+    /// returned closure waits for EOF and delivers the bytes; call it once the
+    /// process has exited (e.g. from its termination handler).
+    nonisolated static func startDraining(
+        _ handle: FileHandle,
+        on queue: DispatchQueue = DispatchQueue.global(qos: .userInitiated)
+    ) -> @Sendable () -> Data {
+        let box = DataBox()
+        queue.async { box.data = handle.readDataToEndOfFile() }
+        return { box.wait() }
+    }
+
+    /// Waits for an already-running process while draining `pipes`
+    /// concurrently. Safe for output of any size.
+    nonisolated static func run(
+        _ process: Process,
+        draining pipes: [FileHandle],
+        on queue: DispatchQueue = DispatchQueue.global(qos: .userInitiated)
+    ) -> Result {
+        let readers = pipes.map { startDraining($0, on: queue) }
+        process.waitUntilExit()
+        let output = readers.compactMap { String(data: $0(), encoding: .utf8) }.joined()
+        return Result(status: process.terminationStatus, output: output)
+    }
+
+    /// Launches `executable` off the main actor, captures stdout + stderr,
+    /// waits for it to exit and returns its status plus the combined output.
+    /// A launch failure is reported as status `-1` with the error text in
+    /// `output`, mirroring the old do/catch call sites.
+    nonisolated static func launch(
+        executable: String,
+        arguments: [String],
+        currentDirectory: URL? = nil,
+        environment: [String: String]? = nil
+    ) async -> Result {
+        await Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            if let currentDirectory { process.currentDirectoryURL = currentDirectory }
+            if let environment { process.environment = environment }
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            do {
+                try process.run()
+            } catch {
+                return Result(status: -1, output: "Failed to launch \(executable): \(error.localizedDescription)")
+            }
+            return run(process, draining: [pipe.fileHandleForReading])
+        }.value
+    }
+}
+
+/// Thread-safe one-shot box handing a background pipe read's result back to
+/// the waiter.
+private final class DataBox: @unchecked Sendable {
+    private var _data: Data?
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+
+    var data: Data {
+        get {
+            lock.lock(); defer { lock.unlock() }
+            return _data ?? Data()
+        }
+        set {
+            lock.lock()
+            _data = newValue
+            lock.unlock()
+            semaphore.signal()
+        }
+    }
+
+    func wait() -> Data {
+        semaphore.wait()
+        return data
+    }
+}
 
 // MARK: - Web Image Caching Actor
 actor WebImageCache {

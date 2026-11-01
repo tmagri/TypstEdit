@@ -123,15 +123,20 @@ class TypstUpdater: ObservableObject {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        // Drain before waiting (tiny output, but keeps every Process call
+        // site on the same deadlock-free pattern).
+        let collectOutput = BlockingProcess.startDraining(pipe.fileHandleForReading)
 
         return await withCheckedContinuation { continuation in
             process.terminationHandler = { proc in
                 guard proc.terminationStatus == 0 else {
+                    _ = collectOutput()
                     continuation.resume(returning: nil)
                     return
                 }
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty else {
+                let output = String(data: collectOutput(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !output.isEmpty else {
                     continuation.resume(returning: nil)
                     return
                 }
@@ -452,15 +457,19 @@ class TypstUpdater: ObservableObject {
         process.arguments = [command]
         let pipe = Pipe()
         process.standardOutput = pipe
+        let collectOutput = BlockingProcess.startDraining(pipe.fileHandleForReading)
         
         return await withCheckedContinuation { continuation in
             process.terminationHandler = { process in
                 if process.terminationStatus == 0 {
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-                        continuation.resume(returning: path)
+                    let output = String(data: collectOutput(), encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !output.isEmpty {
+                        continuation.resume(returning: output)
                         return
                     }
+                } else {
+                    _ = collectOutput()
                 }
                 continuation.resume(returning: nil)
             }
@@ -478,14 +487,17 @@ class TypstUpdater: ObservableObject {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        // Drain before waiting: `cargo build` emits far more than the pipe
+        // buffer holds, and a wait-then-read sequence would deadlock with the
+        // child blocked on a full pipe.
+        let collectOutput = BlockingProcess.startDraining(pipe.fileHandleForReading)
         
         return try await withCheckedThrowingContinuation { continuation in
             process.terminationHandler = { process in
                 if process.terminationStatus == 0 {
                     continuation.resume()
                 } else {
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? "Unknown process error"
+                    let output = String(data: collectOutput(), encoding: .utf8) ?? "Unknown process error"
                     continuation.resume(throwing: NSError(domain: "TypstUpdater", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: output]))
                 }
             }

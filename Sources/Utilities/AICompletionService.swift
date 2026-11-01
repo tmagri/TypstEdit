@@ -2853,15 +2853,22 @@ class AICompletionService: ObservableObject {
         return true
     }
 
-    /// Lifts whole Typst code regions out of hybrid `.note` text before the
-    /// CommonMark parse (step 1e). A region opens where `isTypstRegionOpener`
-    /// holds and continues while its bracket depth is unclosed. Depth counting
-    /// respects `"strings"` (with `\"` escapes), `//` line comments and
-    /// `/* */` block comments. Extraction is idempotent: re-running on
-    /// already-sanitized text re-extracts the same regions.
-    nonisolated static func extractTypstRegions(_ text: String, marker: Unicode.Scalar) -> (text: String, regions: [String]) {
-        var lines = text.components(separatedBy: "\n")
-        var regions: [String] = []
+    /// Finds where live Typst code regions start and end in `text`: a region
+    /// opens where `isTypstRegionOpener` holds and continues while its bracket
+    /// depth is unclosed. Depth counting respects `"strings"` (with `\"`
+    /// escapes), `//` line comments and `/* */` block comments. Fenced code
+    /// blocks are skipped wholesale. Returns inclusive line indices.
+    ///
+    /// Single source of truth for region boundaries: both the hybrid
+    /// sanitizer's region extraction (`extractTypstRegions`) and the `.note`
+    /// operator-delimiting pre-pass (`TypstCompiler.delimitImproperOperators`)
+    /// call it, so they can never disagree about what is live Typst code. Such
+    /// a disagreement escaped `>=` inside a `#show` block (`\>=` is invalid in
+    /// code mode), which cascaded into ~4,000 compile errors — and that
+    /// diagnostic flood is what filled the stderr pipe and froze Save.
+    nonisolated static func typstRegionLineSpans(in text: String) -> [(start: Int, end: Int)] {
+        let lines = text.components(separatedBy: "\n")
+        var spans: [(start: Int, end: Int)] = []
         var index = 0
         var insideFence = false
         let regionLineCap = 500
@@ -2909,14 +2916,6 @@ class AICompletionService: ObservableObject {
                             inString = false
                         }
                     } else if inBlockComment {
-                        if ch == "/" {
-                            // possible "*/"; the next loop iteration sees the "/"
-                            // as a normal char — handle explicitly:
-                            let next = lineText.index(after: pos)
-                            if next < lineText.endIndex, lineText[next] == "*" {
-                                // this "/" belongs to an opener; fall through
-                            }
-                        }
                         if ch == "*" {
                             let next = lineText.index(after: pos)
                             if next < lineText.endIndex, lineText[next] == "/" {
@@ -2963,28 +2962,43 @@ class AICompletionService: ObservableObject {
                 end += 1
             }
 
+            spans.append((start: index, end: end))
+            // The whole span is settled: continue scanning after its last line.
+            index = end + 1
+        }
+
+        return spans
+    }
+
+    /// Lifts whole Typst code regions out of hybrid `.note` text before the
+    /// CommonMark parse (step 1e). Regions — and their boundaries — come from
+    /// `typstRegionLineSpans`. Extraction is idempotent: re-running on
+    /// already-sanitized text re-extracts the same regions.
+    nonisolated static func extractTypstRegions(_ text: String, marker: Unicode.Scalar) -> (text: String, regions: [String]) {
+        let spans = typstRegionLineSpans(in: text)
+        guard !spans.isEmpty else { return (text, []) }
+
+        var lines = text.components(separatedBy: "\n")
+        var regions: [String] = []
+
+        // Replace spans last-to-first so mutations can't shift the indices of
+        // the spans still to be processed. `position` is the span's document
+        // order, which is the region's placeholder-token index.
+        for (position, span) in spans.enumerated().reversed() {
             // cmark lazy-continues a column-0 line into a preceding list
             // item's paragraph, which pulled region tokens (and their
             // expansions — images, pagebreaks) inside the list container
             // (typst: "pagebreaks are not allowed inside of containers").
             // A blank line closes the open block so the token starts fresh.
-            if index > 0, !lines[index - 1].trimmingCharacters(in: .whitespaces).isEmpty {
-                lines.insert("", at: index)
-                index += 1
-                end += 1
+            var regionStart = span.start
+            var regionEnd = span.end
+            if regionStart > 0, !lines[regionStart - 1].trimmingCharacters(in: .whitespaces).isEmpty {
+                lines.insert("", at: regionStart)
+                regionStart += 1
+                regionEnd += 1
             }
-            regions.append(lines[index...end].joined(separator: "\n"))
-            lines.replaceSubrange(
-                index...end,
-                with: [PlaceholderMarkers.token(kind: marker, index: regions.count - 1)]
-            )
-            // The region's lines collapsed into one token, so `index` now names
-            // the token itself in the shortened array — the next candidate line
-            // is `index + 1`. Advancing to the OLD `end + 1` would skip
-            // (region line count − 1) real lines, dropping openers that follow
-            // a multi-line region (a layout function swallowed every `#if`
-            // block after it).
-            index += 1
+            regions.insert(lines[regionStart...regionEnd].joined(separator: "\n"), at: 0)
+            lines.replaceSubrange(regionStart...regionEnd, with: [PlaceholderMarkers.token(kind: marker, index: position)])
         }
 
         return (lines.joined(separator: "\n"), regions)
