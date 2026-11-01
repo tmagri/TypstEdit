@@ -210,6 +210,81 @@ final class AIChatModeTests: XCTestCase {
         XCTAssertNil(chat.errorMessage)
     }
 
+    // MARK: - Queue delivery
+
+    func testQueuedMessageWaitsOutsideTheTranscript() async {
+        let chat = AIChatManager()
+        chat.isGenerating = true
+        let before = chat.messages.count
+        await chat.sendMessage("run the tests after this", as: .queue)
+        // A queued message is not an exchange the model has received, so it
+        // must not appear in the transcript while the current turn runs.
+        XCTAssertEqual(chat.messages.count, before)
+        XCTAssertEqual(chat.pendingQueued.map(\.text), ["run the tests after this"])
+        XCTAssertTrue(chat.isGenerating)
+        // A steer, by contrast, is visible immediately.
+        await chat.sendMessage("also fix the header", as: .steer)
+        XCTAssertEqual(chat.messages.last?.text, "also fix the header")
+    }
+
+    func testQueuedMessageSurvivesStopButSteerDoesNot() async {
+        let chat = AIChatManager()
+        chat.isGenerating = true
+        await chat.sendMessage("steer me", as: .steer)
+        await chat.sendMessage("queue me", as: .queue)
+        chat.stop()
+        // The steer belonged to the cancelled execution: dropped. The queued
+        // message never did, so it survives — but the drain is disarmed so it
+        // cannot fire a surprise turn.
+        XCTAssertEqual(chat.pendingQueued.map(\.text), ["queue me"])
+        // The steer is the last transcript entry — it was appended when sent.
+        // The queued message stays out of it, so Stop cannot leave an
+        // exchange the model never saw sitting in the history.
+        XCTAssertEqual(chat.messages.last?.text, "steer me")
+    }
+
+    func testDropQueuedReturnsTextToTheComposer() {
+        let chat = AIChatManager()
+        chat.enqueue("appendix pass")
+        chat.draft = "existing draft"
+        chat.dropQueued(chat.pendingQueued[0].id)
+        XCTAssertTrue(chat.pendingQueued.isEmpty)
+        XCTAssertEqual(chat.draft, "appendix pass\n\nexisting draft")
+    }
+
+    func testDropQueuedReplacesAnEmptyDraft() {
+        let chat = AIChatManager()
+        chat.enqueue("appendix pass")
+        chat.draft = "   "
+        chat.dropQueued(chat.pendingQueued[0].id)
+        XCTAssertEqual(chat.draft, "appendix pass")
+    }
+
+    func testPromoteQueuedOpensItsOwnTurnInTheTranscript() {
+        let chat = AIChatManager()
+        chat.enqueue("first")
+        chat.enqueue("second")
+        guard let promoted = chat.promoteQueued() else {
+            return XCTFail("a waiting message should be promoted")
+        }
+        XCTAssertEqual(promoted, "first")
+        XCTAssertEqual(chat.messages.last?.role, .user)
+        XCTAssertEqual(chat.messages.last?.text, "first")
+        // Oldest first, and only one per turn.
+        XCTAssertEqual(chat.pendingQueued.map(\.text), ["second"])
+    }
+
+    func testSteerQueuedMovesTheMessageIntoTheRunningTurn() async {
+        let chat = AIChatManager()
+        chat.isGenerating = true
+        await chat.sendMessage("wait your turn", as: .queue)
+        let id = chat.pendingQueued[0].id
+        chat.steerQueued(id)
+        XCTAssertTrue(chat.pendingQueued.isEmpty)
+        XCTAssertEqual(chat.messages.last?.text, "wait your turn")
+        XCTAssertTrue(chat.isGenerating, "no new turn starts — this joins the running one")
+    }
+
     // MARK: - Tool Input Repair
 
     /// A schema shaped like the built-in `read_file` descriptor.

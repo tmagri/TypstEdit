@@ -1606,22 +1606,31 @@ struct AIChatView: View {
                     // the running task instead of starting a new turn.
                     .disabled(chat.pendingApproval != nil)
                     .help(chat.isGenerating
-                          ? "The AI is working. Sending now steers the current task — it reads your message at its next step."
-                          : "Ask anything. Shift+Return sends.")
+                          ? "The AI is working. Return steers the current task (it reads this at its next step); ⌘⇧Return queues it for after."
+                          : "Ask anything. Return sends.")
 
                 if chat.isGenerating {
                     // A sibling of the (still enabled) TextEditor, so it stays
                     // pressable while generation runs — including while an
                     // approval is pending, since `isGenerating` covers that.
-                    // A non-empty draft gets a steering send next to Stop.
-                    if !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // A non-empty draft gets both deliveries next to Stop:
+                    // steer joins the running turn, queue waits for it.
+                    if hasDraft {
                         Button {
                             send()
                         } label: {
                             Image(systemName: "arrow.up.circle").font(.system(size: 24))
                         }
                         .buttonStyle(.plain)
-                        .help("Send as steering input — the AI adjusts course at its next step")
+                        .help("Steer — send this into the running task. The AI adjusts course at its next step.")
+
+                        Button {
+                            enqueue()
+                        } label: {
+                            Image(systemName: "text.append").font(.system(size: 24))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Queue — let the current task finish, then run this as its own turn.")
                     }
                     Button {
                         chat.stop()
@@ -1637,11 +1646,62 @@ struct AIChatView: View {
                         Image(systemName: "arrow.up.circle.fill").font(.system(size: 24))
                     }
                     .buttonStyle(.plain)
-                    .disabled(chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.isGenerating || chat.pendingApproval != nil)
+                    .disabled(!hasDraft || chat.pendingApproval != nil)
                 }
+            }
+
+            if chat.isGenerating && !chat.pendingQueued.isEmpty {
+                queuedStrip
             }
         }
         .padding(10)
+    }
+
+    private var hasDraft: Bool {
+        !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The messages waiting for the running turn to finish. Each row can jump
+    /// the line as steering input or go back to the composer; the whole strip
+    /// is only shown while a turn is running, which is the only time "queue"
+    /// means anything.
+    private var queuedStrip: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "text.append").font(.caption2)
+                Text(chat.pendingQueued.count == 1
+                     ? "1 message queued — runs when this task finishes"
+                     : "\(chat.pendingQueued.count) messages queued — run when this task finishes")
+                    .font(.caption)
+                Spacer(minLength: 0)
+            }
+            .foregroundColor(.secondary)
+
+            ForEach(chat.pendingQueued) { item in
+                HStack(spacing: 6) {
+                    Text(item.text)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Button("Steer") { chat.steerQueued(item.id) }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .help("Send this into the running task instead of waiting")
+                    Button {
+                        chat.dropQueued(item.id)
+                    } label: {
+                        Image(systemName: "xmark").font(.caption2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove from the queue and put it back in the composer")
+                }
+                .foregroundColor(.secondary)
+            }
+        }
+        .padding(6)
+        .background(Color.secondary.opacity(0.08))
+        .cornerRadius(6)
     }
 
     // The picker row adapts as the panel narrows instead of overflowing —
@@ -1920,22 +1980,40 @@ struct AIChatView: View {
         Task { await chat.sendMessage(text) }
     }
 
-    // Shift+Enter submits the draft, like the send button. A local key monitor
-    // (the same pattern EditorController uses for its paste shortcuts) is
-    // installed while the panel is visible and removed when it leaves the
-    // hierarchy, so it never outlives the sidebar tab.
+    /// Sends the draft to the queue instead of into the running turn. A send
+    /// while idle is never queued (there is nothing to wait for), so this
+    /// falls through to a normal send — the same rule opencode applies.
+    private func enqueue() {
+        let text = chat.draft
+        guard chat.isGenerating else { return send() }
+        chat.draft = ""
+        scrollToLatestRequest += 1
+        Task { await chat.sendMessage(text, as: .queue) }
+    }
+
+    // Shift+Enter submits the draft, like the send button; ⌘Shift+Enter
+    // queues it instead when a turn is running. A local key monitor (the same
+    // pattern EditorController uses for its paste shortcuts) is installed
+    // while the panel is visible and removed when it leaves the hierarchy, so
+    // it never outlives the sidebar tab.
     private func installShiftEnterMonitor() {
         guard shiftEnterMonitor == nil else { return }
         shiftEnterMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak chat = self.chat] event in
-            let isShiftEnter = event.charactersIgnoringModifiers == "\r"
-                && event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.shift]
-            guard isShiftEnter,
+            let isReturn = event.charactersIgnoringModifiers == "\r"
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isShiftEnter = isReturn && flags == [.shift]
+            let isQueueEnter = isReturn && flags == [.shift, .command]
+            guard isShiftEnter || isQueueEnter,
                   let chat,
                   chat.pendingApproval == nil,
                   self.inputFocused,
                   !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { return event }
-            self.send()
+            if isQueueEnter {
+                self.enqueue()
+            } else {
+                self.send()
+            }
             return nil // Consume it so the TextEditor doesn't also insert a newline
         }
     }

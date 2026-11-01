@@ -226,6 +226,32 @@ final class AIChatManager: ObservableObject {
     /// (`onSteer`), or promoted as the next exchange right after the current
     /// answer if no boundary was left. Cleared by `stop()`.
     private var pendingSteers: [String] = []
+
+    /// Queued input: messages the user sent while a turn was running with
+    /// "queue" delivery. Unlike a steer they are deliberately *not* given to
+    /// the running turn: it finishes untouched, and the oldest queued message
+    /// then opens its own turn in the same busy period (`runTurns`). They are
+    /// not in the transcript until that turn starts, because an exchange the
+    /// model never received should not appear in the order it was written
+    /// around. Survives `stop()` — see `stop()` for why steers do not.
+    @Published private(set) var pendingQueued: [QueuedMessage] = []
+
+    /// One message waiting for the running turn to finish. Carries an id so
+    /// the pending strip can offer "steer now" and "drop" per row.
+    struct QueuedMessage: Identifiable, Equatable {
+        let id = UUID()
+        let text: String
+    }
+
+    /// Set by `stop()` and cleared when the next busy period starts, so the
+    /// queue drain does not fire a surprise follow-up request after a Stop.
+    private var stopRequested = false
+
+    /// Adds a message to the queue. Internal so the delivery rules are
+    /// directly testable without a running model request.
+    func enqueue(_ text: String) {
+        pendingQueued.append(QueuedMessage(text: text))
+    }
     /// Input schemas of the tools offered this turn, keyed by qualified
     /// name — used to repair malformed arguments before execution (see
     /// `AICompletionService.repairToolInput`). Set at the top of each turn;
@@ -645,29 +671,55 @@ final class AIChatManager: ObservableObject {
     }
 
     func sendMessage(_ text: String) async {
+        await sendMessage(text, as: .steer)
+    }
+
+    /// How a message sent while a turn is already running reaches the model.
+    /// Mirrors opencode's `SessionInbox.Delivery`, and inherits its meaning:
+    /// `steer` interrupts the *plan*, not the request — the running turn sees
+    /// it at its next tool boundary. `queue` leaves the running turn alone and
+    /// becomes a turn of its own once it finishes.
+    enum Delivery {
+        case steer
+        case queue
+    }
+
+    func sendMessage(_ text: String, as delivery: Delivery) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
         if isGenerating {
-            // Steering: a turn is already running, so this message can't
-            // start a new one. It lands in the transcript immediately —
-            // visible and persisted — and reaches the model at the next
-            // tool-round boundary, or right after the answer if the model
-            // was already writing it.
-            messages.append(ChatMessage(role: .user, text: trimmed))
-            pendingSteers.append(trimmed)
-            // A message during an Auto-proceed countdown is the user taking
-            // over: cancel the countdown and let this message be the next
-            // exchange instead of the automatic continuation.
-            cancelAutoProceed()
-            refreshTitleAfterTurnActivity()
-            persist()
-            return
+            switch delivery {
+            case .steer:
+                // Steering: a turn is already running, so this message can't
+                // start a new one. It lands in the transcript immediately —
+                // visible and persisted — and reaches the model at the next
+                // tool-round boundary, or right after the answer if the model
+                // was already writing it.
+                messages.append(ChatMessage(role: .user, text: trimmed))
+                pendingSteers.append(trimmed)
+                // A message during an Auto-proceed countdown is the user taking
+                // over: cancel the countdown and let this message be the next
+                // exchange instead of the automatic continuation.
+                cancelAutoProceed()
+                refreshTitleAfterTurnActivity()
+                persist()
+                return
+            case .queue:
+                // Queued: the running turn finishes untouched, then this opens
+                // its own turn. Nothing enters the transcript yet — the model
+                // has not seen it, and an exchange it never received must not
+                // sit in the history as if it had. `runTurnSequence` promotes it.
+                enqueue(trimmed)
+                cancelAutoProceed()
+                return
+            }
         }
 
         // A message typed by the user starts a fresh run: the Auto-proceed
         // round budget begins again from here.
         autoProceedRound = 0
+        stopRequested = false
         messages.append(ChatMessage(role: .user, text: trimmed))
         // Names the chat from this message (if it's the first) and asks the
         // model for a proper title once there's a reply to summarize.
@@ -715,16 +767,29 @@ final class AIChatManager: ObservableObject {
     /// `runTurn` itself (so the tool state and read-before-edit memory are
     /// kept); a turn that *threw* has already unwound that loop, so it is
     /// retried here as a fresh exchange with the error as context.
+    ///
+    /// One busy period, not one turn: a queued message opens the next turn of
+    /// this same run, so `isGenerating` stays true across it and the panel
+    /// keeps showing work in progress (opencode's coalesced drain).
     private func runTurnSequence(_ firstText: String) async {
         var text = firstText
         while !Task.isCancelled {
             let failure = await runTurn(text)
-            // A message the user sent while the turn was ending — including
-            // one that arrived during an Auto-proceed countdown and cancelled
-            // it — is the next exchange, not a fresh send.
+            // Steers first: a message sent mid-turn was already in the
+            // transcript and is the next exchange of *this* turn.
             if let steer = dequeueSteers(joining: true) {
                 autoProceedStoppedReason = nil
                 text = steer
+                continue
+            }
+            // Then the queue: the running turn is over, so the oldest waiting
+            // message opens its own turn. It preempts Auto-proceed — an
+            // explicit message outranks an automatic continuation, the same
+            // way a steer does.
+            if !stopRequested, let next = promoteQueued() {
+                autoProceedStoppedReason = nil
+                autoProceedRound = 0
+                text = next
                 continue
             }
             guard let failure else { return }
@@ -740,6 +805,49 @@ final class AIChatManager: ObservableObject {
             }
             return
         }
+    }
+
+    /// Moves the oldest queued message into the transcript and returns its
+    /// text, or nil when nothing is waiting. Kept off the queue *before* the
+    /// turn runs so a Stop mid-turn cannot replay it. Internal for the tests.
+    func promoteQueued() -> String? {
+        guard !pendingQueued.isEmpty else { return nil }
+        let next = pendingQueued.removeFirst()
+        messages.append(ChatMessage(role: .user, text: next.text))
+        refreshTitleAfterTurnActivity()
+        persist()
+        return next.text
+    }
+
+    /// Re-routes a waiting message to the running turn: it becomes steering
+    /// input for the turn in flight instead of a turn of its own. Used by the
+    /// pending strip's "steer now" action, and the same path as sending with
+    /// `.steer` while busy.
+    func steerQueued(_ id: UUID) {
+        guard let index = pendingQueued.firstIndex(where: { $0.id == id }) else { return }
+        let message = pendingQueued.remove(at: index)
+        guard isGenerating else {
+            // Nothing is running to steer, so run it now as its own turn. That
+            // also re-arms the drain, so anything still queued behind it runs
+            // after — the same as picking it from the strip.
+            stopRequested = false
+            Task { await sendMessage(message.text) }
+            return
+        }
+        messages.append(ChatMessage(role: .user, text: message.text))
+        pendingSteers.append(message.text)
+        cancelAutoProceed()
+        refreshTitleAfterTurnActivity()
+        persist()
+    }
+
+    /// Drops a waiting message and returns its text to the composer, so
+    /// removing it from the queue never loses what the user typed.
+    func dropQueued(_ id: UUID) {
+        guard let index = pendingQueued.firstIndex(where: { $0.id == id }) else { return }
+        let message = pendingQueued.remove(at: index)
+        let current = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = current.isEmpty ? message.text : message.text + "\n\n" + draft
     }
 
     /// True when the configured per-request continuation budget is used up.
@@ -1133,9 +1241,13 @@ final class AIChatManager: ObservableObject {
     /// for a button the user is about to stop caring about. Queued steering
     /// input is dropped — a Stop kills the whole execution, and a steer
     /// left parked would otherwise fire as a surprise follow-up request.
+    /// Explicitly *queued* messages survive: they were never part of the
+    /// cancelled execution, and `stopRequested` keeps the drain from firing
+    /// one as a surprise turn until the user sends again.
     func stop() {
         guard isGenerating else { return }
         pendingSteers.removeAll()
+        stopRequested = true
         autoProceed = nil
         generationTask?.cancel()
         // Every call blocked on approval is denied, not just the visible one:
