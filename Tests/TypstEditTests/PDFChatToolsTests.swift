@@ -159,6 +159,48 @@ final class PDFChatToolsTests: XCTestCase {
         }
     }
 
+    // MARK: - MCP server
+
+    /// `tools/call read_pdf` through the real JSON-RPC handler.
+    func testMCPReadPDF() async throws {
+        let url = root.appendingPathComponent("report.pdf")
+        try PDFTestFixtures.draw(to: url)
+        let pipe = Pipe()
+        let server = TypstEditMCPServer(output: ProtocolOutput(fileDescriptor: pipe.fileHandleForWriting.fileDescriptor))
+        let call: [String: Any] = ["jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                                   "params": ["name": "read_pdf", "arguments": ["path": url.path]]]
+        await server.handle(String(data: try JSONSerialization.data(withJSONObject: call), encoding: .utf8)!)
+        try pipe.fileHandleForWriting.close()
+
+        let line = try XCTUnwrap(String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8))
+        let reply = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        XCTAssertEqual(reply["id"] as? Int, 7)
+        let result = try XCTUnwrap(reply["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, false)
+        let text = try XCTUnwrap(((result["content"] as? [[String: Any]])?.first)?["text"] as? String)
+        XCTAssertTrue(text.contains("# Quarterly Report"), text)
+        XCTAssertTrue(text.contains("| North | 120 |"), text)
+        let structured = try XCTUnwrap(result["structuredContent"] as? [String: Any])
+        XCTAssertEqual(structured["pageCount"] as? Int, 1)
+        XCTAssertEqual(structured["lastPage"] as? Int, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["report.pdf"], "read_pdf writes nothing")
+    }
+
+    func testMCPReadPDFReportsErrors() async throws {
+        try "text".write(to: root.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        let pipe = Pipe()
+        let server = TypstEditMCPServer(output: ProtocolOutput(fileDescriptor: pipe.fileHandleForWriting.fileDescriptor))
+        let call: [String: Any] = ["jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                                   "params": ["name": "read_pdf", "arguments": ["path": root.appendingPathComponent("notes.txt").path]]]
+        await server.handle(String(data: try JSONSerialization.data(withJSONObject: call), encoding: .utf8)!)
+        try pipe.fileHandleForWriting.close()
+        let reply = try XCTUnwrap(JSONSerialization.jsonObject(with: pipe.fileHandleForReading.readDataToEndOfFile()) as? [String: Any])
+        let result = try XCTUnwrap(reply["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = (((result["content"] as? [[String: Any]])?.first)?["text"] as? String) ?? ""
+        XCTAssertTrue(text.contains("is not a PDF"), text)
+    }
+
     // MARK: - Busy local model
 
     func testActivityCountsRequestsPerServer() async {

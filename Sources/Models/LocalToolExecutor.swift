@@ -128,10 +128,12 @@ final class LocalToolExecutor {
     /// `read_file` call dumping an entire multi-thousand-line document into
     /// the prompt. Small files (the common case) are still returned whole,
     /// with no paging noise.
-    private let defaultReadLineLimit = 400
+    private let defaultReadLineLimit = LocalToolExecutor.readLineDefault
     /// Hard ceiling on a model-requested `limit`, so a single call still
     /// can't request the whole file back in one shot.
-    private let maxReadLineLimit = 2000
+    private let maxReadLineLimit = LocalToolExecutor.readLineMax
+    static let readLineDefault = 400
+    static let readLineMax = 2000
     /// Upper bound on `grep_project` matches per call, and the cap on how many
     /// files it will scan — enough for a normal project, bounded enough that a
     /// pathological pattern can't hang the UI.
@@ -387,7 +389,8 @@ final class LocalToolExecutor {
                         "path": ["type": "string", "description": "PDF path relative to the \(scope.noun) root."],
                         "pages": ["type": "string", "description": "Page or range, e.g. \"5\" or \"12-30\" (1-based)."],
                         "offset": ["type": "integer", "description": "1-based line of the Markdown to start from, for paging through a long result."],
-                        "limit": ["type": "integer", "description": "Maximum lines to return (default \(defaultReadLineLimit), capped at \(maxReadLineLimit))."]
+                        "limit": ["type": "integer", "description": "Maximum lines to return (default \(defaultReadLineLimit), capped at \(maxReadLineLimit))."],
+                        "force_ocr": ["type": "boolean", "description": "Ignore the PDF's own text and read every page with OCR, for PDFs whose text comes out garbled. Default false."]
                     ],
                     "required": ["path"]
                 ]
@@ -1596,51 +1599,13 @@ final class LocalToolExecutor {
 
     // MARK: - PDF
 
-    static let defaultPDFPages = 20
-    static let maxPDFPagesPerRead = 40
+    static let defaultPDFPages = PDFReader.defaultPages
+    static let maxPDFPagesPerRead = PDFReader.maxPages
     static let maxPDFPagesPerImport = 150
 
-    /// Recent `read_pdf` conversions, keyed by path, modification date and
-    /// page range, so paging through one result with `offset` does not
-    /// convert the same pages again.
-    private struct PDFReading { let markdown: String; let summary: String; let warnings: [String] }
-    private var pdfReadings: [String: PDFReading] = [:]
-    private var pdfReadingOrder: [String] = []
-
-    /// The pages a PDF tool call covers: the `pages` argument ("5", "12-30"),
-    /// or the first `defaultCount` pages. Ranges longer than `maximum` are
-    /// cut, with a note for the model; with `defaultCount == nil` a PDF over
-    /// `maximum` pages requires an explicit range.
-    private func pdfPageRange(_ arguments: [String: Any], pageCount: Int, defaultCount: Int?, maximum: Int, label: String) throws -> (ClosedRange<Int>, String) {
-        var range: ClosedRange<Int>
-        var note = ""
-        let raw = (arguments["pages"] as? String) ?? Self.intValue(arguments["pages"]).map(String.init)
-        if let raw, !raw.trimmingCharacters(in: .whitespaces).isEmpty {
-            let numbers = raw.split(whereSeparator: { "-–— ".contains($0) }).compactMap { Int($0) }
-            guard (1...2).contains(numbers.count), numbers[0] >= 1, numbers.last! >= numbers[0] else {
-                throw LocalToolError.invalidArguments("pages must be a page or a range such as \"12-30\"; got \"\(raw)\".")
-            }
-            guard numbers[0] <= pageCount else {
-                throw LocalToolError.invalidArguments("'\(label)' has \(pageCount) pages; page \(numbers[0]) does not exist.")
-            }
-            range = numbers[0]...min(numbers.last!, pageCount)
-        } else if let defaultCount {
-            range = 1...min(pageCount, defaultCount)
-            if pageCount > defaultCount {
-                note = " The PDF has \(pageCount) pages; pass pages (for example \"\(defaultCount + 1)-\(min(pageCount, defaultCount * 2))\") to read more."
-            }
-        } else {
-            guard pageCount <= maximum else {
-                throw LocalToolError.invalidArguments("'\(label)' has \(pageCount) pages. Pass pages, at most \(maximum) per call, for example \"1-\(maximum)\".")
-            }
-            range = 1...pageCount
-        }
-        if range.count > maximum {
-            let end = range.lowerBound + maximum - 1
-            note += " Only pages \(range.lowerBound)-\(end) were read (at most \(maximum) per call); continue from page \(end + 1)."
-            range = range.lowerBound...end
-        }
-        return (range, note)
+    /// The `pages` argument, as a string ("12-30") or a bare page number.
+    private static func pagesArgument(_ arguments: [String: Any]) -> String? {
+        (arguments["pages"] as? String) ?? intValue(arguments["pages"]).map(String.init)
     }
 
     /// Opens `path` as a PDF in the scope, with its page count.
@@ -1650,14 +1615,22 @@ final class LocalToolExecutor {
         }
         let url = try resolvePath(path)
         guard FileManager.default.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
-        guard url.pathExtension.lowercased() == "pdf" else {
+        do {
+            return (url, path, try PDFReader.pageCount(of: url, label: path))
+        } catch PDFReader.ReadError.notAPDF {
             throw LocalToolError.invalidArguments("'\(path)' is not a PDF. Use read_file for text files.")
+        } catch {
+            throw LocalToolError.invalidArguments(error.localizedDescription)
         }
-        guard let document = PDFDocument(url: url) else {
-            throw LocalToolError.invalidArguments("'\(path)' could not be opened as a PDF.")
+    }
+
+    private func pdfPageRange(_ arguments: [String: Any], pageCount: Int, defaultCount: Int?, maximum: Int, label: String) throws -> (ClosedRange<Int>, String) {
+        do {
+            return try PDFReader.pageRange(Self.pagesArgument(arguments), pageCount: pageCount,
+                                           defaultCount: defaultCount, maximum: maximum, label: label)
+        } catch {
+            throw LocalToolError.invalidArguments(error.localizedDescription)
         }
-        guard !document.isLocked else { throw LocalToolError.invalidArguments("'\(path)' is password protected.") }
-        return (url, path, document.pageCount)
     }
 
     /// `read_pdf`: the importer's Markdown for a page range, writing nothing.
@@ -1665,24 +1638,16 @@ final class LocalToolExecutor {
         let pdf = try resolvePDF(arguments)
         let (range, note) = try pdfPageRange(arguments, pageCount: pdf.pageCount, defaultCount: Self.defaultPDFPages,
                                              maximum: Self.maxPDFPagesPerRead, label: pdf.path)
-        let key = "\(pdf.url.path)|\(Self.modificationDate(of: pdf.url)?.timeIntervalSince1970 ?? 0)|\(range)"
-        let reading: PDFReading
-        if let cached = pdfReadings[key] {
-            reading = cached
-        } else {
-            var importer = PDFImporter(sourceURL: pdf.url, outputDirectory: FileManager.default.temporaryDirectory, baseName: "read-pdf")
-            importer.options.pageRange = range
-            importer.options.writeAssets = false
-            let result = try await importer.run()
-            reading = PDFReading(markdown: result.markdown, summary: result.summary, warnings: result.warnings)
-            pdfReadings[key] = reading
-            pdfReadingOrder.append(key)
-            if pdfReadingOrder.count > 6 { pdfReadings[pdfReadingOrder.removeFirst()] = nil }
-        }
-        var header = "PDF '\(pdf.path)', pages \(range.lowerBound)-\(range.upperBound) of \(pdf.pageCount) (\(reading.summary)).\(note)"
-        if !reading.warnings.isEmpty { header += "\nNotes: " + reading.warnings.joined(separator: " ") }
-        return header + "\n\n" + Self.windowed(reading.markdown, label: pdf.path, arguments: arguments,
-                                                 defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+        let reading = try await PDFReader.read(pdf.url, pages: range, forceOCR: Self.boolValue(arguments["force_ocr"]) == true)
+        return PDFReader.header(label: pdf.path, range: range, pageCount: pdf.pageCount, reading: reading, note: note)
+            + "\n\n" + Self.windowed(reading.markdown, label: pdf.path, arguments: arguments,
+                                     defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+    }
+
+    /// Pages a long text into a `read_file`-style window. Shared with the
+    /// MCP server's `read_pdf`, so both page their results the same way.
+    static func readWindow(_ text: String, label: String, arguments: [String: Any]) -> String {
+        windowed(text, label: label, arguments: arguments, defaultLimit: readLineDefault, maxLimit: readLineMax)
     }
 
     /// `import_pdf`: the menu's PDF import, approved first, writing a `.typ`

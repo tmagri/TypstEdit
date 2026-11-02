@@ -75,6 +75,10 @@ AI Chat has two tools for PDFs in the project:
 
 For example, "Summarise chapter 2 of manual.pdf" uses `read_pdf`. "Import pages 12–30 of manual.pdf as Typst" uses `import_pdf`.
 
+## Use PDFs from other AI agents (MCP)
+
+TypstEdit's MCP server (`typstedit mcp`, see **Settings → Integrations**) also has `read_pdf`. With it, Claude, Codex, Cursor, opencode or another agent can read a PDF in the same way as AI Chat. The tool takes an absolute path. It writes no files, and it reads at most 40 pages in each call. Its result also has `structuredContent` with the page count, the pages that it read, a summary and the notes.
+
 ## Known limits
 
 - A chart with two columns of related rows and no lines, for example "Letters | Acts", is read one column at a time.

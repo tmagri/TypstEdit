@@ -133,6 +133,8 @@ final class TypstEditMCPServer {
             return await previewTool(arguments)
         case "typstedit_open":
             return openTool(arguments)
+        case "read_pdf":
+            return await readPDFTool(arguments)
         case "typstedit_info":
             let info = await TypstEditCLI.infoDictionary()
             return Self.toolResult(text: TypstEditCLI.describe(info: info), structured: info)
@@ -215,6 +217,39 @@ final class TypstEditMCPServer {
         return Self.toolResult(text: ok ? "Opened \(url.path) in TypstEdit." : message, isError: !ok)
     }
 
+    /// A PDF as Markdown, through TypstEdit's PDF importer: reading order
+    /// across columns, headings, lists, tables with merged cells, code
+    /// samples, and OCR for scanned pages. Writes nothing.
+    private func readPDFTool(_ arguments: [String: Any]) async -> [String: Any] {
+        guard let path = arguments["path"] as? String, !path.isEmpty else {
+            return Self.toolResult(text: "`path` is required: the absolute path of a PDF.", isError: true)
+        }
+        let url = AgentCompileService.resolve(path, relativeTo: FileManager.default.homeDirectoryForCurrentUser)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return Self.toolResult(text: "File not found: \(url.path)", isError: true)
+        }
+        do {
+            let pageCount = try PDFReader.pageCount(of: url, label: url.path)
+            let pages = (arguments["pages"] as? String) ?? (arguments["pages"] as? Int).map(String.init)
+            let (range, note) = try PDFReader.pageRange(pages, pageCount: pageCount, defaultCount: PDFReader.defaultPages,
+                                                        maximum: PDFReader.maxPages, label: url.path)
+            let reading = try await PDFReader.read(url, pages: range, forceOCR: arguments["force_ocr"] as? Bool ?? false)
+            let text = PDFReader.header(label: url.path, range: range, pageCount: pageCount, reading: reading, note: note)
+                + "\n\n" + LocalToolExecutor.readWindow(reading.markdown, label: url.lastPathComponent, arguments: arguments)
+            let structured: [String: Any] = [
+                "path": url.path,
+                "pageCount": pageCount,
+                "firstPage": range.lowerBound,
+                "lastPage": range.upperBound,
+                "summary": reading.summary,
+                "warnings": reading.warnings,
+            ]
+            return Self.toolResult(text: text, structured: structured)
+        } catch {
+            return Self.toolResult(text: error.localizedDescription, isError: true)
+        }
+    }
+
     // MARK: - Helpers
 
     private static func validateInput(_ arguments: [String: Any]) -> String? {
@@ -241,7 +276,9 @@ final class TypstEditMCPServer {
     Markdown (.md) and TypstEdit Note (.note) documents with the same compiler and pipeline \
     as the app. Use typst_check after editing a document to get errors with file, line and \
     column; typst_compile to write PDF/PNG/SVG; typst_render_preview to look at pages as \
-    images; typstedit_open to show a file to the user in the editor. Paths should be absolute.
+    images; typstedit_open to show a file to the user in the editor. Use read_pdf to read any \
+    PDF as Markdown (tables, headings, code and scanned pages included), a page range at a \
+    time. Paths should be absolute.
     """
 
     private static let inputProperties: [String: Any] = [
@@ -292,6 +329,23 @@ final class TypstEditMCPServer {
                 "description": "Opens a file in the TypstEdit app so the user can see it with live preview.",
                 "inputSchema": ["type": "object", "properties": ["path": ["type": "string", "description": "Absolute path of the file to open."]], "required": ["path"]],
                 "annotations": ["readOnlyHint": true, "openWorldHint": false]
+            ],
+            [
+                "name": "read_pdf",
+                "title": "Read PDF",
+                "description": "Reads a PDF as Markdown with TypstEdit's PDF importer: text in reading order across columns, headings (from bookmarks when present), lists, tables including merged cells, code samples, and [Figure: caption] markers. Scanned pages are read with on-device OCR. Reads at most \(PDFReader.maxPages) pages per call (the first \(PDFReader.defaultPages) when `pages` is omitted); the result states the page count and how to continue. Long results are paged with `offset`/`limit`. Writes nothing.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Absolute path of the PDF."],
+                        "pages": ["type": "string", "description": "Page or range, e.g. \"5\" or \"12-30\" (1-based)."],
+                        "offset": ["type": "integer", "description": "1-based line of the Markdown to start from, for paging through a long result."],
+                        "limit": ["type": "integer", "description": "Maximum lines to return (default \(LocalToolExecutor.readLineDefault), capped at \(LocalToolExecutor.readLineMax))."],
+                        "force_ocr": ["type": "boolean", "description": "Ignore the PDF's own text and read every page with OCR, for PDFs whose text comes out garbled. Default false."]
+                    ],
+                    "required": ["path"]
+                ],
+                "annotations": readOnly
             ],
             [
                 "name": "typstedit_info",

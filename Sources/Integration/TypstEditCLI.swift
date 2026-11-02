@@ -275,7 +275,7 @@ enum TypstEditCLI {
     AI AGENTS
       Add an MCP server with command `typstedit` and argument `mcp`
       (tools: typst_check, typst_compile, typst_render_preview, typstedit_open,
-      typstedit_info). See TypstEdit > Settings > Integrations.
+      typstedit_info, read_pdf). See TypstEdit > Settings > Integrations.
     """
 }
 

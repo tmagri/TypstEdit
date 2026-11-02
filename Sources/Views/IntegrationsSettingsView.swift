@@ -144,6 +144,7 @@ struct IntegrationsSettingsView: View {
                 Label("typst_render_preview — return rendered pages as images the agent can see", systemImage: "photo").font(.caption)
                 Label("typstedit_open — open a file in TypstEdit for you to review", systemImage: "macwindow").font(.caption)
                 Label("typstedit_info — versions and paths of TypstEdit and Typst", systemImage: "info.circle").font(.caption)
+                Label("read_pdf — read any PDF as Markdown (tables, headings, code; scanned pages via OCR)", systemImage: "doc.viewfinder").font(.caption)
                 Text("Agents without MCP support can run `typstedit check <file> --json` in a shell instead.")
                     .font(.caption)
                     .foregroundColor(.secondary)
