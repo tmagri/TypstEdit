@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 
 enum LocalToolError: LocalizedError {
     case pathEscapesScope(String)
@@ -378,6 +379,38 @@ final class LocalToolExecutor {
             ))
             tools.append(MCPTool(
                 serverName: Self.namespace,
+                name: "read_pdf",
+                description: "Read a PDF in the \(scope.noun) as Markdown, with TypstEdit's PDF importer: text in reading order across columns, headings, lists, tables (including merged cells), code samples, and [Figure: caption] markers. Scanned pages are read with on-device OCR. Nothing is written. Read at most \(Self.maxPDFPagesPerRead) pages per call; with no `pages`, the first \(Self.defaultPDFPages) are read and the result says how many pages the PDF has. Long results are windowed like read_file — pass `offset` to continue. Use this to read, summarise or quote a PDF; use import_pdf to turn one into a Typst file.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "PDF path relative to the \(scope.noun) root."],
+                        "pages": ["type": "string", "description": "Page or range, e.g. \"5\" or \"12-30\" (1-based)."],
+                        "offset": ["type": "integer", "description": "1-based line of the Markdown to start from, for paging through a long result."],
+                        "limit": ["type": "integer", "description": "Maximum lines to return (default \(defaultReadLineLimit), capped at \(maxReadLineLimit))."]
+                    ],
+                    "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "import_pdf",
+                description: "Convert a PDF in the \(scope.noun) to a Typst file, the same as File → Import → PDF: headings, lists, tables with merged cells, code blocks, figures saved as PNG files in a folder next to the output, and formulas as images. Up to \(Self.maxPDFPagesPerImport) pages per call. The user approves first. With use_ai, formulas and complex tables are sent as cropped images to the user's Chat & Actions model (it must accept images); a local model that is busy is not waited on — those items stay images and the result says so. Search the result for TODO(import) to find items to review.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "PDF path relative to the \(scope.noun) root."],
+                        "output": ["type": "string", "description": "Optional .typ path relative to the \(scope.noun) root. Default: the PDF's name with .typ, next to it."],
+                        "pages": ["type": "string", "description": "Page or range, e.g. \"12-30\". Required for PDFs over \(Self.maxPDFPagesPerImport) pages."],
+                        "use_ai": ["type": "boolean", "description": "Transcribe formulas and complex tables with the user's model. Default false."],
+                        "markdown_and_json": ["type": "boolean", "description": "Also write .md and .json copies next to the .typ. Default false."],
+                        "force_ocr": ["type": "boolean", "description": "Ignore the PDF's own text and read every page with OCR, for PDFs whose text comes out garbled. Default false."]
+                    ],
+                    "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
                 name: "copy_files",
                 description: "Copy one or more files or folders into a destination folder inside the \(scope.noun) root, keeping their names. Creates the destination folder if needed. Existing items are left untouched unless overwrite is true. The user approves the complete list before anything is copied. Use this to gather related evidence, images or attachments into a delivery/deploy folder.",
                 inputSchema: [
@@ -537,6 +570,8 @@ final class LocalToolExecutor {
         case "convert_markdown_to_typst": return convertMarkdownToTypst(arguments)
         case "export_document": return try await exportDocument(arguments, requestApproval: requestApproval)
         case "export_markdown": return try await exportMarkdown(arguments, requestApproval: requestApproval)
+        case "read_pdf": return try await readPDF(arguments)
+        case "import_pdf": return try await importPDF(arguments, requestApproval: requestApproval)
         case "copy_files": return try await copyFiles(arguments, requestApproval: requestApproval)
         case "create_folder": return try await createFolder(arguments, requestApproval: requestApproval)
         case "apply_patch": return try await applyPatch(arguments, requestApproval: requestApproval)
@@ -1557,6 +1592,170 @@ final class LocalToolExecutor {
         }
         let hybrid = (arguments["hybrid"] as? Bool) ?? false
         return AICompletionService.shared.sanitizeMarkdownToTypst(markdown, isHybrid: hybrid)
+    }
+
+    // MARK: - PDF
+
+    static let defaultPDFPages = 20
+    static let maxPDFPagesPerRead = 40
+    static let maxPDFPagesPerImport = 150
+
+    /// Recent `read_pdf` conversions, keyed by path, modification date and
+    /// page range, so paging through one result with `offset` does not
+    /// convert the same pages again.
+    private struct PDFReading { let markdown: String; let summary: String; let warnings: [String] }
+    private var pdfReadings: [String: PDFReading] = [:]
+    private var pdfReadingOrder: [String] = []
+
+    /// The pages a PDF tool call covers: the `pages` argument ("5", "12-30"),
+    /// or the first `defaultCount` pages. Ranges longer than `maximum` are
+    /// cut, with a note for the model; with `defaultCount == nil` a PDF over
+    /// `maximum` pages requires an explicit range.
+    private func pdfPageRange(_ arguments: [String: Any], pageCount: Int, defaultCount: Int?, maximum: Int, label: String) throws -> (ClosedRange<Int>, String) {
+        var range: ClosedRange<Int>
+        var note = ""
+        let raw = (arguments["pages"] as? String) ?? Self.intValue(arguments["pages"]).map(String.init)
+        if let raw, !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+            let numbers = raw.split(whereSeparator: { "-–— ".contains($0) }).compactMap { Int($0) }
+            guard (1...2).contains(numbers.count), numbers[0] >= 1, numbers.last! >= numbers[0] else {
+                throw LocalToolError.invalidArguments("pages must be a page or a range such as \"12-30\"; got \"\(raw)\".")
+            }
+            guard numbers[0] <= pageCount else {
+                throw LocalToolError.invalidArguments("'\(label)' has \(pageCount) pages; page \(numbers[0]) does not exist.")
+            }
+            range = numbers[0]...min(numbers.last!, pageCount)
+        } else if let defaultCount {
+            range = 1...min(pageCount, defaultCount)
+            if pageCount > defaultCount {
+                note = " The PDF has \(pageCount) pages; pass pages (for example \"\(defaultCount + 1)-\(min(pageCount, defaultCount * 2))\") to read more."
+            }
+        } else {
+            guard pageCount <= maximum else {
+                throw LocalToolError.invalidArguments("'\(label)' has \(pageCount) pages. Pass pages, at most \(maximum) per call, for example \"1-\(maximum)\".")
+            }
+            range = 1...pageCount
+        }
+        if range.count > maximum {
+            let end = range.lowerBound + maximum - 1
+            note += " Only pages \(range.lowerBound)-\(end) were read (at most \(maximum) per call); continue from page \(end + 1)."
+            range = range.lowerBound...end
+        }
+        return (range, note)
+    }
+
+    /// Opens `path` as a PDF in the scope, with its page count.
+    private func resolvePDF(_ arguments: [String: Any]) throws -> (url: URL, path: String, pageCount: Int) {
+        guard let path = arguments["path"] as? String, !path.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw LocalToolError.invalidArguments("path is required")
+        }
+        let url = try resolvePath(path)
+        guard FileManager.default.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
+        guard url.pathExtension.lowercased() == "pdf" else {
+            throw LocalToolError.invalidArguments("'\(path)' is not a PDF. Use read_file for text files.")
+        }
+        guard let document = PDFDocument(url: url) else {
+            throw LocalToolError.invalidArguments("'\(path)' could not be opened as a PDF.")
+        }
+        guard !document.isLocked else { throw LocalToolError.invalidArguments("'\(path)' is password protected.") }
+        return (url, path, document.pageCount)
+    }
+
+    /// `read_pdf`: the importer's Markdown for a page range, writing nothing.
+    private func readPDF(_ arguments: [String: Any]) async throws -> String {
+        let pdf = try resolvePDF(arguments)
+        let (range, note) = try pdfPageRange(arguments, pageCount: pdf.pageCount, defaultCount: Self.defaultPDFPages,
+                                             maximum: Self.maxPDFPagesPerRead, label: pdf.path)
+        let key = "\(pdf.url.path)|\(Self.modificationDate(of: pdf.url)?.timeIntervalSince1970 ?? 0)|\(range)"
+        let reading: PDFReading
+        if let cached = pdfReadings[key] {
+            reading = cached
+        } else {
+            var importer = PDFImporter(sourceURL: pdf.url, outputDirectory: FileManager.default.temporaryDirectory, baseName: "read-pdf")
+            importer.options.pageRange = range
+            importer.options.writeAssets = false
+            let result = try await importer.run()
+            reading = PDFReading(markdown: result.markdown, summary: result.summary, warnings: result.warnings)
+            pdfReadings[key] = reading
+            pdfReadingOrder.append(key)
+            if pdfReadingOrder.count > 6 { pdfReadings[pdfReadingOrder.removeFirst()] = nil }
+        }
+        var header = "PDF '\(pdf.path)', pages \(range.lowerBound)-\(range.upperBound) of \(pdf.pageCount) (\(reading.summary)).\(note)"
+        if !reading.warnings.isEmpty { header += "\nNotes: " + reading.warnings.joined(separator: " ") }
+        return header + "\n\n" + Self.windowed(reading.markdown, label: pdf.path, arguments: arguments,
+                                                 defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+    }
+
+    /// `import_pdf`: the menu's PDF import, approved first, writing a `.typ`
+    /// (plus figures, and optionally `.md`/`.json`) inside the scope.
+    private func importPDF(
+        _ arguments: [String: Any],
+        requestApproval: @escaping (PendingApprovalKind) async -> Bool
+    ) async throws -> String {
+        let fm = FileManager.default
+        let pdf = try resolvePDF(arguments)
+        let (range, note) = try pdfPageRange(arguments, pageCount: pdf.pageCount, defaultCount: nil,
+                                             maximum: Self.maxPDFPagesPerImport, label: pdf.path)
+
+        let outputURL: URL
+        if let raw = (arguments["output"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            let requested = try resolvePath(raw)
+            if raw.hasSuffix("/") || Self.isDirectory(requested) {
+                outputURL = requested.appendingPathComponent(pdf.url.deletingPathExtension().lastPathComponent + ".typ").standardizedFileURL
+            } else if requested.pathExtension.isEmpty {
+                outputURL = requested.appendingPathExtension("typ")
+            } else {
+                guard requested.pathExtension.lowercased() == "typ" else {
+                    throw LocalToolError.invalidArguments("output must be a .typ file or a folder; got '\(raw)'.")
+                }
+                outputURL = requested
+            }
+        } else {
+            outputURL = pdf.url.deletingPathExtension().appendingPathExtension("typ")
+        }
+
+        let wantsAI = Self.boolValue(arguments["use_ai"]) == true
+        let target = wantsAI ? PDFImportAI.target() : nil
+        let approved = await requestApproval(.pdfImport(
+            source: pdf.path,
+            destination: relativePath(for: outputURL),
+            pages: "\(range.lowerBound)-\(range.upperBound) of \(pdf.pageCount)",
+            aiModel: target.map { _ in PDFImportAI.modelDisplayName },
+            existingFile: fm.fileExists(atPath: outputURL.path)))
+        guard approved else { throw LocalToolError.approvalDenied }
+
+        let folder = outputURL.deletingLastPathComponent()
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let baseName = outputURL.deletingPathExtension().lastPathComponent
+        var importer = PDFImporter(sourceURL: pdf.url, outputDirectory: folder, baseName: baseName)
+        importer.options.pageRange = range
+        importer.options.forceOCR = Self.boolValue(arguments["force_ocr"]) == true
+        importer.aiTarget = target
+        let result = try await importer.run()
+
+        var written = [outputURL]
+        try result.typst.write(to: outputURL, atomically: true, encoding: .utf8)
+        if Self.boolValue(arguments["markdown_and_json"]) == true {
+            let md = folder.appendingPathComponent(baseName + ".md"), json = folder.appendingPathComponent(baseName + ".json")
+            try result.markdown.write(to: md, atomically: true, encoding: .utf8)
+            try result.json.write(to: json, atomically: true, encoding: .utf8)
+            written += [md, json]
+        }
+        for url in written { Self.notifyFileChangedOnDisk(url) }
+        Self.notifyProjectFilesChanged()
+
+        var lines = ["Imported '\(pdf.path)' pages \(range.lowerBound)-\(range.upperBound) of \(pdf.pageCount): \(result.summary)."]
+        lines += written.map { "  \(relativePath(for: $0))" }
+        if fm.fileExists(atPath: importer.assetsDirectory.path) {
+            lines.append("  \(relativePath(for: importer.assetsDirectory))/ (images)")
+        }
+        let todos = result.typst.components(separatedBy: "TODO(import)").count - 1
+        if todos > 0 { lines.append("\(todos) item(s) are marked TODO(import) for review (formulas or tables kept as images, or AI transcriptions).") }
+        if wantsAI && target == nil {
+            lines.append("AI was requested but is not available (AI Chat must be on, with a model that accepts images), so formulas and complex tables are kept as images.")
+        }
+        if !result.warnings.isEmpty { lines.append("Notes: " + result.warnings.joined(separator: " ")) }
+        if !note.isEmpty { lines.append(note.trimmingCharacters(in: .whitespaces)) }
+        return lines.joined(separator: "\n")
     }
 
     // MARK: - Export & Delivery

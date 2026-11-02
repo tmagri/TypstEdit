@@ -88,6 +88,9 @@ enum PendingApprovalKind {
     /// page files), so there's no text diff to show — the destination and
     /// format are the useful details.
     case documentExport(relativePath: String, format: String, destination: String, existingFile: Bool)
+    /// Converting a PDF to Typst (`import_pdf`). Shown with the pages and,
+    /// when AI is used, the model that will receive cropped page images.
+    case pdfImport(source: String, destination: String, pages: String, aiModel: String?, existingFile: Bool)
     /// Copying files or folders into a delivery/evidence folder. Listed as a
     /// batch so a multi-file handoff needs one approval, not one per copy.
     case fileCopy(sources: [String], destination: String, overwrite: Bool)

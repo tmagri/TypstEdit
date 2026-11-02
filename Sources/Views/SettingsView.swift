@@ -1126,6 +1126,7 @@ struct AISettingsView: View {
                 Label("convert_markdown_to_typst — the same converter used when pasting Markdown into the editor", systemImage: "arrow.left.arrow.right").font(.caption)
                 Label("export_markdown — writes a Typst→Markdown copy with the editor's own converter", systemImage: "doc.richtext").font(.caption)
                 Label("export_document — compiles to PDF, PNG or SVG with the editor's export pipeline", systemImage: "square.and.arrow.up").font(.caption)
+                Label("read_pdf, import_pdf — reads a PDF as Markdown, or converts it to a Typst file (approved first) with the PDF importer", systemImage: "doc.viewfinder").font(.caption)
                 Label("create_folder, copy_files — builds a delivery/evidence folder and copies related files in one approval", systemImage: "folder.badge.plus").font(.caption)
                 Label("run_typst_check — compiles a snippet, or an existing file in place, to check for errors", systemImage: "checkmark.seal").font(.caption)
                 Label("update_plan — a visible task list for multi-step jobs", systemImage: "checklist").font(.caption)

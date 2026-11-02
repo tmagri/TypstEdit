@@ -38,7 +38,7 @@ final class AIChatModeTests: XCTestCase {
         let names = Set(filtered.map(\.qualifiedName))
         for writer in ["project__edit_file", "project__move_lines", "project__write_file",
                        "project__export_document", "project__export_markdown",
-                       "project__copy_files", "project__create_folder", "python__run"] {
+                       "project__copy_files", "project__create_folder", "project__import_pdf", "python__run"] {
             XCTAssertFalse(names.contains(writer), "\(writer) must not be offered in Plan mode")
         }
         for mutator in ["git__git_stage", "git__git_commit", "git__git_fetch", "git__git_pull", "git__git_push"] {

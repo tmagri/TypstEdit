@@ -368,6 +368,9 @@ class AICompletionService: ObservableObject {
         guard let url = URL(string: endpoint) else {
             throw AIError.invalidURL
         }
+        // Lets other features see that this server is busy.
+        let activity = ModelServerActivity.shared.begin(url)
+        defer { ModelServerActivity.shared.end(activity) }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1957,6 +1960,9 @@ class AICompletionService: ObservableObject {
     ) async throws -> (AIChatStep, AIChatStepMeta) {
         let settings = AISettingsManager.shared
         guard let url = URL(string: ctx.chatEndpoint) else { throw AIError.invalidURL }
+        // In flight until the reply (or stream) is fully read.
+        let activity = ModelServerActivity.shared.begin(url)
+        defer { ModelServerActivity.shared.end(activity) }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

@@ -1336,6 +1336,34 @@ struct AIChatView: View {
                 .background(Color.black.opacity(0.06))
                 .cornerRadius(6)
 
+            case .pdfImport(let source, let destination, let pages, let aiModel, let existingFile):
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.viewfinder").foregroundColor(.orange)
+                    Text("Import '\(source)' to Typst?").font(.subheadline.bold())
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(destination)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Pages: \(pages). Figures are saved in a folder next to it.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    if let aiModel {
+                        Text("Cropped images of formulas and complex tables go to \(aiModel).")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    if existingFile {
+                        Text("This replaces the existing file.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+
             case .batchPatch(let changes):
                 HStack(spacing: 6) {
                     Image(systemName: "square.stack.3d.up.fill").foregroundColor(.orange)

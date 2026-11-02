@@ -100,6 +100,9 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
     let modelName: String
     
     func getEmbedding(for text: String) async throws -> [Float] {
+        // Embeddings often share a local server with the chat model.
+        let activity = ModelServerActivity.shared.begin(endpointURL)
+        defer { ModelServerActivity.shared.end(activity) }
         var request = URLRequest(url: endpointURL)
         request.httpMethod = "POST"
         

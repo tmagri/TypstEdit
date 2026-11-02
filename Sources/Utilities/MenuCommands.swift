@@ -103,12 +103,30 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("n", modifiers: [.command, .option])
             
-            Button("Import LyX File...") {
-                inMainWindow {
-                    editorController.importLyx()
+            Menu("Import") {
+                Button("PDF...") {
+                    inMainWindow {
+                        editorController.importPDF()
+                    }
                 }
+                .keyboardShortcut("i", modifiers: [.command, .shift, .option])
+
+                Button("PDF (Force OCR)...") {
+                    inMainWindow {
+                        editorController.importPDF(forceOCR: true)
+                    }
+                }
+                .help("Ignores the PDF's own text and reads every page from its image. Use it when imported text comes out garbled.")
+
+                Divider()
+
+                Button("LyX File...") {
+                    inMainWindow {
+                        editorController.importLyx()
+                    }
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
             }
-            .keyboardShortcut("i", modifiers: [.command, .shift])
             
             Divider()
             

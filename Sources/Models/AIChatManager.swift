@@ -951,6 +951,7 @@ final class AIChatManager: ObservableObject {
         - Read before you change. edit_file/write_file only work on a file you've read in this request, and edit_file needs old_string copied exactly from what you read. Prefer edit_file for localized changes — write_file replaces the whole file.
         - edit_file/write_file automatically compile the .typ file they just touched and report the result ("✓ compiles cleanly" or a compiler error) right in their own output — read that before telling the user you're done. If it reports an error, fix it (another edit_file call) rather than leaving it. Ignore a failure only if the file is clearly a fragment meant to be #include'd elsewhere and the error is about something defined in its parent document.
         - If you're not confident of Typst's exact syntax for something (bold, headings, lists, links, tables, math), write it in Markdown and run it through convert_markdown_to_typst first rather than guessing at delimiters. Use run_typst_check on a snippet (or an existing path) any time you want to double-check before or after writing.
+        - For a PDF, never read_file it (that returns raw bytes): read_pdf returns its text as Markdown (tables, headings and code included), a page range at a time; import_pdf converts it into a Typst file the user can edit.
         - For a finished document or handoff package, use the export tools instead of Python: export_document compiles to PDF/PNG/SVG, export_markdown writes a .md copy with the editor's own converter, create_folder makes a delivery folder, and copy_files gathers related files/evidence into it in one approved batch. A typical request ("make a deploy folder with the PDF, a Markdown copy and related evidence") is: create_folder, export_document, export_markdown, then copy_files for the evidence — all inside the current scope.
         - Use grep_project for exact lookups (a symbol, a phrase, a heading) before reading whole files, and read_file's offset/limit to page through a large document instead of pulling it in at once.
         - To restructure, reorganize or review a long document, work in this order: (1) read_file with outline: true to map it; (2) write the target structure into update_plan, one item per section or move; (3) read and change one section at a time, using the outline's line ranges as offset/limit — move whole sections (into an appendix, for example) with move_lines instead of retyping them through edit_file, and work from the bottom of the file up so earlier line numbers stay valid; (4) check that the edit's compile result is clean. Don't page through a whole long file just to learn how it's organized.
@@ -1764,6 +1765,7 @@ final class AIChatManager: ObservableObject {
     nonisolated static let planModeBlockedLocalToolNames: Set<String> = [
         "edit_file", "move_lines", "write_file", "apply_patch",
         "export_document", "export_markdown", "copy_files", "create_folder",
+        "import_pdf",
     ]
 
     /// The Python tool executes arbitrary code (its sandbox limits writes to
