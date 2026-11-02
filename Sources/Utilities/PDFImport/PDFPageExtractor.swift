@@ -65,6 +65,11 @@ enum PDFPageExtractor {
         let string = attributed.string as NSString
         let transform = displayTransform(for: page)
 
+        // and other legacy fonts map Hebrew and Greek onto ASCII
+        // codes with no Unicode mapping, so their words arrive as gibberish
+        // ("tyrb[b" for בעברית). The font that drew a word is only knowable
+        // from the content stream, so it is read once when the page uses one.
+        let legacy = legacyFragments(for: page)
         var words: [Glyph] = []
         var garbage = 0, visible = 0
 
@@ -121,12 +126,91 @@ enum PDFPageExtractor {
 
         guard visible >= 12, words.count >= 3 else { return nil }
         guard Double(garbage) / Double(visible) < 0.1 else { return nil }
-        return runs(from: words, barriers: barriers)
+        var built = runs(from: words, barriers: barriers)
+        if !legacy.isEmpty {
+            built = built.map { run in
+                var copy = run
+                copy.text = replacingLegacy(in: run.text, fragments: legacy)
+                return copy
+            }.filter { !$0.text.isEmpty }
+        }
+        return built
+    }
+
+    /// Replaces the codes of legacy-font fragments inside a run's text with
+    /// their decoded letters.
+    ///
+    /// The match ignores whitespace: PDFKit splits words where it likes (a
+    /// Hebrew run can start mid-word, as in "ytwylkw(Lesëonenu"), so the
+    /// fragment's codes are found as a run of characters, not as words.
+    static func replacingLegacy(in text: String, fragments: [PDFLegacyFonts.Fragment]) -> String {
+        // One fragment at a time. A phrase split into several fragments
+        // ("vdq"),("-"),("ynba") keeps the page's visual order inside the run;
+        // merging them is not attempted, since their codes are not contiguous
+        // in the text PDFKit reports.
+        var result = text
+        for fragment in fragments {
+            guard let encoding = PDFLegacyFonts.encoding(forFont: fragment.font) else { continue }
+            let codes = fragment.text.filter { !$0.isWhitespace }
+            guard codes.count >= 2 else { continue }
+            let decoded = PDFLegacyFonts.decode(fragment.text, as: encoding)
+                .trimmingCharacters(in: .whitespaces)
+            guard !decoded.isEmpty, let range = whitespaceInsensitiveRange(of: codes, in: result) else { continue }
+            result.replaceSubrange(range, with: decoded)
+        }
+        return result
+    }
+
+    /// The range of `haystack` whose non-whitespace characters spell `needle`.
+    static func whitespaceInsensitiveRange(of needle: String, in haystack: String) -> Range<String.Index>? {
+        let target = Array(needle)
+        guard !target.isEmpty else { return nil }
+        var index = haystack.startIndex
+        while index < haystack.endIndex {
+            if haystack[index] == target[0] {
+                var cursor = index
+                var matched = 0
+                var end = index
+                while cursor < haystack.endIndex, matched < target.count {
+                    let character = haystack[cursor]
+                    if !character.isWhitespace {
+                        if character != target[matched] { break }
+                        matched += 1
+                    }
+                    end = haystack.index(after: cursor)
+                    cursor = end
+                }
+                if matched == target.count { return index..<end }
+            }
+            index = haystack.index(after: index)
+        }
+        return nil
     }
 
     private static func isLetter(_ unit: unichar) -> Bool {
         guard let scalar = Unicode.Scalar(unit) else { return false }
         return CharacterSet.letters.contains(scalar)
+    }
+
+    /// The page's legacy-font fragments, but only when the page uses such a
+    /// font at all: the content stream walk costs time on every page, and most
+    /// PDFs have none.
+    private static func legacyFragments(for page: PDFPage) -> [PDFLegacyFonts.Fragment] {
+        guard let pageRef = page.pageRef else { return [] }
+        let names = PDFLegacyFonts.fontNames(of: pageRef).values
+        guard names.contains(where: {
+            PDFLegacyFonts.encoding(forFont: $0) != nil || PDFLegacyFonts.isUndecodedLegacyFont($0)
+        }) else { return [] }
+        return PDFLegacyFonts.fragments(of: page, displaySize: displaySize(of: page))
+    }
+
+    /// The names of fonts on the page that carry no Unicode mapping and are
+    /// not decoded here (transliteration and symbol fonts), so the
+    /// import can warn that this page's text needs a check.
+    static func undecodedLegacyFonts(of page: PDFPage) -> [String] {
+        guard let pageRef = page.pageRef else { return [] }
+        return Set(PDFLegacyFonts.fontNames(of: pageRef).values.filter(PDFLegacyFonts.isUndecodedLegacyFont))
+            .sorted()
     }
 
     /// Ranges of whitespace-separated words inside `range`.
@@ -274,6 +358,19 @@ enum PDFPageExtractor {
         }
     }
 
+    /// The words of one segment in reading order. A right-to-left line is
+    /// extracted in visual (drawn) order, so its words are put back into
+    /// logical order. Left-to-right lines are left as they are.
+    private static func orderedWords(_ words: [Glyph]) -> [Glyph] {
+        guard TextScript.isRightToLeftLine(words.map(\.text).joined(separator: " ")) else { return words }
+        return words.reversed()
+    }
+
+    /// The same reordering on plain words, so it can be tested without a PDF.
+    nonisolated static func readingOrderedWords(_ words: [String]) -> [String] {
+        TextScript.isRightToLeftLine(words.joined(separator: " ")) ? words.reversed() : words
+    }
+
     /// One run from the words of one segment, joined with single spaces.
     /// Words normally read left to right; when they sit on visibly different
     /// lines (two tight lines merged into one row, as in a two-line table
@@ -285,6 +382,9 @@ enum PDFPageExtractor {
            high - low > height * 0.3, words.allSatisfy({ $0.order != nil }) {
             words.sort { $0.order! < $1.order! }
         }
+        // Right-to-left text reaches us in the order the glyphs are drawn:
+        // the words of an Arabic or Hebrew line are reversed. Restore them.
+        words = Self.orderedWords(words)
         let text = words.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return [] }
         let sizes = words.map(\.fontSize).sorted()

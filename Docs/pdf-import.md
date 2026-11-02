@@ -57,6 +57,26 @@ A page is scanned if it shows one large image of the page.
 - **A scan with an OCR text layer** (from most scanners and archives): the import uses the text layer. Font sizes in such layers are not correct, so the import does not use size to find headings. It uses weight, capitals, numbering and space.
 - **A scan without a text layer**: Vision document recognition (macOS 26 or later) finds paragraphs, titles, lists and tables. On earlier macOS versions, the import reads lines with OCR and then does the layout itself.
 
+## Legacy fonts (BibleWorks Hebrew and Greek)
+
+Some PDFs set Hebrew or Greek in the BibleWorks fonts (`Bwhebb`, `Bwgrkl`, …). These fonts put Hebrew and Greek letters on ASCII codes and have no Unicode map, so the text layer holds `tyrb[b` where the page shows בעברית.
+
+The import decodes those fonts:
+
+- `Bwhebb`, `Bwhebl`, `Bwheba` (Hebrew): letters, final forms, sin, and the Hebrew hyphen.
+- `Bwgrkl`, `Bwgrkn`, `Bwgrki`, `Bwgrkd` (Greek): letters, including the final sigma.
+
+The import reverses the Hebrew codes into reading order, so words come out as real Hebrew: `"!y["` becomes עין, and `"tyrb[b"` becomes בעברית. The font itself is not used or needed; the import only uses a character table.
+
+Not decoded:
+
+- `BwLexa` and the other transliteration fonts (`BwLexa`, `BwLexS`, `BwTransH`, …). They put marks such as macrons over Latin letters, so `segullaÒ` means *segullā*.
+- The symbol fonts.
+
+When the document uses one of these fonts, the import adds a note. Text in those fonts can be wrong. Check the text that is set in them.
+
+A phrase split into several pieces on one line, such as `vdq` + `-` + `ynba` for אבני־קדש, decodes each piece but keeps the order the page draws them in. Check those phrases.
+
 ## Use AI for formulas and complex tables
 
 The import uses the **Chat & Actions** model. The model must accept images.
@@ -95,3 +115,4 @@ TypstEdit's MCP server (`typstedit mcp`, see **Settings → Integrations**) also
 - A chart with two columns of related rows and no lines, for example "Letters | Acts", is read one column at a time.
 - Formulas without AI stay images.
 - On very old scans, OCR errors from the scanner or from Vision stay in the text.
+- Transliteration fonts such as `BwLexa` are not decoded, and a Hebrew phrase drawn as several pieces on one line keeps the page's order.

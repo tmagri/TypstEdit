@@ -226,6 +226,65 @@ final class PDFImportTests: XCTestCase {
         XCTAssertNil(PDFImportAI.cleanLatex("\\frac{a}{b"))
     }
 
+    // MARK: - Scripts
+
+    func testRightToLeftLinesAreDetected() {
+        XCTAssertTrue(TextScript.isRightToLeftLine("هذا نص عربي للاختبار"))
+        XCTAssertTrue(TextScript.isRightToLeftLine("זהו טקסט בעברית"))
+        XCTAssertFalse(TextScript.isRightToLeftLine("This is English text"))
+        XCTAssertFalse(TextScript.isRightToLeftLine("Αυτό είναι ελληνικά"))
+        // Mixed text is judged by its majority.
+        XCTAssertTrue(TextScript.isRightToLeftLine("كتاب book"))
+        XCTAssertFalse(TextScript.isRightToLeftLine("The word for book is كتاب كتاب x"))
+    }
+
+    func testRightToLeftWordsAreReadInLogicalOrder() {
+        // A PDF draws an Arabic line from its right edge, so extraction
+        // delivers the words reversed.
+        let drawn = ["اليسار.", "إلى", "اليمين", "من", "صحيح", "بترتيب"]
+        XCTAssertEqual(PDFPageExtractor.readingOrderedWords(drawn).joined(separator: " "),
+                       "بترتيب صحيح من اليمين إلى اليسار.")
+        XCTAssertEqual(PDFPageExtractor.readingOrderedWords(["Hello", "world"]), ["Hello", "world"])
+    }
+
+    func testCJKLineBreakAddsNoSpace() {
+        // The sentence is one run of characters; the printed line break in
+        // the middle of it must not become a space.
+        XCTAssertEqual(PDFLayoutAnalyzer.joinLines(["这是一段用于测试的中文文本，用来检查提取", "出来。"]),
+                       "这是一段用于测试的中文文本，用来检查提取出来。")
+        XCTAssertEqual(PDFLayoutAnalyzer.joinLines(["日本語の文章を", "確認します。"]),
+                       "日本語の文章を確認します。")
+        // A Latin word next to CJK keeps its space.
+        XCTAssertEqual(PDFLayoutAnalyzer.joinLines(["The book is 书", "and it is good"]),
+                       "The book is 书 and it is good")
+    }
+
+    func testGreekIsNotMathematics() {
+        // Greek prose was read as display math (Greek letters counted as math
+        // symbols) and turned into an image.
+        XCTAssertLessThan(PDFLayoutAnalyzer.mathSymbolFraction("Αυτό είναι ένα κείμενο στα ελληνικά"), 0.2)
+        XCTAssertLessThan(PDFLayoutAnalyzer.mathSymbolFraction("Это текст на русском"), 0.2)
+        // Real math is still recognised (4 of the 7 visible characters here).
+        XCTAssertGreaterThan(PDFLayoutAnalyzer.mathSymbolFraction("E = m c ∑ ∫ ∞"), 0.5)
+    }
+
+    func testRightToLeftParagraphKeepsRightAlignedWrap() {
+        // A Hebrew paragraph: the first line is full, the second is short and
+        // ends at the right edge (RTL alignment), which must not be read as a
+        // new, indented paragraph.
+        var lines: [PDFLayoutAnalyzer.Line] = []
+        for (index, text) in ["זהו טקסט בעברית לבדיקה. הוא כולל מספר מילים", "לשמאל."].enumerated() {
+            let width: CGFloat = index == 0 ? 400 : 60
+            lines.append(.init(text: text,
+                               rect: CGRect(x: 500 - width, y: 600 - CGFloat(index) * 15,
+                                            width: width, height: 11),
+                               fontSize: 11, isBold: false, mathScore: 0, isTitle: false))
+        }
+        let blocks = PDFLayoutAnalyzer.textBlocks(from: lines, bodyFontSize: 11)
+        XCTAssertEqual(blocks.count, 1, "\(blocks)")
+        XCTAssertEqual(blocks.first?.content, .text("זהו טקסט בעברית לבדיקה. הוא כולל מספר מילים לשמאל."))
+    }
+
     // MARK: - End to end
 
     /// Draws a small PDF (title, two paragraphs, a ruled table with a merged

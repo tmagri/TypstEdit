@@ -943,24 +943,43 @@ enum PDFLayoutAnalyzer {
             // A blank line's worth of space is a paragraph break in any
             // typography, even with nothing to compare against.
             if gap > size { return false }
-            // A short line ending a sentence closes the paragraph.
+
+            // Right-to-left text is aligned on its right edge, so "indent"
+            // and "short last line" are measured from the right.
+            let rightToLeft = TextScript.isRightToLeftLine(previous.text)
+                || TextScript.isRightToLeftLine(firstLine.text)
             let right = max(previous.rect.maxX, firstLine.rect.maxX, next.rect.maxX)
             let left = min(previous.rect.minX, firstLine.rect.minX)
             let width = max(right - left, 1)
             let endsSentence = previous.text.range(of: #"[.!?:]["”’)]?$"#, options: .regularExpression) != nil
-            if endsSentence, previous.rect.maxX < right - width * 0.15 { return false }
+            // A short line ending a sentence closes the paragraph.
+            let trailingEdge = rightToLeft ? previous.rect.minX - left : right - previous.rect.maxX
+            if endsSentence, trailingEdge > width * 0.15 { return false }
+
             // First-line indent starts a new paragraph (list continuations are
             // indented under the marker, so lists are exempt).
-            if currentRole == .body, next.rect.minX - previous.rect.minX > size * 0.8,
-               next.rect.minX - firstLine.rect.minX > size * 0.8 {
-                return false
+            if currentRole == .body {
+                let indent: CGFloat = rightToLeft
+                    ? firstLine.rect.maxX - next.rect.maxX
+                    : next.rect.minX - firstLine.rect.minX
+                let deeperThanPrevious: CGFloat = rightToLeft
+                    ? previous.rect.maxX - next.rect.maxX
+                    : next.rect.minX - previous.rect.minX
+                if indent > size * 0.8, deeperThanPrevious > size * 0.8 { return false }
             }
+
             // A list item continues on lines indented under its text. A line
             // back at the marker's position continues it only after a full
             // line (lists without a hanging indent, or an indented first
             // line); after a short line it is the paragraph after the list.
-            if currentRole == .listStart, next.rect.minX < firstLine.rect.minX + size * 0.5 {
-                return previous.rect.maxX >= right - width * 0.1
+            if currentRole == .listStart {
+                let atMarker: Bool = rightToLeft
+                    ? next.rect.maxX > firstLine.rect.maxX - size * 0.5
+                    : next.rect.minX < firstLine.rect.minX + size * 0.5
+                if atMarker {
+                    return rightToLeft ? previous.rect.minX <= left + width * 0.1
+                                       : previous.rect.maxX >= right - width * 0.1
+                }
             }
             return true
         }
@@ -1039,6 +1058,11 @@ enum PDFLayoutAnalyzer {
             if result.isEmpty { result = line; continue }
             if pendingSoftBreak {
                 result += line
+            } else if let last = result.last, let first = line.first,
+                      TextScript.joinsWithoutSpace(after: last, before: first) {
+                // A Chinese, Japanese or Thai sentence split by the line
+                // wrapping is one word run: no space at the break.
+                result += line
             } else if result.hasSuffix("-"), result.dropLast().last?.isNumber == true, line.first?.isNumber == true {
                 // A range broken after its dash ("1:1-" / "4:1a") keeps the
                 // dash and loses the space.
@@ -1105,7 +1129,9 @@ enum PDFLayoutAnalyzer {
 
     static func isMathScalar(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.value {
-        case 0x0391...0x03C9: return true          // Greek
+        // Greek letters are not evidence of mathematics: Greek is a language
+        // written in these letters, and Greek math arrives in a math font
+        // (`isMathFont`) or as math alphanumerics below.
         case 0x2070...0x209F: return true          // super/subscripts
         case 0x2100...0x214F: return true          // letterlike (ℝ, ℏ)
         case 0x2190...0x21FF: return true          // arrows
@@ -1113,7 +1139,7 @@ enum PDFLayoutAnalyzer {
         case 0x2300...0x23FF: return true          // misc technical (⌈ ⎛)
         case 0x27C0...0x27EF, 0x2980...0x2AFF: return true
         case 0x1D400...0x1D7FF: return true        // math alphanumerics
-        default: return "=+<>^|∑∫√±×÷".unicodeScalars.contains(scalar)
+        default: return "=+<>^|∑∫√±×÷∂∇∞".unicodeScalars.contains(scalar)
         }
     }
 

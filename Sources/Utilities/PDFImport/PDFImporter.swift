@@ -42,6 +42,9 @@ struct PDFImporter: Sendable {
         let range = options.pageRange.map { max($0.lowerBound - 1, 0)..<min($0.upperBound, pdf.pageCount) } ?? all
         guard !range.isEmpty else { throw ImportError.empty }
         var warnings: [String] = []
+        /// BibleWorks fonts used by the document whose codes this import does
+        /// not decode, reported once at the end.
+        var undecodedFonts: Set<String> = []
 
         // 1. Text per page: the text layer when usable, otherwise OCR.
         var work: [PageWork] = []
@@ -58,9 +61,17 @@ struct PDFImporter: Sendable {
             // invisible layer whose geometry (sizes, line boxes) is noise.
             // A scan's text layer, when present, is the scanner's OCR: its
             // text and word positions are good, but its sizes come from word
-            // boxes and are noise. Use it, with sizes untrusted. Scans with
+            // boxes and Use it, with sizes untrusted. Scans with
             // no layer are read from the image.
             let scanned = PDFPageExtractor.isScannedPage(page)
+            // Text in a BibleWorks font we cannot decode (its transliteration
+            // or symbol fonts) would come out as codes; say so once for the
+            // import, rather than on every page of a long book.
+            if !options.forceOCR {
+                for font in PDFPageExtractor.undecodedLegacyFonts(of: page) {
+                    undecodedFonts.insert(PDFLegacyFonts.baseName(font))
+                }
+            }
             // Ruled tables first: their rules also keep text runs from
             // crossing cell borders.
             let layer: (runs: [PDFTextRun], all: [PDFTextRun], tables: [PDFRegion])? = options.forceOCR ? nil : autoreleasepool {
@@ -76,8 +87,7 @@ struct PDFImporter: Sendable {
                 var item = PageWork(index: index, size: size, runs: layer.runs, presetTables: layer.tables,
                                     engine: .textLayer, sizesTrusted: !scanned)
                 item.bodySample = layer.all
-                work.append(item)
-            } else if let image = autoreleasepool(invoking: { PDFPageExtractor.render(page, scale: 3) }) {
+                work.append(item)            } else if let image = autoreleasepool(invoking: { PDFPageExtractor.render(page, scale: 3) }) {
                 progress("Recognising text on page \(index + 1)…")
                 let ocr = await PDFPageExtractor.recognize(image, page: page, displaySize: size, textLayer: nil)
                 var runs = ocr.runs
@@ -189,6 +199,11 @@ struct PDFImporter: Sendable {
         }
 
         progress("Writing Typst…")
+        if !undecodedFonts.isEmpty {
+            warnings.append("The document uses the BibleWorks legacy fonts "
+                + undecodedFonts.sorted().joined(separator: ", ")
+                + ". Text in those fonts has no Unicode mapping, so its characters (transliteration marks, symbols) may be wrong; check anything set in them.")
+        }
         return PDFImportResult(document: document,
                                typst: PDFImportEmitter.typst(document),
                                markdown: PDFImportEmitter.markdown(document),
