@@ -192,6 +192,12 @@ final class LocalToolExecutor {
     /// context, and the model must look at the file again.
     private var readFiles: [String: Date] = [:]
 
+    /// Status line for long-running tools (`import_pdf`), so the chat can
+    /// show "Reading page 800 of 1550" instead of a silent spinner while a
+    /// tool call runs. Set by the chat before each turn; called from the
+    /// import's background work, so it must hop to the main actor itself.
+    var onProgress: (@Sendable (String) -> Void)?
+
     /// Called by the chat manager at the start of each user turn.
     func beginRequest() {
         readFiles.removeAll()
@@ -1695,7 +1701,8 @@ final class LocalToolExecutor {
         importer.options.pageRange = range
         importer.options.forceOCR = Self.boolValue(arguments["force_ocr"]) == true
         importer.aiTarget = target
-        let result = try await importer.run()
+        let report = onProgress
+        let result = try await importer.run { message in report?("Importing \(pdf.url.lastPathComponent): \(message)") }
 
         var written = [outputURL]
         try result.typst.write(to: outputURL, atomically: true, encoding: .utf8)

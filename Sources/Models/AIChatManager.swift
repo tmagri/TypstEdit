@@ -2111,6 +2111,12 @@ final class AIChatManager: ObservableObject {
         )
         defer { runningTool = previousRunning }
         defer { stoppedToolMessageIDs.remove(messageID) }
+        // Long tools (PDF import) report their own progress into the live
+        // status line; clear it however the call ends.
+        localTools.onProgress = { [weak self] status in
+            Task { @MainActor in self?.liveStatus = status }
+        }
+        defer { localTools.onProgress = nil }
 
         do {
             try Self.validateToolAccess(qualifiedName: qualifiedName, isSubagent: isSubagent, planMode: planMode)

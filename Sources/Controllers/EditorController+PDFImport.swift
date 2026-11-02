@@ -52,28 +52,38 @@ extension EditorController {
         let saveExtras = accessory.saveExtras
         let openAsProject = destination.openAsProject
 
-        showStatus("Importing \(pdfURL.lastPathComponent)…", duration: 600)
-        let relay: PDFImporter.Progress = { [weak self] message in
-            Task { @MainActor in self?.showStatus(message, duration: 600) }
-        }
-
-        Task { [weak self] in
+        // A visible window with a page counter, because a long import takes
+        // minutes and looked like a hang in the toolbar caption.
+        let totalPages = PDFDocument(url: pdfURL)?.pageCount ?? 0
+        let pages = min(pageRange.range?.upperBound ?? totalPages, totalPages)
+        let progress = PDFImportProgress(fileName: pdfURL.lastPathComponent, totalPages: max(pages, 1))
+        let task = Task { [weak self] in
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
-                    try await importer.run(progress: relay)
+                    try await importer.run(progress: progress.progressHandler())
                 }.value
+                try Task.checkCancellation()
+                progress.page = progress.totalPages
+                progress.phase = .writing
                 let typURL = destination.directory.appendingPathComponent("\(baseName).typ")
                 try result.typst.write(to: typURL, atomically: true, encoding: .utf8)
                 if saveExtras {
                     try result.markdown.write(to: destination.directory.appendingPathComponent("\(baseName).md"), atomically: true, encoding: .utf8)
                     try result.json.write(to: destination.directory.appendingPathComponent("\(baseName).json"), atomically: true, encoding: .utf8)
                 }
+                progress.finish(output: typURL)
                 self?.finishPDFImport(typURL: typURL, openAsProject: openAsProject, result: result)
+            } catch is CancellationError {
+                progress.markCancelled()
+                self?.showStatus("PDF import cancelled", duration: 4)
             } catch {
                 print("[ERROR] PDF import failed: \(error.localizedDescription)")
+                progress.fail(error.localizedDescription)
                 self?.showStatus("Import failed: \(error.localizedDescription)", duration: 5)
             }
         }
+        progress.onCancel = { task.cancel() }
+        PDFImportProgressWindow.show(progress)
     }
 
     private func finishPDFImport(typURL: URL, openAsProject: Bool, result: PDFImportResult) {

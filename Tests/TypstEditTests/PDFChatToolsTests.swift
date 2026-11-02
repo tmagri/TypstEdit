@@ -201,6 +201,84 @@ final class PDFChatToolsTests: XCTestCase {
         XCTAssertTrue(text.contains("is not a PDF"), text)
     }
 
+    // MARK: - Progress
+
+    func testProgressTracksPagesAndPhases() {
+        let progress = PDFImportProgress(fileName: "book.pdf", totalPages: 1550)
+        progress.apply("Reading page 1 of 1550…")
+        XCTAssertEqual(progress.phase, .reading)
+        XCTAssertEqual(progress.page, 1)
+        progress.apply("Reading page 800 of 1550…")
+        XCTAssertEqual(progress.page, 800)
+        XCTAssertEqual(progress.fraction, 0.05 + (800.0 / 1550.0) * 0.65, accuracy: 0.001)
+        progress.apply("Analysing layout of page 801…")
+        XCTAssertEqual(progress.phase, .analysing)
+        XCTAssertEqual(progress.page, 801)
+        progress.apply("Saving figures…")
+        XCTAssertEqual(progress.phase, .figures)
+        XCTAssertGreaterThan(progress.fraction, 0.7)
+        progress.apply("Writing Typst…")
+        XCTAssertEqual(progress.phase, .writing)
+        XCTAssertFalse(progress.isFinished)
+        XCTAssertEqual(progress.log.count, 5)
+    }
+
+    func testProgressEndsInFinishedOrFailed() {
+        let finished = PDFImportProgress(fileName: "a.pdf", totalPages: 2)
+        finished.finish(output: URL(fileURLWithPath: "/tmp/a.typ"))
+        XCTAssertEqual(finished.phase, .finished)
+        XCTAssertTrue(finished.isFinished)
+        XCTAssertEqual(finished.fraction, 1)
+        XCTAssertEqual(finished.outputURL?.lastPathComponent, "a.typ")
+
+        let failed = PDFImportProgress(fileName: "b.pdf", totalPages: 2)
+        failed.fail("The PDF is password protected.")
+        XCTAssertEqual(failed.phase, .failed)
+        XCTAssertTrue(failed.isFinished)
+        XCTAssertEqual(failed.failure, "The PDF is password protected.")
+        XCTAssertTrue(failed.message.contains("password"))
+
+        let cancelled = PDFImportProgress(fileName: "c.pdf", totalPages: 2)
+        cancelled.markCancelled()
+        XCTAssertEqual(cancelled.phase, .cancelled)
+        XCTAssertTrue(cancelled.isFinished)
+    }
+
+    /// The importer reports "Reading page N of M" for every page, which is
+    /// what the window counts.
+    @MainActor
+    func testImportReportsProgressPerPage() async throws {
+        let url = root.appendingPathComponent("three.pdf")
+        try PDFTestFixtures.draw(to: url, pages: 3)
+        let progress = PDFImportProgress(fileName: "three.pdf", totalPages: 3)
+        let importer = PDFImporter(sourceURL: url, outputDirectory: root, baseName: "three")
+        _ = try await importer.run(progress: progress.progressHandler())
+        // The importer delivers updates through a task; give them a moment.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(progress.log.contains { $0.hasPrefix("Reading page 3 of 3") }, "\(progress.log)")
+        XCTAssertEqual(progress.page, 3)
+        XCTAssertFalse(progress.log.isEmpty)
+    }
+
+    /// `import_pdf` reports into the chat's live status line.
+    @MainActor
+    func testImportPDFReportsProgressToTheChat() async throws {
+        try PDFTestFixtures.draw(to: root.appendingPathComponent("report.pdf"), pages: 2)
+        let lines = LineBox()
+        executor.onProgress = { line in Task { @MainActor in lines.append(line) } }
+        _ = try await run("import_pdf", ["path": "report.pdf"])
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let seen = lines.all
+        XCTAssertTrue(seen.contains { $0.hasPrefix("Importing report.pdf: Reading page 2 of 2") }, "\(seen)")
+    }
+
+    private final class LineBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+    }
+
     // MARK: - Busy local model
 
     func testActivityCountsRequestsPerServer() async {

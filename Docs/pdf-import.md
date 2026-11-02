@@ -15,6 +15,17 @@ The import runs on your Mac. It uses only Apple frameworks (PDFKit and Vision). 
 
 If the PDF is outside the open project, select **Add to Project** or **Open PDF Folder**. If a Typst file with the same name exists, select **Replace** or **Keep Both**.
 
+### The import window
+
+After you click **Import**, a window shows the progress:
+
+- **Reading page 800 of 1550**, then analysing each page, saving figures, AI and writing the file.
+- A progress bar with a percentage.
+- A log of the last steps.
+- **Cancel Import** stops the import. You can close the window and continue working: the import keeps running, and its files appear in the project when it ends, or the window shows the error.
+
+The window closes 1.5 seconds after a successful import. **Open** opens the new file. If the import fails, the window stays open and shows the reason.
+
 For more than 150 pages with no range, the app asks you to confirm and shows an estimated time. The import takes approximately 0.3 to 1 second for each page.
 
 Search the new file for `TODO(import)`. This marker shows each formula and table that you must examine.
@@ -71,7 +82,7 @@ Requests from other apps to the same server are not counted.
 AI Chat has two tools for PDFs in the project:
 
 - **`read_pdf`** gives the PDF text to the model as Markdown, with tables, headings and code. It writes no files. It reads 40 pages at most in each call. If you give no page range, it reads the first 20 pages.
-- **`import_pdf`** makes a Typst file, the same as the menu command. You must approve the import first. The approval shows the destination, the pages and the AI model, if the import uses AI. It imports 150 pages at most in each call. Plan mode does not offer this tool.
+- **`import_pdf`** makes a Typst file, the same as the menu command. You must approve the import first. The approval shows the destination, the pages and the AI model, if the import uses AI. It imports 150 pages at most in each call. Plan mode does not offer this tool. While it runs, the chat shows the page that it is reading.
 
 For example, "Summarise chapter 2 of manual.pdf" uses `read_pdf`. "Import pages 12–30 of manual.pdf as Typst" uses `import_pdf`.
 
