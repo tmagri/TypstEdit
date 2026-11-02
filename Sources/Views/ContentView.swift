@@ -309,6 +309,16 @@ struct ContentView: View {
                 }
                 self.handleExternalDiskChange(at: openURL, userInitiated: false)
             }
+            .onReceive(NotificationCenter.default.publisher(for: FileSystemModel.projectFilesDidChange)) { notification in
+                // A write landed anywhere in the open project. The project
+                // watcher saw it the moment it happened, so the open document
+                // can refresh without waiting for the poll below. Writes this
+                // app makes itself are filtered by the disk-state check in
+                // `handleExternalDiskChange`.
+                if let urls = notification.object as? [URL] {
+                    self.handleProjectFileChanges(urls)
+                }
+            }
             .onChange(of: editorController.currentFileURL) { _ in syncWindowDocumentState() }
             .onChange(of: editorController.hasUnsavedChanges) { _ in syncWindowDocumentState() }
             .onChange(of: editorController.isFileDeletedOnDisk) { _ in syncWindowDocumentState() }
@@ -320,15 +330,35 @@ struct ContentView: View {
                 self.checkForExternalDiskChange()
             }
             .task {
-                // Cheap belt-and-suspenders poll for changes from something
-                // that isn't AI Chat (another editor, a sync tool, git) —
-                // AI Chat's own edits are caught instantly via the
-                // notification above instead of waiting on this.
+                // Backstop only: the project watcher (see SidebarView) catches
+                // every write in the open project the moment it lands, and
+                // AI Chat's edits arrive as notifications. This slow stat
+                // covers the cases the watcher cannot see — a standalone file
+                // with no project open, a sync tool touching only the open
+                // document. It is deliberately cheap: one `stat` per tick.
                 while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
                     self.checkForExternalDiskChange()
                 }
             }
+    }
+
+    /// Handles a batch of changed paths from the project watcher. Only the
+    /// document this window is showing matters here; the rest of the batch is
+    /// the sidebar's business (and the index's).
+    private func handleProjectFileChanges(_ urls: [URL]) {
+        guard let openURL = editorController.currentFileURL else { return }
+        let openPath = openURL.resolvingSymlinksInPath().standardizedFileURL.path
+        // An atomic save writes a temp file and renames it over the target, so
+        // the batch can name the file itself or its folder; comparing both
+        // covers the rename form as well as an in-place rewrite.
+        for url in urls {
+            let changed = url.resolvingSymlinksInPath().standardizedFileURL.path
+            if changed == openPath {
+                checkForExternalDiskChange()
+                return
+            }
+        }
     }
 
     /// Stats the open file and flags `externalDiskChangeAvailable` if its

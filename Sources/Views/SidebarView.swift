@@ -1,14 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct FileNode: Identifiable, Hashable {
-    var id: URL { url }
-    let url: URL
-    let name: String
-    let isDirectory: Bool
-    var children: [FileNode]?
-}
-
 /// Explorer-style abbreviation shared by the sidebar rows: keep the head of
 /// the name but always leave the file extension visible ("IT Team Meet….note")
 /// so long names stay scannable in the narrow sidebar. The full name stays
@@ -21,19 +13,76 @@ func explorerAbbreviatedName(_ name: String, pathExtension: String = "") -> Stri
 @MainActor
 class FileSystemModel: ObservableObject {
     @Published var rootNodes: [FileNode] = []
-    @Published var currentFolder: URL?
+    @Published var currentFolder: URL? {
+        didSet {
+            guard let folder = currentFolder else {
+                guard oldValue != nil else { return }
+                rootNodes = []
+                expandedFolders = []
+                stopWatching()
+                return
+            }
+            guard ProjectTreeLoader.canonical(folder) != oldValue.map(ProjectTreeLoader.canonical) else { return }
+            // A new project means a new watch and a list that starts from the
+            // top level only (the old tree belongs to another folder).
+            rootNodes = []
+            expandedFolders = []
+            restartWatching()
+            // The Notebooks view reuses `currentFolder` to mark its own root,
+            // but that folder is not a project: no project tree, no index.
+            guard !isNotebookFolder else { return }
+            loadFiles()
+        }
+    }
     @Published var expandedFolders: Set<URL> = []
     @Published var isNewUnsavedFile: Bool = false
-    /// Bumped whenever a reload observes an actual change in the tree. The
-    /// file List uses it as its identity so SwiftUI rebuilds rows outright.
-    /// Without it, `List(_:children:)` sometimes diffs the new data to "no
-    /// visual change" and keeps stale rows — the glitch where a refresh only
-    /// took effect after switching to Notebooks and back (which recreated the
-    /// List, and is exactly what this rebuild mimics).
+    /// Bumped when a reload actually changes the tree, and when a folder is
+    /// expanded or collapsed. The List renders a flat array of rows, so it
+    /// diffs by row identity and this is what makes dependent views (source
+    /// control, for one) re-read state at the same moment.
     @Published var refreshGeneration: Int = 0
     /// The editor of the window this model belongs to.
     weak var documentController: EditorController?
-    
+
+    /// Whether the Projects list is on screen. Drives the live watch: turning
+    /// it off tears the watcher down so a hidden sidebar has no cost. Change it
+    /// through `setWatchActive(_:)`, never directly.
+    private(set) var watchEnabled = false
+
+    /// The rows the List renders: the tree flattened to the expanded folders.
+    /// Derived state only — recomputed on read from two `@Published`s, so it
+    /// adds no extra object changes of its own.
+    var visibleRows: [VisibleFileRow] {
+        ProjectTreeLoader.visibleRows(in: rootNodes, expanded: expandedFolders)
+    }
+
+    /// True while the sidebar is showing Notebooks. `currentFolder` doubles as
+    /// "which root is open", and the notebook root is not a project.
+    private var isNotebookFolder: Bool {
+        guard let currentFolder else { return false }
+        return ProjectTreeLoader.canonical(currentFolder)
+            == ProjectTreeLoader.canonical(NotebookManager.shared.rootDirectory)
+    }
+
+    /// Live view of the project folder. One FSEvents subscription covers the
+    /// whole tree, so the list keeps itself current without a poll.
+    private var watcher: DirectoryWatcher?
+    private var reloadTask: Task<Void, Never>?
+    private var reloadGeneration = 0
+
+    /// Writes inside the project are announced with this notification so the
+    /// editor can reload the open document the moment it changes, without the
+    /// model needing a reference back into the view hierarchy. `object` is the
+    /// batch of changed URLs.
+    static let projectFilesDidChange = Notification.Name("TypstEdit.projectFilesDidChange")
+
+    deinit {
+        watcher?.stop()
+        reloadTask?.cancel()
+        indexTask?.cancel()
+        indexRetryTask?.cancel()
+    }
+
     // ADD THIS METHOD:
     func openFile() {
         let panel = NSOpenPanel()
@@ -65,126 +114,305 @@ class FileSystemModel: ObservableObject {
         }
     }
     
-    /// The toolbar Refresh button: rescans and always rebuilds the List, even
-    /// when the scan comes back identical — an identical result can't be
-    /// trusted to undo a List that's already showing stale rows, which is
-    /// exactly the glitch this is meant to recover from.
-    func forceRefresh() {
-        refreshGeneration += 1
-        loadFiles()
-    }
-
-    func loadFiles() {
-        guard let folder = currentFolder else { return }
-        let fresh = refreshedTree(at: folder)
-
-        // Only touch state when the tree really changed: no flicker on
-        // no-op refreshes, and a guaranteed rebuild when files appeared,
-        // disappeared, or moved.
-        if fresh != rootNodes {
-            self.rootNodes = fresh
-            refreshGeneration += 1
-        }
-
-        Task(priority: .background) {
-            print("[DEBUG] Triggering RAG Indexer for folder: \(folder.lastPathComponent)")
-            await RAGManager.shared.indexProject(at: folder)
-        }
-    }
-
-    /// Loads the top level of `folder` and re-fills every folder the user
-    /// already expanded, so nested changes show up in the same pass instead
-    /// of lingering stale until the user collapses and re-expands.
+    /// Reloads the tree now. The watcher keeps the list current on its own, so
+    /// this is for the toolbar button and for explicit "something happened"
+    /// notifications.
     ///
-    /// URLs are processed shallowest-first: a subfolder only becomes visible
-    /// in the tree after its parent has been refilled, so parents must be
-    /// handled before their children.
-    private func refreshedTree(at folder: URL) -> [FileNode] {
-        var tree = loadDirectory(at: folder)
-        let expanded = expandedFolders.sorted {
-            $0.pathComponents.count < $1.pathComponents.count
-        }
-        for url in expanded {
-            guard findNode(with: url, in: tree) != nil else { continue }
-            let children = loadDirectory(at: url)
-            tree = tree.map { updateChildren(in: $0, target: url, children: children) }
-        }
-        return tree
+    /// Note what it deliberately does *not* do: it doesn't throw the list away
+    /// and rebuild it. An unchanged scan leaves every row (and its selection
+    /// and scroll position) untouched; a changed scan republishes the rows that
+    /// actually changed.
+    func loadFiles() {
+        scheduleLoad(debounced: false)
+        indexProjectIfNeeded(force: true)
     }
 
-    /// Depth-first search for the node with `url` in the (lazily loaded) tree.
-    private func findNode(with url: URL, in nodes: [FileNode]) -> FileNode? {
+    /// Starts (or restarts) the live watch on `currentFolder` and re-reads the
+    /// tree once, so anything that changed while the pane was hidden shows up.
+    /// Safe to call repeatedly.
+    func startWatching() {
+        guard let folder = currentFolder, !isNotebookFolder else { return }
+        let canonical = ProjectTreeLoader.canonical(folder)
+        if let watcher, watcher.watchedRoot == canonical {
+            scheduleLoad(debounced: false)
+            return
+        }
+        restartWatching()
+        scheduleLoad(debounced: false)
+    }
+
+    /// Stops the watcher — called when the Files panel goes away, so a hidden
+    /// sidebar costs nothing at all.
+    func stopWatching() {
+        watcher?.stop()
+        watcher = nil
+        reloadTask?.cancel()
+        reloadTask = nil
+    }
+
+    /// The watcher is only started while the Projects list is on screen. Wire
+    /// this from the view's lifecycle rather than from `currentFolder` alone:
+    /// opening a project while the sidebar is hidden must not start watching.
+    func setWatchActive(_ active: Bool) {
+        guard watchEnabled != active else {
+            if active, watcher == nil { restartWatching() }
+            return
+        }
+        watchEnabled = active
+        restartWatching()
+    }
+
+    private func restartWatching() {
+        watcher?.stop()
+        watcher = nil
+        guard watchEnabled, !isNotebookFolder, let folder = currentFolder else { return }
+        // The current folder may have been removed or unmounted while the
+        // panel was hidden; FSEvents would fail silently then.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return }
+
+        let observer = DirectoryWatcher(root: folder) { [weak self] changes in
+            self?.handleFileSystemChanges(changes)
+        }
+        observer.start()
+        watcher = observer
+    }
+
+    private func handleFileSystemChanges(_ changes: [DirectoryChange]) {
+        guard let folder = currentFolder, !isNotebookFolder else { return }
+        let root = ProjectTreeLoader.canonical(folder)
+
+        var external: [URL] = []
+        var needsScan = false
+        var changedIndexableFile = false
+
+        for change in changes {
+            if ProjectTreeLoader.isIgnoredPath(change.url, inProject: folder) { continue }
+            external.append(change.url)
+            if RAGManager.isIndexableFile(change.url) { changedIndexableFile = true }
+
+            if change.changesParentListing {
+                // A row was created, removed or renamed: re-read the listing
+                // of the folder holding it — but only if that folder is on
+                // screen. A change inside a collapsed folder can't alter any
+                // visible row, so it doesn't earn a scan.
+                if isVisibleFolder(change.url.deletingLastPathComponent(), under: root) {
+                    needsScan = true
+                }
+                // A folder that was renamed or removed also affects its own
+                // listing (which may have followed it).
+                if change.isDirectory && isVisibleFolder(change.url, under: root) {
+                    needsScan = true
+                }
+            }
+            // A folder reported as merely "modified" is deliberately ignored:
+            // a folder's list of entries only changes through a create, remove
+            // or rename, all of which arrive as their own flag above. FSEvents
+            // also reports the parent folder whenever a file is *written* —
+            // rescanning on that would re-read the project root on every
+            // autosave for no visible change.
+        }
+
+        if !external.isEmpty {
+            // Announced rather than stored as a callback: the editor listens,
+            // so the model holds no reference into the view hierarchy.
+            NotificationCenter.default.post(name: Self.projectFilesDidChange, object: external)
+            if changedIndexableFile { indexProjectIfNeeded(force: false) }
+        }
+        if needsScan && watchEnabled { scheduleLoad(debounced: true) }
+    }
+
+    /// True when `url` is the project root or a folder the user has expanded —
+    /// i.e. a folder whose listing contributes rows to the visible list.
+    private func isVisibleFolder(_ url: URL, under root: URL) -> Bool {
+        let canonical = ProjectTreeLoader.canonical(url)
+        if canonical == root { return true }
+        return expandedFolders.contains { ProjectTreeLoader.canonical($0) == canonical }
+    }
+
+    // MARK: - Reloading
+
+    /// How long a burst of notifications is folded into one scan.
+    private static let reloadDebounce: UInt64 = 250_000_000 // 0.25 s
+
+    /// Runs a scan off the main actor, then publishes it if it still matters.
+    /// The generation check drops a scan that finished after a newer one
+    /// started, so a slow first pass can never overwrite fresher state.
+    private func scheduleLoad(debounced: Bool) {
+        guard let folder = currentFolder else { return }
+        reloadTask?.cancel()
+        reloadGeneration += 1
+        let generation = reloadGeneration
+
+        reloadTask = Task { [weak self] in
+            if debounced {
+                try? await Task.sleep(nanoseconds: Self.reloadDebounce)
+            }
+            // Read the expansion state *now*, not when the scan was queued: a
+            // folder collapsed during the debounce window shouldn't be listed
+            // at all, and one expanded during it should be.
+            guard !Task.isCancelled, let self else { return }
+            guard generation == self.reloadGeneration else { return }
+            let expanded = ProjectTreeLoader.loadedDirectories(in: self.rootNodes,
+                                                              expanded: self.expandedFolders)
+
+            let tree = await Task.detached(priority: .userInitiated) {
+                ProjectTreeLoader.buildTree(root: folder, reloading: expanded)
+            }.value
+            guard !Task.isCancelled else { return }
+            guard generation == self.reloadGeneration else { return }
+            guard self.currentFolder?.standardizedFileURL == folder.standardizedFileURL else { return }
+
+            // A folder the user expanded while the detached scan was running
+            // wasn't in the snapshot it reloaded, so its row would come back
+            // holding the placeholder `[]`. Keep what the list already has.
+            let merged = Self.keepingNewlyExpandedFolders(in: self.rootNodes,
+                                                         mergedInto: tree,
+                                                         scanned: expanded,
+                                                         expanded: self.expandedFolders)
+            self.publish(merged)
+        }
+    }
+
+    /// Publishes a scan only when it differs from what's on screen.
+    ///
+    /// `FileNode` compares by URL, so the outline can diff rows by identity:
+    /// an unchanged scan leaves the List completely alone (no flicker, no lost
+    /// selection or scroll position) while a real change still rebuilds
+    /// exactly the rows that moved.
+    private func publish(_ tree: [FileNode]) {
+        guard !tree.hasSameStructure(as: rootNodes) else { return }
+        rootNodes = tree
+        refreshGeneration += 1
+    }
+
+    /// Carries the contents of folders expanded after a scan started into that
+    /// scan's result, so publishing it can't undo the user's expand.
+    private static func keepingNewlyExpandedFolders(in current: [FileNode],
+                                                   mergedInto scanned: [FileNode],
+                                                   scanned scannedFolders: Set<URL>,
+                                                   expanded: Set<URL>) -> [FileNode] {
+        let canonicalExpanded = Set(expanded.map(ProjectTreeLoader.canonical))
+        let missed = canonicalExpanded.subtracting(scannedFolders)
+        guard !missed.isEmpty else { return scanned }
+        return scanned.map { carry($0, from: current, missed: missed) }
+    }
+
+    private static func carry(_ node: FileNode, from current: [FileNode], missed: Set<URL>) -> FileNode {
+        var updated = node
+        if node.isDirectory, missed.contains(node.url), let existing = find(node.url, in: current) {
+            updated.children = existing.children
+            return updated
+        }
+        guard let children = node.children else { return updated }
+        updated.children = children.map { carry($0, from: current, missed: missed) }
+        return updated
+    }
+
+    private static func find(_ url: URL, in nodes: [FileNode]) -> FileNode? {
         for node in nodes {
             if node.url == url { return node }
-            if let children = node.children, let hit = findNode(with: url, in: children) {
-                return hit
-            }
+            if let children = node.children, let hit = find(url, in: children) { return hit }
         }
         return nil
     }
-    
-    // Auto-generated directories that shouldn't clutter the project sidebar.
-    private static let hiddenFolders: Set<String> = ["backups", "temp", "vectorcaches"]
 
-    /// Loads **one level** of a directory. Subdirectories are given an empty
-    /// `children` array (so SwiftUI renders the disclosure chevron) but their
-    /// contents are NOT loaded yet — they are fetched lazily via
-    /// `loadChildren(for:)` when the user first expands the row.
-    ///
-    /// This breaks the deep recursion that caused the
-    /// `OutlineListCoordinator.recursivelyDiffRows` crash (RECURSION LEVEL 11).
-    private func loadDirectory(at url: URL) -> [FileNode] {
-        var nodes: [FileNode] = []
-        do {
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: url,
-                includingPropertiesForKeys: [.isDirectoryKey],
-                options: [.skipsHiddenFiles]
-            )
-
-            let sortedContents = contents.sorted { lhs, rhs in
-                let lhsDir = (try? lhs.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                let rhsDir = (try? rhs.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                if lhsDir != rhsDir { return lhsDir } // Directories first
-                return lhs.lastPathComponent.localizedStandardCompare(rhs.lastPathComponent) == .orderedAscending
-            }
-
-            for file in sortedContents {
-                let isDir = (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                if isDir && Self.hiddenFolders.contains(file.lastPathComponent) { continue }
-
-                // Directories start with an empty (not nil) children array so
-                // SwiftUI shows the disclosure triangle, but the contents are
-                // loaded on demand — never recursively here.
-                let children: [FileNode]? = isDir ? [] : nil
-
-                nodes.append(FileNode(url: file, name: file.lastPathComponent, isDirectory: isDir, children: children))
-            }
-        } catch {
-            print("Error listing directory: \(error)")
-        }
-        return nodes
-    }
-
-    /// Called by `SidebarRow` the first time a folder is expanded.
-    /// Replaces the placeholder `[]` with the actual one-level contents.
+    /// Called by `SidebarRow` when a folder is expanded.
+    /// Lists the folder's one-level contents (always re-read, so a folder
+    /// that was collapsed while files changed is fresh the moment it opens).
     func loadChildren(for node: FileNode) {
         guard node.isDirectory else { return }
-        let children = loadDirectory(at: node.url)
-        // Walk the tree and replace the matching node in-place.
-        rootNodes = rootNodes.map { updateChildren(in: $0, target: node.url, children: children) }
+        expandedFolders.insert(node.url)
+
+        // Listing happens off the main actor: a folder with many entries
+        // would otherwise stall the UI on the expand click.
+        let url = node.url
+        Task { [weak self] in
+            let children = await Task.detached(priority: .userInitiated) {
+                ProjectTreeLoader.loadDirectory(at: url)
+            }.value
+            guard let self else { return }
+            guard self.currentFolder != nil, self.expandedFolders.contains(url) else { return }
+            self.rootNodes = ProjectTreeLoader.replacingChildren(of: url, with: children, in: self.rootNodes)
+        }
     }
 
-    private func updateChildren(in node: FileNode, target: URL, children: [FileNode]) -> FileNode {
-        if node.url == target {
-            var updated = node
-            updated.children = children
-            return updated
+    /// Called when a folder row is collapsed. Its contents stay cached (so the
+    /// rows come back instantly) but stop being refreshed: nothing inside a
+    /// collapsed subtree can be on screen.
+    func noteCollapsed(_ node: FileNode) {
+        expandedFolders.remove(node.url)
+        let prefix = ProjectTreeLoader.canonical(node.url).path + "/"
+        expandedFolders = expandedFolders.filter {
+            !ProjectTreeLoader.canonical($0).path.hasPrefix(prefix)
         }
-        guard let existing = node.children else { return node }
-        var updated = node
-        updated.children = existing.map { updateChildren(in: $0, target: target, children: children) }
-        return updated
+    }
+
+    // MARK: - Semantic index
+
+    /// The index lags the tree on purpose: re-embedding is by far the most
+    /// expensive thing a file change can trigger, so watcher-driven updates
+    /// wait for a quiet period (`minimumIndexInterval`) while an explicit
+    /// refresh runs its own pass immediately. A change that arrives during a
+    /// pass leaves `indexPending` set, so the work isn't lost.
+    private static let minimumIndexInterval: TimeInterval = 15
+    private var lastIndexRequest: Date = .distantPast
+    private var indexTask: Task<Void, Never>?
+    private var indexPending = false
+    private var indexRetryTask: Task<Void, Never>?
+
+    /// Whether this model should keep the project's semantic index up to date.
+    /// Tests turn it off so they can exercise the tree without touching the
+    /// embedding backend.
+    var indexesProject = true
+
+    private func indexProjectIfNeeded(force: Bool) {
+        guard indexesProject else { return }
+        guard let folder = currentFolder, !isNotebookFolder else { return }
+        guard RAGManager.shouldUseRAG(for: folder) else { return }
+
+        let elapsed = Date().timeIntervalSince(lastIndexRequest)
+        guard force || elapsed >= Self.minimumIndexInterval else {
+            // Too soon. Remember the change and come back once the throttle
+            // expires — without a wake-up, a change made during the window
+            // would sit unindexed until the next unrelated refresh.
+            indexPending = true
+            scheduleIndexRetry(after: Self.minimumIndexInterval - elapsed)
+            return
+        }
+        guard indexTask == nil else {
+            // A pass is already running and will pick this up when it ends.
+            indexPending = true
+            return
+        }
+        guard !RAGManager.shared.isIndexing else {
+            // The manual "Update AI Index" button runs a pass outside this
+            // model. Retry shortly instead of dropping the change.
+            indexPending = true
+            scheduleIndexRetry(after: Self.minimumIndexInterval)
+            return
+        }
+
+        lastIndexRequest = Date()
+        indexPending = false
+        let project = folder
+        indexTask = Task(priority: .background) { [weak self] in
+            await RAGManager.shared.indexProject(at: project)
+            guard let self, !Task.isCancelled else { return }
+            self.indexTask = nil
+            if self.indexPending { self.indexProjectIfNeeded(force: false) }
+        }
+    }
+
+    private func scheduleIndexRetry(after delay: TimeInterval) {
+        guard indexRetryTask == nil else { return }
+        indexRetryTask = Task(priority: .background) { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(delay, 0) * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.indexRetryTask = nil
+            if self.indexPending { self.indexProjectIfNeeded(force: false) }
+        }
     }
     
     func createNewProject(template: ProjectTemplate) {
@@ -366,13 +594,37 @@ struct SidebarView: View {
 
     private var sourceControlRoot: URL? {
         guard visibility.showsSourceControl,
-              model.currentFolder != NotebookManager.shared.rootDirectory else { return nil }
-        return model.currentFolder
+              let folder = model.currentFolder,
+              ProjectTreeLoader.canonical(folder) != ProjectTreeLoader.canonical(NotebookManager.shared.rootDirectory)
+        else { return nil }
+        return folder
     }
 
     private func reconcileBrowserSelection() {
         if let mode = visibility.resolvedBrowserMode(sidebarMode), mode != sidebarMode {
             sidebarMode = mode
+        }
+    }
+
+    /// True while the Projects file list is the thing actually on screen
+    /// (not just the selected tab: the sidebar itself may be hidden). The
+    /// Notebooks root is excluded — it's not a project tree.
+    private var isProjectsBrowserVisible: Bool {
+        guard let folder = model.currentFolder else { return false }
+        return editorController.isSidebarVisible
+            && visibility.resolvedPanel(editorController.sidebarContent) == .files
+            && visibility.resolvedBrowserMode(sidebarMode) == 0
+            && ProjectTreeLoader.canonical(folder) != ProjectTreeLoader.canonical(NotebookManager.shared.rootDirectory)
+    }
+
+    /// Starts or stops the live watch to match what is on screen.
+    private func syncProjectWatch() {
+        let visible = isProjectsBrowserVisible
+        model.setWatchActive(visible)
+        if visible {
+            model.startWatching()
+        } else {
+            model.stopWatching()
         }
     }
 
@@ -437,12 +689,12 @@ struct SidebarView: View {
                                 }
                             }
                             
-                            Button(action: { model.forceRefresh() }) {
+                            Button(action: { model.loadFiles() }) {
                                 Image(systemName: "arrow.clockwise")
                                     .foregroundColor(themeManager.textColor.opacity(0.6))
                             }
                             .buttonStyle(.plain)
-                            .help("Refresh Files")
+                            .help("Refresh Files (the list usually updates on its own)")
                             
                             Menu {
                                 Button(action: {
@@ -527,15 +779,21 @@ struct SidebarView: View {
                     }
                 }
                 
-                // 👉 RESTORED: The actual file list!
-                List(model.rootNodes, children: \.children) { node in
-                    SidebarRow(node: node, selectedFile: $selectedFile, editorController: editorController,
+                // Flat, pre-flattened rows: the list never recurses into the
+                // tree, so a deep project can't trip SwiftUI's recursive row
+                // diffing, and a reload only touches rows whose path changed.
+                // `.id` is deliberately stable — the tree watcher keeps this
+                // list current, so rebuilding it would throw away selection,
+                // scroll position and any in-flight row animation.
+                List(model.visibleRows) { row in
+                    SidebarRow(node: row.node, depth: row.depth, isExpanded: row.isExpanded,
+                               selectedFile: $selectedFile, editorController: editorController,
                                onCleanupFolder: { imageCleanupTarget = ImageCleanupTarget(url: $0) })
                         .environmentObject(model)
                         .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
                         .listRowSeparator(.hidden)
                         .listRowBackground(
-                            selectedFile == node.url ? Color.accentColor.opacity(0.8) : Color.clear
+                            selectedFile == row.node.url ? Color.accentColor.opacity(0.8) : Color.clear
                         )
                 }
                 // .plain rows hug their content (~22pt, VS Code-explorer
@@ -544,10 +802,6 @@ struct SidebarView: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .environment(\.defaultMinListRowHeight, 22)
-                // Rebuilding the List on generation changes is the reliable
-                // fix for the stale-refresh glitch; identity-diffing alone
-                // can leave old rows on screen (see FileSystemModel).
-                .id(model.refreshGeneration)
 
                 if let root = sourceControlRoot {
                     Divider()
@@ -587,6 +841,15 @@ struct SidebarView: View {
             await sourceControl.setProjectRoot(root)
             if sourceControlLoadingRoot == root { sourceControlLoadingRoot = nil }
         }
+        // Live project view. The watcher runs only while the Projects list is
+        // on screen: switching to Notebooks, hiding the sidebar or selecting
+        // another panel turns it off, so an unviewed project costs nothing.
+        .onAppear { syncProjectWatch() }
+        .onDisappear {
+            model.setWatchActive(false)
+            model.stopWatching()
+        }
+        .onChange(of: isProjectsBrowserVisible) { _ in syncProjectWatch() }
         .onChange(of: model.refreshGeneration) { _ in
             guard sourceControlRoot != nil else { return }
             Task { await sourceControl.refresh() }
@@ -618,12 +881,9 @@ struct SidebarView: View {
             reconcileBrowserSelection()
             if newMode == 1 {
                 NotebookManager.shared.loadNotebooks()
-            } else {
-                // Coming back from Notebooks used to be the only way to fix
-                // a stale file list — keep that recovery, but make it
-                // explicit: switch rebuilds the List through forceRefresh.
-                model.forceRefresh()
             }
+            // Coming back to Projects doesn't need a refresh: the watch is
+            // restarted when the tab becomes visible and re-reads the tree.
         }
         .onChange(of: model.currentFolder) { newValue in
             if newValue == NotebookManager.shared.rootDirectory {
@@ -655,6 +915,10 @@ struct SidebarView: View {
 
 struct SidebarRow: View {
     let node: FileNode
+    /// Nesting level in the project tree.
+    var depth: Int = 0
+    /// Whether this folder row is currently expanded.
+    var isExpanded: Bool = false
     @Binding var selectedFile: URL?
     @ObservedObject var editorController: EditorController
     var onCleanupFolder: (URL) -> Void = { _ in }
@@ -667,8 +931,27 @@ struct SidebarRow: View {
         selectedFile == node.url
     }
 
+    private var disclosureWidth: CGFloat { 14 }
+
     var body: some View {
         HStack(spacing: 4) {
+            // Indentation replaces List's built-in outline nesting: the list
+            // renders a flat array of rows, so depth is drawn explicitly.
+            Color.clear.frame(width: CGFloat(depth) * 12, height: 1)
+
+            // A fixed disclosure column for every row keeps file and folder
+            // icons aligned with each other at the same depth.
+            if node.isDirectory {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(themeManager.textColor.opacity(0.55))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: disclosureWidth)
+                    .accessibilityLabel(isExpanded ? "Collapse" : "Expand")
+            } else {
+                Color.clear.frame(width: disclosureWidth, height: 1)
+            }
+
             Image(systemName: iconName(for: node))
                 .foregroundColor(iconColor(for: node))
                 .font(.system(size: 12))
@@ -684,17 +967,10 @@ struct SidebarRow: View {
         .help(node.name)
         .padding(.vertical, 2)
         .contentShape(Rectangle()) // Make full row clickable
-        .onAppear {
-            // Lazily load this directory's children the first time the row
-            // becomes visible (i.e. after the user expands the disclosure
-            // chevron). The model only stores a placeholder [] at load time;
-            // this call replaces it with the real one-level contents.
-            if node.isDirectory {
-                fileSystemModel.loadChildren(for: node)
-            }
-        }
         .onTapGesture {
-            if !node.isDirectory {
+            if node.isDirectory {
+                toggleExpansion()
+            } else {
                 selectedFile = node.url
             }
         }
@@ -760,6 +1036,17 @@ struct SidebarRow: View {
     private func createFileHere(_ fileExtension: String) {
         if let url = fileSystemModel.createFile(in: node.url, fileExtension: fileExtension) {
             selectedFile = url
+        }
+    }
+
+    /// Expands or collapses this folder. Expanding loads its contents on
+    /// demand; collapsing just hides the rows (their contents stay cached).
+    private func toggleExpansion() {
+        guard node.isDirectory else { return }
+        if isExpanded {
+            fileSystemModel.noteCollapsed(node)
+        } else {
+            fileSystemModel.loadChildren(for: node)
         }
     }
 

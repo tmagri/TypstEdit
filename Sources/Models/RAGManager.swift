@@ -151,6 +151,18 @@ class RAGManager: ObservableObject {
 
         return specialDir != "backups" && specialDir != "temp" && specialDir != "vectorcaches" && specialDir != ProjectSettingsManager.dotFolderName
     }
+
+    /// Extensions `gatherFiles` indexes. Shared with the file watcher so a
+    /// change to a file the index doesn't read (an image, the exported PDF)
+    /// never schedules an indexing pass.
+    nonisolated static let indexedFileExtensions: Set<String> = [
+        "typ", "md", "json", "bib", "txt", "csv", "yaml", "yml", "note",
+    ]
+
+    /// True when editing `url` can change the semantic index.
+    nonisolated static func isIndexableFile(_ url: URL) -> Bool {
+        indexedFileExtensions.contains(url.pathExtension.lowercased())
+    }
     
     // MARK: - Path Configuration
     
@@ -351,7 +363,19 @@ class RAGManager: ObservableObject {
         
         setupDatabase()
         guard let db = db else { return }
-        
+
+        // `gatherFiles` walks the whole tree and `contentsOfDirectory`-style
+        // enumeration is blocking I/O. On the main actor it stalled the UI for
+        // the duration of every indexing pass — including the automatic ones
+        // the file watcher triggers. Walk off the actor and only come back
+        // with the list.
+        indexStatus = "Checking index..."
+        let filesToProcess = await Task.detached(priority: .utility) {
+            Self.gatherFiles(in: projectDir)
+        }.value
+        let provider = activeProvider
+        var cacheUpdated = false
+
         let cleanupSQL = "SELECT id, path FROM files;"
         var cleanupStmt: OpaquePointer?
         if sqlite3_prepare_v2(db, cleanupSQL, -1, &cleanupStmt, nil) == SQLITE_OK {
@@ -377,10 +401,6 @@ class RAGManager: ObservableObject {
                 print("Cleaned up \(idsToDelete.count) deleted files from vector DB.")
             }
         }
-        
-        let provider = activeProvider
-        let filesToProcess = gatherFiles(in: projectDir)
-        var cacheUpdated = false
         
         let totalFiles = filesToProcess.count
         guard totalFiles > 0 else { return }
@@ -526,7 +546,7 @@ class RAGManager: ObservableObject {
         }
     }
 
-    private func gatherFiles(in projectDir: URL) -> [URL] {
+    nonisolated private static func gatherFiles(in projectDir: URL) -> [URL] {
         let resourceKeys: [URLResourceKey] = [.contentModificationDateKey, .isDirectoryKey, .fileSizeKey]
         guard let enumerator = FileManager.default.enumerator(
             at: projectDir,
@@ -555,8 +575,7 @@ class RAGManager: ObservableObject {
             }
             
             let ext = fileURL.pathExtension.lowercased()
-            let allowedExtensions = ["typ", "md", "json", "bib", "txt", "csv", "yaml", "yml", "note"]
-            if allowedExtensions.contains(ext) {
+            if indexedFileExtensions.contains(ext) {
                 validFiles.append(fileURL)
             }
         }
