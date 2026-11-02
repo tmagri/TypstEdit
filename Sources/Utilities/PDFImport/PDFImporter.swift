@@ -246,6 +246,9 @@ struct PDFImporter: Sendable {
         removeStaleCrops()
         var created = false
         for p in document.pages.indices {
+            // Writing a page's figures is slow enough to notice on a long
+            // book, so Cancel is honoured between pages.
+            try Task.checkCancellation()
             let pageIndex = document.pages[p].index
             guard let page = pdf.page(at: pageIndex) else { continue }
             var counters: [String: Int] = [:]
@@ -311,6 +314,9 @@ struct PDFImporter: Sendable {
                          progress: Progress, warnings: inout [String]) async throws {
         var jobs: [AIJob] = []
         for p in document.pages.indices {
+            // Rendering every formula and table can take a while on a long
+            // book, so Cancel must be able to stop it here too.
+            try Task.checkCancellation()
             guard let page = pdf.page(at: document.pages[p].index) else { continue }
             for b in document.pages[p].blocks.indices {
                 let block = document.pages[p].blocks[b]
@@ -344,10 +350,13 @@ struct PDFImporter: Sendable {
                 guard next < jobs.count, stoppedBecause == nil else { return }
                 let job = jobs[next]
                 next += 1
-                group.addTask { await Self.perform(job, target: target) }
+                group.addTask { try await Self.perform(job, target: target) }
             }
             for _ in 0..<min(concurrency, jobs.count) { enqueue() }
             while let outcome = try await group.next() {
+                // Cancel Import cancels the parent task; stop sending and let
+                // the group wind down instead of working through the queue.
+                try Task.checkCancellation()
                 outcomes.append(outcome)
                 finished += 1
                 if case .unavailable(let reason) = outcome, stoppedBecause == nil {
@@ -356,7 +365,6 @@ struct PDFImporter: Sendable {
                 } else {
                     progress("AI: \(finished) of \(total) formulas and tables…")
                 }
-                try Task.checkCancellation()
                 enqueue()
             }
         }
@@ -365,6 +373,7 @@ struct PDFImporter: Sendable {
         var failures = 0
         var firstError: String?
         for outcome in outcomes {
+            try Task.checkCancellation()
             switch outcome {
             case .formula(let p, let b, let latex):
                 guard let latex, case .formula(var formula) = document.pages[p].blocks[b].content else { failures += 1; continue }
@@ -395,7 +404,7 @@ struct PDFImporter: Sendable {
         }
     }
 
-    private static func perform(_ job: AIJob, target: PDFImportAI.Target) async -> AIOutcome {
+    private static func perform(_ job: AIJob, target: PDFImportAI.Target) async throws -> AIOutcome {
         do {
             switch job {
             case .formula(let p, let b, let png, let hint):
@@ -405,6 +414,12 @@ struct PDFImporter: Sendable {
             }
         } catch let error as PDFImportAI.ServerError {
             return .unavailable(error.localizedDescription)
+        } catch is CancellationError {
+            // A cancelled request is not a failure to report: let the import
+            // stop.
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
             return .failed(error.localizedDescription)
         }

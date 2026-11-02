@@ -189,6 +189,9 @@ struct PDFImportProgressView: View {
     @ObservedObject var progress: PDFImportProgress
     var onCancel: () -> Void
     var onClose: () -> Void
+    /// True from the moment Cancel is pressed: the import stops at its next
+    /// check, so the button must not invite a second press meanwhile.
+    @State private var isCancelling = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -239,11 +242,21 @@ struct PDFImportProgressView: View {
                         .font(.caption2).foregroundColor(.secondary)
                     Spacer()
                     Button("Close", action: onClose).keyboardShortcut(.defaultAction)
+                } else if isCancelling {
+                    Text("Cancelling…")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    ProgressView().controlSize(.small)
                 } else {
                     Text("You can keep working. Closing this window does not stop the import.")
                         .font(.caption2).foregroundColor(.secondary)
                     Spacer()
-                    Button("Cancel Import", action: onCancel)
+                    Button("Cancel Import") {
+                        isCancelling = true
+                        progress.message = "Cancelling after the current step…"
+                        onCancel()
+                    }
                 }
             }
         }

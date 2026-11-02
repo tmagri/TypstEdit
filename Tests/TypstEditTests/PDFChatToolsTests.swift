@@ -320,4 +320,33 @@ final class PDFChatToolsTests: XCTestCase {
         XCTAssertTrue(note.contains("2 of 2"), note)
         XCTAssertTrue(result.typst.contains("TODO(import): formula shown as an image"), result.typst)
     }
+
+    /// Cancel Import must stop an AI import promptly. The AI phase waits for
+    /// a busy local model; cancelling has to interrupt that wait, not run to
+    /// its 30-second timeout and then carry on with the next item.
+    func testCancellingStopsTheAIImport() async throws {
+        let url = root.appendingPathComponent("formulas.pdf")
+        try PDFTestFixtures.draw(to: url, formulas: ["E = m c + 1", "F = m a - 2", "G = m g + 3"])
+        let server = URL(string: "http://localhost:41298/v1/chat/completions")!
+        let chat = ModelServerActivity.shared.begin(server)
+        defer { ModelServerActivity.shared.end(chat) }
+
+        var importer = PDFImporter(sourceURL: url, outputDirectory: root, baseName: "cancelled")
+        // A long idle wait, so only cancellation can end this quickly.
+        importer.aiTarget = PDFImportAI.Target(url: server, headers: [:], model: "local", style: .openAI,
+                                               timeout: 60, maxTokens: 100, isLocal: true, idleWait: 60)
+        let started = Date()
+        let task = Task { try await importer.run() }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("a cancelled import must not return a result")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "expected CancellationError, got \(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "Cancel must interrupt the AI wait, not time it out")
+        // Nothing was written for a cancelled import.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("cancelled.typ").path))
+    }
 }

@@ -57,11 +57,13 @@ extension EditorController {
         let totalPages = PDFDocument(url: pdfURL)?.pageCount ?? 0
         let pages = min(pageRange.range?.upperBound ?? totalPages, totalPages)
         let progress = PDFImportProgress(fileName: pdfURL.lastPathComponent, totalPages: max(pages, 1))
+        // A plain Task, not a detached one: `PDFImporter.run` is a
+        // nonisolated async function, so it still runs off the main actor,
+        // and the task inherits cancellation — which is what Cancel Import
+        // relies on. A detached task would keep running after `cancel()`.
         let task = Task { [weak self] in
             do {
-                let result = try await Task.detached(priority: .userInitiated) {
-                    try await importer.run(progress: progress.progressHandler())
-                }.value
+                let result = try await importer.run(progress: progress.progressHandler())
                 try Task.checkCancellation()
                 progress.page = progress.totalPages
                 progress.phase = .writing
@@ -74,6 +76,9 @@ extension EditorController {
                 progress.finish(output: typURL)
                 self?.finishPDFImport(typURL: typURL, openAsProject: openAsProject, result: result)
             } catch is CancellationError {
+                progress.markCancelled()
+                self?.showStatus("PDF import cancelled", duration: 4)
+            } catch let error as URLError where error.code == .cancelled {
                 progress.markCancelled()
                 self?.showStatus("PDF import cancelled", duration: 4)
             } catch {
