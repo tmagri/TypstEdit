@@ -218,4 +218,50 @@ final class CrystalPasteReproTests: XCTestCase {
         XCTAssertEqual(map[1], 1, "Heading line should map to heading line: \(map)")
         XCTAssertEqual(map[3], 3, "Converted paragraph should map to its source line: \(map)")
     }
+
+    /// Regression: the old look-ahead-of-8 walk could not recover once the
+    /// conversion had inserted more than 8 lines, so every later diagnostic
+    /// collapsed onto one stale source line. A real 7,500-line `.note` converted
+    /// to a 9,257-line shadow and all 18 warnings were reported at line 1349.
+    func testBuildLineMapSurvivesLargeExpansion() {
+        // Each list item expands into a three-line block in the output, so the
+        // output grows 3× faster than the source — far beyond any fixed
+        // look-ahead window.
+        let items = (1...200).map { "distinctive paragraph number \($0) with enough text to anchor" }
+
+        var source = "# Title\n\n"
+        for item in items { source += "* \(item)\n" }
+        source += "\nFinal section heading here\n"
+
+        var output = "= Title\n\n"
+        for item in items {
+            // The anchor line keeps the source text verbatim; the two lines
+            // below are what the converter adds.
+            output += "- \(item)\n  continuation line\n  and another line\n"
+        }
+        output += "\nFinal section heading here\n"
+
+        let map = TypstCompiler.buildLineMap(source: source, output: output)
+
+        // Source line of item N is N + 2 (heading + blank first).
+        let outputLines = output.components(separatedBy: "\n")
+        var checked = 0
+        for (index, line) in outputLines.enumerated() where line.hasPrefix("- distinctive paragraph number") {
+            guard let number = Int(line.split(separator: " ")[4]) else { continue }
+            let expected = number + 2
+            XCTAssertEqual(map[index + 1], expected,
+                           "Output line \(index + 1) should map to source \(expected), got \(map[index + 1] ?? -1)")
+            checked += 1
+        }
+        XCTAssertEqual(checked, 200, "all 200 expanded items should have been checked")
+
+        // The line after the expansion must land on its own source line, not on
+        // the last item.
+        if let trailing = outputLines.firstIndex(of: "Final section heading here") {
+            XCTAssertEqual(map[trailing + 1], 204,
+                           "trailing heading should keep its own source line, got \(map[trailing + 1] ?? -1)")
+        } else {
+            XCTFail("trailing heading not found in output")
+        }
+    }
 }

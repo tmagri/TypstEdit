@@ -129,6 +129,9 @@ struct AgentCompileResult: Codable, Sendable {
     var errorCount = 0
     var warningCount = 0
     var diagnostics: [AgentDiagnostic] = []
+    /// Diagnostics found but not listed, split so each count stays honest.
+    var suppressedCount = 0
+    var suppressedWarningCount = 0
     /// Every file the compilation read, from `typst --deps`. Use it to tell
     /// whether a diagnostic belongs to the file that was edited or to an
     /// imported module.
@@ -150,7 +153,13 @@ struct AgentCompileResult: Codable, Sendable {
     /// Short report for people and agents that read plain text.
     var summary: String {
         let name = input.map { ($0 as NSString).lastPathComponent } ?? "inline source"
-        let counts = "\(errorCount) error\(errorCount == 1 ? "" : "s"), \(warningCount) warning\(warningCount == 1 ? "" : "s")"
+        var counts = "\(errorCount) error\(errorCount == 1 ? "" : "s"), \(warningCount) warning\(warningCount == 1 ? "" : "s")"
+        if suppressedCount > 0 {
+            counts += "; \(suppressedCount) similar error\(suppressedCount == 1 ? "" : "s") not listed"
+        }
+        if suppressedWarningCount > 0 {
+            counts += "; \(suppressedWarningCount) similar warning\(suppressedWarningCount == 1 ? "" : "s") not listed"
+        }
         var lines: [String] = []
         if success {
             if checkOnly {
@@ -239,8 +248,8 @@ final class AgentCompileService {
 
         func finish(_ result: AgentCompileResult) -> AgentCompileResult {
             var final = result
-            final.errorCount = final.diagnostics.filter { $0.severity == "error" }.count
-            final.warningCount = final.diagnostics.filter { $0.severity == "warning" }.count
+            final.errorCount = final.diagnostics.filter { $0.severity == "error" }.count + final.suppressedCount
+            final.warningCount = final.diagnostics.filter { $0.severity == "warning" }.count + final.suppressedWarningCount
             final.status = final.success ? "ok" : "errors"
             final.durationMs = Int(Date().timeIntervalSince(started) * 1000)
             return final
@@ -490,6 +499,10 @@ final class AgentCompileService {
         }
 
         var seen = Set<String>()
+        func locationKey(_ diagnostic: AgentDiagnostic) -> String {
+            "\(diagnostic.file ?? "-")|\(diagnostic.line ?? -1)|\(diagnostic.column ?? -1)|\(diagnostic.severity)|\(diagnostic.message)"
+        }
+
         for raw in parsed {
             var diagnostic = AgentDiagnostic(severity: raw.severity == .error ? "error" : "warning", message: raw.message)
             diagnostic.code = TypstDiagnosticCode.slug(for: raw.message)
@@ -513,10 +526,56 @@ final class AgentCompileService {
                 return .init(message: frame.message, file: file, line: line, snippet: snippet)
             }
 
+            // A bad label is reported where the reference is *evaluated*, so a
+            // document with a `#show ref` handler reports every broken `@ref`
+            // at that handler — one real document produced 16 errors all
+            // pointing at the same unrelated line. Re-point them at the source
+            // line(s) that actually contain the reference. For a duplicate
+            // label the reference lines are not the problem at all: what has to
+            // change is the definition, so those are reported instead.
+            if let label = TypstLabelReference.labelName(in: raw.message) {
+                let isDuplicate = raw.message.contains("occurs multiple times")
+                let lines = originalText.components(separatedBy: "\n")
+                let targets: [(line: Int, column: Int?, snippet: String?)]
+                let noun: String
+                if isDuplicate {
+                    noun = "duplicate label definition"
+                    targets = TypstLabelReference.definitions(of: label, in: originalText).map { line in
+                        (line, nil, lines.dropFirst(line - 1).first)
+                    }
+                } else {
+                    let references = TypstLabelReference.references(of: label, in: originalText)
+                    noun = "reference"
+                    targets = references.map { ($0.line, $0.column, $0.snippet) }
+                }
+                if let first = targets.first {
+                    var hint = "Typst reports this where the \(isDuplicate ? "label" : "reference") is evaluated; resolved to the \(noun) at \(displayPath):\(first.line)."
+                    if isDuplicate, targets.count > 1 {
+                        hint = "`<\(label)>` is defined on \(targets.count) lines (\(targets.map { String($0.line) }.joined(separator: ", "))). Typst allows each label once; remove or rename the extra definition."
+                    }
+                    if targets.count > Self.maxLabelExpansions {
+                        hint += " It appears on \(targets.count) lines; the first \(Self.maxLabelExpansions) are listed."
+                    }
+                    diagnostic.hints.append(hint)
+                    for target in targets.prefix(Self.maxLabelExpansions) {
+                        var expanded = diagnostic
+                        expanded.file = displayPath
+                        expanded.line = target.line
+                        expanded.column = target.column
+                        expanded.endColumn = target.column.map { $0 + label.count + 1 }
+                        expanded.snippet = target.snippet
+                        expanded.length = target.column == nil ? nil : label.count + 1
+                        guard seen.insert(locationKey(expanded)).inserted else { continue }
+                        Self.attachGuidance(to: &expanded)
+                        result.diagnostics.append(expanded)
+                    }
+                    continue
+                }
+            }
+
             // Same message, same place, printed twice (Typst sometimes repeats a
             // diagnostic once per evaluation) — keep one.
-            let key = "\(diagnostic.file ?? "-")|\(diagnostic.line ?? -1)|\(diagnostic.column ?? -1)|\(diagnostic.severity)|\(diagnostic.message)"
-            guard seen.insert(key).inserted else { continue }
+            guard seen.insert(locationKey(diagnostic)).inserted else { continue }
 
             Self.attachGuidance(to: &diagnostic)
             result.diagnostics.append(diagnostic)
@@ -528,6 +587,15 @@ final class AgentCompileService {
                 severity: "error",
                 message: raw.isEmpty ? "Typst exited with code \(status)." : raw))
         }
+
+        // One typo can produce hundreds of diagnostics: a single unbalanced
+        // `#figure(` in a real 7,500-line document produced 213 "expected
+        // comma" and 36 "the character `#` is not valid in code" errors. Listing
+        // all of them buries the one line that has to be fixed, so each code is
+        // capped and the remainder is counted.
+        let suppressed = Self.collapseRepeats(in: &result.diagnostics)
+        result.suppressedCount = suppressed.errors
+        result.suppressedWarningCount = suppressed.warnings
 
         // 7. Dependency list, so a caller can tell whether a diagnostic belongs
         // to the edited file or to something it imports.
@@ -547,6 +615,50 @@ final class AgentCompileService {
     }
 
     // MARK: - Helpers
+
+    /// Most diagnostics a single `code` may contribute to the list.
+    ///
+    /// A cascading syntax error repeats the same message on every following
+    /// line: one unbalanced `#figure(` in a real 7,500-line document produced
+    /// 213 "expected comma" and 36 "the character `#` is not valid in code"
+    /// diagnostics. Keeping a few per code preserves the pattern (and the first
+    /// real location) while leaving the list small enough to act on.
+    nonisolated static let maxDiagnosticsPerCode = 8
+
+    /// Trims runs of identical codes, keeping the earliest locations and
+    /// returning how many errors and warnings were dropped.
+    ///
+    /// Severities are counted separately so a flood of warnings cannot push the
+    /// one real error out of the list.
+    nonisolated static func collapseRepeats(
+        in diagnostics: inout [AgentDiagnostic]
+    ) -> (errors: Int, warnings: Int) {
+        var kept: [AgentDiagnostic] = []
+        var perKey: [String: Int] = [:]
+        var suppressedErrors = 0
+        var suppressedWarnings = 0
+        for diagnostic in diagnostics {
+            // Uncoded diagnostics are kept: they are the unusual ones.
+            guard let code = diagnostic.code else {
+                kept.append(diagnostic)
+                continue
+            }
+            // Keyed on the message, not just the code: a cascade repeats one
+            // message on every line, while `label <a>` and `label <b>` are
+            // different defects that both map to `label-problem`. Keying on the
+            // code alone would hide 14 distinct missing labels behind one cap.
+            let key = "\(diagnostic.severity)|\(code)|\(diagnostic.message)"
+            let count = perKey[key, default: 0]
+            if count >= maxDiagnosticsPerCode {
+                if diagnostic.severity == "warning" { suppressedWarnings += 1 } else { suppressedErrors += 1 }
+                continue
+            }
+            perKey[key] = count + 1
+            kept.append(diagnostic)
+        }
+        diagnostics = kept
+        return (suppressedErrors, suppressedWarnings)
+    }
 
     nonisolated static func resolve(_ path: String, relativeTo base: URL) -> URL {
         let expanded = (path as NSString).expandingTildeInPath
@@ -595,6 +707,11 @@ final class AgentCompileService {
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             .map(\.path)
     }
+
+    /// A label can be referenced many times (`@gen-9-29` appears on four
+    /// lines). Reporting every occurrence would flood the result, so the first
+    /// few are expanded into located diagnostics and the hint names the rest.
+    private static let maxLabelExpansions = 4
 
     /// Adds the plain-English explanation and the quick fixes the editor shows
     /// in its error panel, so an agent gets the same guidance a person does

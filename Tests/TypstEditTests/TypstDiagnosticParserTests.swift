@@ -305,4 +305,133 @@ final class TypstDiagnosticParserTests: XCTestCase {
             TypstCompiler.parseRawErrorLines(from: output, onlyInFile: "doc.typ.preview.typ"),
             [3])
     }
+
+    // MARK: - Label reference resolution
+
+    func testLabelNameIsExtractedFromTheMessage() {
+        XCTAssertEqual(
+            TypstLabelReference.labelName(in: "label `<gen-9-27>` does not exist in the document"),
+            "gen-9-27")
+        XCTAssertEqual(
+            TypstLabelReference.labelName(in: "label `<gen-47-11>` occurs multiple times in the document"),
+            "gen-47-11")
+        XCTAssertNil(TypstLabelReference.labelName(in: "cannot add integer and string"))
+        XCTAssertNil(TypstLabelReference.labelName(in: "label `<>` does not exist in the document"))
+    }
+
+    /// A `#show ref` handler makes Typst report every broken reference at the
+    /// handler's `link(…)` call. The resolver must find the author's line.
+    func testReferencesAreResolvedToTheSourceLine() {
+        let source = """
+        #show ref: it => {
+          link(it.target, [Gen #it.target])
+        }
+
+        = Genesis
+
+        Some text with @gen-9-27 here.
+        Another line with @gen-9-29 and @gen-9-27 again.
+        """
+        let refs = TypstLabelReference.references(of: "gen-9-27", in: source)
+        XCTAssertEqual(refs.map(\.line), [7, 8])
+        XCTAssertEqual(refs.map(\.column), [16, 33])
+        XCTAssertEqual(refs[0].snippet, "Some text with @gen-9-27 here.")
+    }
+
+    /// `@gen-1-2` must not be found inside `@gen-1-25`.
+    func testReferencesRequireAWholeLabel() {
+        let source = "See @gen-1-25 and @gen-1-2 and @gen-1-2."
+        let refs = TypstLabelReference.references(of: "gen-1-2", in: source)
+        XCTAssertEqual(refs.count, 2)
+        XCTAssertEqual(refs.map(\.column), [19, 32])
+    }
+
+    /// A sentence-ending period is punctuation, not part of the label; a dot
+    /// followed by a label character is part of it (Typst parses
+    /// `@gen-1-2.` as `gen-1-2` but `@gen-1-2.x` as `gen-1-2.x`).
+    func testTrailingPeriodIsNotPartOfTheLabel() {
+        XCTAssertEqual(
+            TypstLabelReference.references(of: "gen-1-2", in: "See @gen-1-2. Done.").count, 1)
+        XCTAssertEqual(
+            TypstLabelReference.references(of: "gen-1-2.x", in: "See @gen-1-2.x here.").count, 1)
+        XCTAssertEqual(
+            TypstLabelReference.references(of: "gen-1-2", in: "See @gen-1-2.x here.").count, 0)
+    }
+
+    func testDefinitionsAreFoundForDuplicateLabels() {
+        let source = """
+        #figure([a]) <gen-47-11>
+        #figure([b]) <gen-47-11>
+        #figure([c]) <gen-47-12>
+        """
+        XCTAssertEqual(TypstLabelReference.definitions(of: "gen-47-11", in: source), [1, 2])
+        XCTAssertEqual(TypstLabelReference.definitions(of: "gen-47-12", in: source), [3])
+        XCTAssertEqual(TypstLabelReference.definitions(of: "nope", in: source), [])
+    }
+
+    // MARK: - Fallback fixer must not rewrite live Typst code
+
+    /// Regression: a one-character typo (`said:]` instead of `said:])`) made the
+    /// region scanner treat the following figure lines as live code, and the
+    /// lenient fixer then escaped them — turning 38 `<gen-…>` labels into
+    /// literal `\<gen-…>` text and producing 34 bogus "label does not exist"
+    /// errors on top of the one real typo.
+    @MainActor
+    func testFallbackFixLeavesLiveTypstRegionsAlone() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fallback-guard-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let shadow = """
+        #show ref: it => {
+          link(it.target, [Gen #it.target])
+        }
+
+        = Genesis
+
+        #figure(kind: "verse", [And he said:] <gen-34-11>
+        #figure(kind: "verse", [We cannot do this.]) <gen-34-12>
+        """
+        let url = directory.appendingPathComponent("doc.note.preview.typ")
+        try shadow.write(to: url, atomically: true, encoding: .utf8)
+
+        let compiler = TypstCompiler()
+        var attempts: [Int: Int] = [:]
+        // Line 7 is the broken `#figure(` call: closing it is the real fix, but
+        // the lenient fixer must not escape it or the labels after it.
+        let modified = compiler.applyFallbackFix(
+            to: url, rawErrorLines: [7, 8], attempts: &attempts, isHybrid: true)
+
+        let after = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(modified, "live Typst code must not be rewritten")
+        XCTAssertEqual(after, shadow, "the shadow file must be left untouched")
+    }
+
+    /// A genuinely broken Markdown line (outside any Typst region) is still
+    /// repaired, so the guard does not disable the lenient mode.
+    @MainActor
+    func testFallbackFixStillRepairsProseLines() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fallback-prose-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let shadow = """
+        = Note
+
+        Plain prose with a stray #hash that is not code.
+        """
+        let url = directory.appendingPathComponent("doc.note.preview.typ")
+        try shadow.write(to: url, atomically: true, encoding: .utf8)
+
+        let compiler = TypstCompiler()
+        var attempts: [Int: Int] = [:]
+        let modified = compiler.applyFallbackFix(
+            to: url, rawErrorLines: [3], attempts: &attempts, isHybrid: true)
+
+        let after = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(modified, "prose outside a Typst region should still be repaired")
+        XCTAssertTrue(after.contains("\\#hash"), "the stray hash should be escaped: \(after)")
+    }
 }

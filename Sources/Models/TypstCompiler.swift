@@ -1231,54 +1231,115 @@ class TypstCompiler: ObservableObject {
 
     // MARK: - Shadow → Source Line Mapping
 
-    /// Builds a map from converted-output line (1-based) to source line by walking
-    /// both texts in order and matching normalized lines within a small look-ahead
-    /// window. The conversion is mostly structure-preserving (headings, lists,
-    /// paragraphs and fenced code stay one line each); block-level expansions such
-    /// as Markdown tables → `#table(...)` calls insert extra output lines, which the
-    /// window absorbs before the next anchor re-syncs the walk.
+    /// Builds a map from converted-output line (1-based) to source line by
+    /// matching normalized lines, then interpolating what falls between the
+    /// matches.
+    ///
+    /// The conversion is mostly structure-preserving, but it also *expands*:
+    /// an `.note` with 7,560 lines converts to a 9,257-line shadow, because
+    /// lists and tables add lines. A pure "look ahead N source lines" walk
+    /// cannot recover once the output has drifted more than N lines past the
+    /// source cursor — every later line then maps to the same stale position.
+    /// (In a real 7,500-line document that collapsed all 18 diagnostics onto a
+    /// single, unrelated source line.) So matches are found by content in the
+    /// whole remaining source, and gaps between two confident matches are
+    /// spread proportionally, which absorbs local expansion.
     nonisolated static func buildLineMap(source: String, output: String) -> [Int: Int] {
         let srcLines = source.components(separatedBy: "\n")
         let outLines = output.components(separatedBy: "\n")
-        var map: [Int: Int] = [:]
-        var s = 0 // next source line candidate (0-based)
-        let window = 8
+        guard !srcLines.isEmpty, !outLines.isEmpty else { return [:] }
 
-        for (i, outLine) in outLines.enumerated() {
-            let normalized = normalizedForLineMap(outLine)
-            var bestJ = -1
-            var bestScore = 0.0
-            if !normalized.isEmpty {
-                let upper = min(srcLines.count, s + window)
-                for j in s..<upper {
-                    let score = lineMapSimilarity(normalized, normalizedForLineMap(srcLines[j]))
-                    if score > bestScore {
-                        bestScore = score
-                        bestJ = j
-                    }
-                }
+        // Normalized source text → candidate line indices, in document order.
+        // Only distinctive lines are indexed: a blank line or a lone `-` says
+        // nothing about where it came from.
+        var index: [String: [Int]] = [:]
+        for (i, line) in srcLines.enumerated() {
+            let normalized = normalizedForLineMap(line)
+            guard normalized.count >= Self.lineMapMinimumAnchorLength else { continue }
+            index[normalized, default: []].append(i)
+        }
+
+        // Pass 1: confident anchors, in order. Lines are matched to the first
+        // equal source line at or after the cursor, so a repeated paragraph
+        // cannot drag the mapping backwards.
+        var anchors: [(output: Int, source: Int)] = []
+        var cursor = 0
+        for (i, line) in outLines.enumerated() {
+            let normalized = normalizedForLineMap(line)
+            guard normalized.count >= Self.lineMapMinimumAnchorLength,
+                  let candidates = index[normalized] else { continue }
+            // `candidates` is sorted ascending; find the first at/after cursor.
+            var low = 0
+            var high = candidates.count
+            while low < high {
+                let mid = (low + high) / 2
+                if candidates[mid] < cursor { low = mid + 1 } else { high = mid }
             }
-            if bestJ >= 0 && bestScore >= 0.6 {
-                map[i + 1] = bestJ + 1
-                s = bestJ + 1
-            } else {
-                // Unanchored line (blank separator, expanded table cell, …): keep it
-                // at the current source position.
-                map[i + 1] = min(s + 1, max(srcLines.count, 1))
+            guard low < candidates.count else { continue }
+            let sourceIndex = candidates[low]
+            anchors.append((i, sourceIndex))
+            cursor = sourceIndex + 1
+        }
+
+        // Pass 2: fill the gaps between anchors.
+        var map: [Int: Int] = [:]
+        map.reserveCapacity(outLines.count)
+
+        /// Maps `outputCount` output lines starting at `outputStart` onto
+        /// `sourceCount` source lines starting at `sourceStart`, all 0-based.
+        ///
+        /// Equal counts map one-to-one, so an unchanged document keeps exact
+        /// line numbers. Unequal counts are spread evenly — that is what absorbs
+        /// a table or list that expands into more output lines than it had in
+        /// the source. The ranges are exclusive of the anchors on both sides,
+        /// so a filled line can never claim an anchor's own position.
+        func fill(outputStart: Int, outputCount: Int, sourceStart: Int, sourceCount: Int) {
+            guard outputCount > 0, !srcLines.isEmpty else { return }
+            for k in 0..<outputCount {
+                let offset: Int
+                if sourceCount <= 0 {
+                    offset = 0
+                } else if sourceCount == outputCount {
+                    offset = k
+                } else {
+                    // Floor, not round: a rounding-up last step would spill onto
+                    // the next anchor's source line.
+                    offset = Int(Double(k) * Double(sourceCount) / Double(outputCount))
+                }
+                let sourceIndex = min(sourceStart + offset, srcLines.count - 1)
+                map[outputStart + k + 1] = max(1, sourceIndex + 1)
             }
         }
+
+        guard let first = anchors.first else {
+            // Nothing matched (fully rewritten document): a straight
+            // proportional fallback still beats no mapping at all.
+            fill(outputStart: 0, outputCount: outLines.count,
+                 sourceStart: 0, sourceCount: srcLines.count)
+            return map
+        }
+
+        fill(outputStart: 0, outputCount: first.output,
+             sourceStart: 0, sourceCount: first.source)
+        for (a, b) in zip(anchors, anchors.dropFirst()) {
+            fill(outputStart: a.output + 1, outputCount: b.output - a.output - 1,
+                 sourceStart: a.source + 1, sourceCount: b.source - a.source - 1)
+        }
+        if let last = anchors.last {
+            fill(outputStart: last.output + 1, outputCount: outLines.count - last.output - 1,
+                 sourceStart: last.source + 1, sourceCount: srcLines.count - last.source - 1)
+        }
+        // The anchors themselves are exact.
+        for anchor in anchors { map[anchor.output + 1] = anchor.source + 1 }
         return map
     }
 
+    /// Shorter normalized lines (a list bullet, a lone word) match too many
+    /// places to be a trustworthy anchor, so they are interpolated instead.
+    private nonisolated static let lineMapMinimumAnchorLength = 12
+
     private nonisolated static func normalizedForLineMap(_ line: String) -> String {
         String(line.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
-    }
-
-    private nonisolated static func lineMapSimilarity(_ a: String, _ b: String) -> Double {
-        if a.isEmpty || b.isEmpty { return 0 }
-        if a == b { return 1 }
-        let common = a.commonPrefix(with: b).count
-        return Double(common) / Double(max(a.count, b.count))
     }
 
     // MARK: - Lenient Fallback Fixer (.note / .md)
@@ -1360,6 +1421,22 @@ class TypstCompiler: ObservableObject {
             var fileLines = content.components(separatedBy: "\n")
             var modified = false
 
+            // Lines that belong to a live Typst code region (`#figure(…)`,
+            // `#show …`, `#let …`) are the user's own code, not generated
+            // Markdown. Escaping them corrupts the document instead of
+            // repairing it: one `#figure(` call missing its closing `)` is
+            // enough to make the region scanner treat the following lines as
+            // code, and rewriting them turned 38 figure labels into literal
+            // `\<gen-34-14>` text, producing 34 bogus "label does not exist"
+            // errors. Surface the original diagnostic instead.
+            //
+            // Spans are computed on this file (not the source) so the 1-based
+            // line numbers match `rawErrorLines` exactly, preambles included.
+            let codeLines: Set<Int> = isHybrid
+                ? Set(AICompletionService.typstRegionLineSpans(in: content)
+                    .flatMap { ($0.start...$0.end).map { $0 + 1 } })
+                : []
+
             // --- Strategy 1: escape special characters ---
             for rawLine in escapeTargets {
                 let idx = rawLine - 1  // 1-based → 0-based
@@ -1369,6 +1446,11 @@ class TypstCompiler: ObservableObject {
                 let trimmed = original.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty { continue }                          // nothing to escape
                 if trimmed.hasPrefix("#raw(\"") { continue }             // already a raw block
+                if codeLines.contains(rawLine) {
+                    attempts[rawLine] = 2  // never repair live code
+                    print("[FallbackFix][skip] line \(rawLine): live Typst region — \(trimmed.prefix(40))")
+                    continue
+                }
                 if isProtectedTypstDirective(trimmed, isHybrid: isHybrid) {
                     attempts[rawLine] = 2  // mark as maxed so we don't keep retrying
                     print("[FallbackFix][skip] line \(rawLine): protected directive — \(trimmed.prefix(40))")
@@ -1390,6 +1472,11 @@ class TypstCompiler: ObservableObject {
                 let trimmed = original.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty { continue }
                 if trimmed.hasPrefix("#raw(\"") { continue }             // idempotent
+                if codeLines.contains(rawLine) {
+                    attempts[rawLine] = 2
+                    print("[FallbackFix][skip] line \(rawLine): live Typst region — \(trimmed.prefix(40))")
+                    continue
+                }
                 if isProtectedTypstDirective(trimmed, isHybrid: isHybrid) {
                     attempts[rawLine] = 2
                     print("[FallbackFix][skip] line \(rawLine): protected directive — \(trimmed.prefix(40))")

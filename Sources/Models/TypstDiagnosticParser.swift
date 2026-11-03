@@ -358,3 +358,79 @@ enum TypstDiagnosticCode {
         return nil
     }
 }
+
+// MARK: - Label Reference Resolution
+
+/// Typst reports a bad label where the reference is *evaluated*, not where the
+/// author wrote it. A document with a `#show ref` handler therefore reports
+/// every missing label at the handler's `link(...)` call — one document with
+/// 16 broken `@gen-…` references produced 16 errors all pointing at the same
+/// unrelated line. An agent cannot act on that, so the label name in the
+/// message is matched against the original source to find the real line.
+enum TypstLabelReference {
+    /// `label `<gen-9-27>` does not exist in the document` → `gen-9-27`
+    static func labelName(in message: String) -> String? {
+        let lower = message.lowercased()
+        guard lower.hasPrefix("label "), let open = message.firstIndex(of: "<"),
+              let close = message[open...].firstIndex(of: ">") else { return nil }
+        let name = String(message[message.index(after: open)..<close])
+        return name.isEmpty || name.contains(" ") ? nil : name
+    }
+
+    /// A located reference to `label` in `source`, 1-based.
+    struct Reference: Equatable {
+        var line: Int
+        /// 1-based column of the `@`.
+        var column: Int
+        var snippet: String
+    }
+
+    /// Finds where `label` is written as `@label` in `source`.
+    ///
+    /// The match must be a whole label: `@gen-1-2` does not match `@gen-1-25`.
+    /// Typst's label alphabet is letters, digits, `_`, `-`, `:` and `.`, but a
+    /// trailing `.` is only part of the label when another label character
+    /// follows it — Typst parses `@gen-1-2.` at the end of a sentence as the
+    /// label `gen-1-2` plus a period, while `@gen-1-2.x` names `gen-1-2.x`.
+    static func references(of label: String, in source: String) -> [Reference] {
+        guard !label.isEmpty else { return [] }
+        let lines = source.components(separatedBy: "\n")
+        let needle = "@" + label
+        var found: [Reference] = []
+
+        for (index, line) in lines.enumerated() {
+            var searchStart = line.startIndex
+            while let range = line.range(of: needle, range: searchStart..<line.endIndex) {
+                searchStart = range.upperBound
+                if continuesLabel(at: range.upperBound, in: line) { continue }
+                let column = line.distance(from: line.startIndex, to: range.lowerBound) + 1
+                found.append(Reference(line: index + 1, column: column, snippet: line))
+            }
+        }
+        return found
+    }
+
+    /// Whether the character at `position` extends the label that ends there.
+    private static func continuesLabel(at position: String.Index, in line: String) -> Bool {
+        guard position < line.endIndex else { return false }
+        let next = line[position]
+        if next.isLetter || next.isNumber || next == "_" || next == "-" || next == ":" {
+            return true
+        }
+        guard next == "." else { return false }
+        // A dot only continues the label when a label character follows it.
+        let afterDot = line.index(after: position)
+        guard afterDot < line.endIndex else { return false }
+        let following = line[afterDot]
+        return following.isLetter || following.isNumber || following == "_" || following == "-"
+    }
+
+    /// Line numbers whose `<label>` definition is what a caller must look at.
+    static func definitions(of label: String, in source: String) -> [Int] {
+        guard !label.isEmpty else { return [] }
+        let needle = "<" + label + ">"
+        return source.components(separatedBy: "\n").enumerated()
+            .filter { $0.element.contains(needle) }
+            .map { $0.offset + 1 }
+    }
+}
