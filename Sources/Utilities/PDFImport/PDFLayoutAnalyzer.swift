@@ -171,6 +171,20 @@ enum PDFLayoutAnalyzer {
             }
 
             let group = Array(rows[start...end])
+            // A row just outside the group that shares a column with one of
+            // its cells, but is an ordinary wide paragraph line there, is
+            // the clearest sign a "cell" is just that same paragraph's
+            // first or last line, not tabular data — not every short line
+            // that ends a wrapped sentence starts with a lowercase letter
+            // (only a mid-word hyphen break does), so this catches the rest:
+            // two columns' independent line wraps landing short fragments on
+            // the same baseline, which otherwise looks like a table row.
+            let before = start > 0 ? rows[start - 1] : nil
+            let after = end + 1 < rows.count ? rows[end + 1] : nil
+            guard !adjoinsRunningProse(group, before: before, after: after, runs: runs, pageSize: pageSize) else {
+                start += 1
+                continue
+            }
             if let table = buildTable(group, runs: runs, pageSize: pageSize, gutter: gutter) {
                 regions.append(table.region)
                 consumed.formUnion(table.consumed)
@@ -311,8 +325,40 @@ enum PDFLayoutAnalyzer {
     /// Short enough to be a table cell rather than a line of prose. A bare
     /// list marker ("•", "1.") is not a cell: a hanging-indent list would
     /// otherwise read as a two-column table.
+    ///
+    /// Nor is a run that opens with a lowercase letter: that is the tail of
+    /// a word or sentence wrapped from the line above in the same column
+    /// ("Degra¬" / "dation of Human Dignity…"), not a cell's own text. Such
+    /// a short, narrow tail is common at the end of any justified paragraph,
+    /// and on a two-column page two unrelated columns' independent wraps can
+    /// land on the same baseline and look like a two-cell row.
     static func isCellLike(_ run: PDFTextRun, pageWidth: CGFloat) -> Bool {
-        run.text.count <= 40 && run.rect.width < pageWidth * 0.35 && !isBareMarker(run.text)
+        guard run.text.count <= 40, run.rect.width < pageWidth * 0.35, !isBareMarker(run.text) else { return false }
+        guard let first = run.text.trimmingCharacters(in: .whitespaces).first else { return false }
+        return !first.isLowercase
+    }
+
+    /// True when a row immediately before or after a table candidate group
+    /// has a wide, ordinary (not cell-like) run sharing a column with one of
+    /// the group's cells — the sign that the "cell" is just that same
+    /// paragraph's own first or last line, not a table at all.
+    private static func adjoinsRunningProse(_ group: [Row], before: Row?, after: Row?,
+                                            runs: [PDFTextRun], pageSize: CGSize) -> Bool {
+        let cellRanges = group.flatMap { row in
+            row.members.filter { isCellLike(runs[$0], pageWidth: pageSize.width) }
+                .map { runs[$0].rect.minX...runs[$0].rect.maxX }
+        }
+        guard !cellRanges.isEmpty else { return false }
+        func touches(_ row: Row?) -> Bool {
+            guard let row else { return false }
+            return row.members.contains { index in
+                let run = runs[index]
+                guard run.rect.width >= pageSize.width * 0.3 else { return false }
+                let runRange = run.rect.minX...run.rect.maxX
+                return cellRanges.contains { $0.overlaps(runRange) }
+            }
+        }
+        return touches(before) || touches(after)
     }
 
     static func isBareMarker(_ text: String) -> Bool {
@@ -877,6 +923,11 @@ enum PDFLayoutAnalyzer {
     static func isFormulaLine(_ line: Line) -> Bool {
         let text = line.text.trimmingCharacters(in: .whitespaces)
         guard text.count >= 2, text.count <= 220 else { return false }
+        // A formula has real content — a variable, a number — beyond its
+        // operators. Bare punctuation is what a scan's dust or a shadow
+        // becomes once OCR has to guess at it ("^" is a common guess for an
+        // ambiguous speck); it is not evidence of mathematics.
+        guard text.contains(where: { $0.isLetter || $0.isNumber }) else { return false }
         if line.mathScore >= 0.6 { return true }
         let hasRelation = text.range(of: #"[=<>≤≥≈≠∝∈⊂→]"#, options: .regularExpression) != nil
         return line.mathScore >= 0.35 && hasRelation
@@ -904,7 +955,9 @@ enum PDFLayoutAnalyzer {
                                  previous: Line?, next: Line?, typicalGap: CGFloat) -> Bool {
         let text = line.text.trimmingCharacters(in: .whitespaces)
         guard column.width > 100, text.count >= 3, text.count <= 140,
-              line.fontSize <= bodyFontSize * 1.2 else { return false }
+              line.fontSize <= bodyFontSize * 1.2,
+              // Real content beyond the operators — see isFormulaLine.
+              text.contains(where: { $0.isLetter || $0.isNumber }) else { return false }
         let numbered = text.range(of: #"\(\d{1,3}(\.\d{1,3})?[a-z]?\)$"#, options: .regularExpression) != nil
         let body = numbered ? text.replacingOccurrences(of: #"\s*\(\d{1,3}(\.\d{1,3})?[a-z]?\)$"#, with: "", options: .regularExpression) : text
         let hasMath = body.range(of: #"[=<>≤≥≈≠∝∑∫∏√±∓→⇒∂∇∞]"#, options: .regularExpression) != nil

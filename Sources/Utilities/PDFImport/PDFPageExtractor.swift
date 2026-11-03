@@ -953,6 +953,20 @@ enum PDFPageExtractor {
             let textArea = inside.reduce(CGFloat(0)) { $0 + runs[$1].rect.width * runs[$1].rect.height }
             let textCoverage = textArea / (rect.width * rect.height)
 
+            // On a scan, the embedded OCR text layer's word boxes do not
+            // always hug the actual ink (skew, font-metric mismatches vs.
+            // the original scan): painting them white can leave slivers that
+            // dilate into one blob spanning several real lines of running
+            // text. When several ordinary body-text lines — each much wider
+            // than this blob — already cut across it, the blob is a
+            // fragment of a paragraph, not a self-contained figure or table:
+            // a caption or axis label is roughly the figure's own size, not
+            // several times wider than it.
+            let crossingLines = runs.filter { run in
+                run.text.count >= 20 && run.rect.width > rect.width * 1.5 && run.rect.intersects(rect)
+            }
+            guard crossingLines.count < 2 else { continue }
+
             // A gridded table: several full-width rules AND several rows of
             // multiple short cells. A framed chart has rules too, but its
             // labels sit along the axes, not in rows of cells.
