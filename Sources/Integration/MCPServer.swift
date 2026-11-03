@@ -279,6 +279,15 @@ final class TypstEditMCPServer {
     images; typstedit_open to show a file to the user in the editor. Use read_pdf to read any \
     PDF as Markdown (tables, headings, code and scanned pages included), a page range at a \
     time. Paths should be absolute.
+
+    Each diagnostic carries `code` (a stable slug such as `unknown-variable` or \
+    `incompatible-operands` to branch on, because Typst has no diagnostic codes), \
+    `explanation` (plain-English cause and fix), `fixes` (concrete replacements for the \
+    snippet line), `trace` (the `while calling …` chain, saying where the failing value was \
+    used) and `docs` (a reference link). `deps` lists every file the compile read: when a \
+    diagnostic's `file` is not the file you edited, the defect is in an import, so fix it \
+    there instead of rewriting the caller. Read `status` ("ok" or "errors") instead of \
+    parsing text.
     """
 
     private static let inputProperties: [String: Any] = [
@@ -296,7 +305,7 @@ final class TypstEditMCPServer {
             [
                 "name": "typst_check",
                 "title": "Check Typst document",
-                "description": "Compiles a document without keeping output and returns errors and warnings (file, line, column, message, hints). Use after every edit.",
+                "description": "Compiles a document without keeping output and returns errors and warnings, deduplicated and in source-file coordinates. Each diagnostic has file/line/column/endColumn, message, a stable `code`, a plain-English `explanation`, `hints`, `fixes` (concrete replacements), and `trace` (the `while calling …` chain). `deps` lists every file the compile read. Use after every edit.",
                 "inputSchema": ["type": "object", "properties": inputProperties],
                 "annotations": readOnly
             ],

@@ -139,6 +139,23 @@ echo '= Hi' | typstedit check -       # source from stdin
 typstedit open report.typ             # show it in the editor
 ```
 
+`--json` emits a stable, agent-oriented shape rather than Typst's box-drawing
+text. Every diagnostic carries what an agent needs to act without guessing:
+
+| Field | Purpose |
+|---|---|
+| `status` | `ok` or `errors` — branch on this, not on prose. |
+| `code` | Stable slug such as `unknown-variable` or `incompatible-operands`. Typst itself has no diagnostic codes ([typst#6059](https://github.com/typst/typst/issues/6059) is still open); these are derived from the message's leading phrase, so they survive rewording and operand order. |
+| `explanation` | Plain-English cause and suggested fix — the same text the editor's error panel shows. |
+| `fixes` | Concrete replacements for the offending line. |
+| `trace` | The `while calling …` chain, so it is clear the fix belongs at the call site rather than the definition. |
+| `file`, `line`, `column`, `endColumn` | Mapped back to your original `.md`/`.note` source, not the converted file. |
+| `deps` | Every file the compile read (`typst --deps`). When a diagnostic's `file` is not the file you edited, the defect is in an import. |
+| `typstVersion` | The compiler that produced the result. |
+
+Diagnostics are de-duplicated, and `log` stays empty unless the output could not
+be parsed — so a normal check costs a few hundred tokens, not thousands.
+
 To connect an agent, register an MCP server with command `typstedit` and argument `mcp`, e.g.:
 
 ```sh

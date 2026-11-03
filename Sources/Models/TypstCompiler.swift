@@ -7,7 +7,6 @@ enum CompilerRegex {
     static let stroke = try! NSRegularExpression(pattern: "((?:bottom|top|left|right)\\s*:\\s*[0-9.]+\\s*pt)(?!\\s*\\+)", options: [.caseInsensitive])
     static let luma = try! NSRegularExpression(pattern: "luma\\(\\s*([0-9.]+)\\s*(%?)\\s*\\)", options: [.caseInsensitive])
     static let black = try! NSRegularExpression(pattern: "(:\\s*\\b)(black|rgb\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)|rgb\\(\"#000000\"\\))(\\b|\\))", options: [.caseInsensitive])
-    static let diagnosticLocation = try! NSRegularExpression(pattern: ":\\d+:\\d+")
     static let markdownConverterFunc = try! NSRegularExpression(pattern: #"^#([A-Za-z][A-Za-z0-9_]*)[\[(]"#)
     // Inline/block math for the dangling-operator fixer. The trailing lookahead
     // keeps two register tokens (`$3DF8/$3E50`, `$DC10/$DC4F`) from being read as
@@ -52,8 +51,9 @@ struct TypstError: Identifiable, Equatable {
         case warning
     }
 
-    /// One `help: …` frame Typst prints under a diagnostic, e.g.
-    /// "error occurred in this call of function `boom`" with its location.
+    /// One call-site frame Typst prints under a diagnostic — "while calling
+    /// `boom`" (0.13+) or "error occurred in this call of function `boom`"
+    /// (older releases) — with the location it was called from.
     struct TraceEntry: Equatable {
         let message: String
         /// Line in the open document (already mapped), or nil when the frame
@@ -62,6 +62,8 @@ struct TypstError: Identifiable, Equatable {
         /// Path as Typst printed it, when the frame is in another file.
         var file: String?
         var fileLine: Int?
+        /// The code Typst printed under the frame, e.g. `boom(2)`.
+        var snippet: String? = nil
     }
 
     let id = UUID()
@@ -123,6 +125,7 @@ struct TypstError: Identifiable, Equatable {
             let at = frame.file.map { "\($0)\(frame.fileLine.map { ":\($0)" } ?? "")" }
                 ?? frame.line.map { "line \($0)" } ?? ""
             out += "  \(frame.message)\(at.isEmpty ? "" : " (\(at))")\n"
+            if let code = frame.snippet { out += "    \(code)\n" }
         }
         if let explanation = TypstErrorExplainer.explanation(for: self) {
             out += "  how to fix: \(explanation)\n"
@@ -975,6 +978,17 @@ class TypstCompiler: ObservableObject {
                !pendingFallbackRawLines.contains(location.line) {
                 pendingFallbackRawLines.append(location.line)
             }
+        case .updated:
+            // A call-site frame (`while calling …`) arrived after the primary
+            // block closed. Typst prints those outside the block, so the
+            // diagnostic itself was already published; fold the new frame in
+            // without re-running the fallback repair.
+            if batchDiagnosticCount > Self.diagnosticFloodLimit {
+                scheduleFloodPublish()
+            } else {
+                rebuildIssuesFromParser()
+                scheduleBatchPublish()
+            }
         case .blockEnded:
             if batchDiagnosticCount > Self.diagnosticFloodLimit {
                 // Flooded cycle: one debounced rebuild + capped publish for the
@@ -1134,12 +1148,19 @@ class TypstCompiler: ObservableObject {
 
         let trace: [TypstError.TraceEntry] = raw.trace.map { frame in
             guard let location = frame.location else {
-                return TypstError.TraceEntry(message: frame.message)
+                return TypstError.TraceEntry(message: frame.message, snippet: frame.snippet)
             }
             if isOpenDocumentPath(location.path) {
-                return TypstError.TraceEntry(message: frame.message, line: editorLine(forDocumentLine: location.line))
+                return TypstError.TraceEntry(
+                    message: frame.message,
+                    line: editorLine(forDocumentLine: location.line),
+                    snippet: frame.snippet)
             }
-            return TypstError.TraceEntry(message: frame.message, file: location.path, fileLine: location.line)
+            return TypstError.TraceEntry(
+                message: frame.message,
+                file: location.path,
+                fileLine: location.line,
+                snippet: frame.snippet)
         }
 
         // An error inside an imported file is still triggered from a line in this
@@ -1287,26 +1308,31 @@ class TypstCompiler: ObservableObject {
     /// `#import` may briefly fail while the package downloads, and silently escaping it
     /// would break the rest of the document. The original error is surfaced to the user
     /// instead of being swallowed by the fallback.
-    /// Parses raw line numbers where Typst reported errors in its stderr output.
-    func parseRawErrorLines(from output: String) -> [Int] {
+
+    /// Line numbers of the errors Typst reported, for the lenient fallback fixer.
+    ///
+    /// `onlyInFile` restricts the result to diagnostics whose location is that
+    /// file (compared by last path component, which is how Typst prints it). An
+    /// error inside an imported module carries *that* module's line numbers;
+    /// rewriting the shadow file with them would corrupt an unrelated line.
+    /// Pass nil to keep every error line (legacy behaviour).
+    nonisolated static func parseRawErrorLines(from output: String, onlyInFile: String? = nil) -> [Int] {
         var rawLines: [Int] = []
-        let lines = output.components(separatedBy: .newlines)
-        var currentErrorMsg: String? = nil
-        for line in lines {
-            if line.starts(with: "error: ") {
-                currentErrorMsg = String(line.dropFirst("error: ".count))
-            } else if currentErrorMsg != nil, let match = CompilerRegex.diagnosticLocation.firstMatch(in: line, options: [], range: NSRange(0..<line.utf16.count)) {
-                let matchStr = (line as NSString).substring(with: match.range) // ":10:5"
-                let parts = matchStr.split(separator: ":")
-                if parts.count >= 1, let lineNum = Int(parts[0]) {
-                    if !rawLines.contains(lineNum) {
-                        rawLines.append(lineNum)
-                    }
-                }
-                currentErrorMsg = nil
+        for diagnostic in TypstDiagnosticParser.parse(output) {
+            guard diagnostic.severity == .error, let location = diagnostic.location else { continue }
+            if let onlyInFile,
+               (location.path as NSString).lastPathComponent != (onlyInFile as NSString).lastPathComponent {
+                continue
+            }
+            if !rawLines.contains(location.line) {
+                rawLines.append(location.line)
             }
         }
         return rawLines
+    }
+
+    func parseRawErrorLines(from output: String) -> [Int] {
+        Self.parseRawErrorLines(from: output)
     }
 
     /// Applies the lenient fallback fix (Strategy 1: escape special characters; Strategy 2: wrap in #raw())
@@ -2444,7 +2470,7 @@ class TypstCompiler: ObservableObject {
                 }
                 
                 if ext == "note" || ext == "md" {
-                    let rawLines = parseRawErrorLines(from: lastOutput)
+                    let rawLines = Self.parseRawErrorLines(from: lastOutput, onlyInFile: sourceURL.lastPathComponent)
                     if !rawLines.isEmpty {
                         let modified = applyFallbackFix(to: sourceURL, rawErrorLines: rawLines, attempts: &cleanFallbackAttempts, isHybrid: isHybrid)
                         if modified {
@@ -2588,7 +2614,7 @@ class TypstCompiler: ObservableObject {
                 lastOutput = result.output.isEmpty ? "Unknown error" : result.output
                 
                 if ext == "note" || ext == "md" {
-                    let rawLines = parseRawErrorLines(from: lastOutput)
+                    let rawLines = Self.parseRawErrorLines(from: lastOutput, onlyInFile: sourceURL.lastPathComponent)
                     if !rawLines.isEmpty {
                         let modified = applyFallbackFix(to: sourceURL, rawErrorLines: rawLines, attempts: &cleanFallbackAttempts, isHybrid: isHybrid)
                         if modified {

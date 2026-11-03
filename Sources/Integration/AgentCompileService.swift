@@ -46,17 +46,37 @@ struct AgentDiagnostic: Codable, Sendable {
         var message: String
         var file: String?
         var line: Int?
+        /// The code Typst printed under the frame, e.g. `boom(2)`.
+        var snippet: String?
+    }
+
+    /// A one-line fix the caller can apply, from TypstEdit's suggestion engine.
+    struct Fix: Codable, Sendable {
+        var title: String
+        var replacement: String
     }
 
     var severity: String
     var message: String
+    /// Stable slug for branching, e.g. `unknown-variable`, `incompatible-operands`.
+    /// Typst's CLI has no diagnostic codes (typst/typst#6059), so this is derived
+    /// from the message's leading phrase and survives rewording of the details.
+    var code: String?
+    /// Plain-English "how to fix" guidance for common diagnostics.
+    var explanation: String?
+    /// Reference page for the feature the diagnostic is about, when known.
+    var docs: String?
     var file: String?
     var line: Int?
     var column: Int?
+    /// 1-based column one past the end of the highlighted span.
+    var endColumn: Int?
     var length: Int?
     var snippet: String?
     var hints: [String] = []
+    /// Where the failing value was used: the `while calling …` chain.
     var trace: [Frame] = []
+    var fixes: [Fix] = []
 
     /// Compiler-style text: `file:line:col: error: message`, plus hints and trace.
     var humanReadable: String {
@@ -66,6 +86,7 @@ struct AgentDiagnostic: Codable, Sendable {
             if let column { location += ":\(column)" }
         }
         var lines = ["\(location): \(severity): \(message)"]
+        if let code { lines[0] += " [\(code)]" }
         if let snippet, !snippet.isEmpty {
             lines.append("    \(snippet)")
             if let column, column >= 1 {
@@ -78,27 +99,44 @@ struct AgentDiagnostic: Codable, Sendable {
             if let file = frame.file {
                 frameLocation = " (\(file)\(frame.line.map { ":\($0)" } ?? ""))"
             }
-            lines.append("  help: \(frame.message)\(frameLocation)")
+            lines.append("  \(frame.message)\(frameLocation)")
+            if let code = frame.snippet { lines.append("    \(code)") }
         }
+        if let explanation { lines.append("  how to fix: \(explanation)") }
+        if !fixes.isEmpty {
+            lines.append("  suggested edit\(fixes.count == 1 ? "" : "s") (apply to the line above):")
+            lines += fixes.map { "    - \($0.title): \($0.replacement)" }
+        }
+        if let docs { lines.append("  docs: \(docs)") }
         return lines.joined(separator: "\n")
     }
 }
 
 struct AgentCompileResult: Codable, Sendable {
+    /// Bumped when the JSON shape changes in a way a client could notice.
+    var schemaVersion = 1
     var success: Bool
     var checkOnly: Bool
+    /// `ok` or `errors` — a single field to branch on instead of `success`.
+    var status: String = "errors"
     var input: String?
     var format: String
     /// Files written (one per page for PNG/SVG). Empty for checks and failures.
     var outputs: [String] = []
     var root: String?
     var typstPath: String?
+    var typstVersion: String?
     var errorCount = 0
     var warningCount = 0
     var diagnostics: [AgentDiagnostic] = []
+    /// Every file the compilation read, from `typst --deps`. Use it to tell
+    /// whether a diagnostic belongs to the file that was edited or to an
+    /// imported module.
+    var deps: [String] = []
     /// Informational notes about what TypstEdit did (conversions, fallbacks).
     var notes: [String] = []
-    /// Raw compiler output.
+    /// Raw compiler output. Only populated when it could not be turned into
+    /// diagnostics, so the token cost stays low on the normal path.
     var log: String = ""
     var durationMs = 0
 
@@ -134,7 +172,15 @@ struct AgentCompileResult: Codable, Sendable {
         }
         return lines.joined(separator: "\n")
     }
+
+    /// True when a diagnostic points at a file other than `input` — the caller
+    /// edited the wrong file, or the fix belongs upstream in an import.
+    var hasDiagnosticsOutsideInput: Bool {
+        guard let input else { return false }
+        return diagnostics.contains { $0.file != nil && $0.file != input }
+    }
 }
+
 
 // MARK: - Service
 
@@ -195,6 +241,7 @@ final class AgentCompileService {
             var final = result
             final.errorCount = final.diagnostics.filter { $0.severity == "error" }.count
             final.warningCount = final.diagnostics.filter { $0.severity == "warning" }.count
+            final.status = final.success ? "ok" : "errors"
             final.durationMs = Int(Date().timeIntervalSince(started) * 1000)
             return final
         }
@@ -208,6 +255,7 @@ final class AgentCompileService {
             return fail("Could not locate the Typst compiler. Open TypstEdit > Settings > Typst Compiler to install one or set a custom path.")
         }
         result.typstPath = typstPath
+        result.typstVersion = await Self.cachedVersion(of: typstPath)
 
         // 1. Resolve the document.
         let originalText: String
@@ -370,22 +418,37 @@ final class AgentCompileService {
         try? fm.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         // 5. Run Typst. Markdown/Note files get the editor's lenient fallback retries.
-        var arguments = ["compile", compileURL.path, outputURL.path,
-                         "--root", rootURL.path,
-                         "--format", format.rawValue,
-                         "--diagnostic-format", "human"]
-        if let pages = request.pages, !pages.isEmpty { arguments += ["--pages", pages] }
-        if format == .png, let ppi = request.ppi { arguments += ["--ppi", String(ppi)] }
-        for (key, value) in request.inputs.sorted(by: { $0.key < $1.key }) { arguments += ["--input", "\(key)=\(value)"] }
-        for fontPath in request.fontPaths { arguments += ["--font-path", Self.resolve(fontPath, relativeTo: request.workingDirectory).path] }
+        // `human` is the only format carrying snippets, hints and the call chain,
+        // so it is the primary channel; `short` is the fallback when a version
+        // prints something `human` parsing does not recognise.
+        let depsURL = fm.temporaryDirectory.appendingPathComponent("typstedit-deps-\(runID).json")
+        cleanup.append(depsURL)
+
+        func typstArguments(diagnosticFormat: String) -> [String] {
+            var arguments = ["compile", compileURL.path, outputURL.path,
+                             "--root", rootURL.path,
+                             "--format", format.rawValue,
+                             "--diagnostic-format", diagnosticFormat,
+                             "--deps", depsURL.path]
+            if let pages = request.pages, !pages.isEmpty { arguments += ["--pages", pages] }
+            if format == .png, let ppi = request.ppi { arguments += ["--ppi", String(ppi)] }
+            for (key, value) in request.inputs.sorted(by: { $0.key < $1.key }) { arguments += ["--input", "\(key)=\(value)"] }
+            for fontPath in request.fontPaths { arguments += ["--font-path", Self.resolve(fontPath, relativeTo: request.workingDirectory).path] }
+            return arguments
+        }
 
         var fallbackAttempts: [Int: Int] = [:]
         var status: Int32 = -1
         var output = ""
         for attempt in 0..<4 {
-            (status, output) = await Self.run(typstPath, arguments: arguments, in: rootURL)
+            (status, output) = await Self.run(typstPath, arguments: typstArguments(diagnosticFormat: "human"), in: rootURL)
             guard status != 0, attempt < 3, kind == "md" || kind == "note", shadowName != nil else { break }
-            let rawLines = helper.parseRawErrorLines(from: output)
+            // Only lines Typst blamed on the shadow file itself may be repaired.
+            // An error inside an imported module carries *that* file's line
+            // numbers, and rewriting the shadow with them would corrupt an
+            // unrelated line.
+            let rawLines = TypstCompiler.parseRawErrorLines(
+                from: output, onlyInFile: compileURL.lastPathComponent)
             guard !rawLines.isEmpty,
                   helper.applyFallbackFix(to: compileURL, rawErrorLines: rawLines, attempts: &fallbackAttempts, isHybrid: kind == "note")
             else { break }
@@ -393,7 +456,6 @@ final class AgentCompileService {
                 result.notes.append("Some lines failed to compile and were rendered as plain text (TypstEdit's lenient Markdown mode).")
             }
         }
-        result.log = output.trimmingCharacters(in: .whitespacesAndNewlines)
         result.success = (status == 0)
 
         // 6. Diagnostics, mapped back to the user's file.
@@ -408,28 +470,73 @@ final class AgentCompileService {
                 return (displayPath, mapLine(line))
             }
             if path.hasPrefix("/") || path.hasPrefix("@") { return (path, line) }
+            if path == "<stdin>" { return (displayPath, line) }
             return (rootURL.appendingPathComponent(path).standardizedFileURL.path, line)
         }
-        for raw in TypstDiagnosticParser.parse(output) {
+
+        var parsed = TypstDiagnosticParser.parse(output)
+        if parsed.isEmpty, !result.success {
+            // Nothing recognised (a newer/older output shape, or a message
+            // printed without a code frame). `short` is the stable
+            // `file:line:col: error: message` format, so re-run in it rather
+            // than handing the caller raw box art.
+            let (_, shortOutput) = await Self.run(
+                typstPath, arguments: typstArguments(diagnosticFormat: "short"), in: rootURL)
+            let shortParsed = TypstDiagnosticParser.parse(shortOutput)
+            if !shortParsed.isEmpty {
+                parsed = shortParsed
+                output = shortOutput
+            }
+        }
+
+        var seen = Set<String>()
+        for raw in parsed {
             var diagnostic = AgentDiagnostic(severity: raw.severity == .error ? "error" : "warning", message: raw.message)
+            diagnostic.code = TypstDiagnosticCode.slug(for: raw.message)
+            diagnostic.docs = TypstDiagnosticCode.docsURL(for: raw.message)
             if let location = raw.location {
                 let (file, line) = mapLocation(location.path, location.line)
                 diagnostic.file = file
                 diagnostic.line = line
                 diagnostic.column = raw.caretColumn.map { $0 + 1 } ?? location.column
                 diagnostic.length = raw.caretLength
+                if let column = diagnostic.column, let length = diagnostic.length {
+                    diagnostic.endColumn = column + max(0, length)
+                }
             }
             diagnostic.snippet = raw.snippet
             diagnostic.hints = raw.hints
             diagnostic.trace = raw.trace.map { frame in
-                guard let location = frame.location else { return .init(message: frame.message) }
+                let snippet = frame.snippet
+                guard let location = frame.location else { return .init(message: frame.message, snippet: snippet) }
                 let (file, line) = mapLocation(location.path, location.line)
-                return .init(message: frame.message, file: file, line: line)
+                return .init(message: frame.message, file: file, line: line, snippet: snippet)
             }
+
+            // Same message, same place, printed twice (Typst sometimes repeats a
+            // diagnostic once per evaluation) — keep one.
+            let key = "\(diagnostic.file ?? "-")|\(diagnostic.line ?? -1)|\(diagnostic.column ?? -1)|\(diagnostic.severity)|\(diagnostic.message)"
+            guard seen.insert(key).inserted else { continue }
+
+            Self.attachGuidance(to: &diagnostic)
             result.diagnostics.append(diagnostic)
         }
         if !result.success && result.diagnostics.isEmpty {
-            result.diagnostics.append(AgentDiagnostic(severity: "error", message: result.log.isEmpty ? "Typst exited with code \(status)." : result.log))
+            let raw = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            result.log = raw
+            result.diagnostics.append(AgentDiagnostic(
+                severity: "error",
+                message: raw.isEmpty ? "Typst exited with code \(status)." : raw))
+        }
+
+        // 7. Dependency list, so a caller can tell whether a diagnostic belongs
+        // to the edited file or to something it imports.
+        if let data = fm.contents(atPath: depsURL.path),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let inputs = json["inputs"] as? [String] {
+            result.deps = inputs.map { input in
+                input.hasPrefix("/") ? input : rootURL.appendingPathComponent(input).standardizedFileURL.path
+            }
         }
 
         // 7. Collect written files.
@@ -489,6 +596,28 @@ final class AgentCompileService {
             .map(\.path)
     }
 
+    /// Adds the plain-English explanation and the quick fixes the editor shows
+    /// in its error panel, so an agent gets the same guidance a person does
+    /// instead of only Typst's terse message.
+    private static func attachGuidance(to diagnostic: inout AgentDiagnostic) {
+        var issue = TypstError(
+            line: diagnostic.line,
+            message: diagnostic.message,
+            severity: diagnostic.severity == "warning" ? .warning : .error)
+        issue.file = diagnostic.file
+        issue.snippet = diagnostic.snippet
+        // The editor's explainer and fixer reason in 0-based caret columns.
+        if let column = diagnostic.column, column >= 1 {
+            issue.column = column - 1
+            if let length = diagnostic.length { issue.length = length }
+        }
+        diagnostic.explanation = TypstErrorExplainer.explanation(for: issue)
+        guard let line = diagnostic.snippet, diagnostic.severity == "error" else { return }
+        diagnostic.fixes = TypstSuggestionEngine.shared.suggestFixes(for: issue, in: line).prefix(3).map {
+            AgentDiagnostic.Fix(title: $0.title, replacement: $0.replacement)
+        }
+    }
+
     /// Runs a process off the main actor and returns its exit code and combined output.
     nonisolated static func run(_ executable: String, arguments: [String], in directory: URL?) async -> (Int32, String) {
         await Task.detached {
@@ -514,6 +643,21 @@ final class AgentCompileService {
             let result = BlockingProcess.run(process, draining: [pipe.fileHandleForReading])
             return (result.status, result.output)
         }.value
+    }
+
+    /// `typst --version` of the active compiler, cached per binary path: the
+    /// version string is part of every result's metadata and spawning a process
+    /// for it on each check would be wasteful.
+    private static var versionCache: [String: String] = [:]
+
+    nonisolated static func cachedVersion(of path: String) async -> String? {
+        let cached: String? = await MainActor.run { versionCache[path] }
+        if let cached { return cached }
+        let (status, output) = await run(path, arguments: ["--version"], in: nil)
+        guard status == 0 else { return nil }
+        let version = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        await MainActor.run { versionCache[path] = version }
+        return version
     }
 
     /// `typst --version` of the active compiler.

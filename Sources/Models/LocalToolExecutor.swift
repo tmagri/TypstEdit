@@ -1546,48 +1546,27 @@ final class LocalToolExecutor {
     /// Runs `typst compile` and reports success/failure as a short string the
     /// model can act on directly. Shared by the ad-hoc snippet/real-file
     /// checks above and the automatic post-edit validation (`validationNote`).
+    ///
+    /// This goes through `AgentCompileService` — the same pipeline the MCP
+    /// server and `typstedit check` use — so the model gets stable,
+    /// deduplicated diagnostics with file/line/column, a diagnostic code,
+    /// TypstEdit's explanation, the call chain and the dependency list,
+    /// instead of Typst's raw box-drawing output.
     private static func compile(typstPath: String, inputURL: URL, outputURL: URL, rootPath: String?) async -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: typstPath)
-        var args = ["compile", inputURL.path, outputURL.path]
-        if let rootPath {
-            args += ["--root", rootPath]
-        }
-        process.arguments = args
-        let stderrPipe = Pipe()
-        process.standardError = stderrPipe
-        process.standardOutput = Pipe()
+        var request = AgentCompileRequest()
+        request.inputPath = inputURL.path
+        request.root = rootPath
+        request.checkOnly = true
+        request.format = .pdf
+        let result = await AgentCompileService.shared.compile(request)
 
-        do {
-            try process.run()
-        } catch {
-            return "Failed to launch Typst: \(error.localizedDescription)"
+        if result.success {
+            let warnings = result.warningCount > 0
+                ? " (\(result.warningCount) warning\(result.warningCount == 1 ? "" : "s"))"
+                : ""
+            return "Compiled successfully with no errors\(warnings)."
         }
-
-        // Drain before waiting so a large diagnostic dump can't fill the pipe and block Typst.
-        let collectStderr = BlockingProcess.startDraining(stderrPipe.fileHandleForReading)
-
-        // Unlike `runPython` (whose `waitWithTimeout` bounds the wait), this
-        // waits on the process with no timeout — a pathological document could
-        // hang the chat forever. Terminate the process when the surrounding
-        // task is cancelled (the chat's Stop button); the termination handler
-        // then resumes the continuation as usual.
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                process.terminationHandler = { finishedProcess in
-                    let errText = String(data: collectStderr(), encoding: .utf8) ?? ""
-                    if finishedProcess.terminationStatus == 0 {
-                        continuation.resume(returning: "Compiled successfully with no errors.")
-                    } else {
-                        continuation.resume(returning: "Compile failed:\n\(errText.isEmpty ? "(no error output)" : errText)")
-                    }
-                }
-            }
-        } onCancel: {
-            if process.isRunning {
-                process.terminate()
-            }
-        }
+        return "Compile failed:\n\(result.summary)"
     }
 
     /// Runs Markdown text through TypstEdit's own Markdown→Typst converter —
