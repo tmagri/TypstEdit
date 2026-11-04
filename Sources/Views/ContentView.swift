@@ -125,6 +125,12 @@ struct ContentView: View {
         guard let payload = notification.object as? [String: Any],
               let target = payload["target"] as? EditorController,
               target === editorController else { return nil }
+        // Only the window registered for this controller acts, never a
+        // duplicate view of the same controller.
+        if let hostingWindow, let owner = AppDelegate.shared?.window(for: editorController),
+           owner !== hostingWindow {
+            return nil
+        }
         return payload
     }
 

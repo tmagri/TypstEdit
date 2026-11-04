@@ -189,8 +189,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // TypstEdit prunes its own stale OS-temp mirrors (used when a
             // project opts out of in-project temp/vectorcache storage) here.
             AppTempDirectoryManager.pruneStale()
+            // Child processes never outlive the app: a watchdog covers Force
+            // Quit and crashes, and leftovers from earlier runs are stopped.
+            ChildProcessGuard.startWatchdog()
+            ChildProcessGuard.sweepOrphanedPreviewCompilers(managedBinaryPrefixes: Self.managedTypstLocations)
             Self.debugLog("didFinishLaunching done")
         }
+    }
+
+    /// Where TypstEdit's own typst binaries live: the downloaded toolchain
+    /// in Application Support, and this app bundle.
+    private static var managedTypstLocations: [String] {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("TypstEdit", isDirectory: true).path
+        return [appSupport, Bundle.main.bundleURL.path].compactMap { $0 }
+    }
+
+    /// Every way of quitting ends here (⌘Q, the menu, logout, restart): stop
+    /// every process the app started, children included.
+    nonisolated func applicationWillTerminate(_ notification: Notification) {
+        ChildProcessGuard.terminateDescendants()
     }
 
     nonisolated func applicationDidBecomeActive(_ notification: Notification) {
@@ -228,7 +246,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Self.debugLog("Dock click with no visible windows: reopening main window")
             self.editorController?.pendingWelcomeReset = true
             self.withMainWindow {}
-            return true
+            // Handled here. Returning true would make AppKit reopen as well,
+            // and SwiftUI would add a second main window that shares this
+            // controller (both windows then react to everything it is sent).
+            return false
         }
     }
 
@@ -468,15 +489,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Called by the main window's `WindowAccessor` each time SwiftUI
     /// (re)creates it.
+    ///
+    /// The main controller is shown by one window only. A second window of
+    /// the group (from any path) is closed again, and the existing one comes
+    /// forward: two views on one controller would both handle every
+    /// notification sent to it.
     func registerMainWindow(_ window: NSWindow) {
         guard mainWindow !== window else { return }
+        if isMainWindowOpen, let existing = mainWindow {
+            Self.debugLog("registerMainWindow: duplicate main window closed")
+            window.orderOut(nil)
+            DispatchQueue.main.async { window.close() }
+            bringToFront(existing)
+            return
+        }
         mainWindow = window
         window.tabbingMode = .disallowed
     }
 
+    /// While the app is hidden (⌘H) no window is visible, yet the main
+    /// window is still open: treating it as closed would open a second one.
     private var isMainWindowOpen: Bool {
         guard let mainWindow else { return false }
         return mainWindow.isVisible || mainWindow.isMiniaturized
+            || (NSApp.isHidden && NSApp.windows.contains(mainWindow))
     }
 
     private struct DocumentWindow {
@@ -509,6 +545,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func bringToFront(_ window: NSWindow?) {
         guard let window else { return }
+        if NSApp.isHidden { NSApp.unhide(nil) }
         if window.isMiniaturized { window.deminiaturize(nil) }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
