@@ -686,6 +686,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             "target": mainController
                         ])
                     }
+                } else if urls.count == 1 {
+                    // One file: ask (or apply the setting). A batch from
+                    // Finder opens one window per file, as before.
+                    chooseWindow(forOpening: url.lastPathComponent, in: windows) { [weak self] choice in
+                        switch choice {
+                        case .newWindow:
+                            self?.openExternalFileInNewWindow(url)
+                        case .replace(let target):
+                            // The load itself asks about unsaved edits.
+                            self?.bringToFront(target.window)
+                            NotificationCenter.default.post(name: .openStandaloneFile, object: [
+                                "url": url,
+                                "target": target.controller,
+                            ])
+                        case .cancel:
+                            break
+                        }
+                    }
                 } else {
                     openExternalFileInNewWindow(url)
                 }
@@ -802,11 +820,121 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if proceed { open(target.controller) }
             }
         case .newWindow:
-            if !forceNewWindow, !isMainWindowOpen, Self.isIdle(mainController) {
-                withMainWindow { open(mainController) }
-            } else {
-                openDocumentWindow(.action(open))
+            let openInNewWindow = { [weak self] in
+                guard let self else { return }
+                if !self.isMainWindowOpen, Self.isIdle(mainController) {
+                    // The main window was closed: bring it back instead.
+                    self.withMainWindow { open(mainController) }
+                } else {
+                    self.openDocumentWindow(.action(open))
+                }
             }
+            guard !forceNewWindow else {
+                openInNewWindow()
+                return
+            }
+            chooseWindow(forOpening: root.lastPathComponent, in: windows) { [weak self] choice in
+                switch choice {
+                case .newWindow:
+                    openInNewWindow()
+                case .replace(let target):
+                    self?.replaceContent(of: target) { open(target.controller) }
+                case .cancel:
+                    break
+                }
+            }
+        }
+    }
+
+    // MARK: - New Window or Replace
+
+    private enum WindowChoice {
+        case newWindow
+        case replace(DocumentWindow)
+        case cancel
+    }
+
+    /// Every window is in use and something needs one. Applies the setting
+    /// (Settings ▸ General ▸ Files & Backups), or asks: open a new window,
+    /// or replace what the front window shows. Nothing to replace means a
+    /// new window, without a question.
+    private func chooseWindow(forOpening name: String, in windows: [DocumentWindow], completion: @escaping (WindowChoice) -> Void) {
+        guard let front = frontmostDocumentWindow(in: windows) else {
+            completion(.newWindow)
+            return
+        }
+        switch GeneralSettingsManager.shared.windowOpenBehavior {
+        case .newWindow:
+            completion(.newWindow)
+            return
+        case .replace:
+            completion(.replace(front))
+            return
+        case .ask:
+            break
+        }
+
+        let current = Self.describe(front.controller)
+        let alert = NSAlert()
+        alert.messageText = "Open “\(name)” in a new window?"
+        var info = "“\(current)” is open in this window. You can open “\(name)” in a new window next to it, or close “\(current)” and open “\(name)” in this window."
+        if front.controller.projectContext.chat.hasRunningWork {
+            info += "\n\nAn AI chat is still working in this window. If you replace the window, the chat stops."
+        }
+        alert.informativeText = info
+        alert.addButton(withTitle: "New Window")
+        alert.addButton(withTitle: "This Window")
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Always do this (change it in Settings ▸ General)"
+
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            let remember = alert.suppressionButton?.state == .on
+            switch response {
+            case .alertFirstButtonReturn:
+                if remember { GeneralSettingsManager.shared.windowOpenBehavior = .newWindow }
+                completion(.newWindow)
+            case .alertSecondButtonReturn:
+                if remember { GeneralSettingsManager.shared.windowOpenBehavior = .replace }
+                completion(.replace(front))
+            default:
+                completion(.cancel)
+            }
+        }
+        if let window = front.window {
+            bringToFront(window)
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            finish(alert.runModal())
+        }
+    }
+
+    /// The window the user is working in: the key document window, else
+    /// the frontmost one.
+    private func frontmostDocumentWindow(in windows: [DocumentWindow]) -> DocumentWindow? {
+        if let key = windows.first(where: { $0.window?.isKeyWindow == true }) { return key }
+        for window in NSApp.orderedWindows {
+            if let match = windows.first(where: { $0.window === window }) { return match }
+        }
+        return windows.first
+    }
+
+    /// What a window shows, for the question: its project, else its file.
+    private static func describe(_ controller: EditorController) -> String {
+        if let root = controller.projectRootURL {
+            return ProjectWindowRouter.isSameFolder(root, NotebookManager.shared.rootDirectory) ? "Notes" : root.lastPathComponent
+        }
+        return controller.currentFileURL?.lastPathComponent ?? "Untitled"
+    }
+
+    /// Closes what `target` shows (asking to save first) and runs `open`
+    /// in it. Its old project's chats, MCP servers and index close with it.
+    private func replaceContent(of target: DocumentWindow, then open: @escaping () -> Void) {
+        bringToFront(target.window)
+        showSaveWarningAsync(for: target.controller) { [weak self] proceed in
+            guard proceed else { return }
+            self?.cleanUpTemp(for: target.controller)
+            open()
         }
     }
 

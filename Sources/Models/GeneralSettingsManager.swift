@@ -1,5 +1,23 @@
 import SwiftUI
 
+/// What happens when a project, the Notes folder or a file would open in an
+/// additional window because every window is in use.
+enum WindowOpenBehavior: String, CaseIterable, Identifiable {
+    case ask
+    case newWindow
+    case replace
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .ask: return "Ask Every Time"
+        case .newWindow: return "Open a New Window"
+        case .replace: return "Replace the Current Window"
+        }
+    }
+}
+
 enum TypstUpdateMode: String, CaseIterable, Identifiable {
     case stableBinary = "Stable Binary (Recommended)"
     case bleedingEdgeSource = "Bleeding Edge (Build from Source)"
@@ -22,6 +40,15 @@ class GeneralSettingsManager: ObservableObject {
     /// heading moves to the next page together with it. Requires Typst 0.12+
     /// (`block.sticky`).
     @AppStorage("keepWithNextHeadings") var keepWithNextHeadings: Bool = true
+
+    @AppStorage("windowOpenBehavior") private var windowOpenBehaviorRaw: String = WindowOpenBehavior.ask.rawValue {
+        willSet { objectWillChange.send() }
+    }
+
+    var windowOpenBehavior: WindowOpenBehavior {
+        get { WindowOpenBehavior(rawValue: windowOpenBehaviorRaw) ?? .ask }
+        set { windowOpenBehaviorRaw = newValue.rawValue }
+    }
 
     // MARK: Sidebar visibility (shared by the View menu and Settings)
 

@@ -244,6 +244,26 @@ struct GeneralSettingsView: View {
     @ViewBuilder
     private var filesSection: some View {
         SettingsCard(
+            title: "Opening Projects and Files",
+            icon: "macwindow.on.rectangle",
+            description: "What happens when you open a project, your notes or a file while every window is in use. A project that is already open always comes to the front instead."
+        ) {
+            SettingsRow(
+                label: "When Busy:",
+                caption: "\"Replace\" closes what the front window shows (it asks you to save first). Open Folder in New Window always opens a new window."
+            ) {
+                Picker("", selection: $generalSettings.windowOpenBehavior) {
+                    ForEach(WindowOpenBehavior.allCases) { behavior in
+                        Text(behavior.label).tag(behavior)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: 260, alignment: .leading)
+            }
+        }
+
+        SettingsCard(
             title: "Notebook Location",
             icon: "folder",
             description: "Where your notebooks are stored on disk. Useful for syncing via iCloud Drive, Dropbox, or other cloud services."

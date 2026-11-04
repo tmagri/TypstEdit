@@ -198,6 +198,11 @@ final class AIChatSessionStore: ObservableObject {
         managers[manager.id] = manager
     }
 
+    /// True while some conversation is still writing or waits for an answer.
+    var hasRunningWork: Bool {
+        managers.values.contains { $0.isGenerating || $0.pendingApproval != nil }
+    }
+
     /// The window is closing: nothing may keep running against its project,
     /// and its sessions folder is free for the next window.
     func close() {
