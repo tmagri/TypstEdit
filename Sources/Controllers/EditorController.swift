@@ -820,14 +820,28 @@ class EditorController: NSObject, ObservableObject {
     @Published var cursorSize: CGFloat = 2.0 // Default thickness
     
     // --- CodeEditSourceEditor State ---
-    @Published var sourceCode: String = "" {
+    //
+    // `sourceCode` and `editorState` are not `@Published`. They change on every keystroke, and
+    // `objectWillChange` re-evaluates every view that observes this controller (ContentView, the
+    // menu commands, the sidebars, AI chat). Changes that come from the text view already show in
+    // it, so they are applied silently with `syncFromTextView`. Programmatic changes still send
+    // `objectWillChange`, so that `SourceEditor` pushes them down to the text view.
+    // Observe `sourceCodeDidChange` to react to every change, as `.onChange` did before.
+    var sourceCode: String = "" {
+        willSet {
+            if !isSyncingFromTextView { objectWillChange.send() }
+        }
         didSet {
             if sourceCode != oldValue {
-                cleanPDFURL = nil
+                if cleanPDFURL != nil { cleanPDFURL = nil }
+                scheduleSourceCodeDidChange()
             }
         }
     }
-    @Published var editorState: SourceEditorState = .init() {
+    var editorState: SourceEditorState = .init() {
+        willSet {
+            if !isSyncingFromTextView { objectWillChange.send() }
+        }
         didSet {
             // Check if selection changed to update UI state
             let oldRanges = oldValue.cursorPositions?.map { $0.range }
@@ -839,6 +853,50 @@ class EditorController: NSObject, ObservableObject {
         }
     }
     
+    /// Sends the latest `sourceCode` on the next run loop turn after it changes. Several changes in
+    /// one turn are sent once, like SwiftUI's `.onChange`.
+    let sourceCodeDidChange = PassthroughSubject<String, Never>()
+    private var isSyncingFromTextView = false
+    private var sourceCodeDidChangePending = false
+
+    private func scheduleSourceCodeDidChange() {
+        guard !sourceCodeDidChangePending else { return }
+        sourceCodeDidChangePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.sourceCodeDidChangePending = false
+            self.sourceCodeDidChange.send(self.sourceCode)
+        }
+    }
+
+    /// Applies a change that came from the text view, without invalidating SwiftUI views.
+    func syncFromTextView(_ update: () -> Void) {
+        let wasSyncing = isSyncingFromTextView
+        isSyncingFromTextView = true
+        defer { isSyncingFromTextView = wasSyncing }
+        update()
+    }
+
+    /// Bindings for `SourceEditor`. Its writes come from the text view, so they are applied silently.
+    var sourceCodeBinding: Binding<String> {
+        Binding(
+            get: { [weak self] in self?.sourceCode ?? "" },
+            set: { [weak self] newValue in
+                guard let self else { return }
+                self.syncFromTextView { self.sourceCode = newValue }
+            }
+        )
+    }
+
+    var editorStateBinding: Binding<SourceEditorState> {
+        Binding(
+            get: { [weak self] in self?.editorState ?? .init() },
+            set: { [weak self] newValue in
+                self?.syncFromTextView { self?.editorState = newValue }
+            }
+        )
+    }
+
     // Bridge to the actual editor for programmatic updates
     var sourceEditorBridge: SourceEditorBridge!
     weak var textViewController: TextViewController?
@@ -1071,42 +1129,54 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func updateErrorHighlights(errors: [TypstError]) {
-        guard let tvc = textViewController else { return }
-        let textStorage = tvc.textView.textStorage!
-        
-        print("[EditorController] Updating error highlights: \(errors.count) errors")
-        
-        // Remove existing error highlights
-        // Since we don't track exact ranges of previous errors easily without state,
-        // and we can't just clear *all* underlines (might be used by markdown),
-        // we ideally should track them.
-        // For now, let's assume we can clear specific attributes if we used a custom key, 
-        // but standard keys are safer for rendering. 
-        // Let's rely on clearing the whole document's error style if possible, 
-        // OR better: keep track of old error ranges.
-        
-        // Simpler approach for now: clear underline color/style for the whole length.
-        // This might conflict if other things use specific red underlines.
+        guard let tvc = textViewController, let textStorage = tvc.textView.textStorage else { return }
         let fullRange = NSRange(location: 0, length: textStorage.length)
+
+        // Find the ranges marked by the previous call. Only those are cleared: attribute changes
+        // invalidate layout for the changed range, and this runs after every compile.
+        var previousRanges: [NSRange] = []
         if fullRange.length > 0 {
-            textStorage.removeAttribute(.underlineColor, range: fullRange)
-            textStorage.removeAttribute(.underlineStyle, range: fullRange)
-            textStorage.removeAttribute(.toolTip, range: fullRange)
-        }
-        
-        for error in errors {
-            if let line = error.line, let range = getRangeForLine(line) {
-                // Ensure range is valid
-                if range.location + range.length <= textStorage.length {
-                    textStorage.addAttributes(attributes(for: error.severity), range: range)
-                    textStorage.addAttribute(.toolTip, value: error.message, range: range)
-                }
+            textStorage.enumerateAttribute(.toolTip, in: fullRange) { value, range, _ in
+                if value != nil { previousRanges.append(range) }
             }
         }
-        
-        // Force layout update and redraw
-        tvc.textView.layoutManager.setNeedsLayout()
+
+        let lineRanges = rangesForLines(Set(errors.compactMap(\.line)))
+        guard !previousRanges.isEmpty || !lineRanges.isEmpty else { return }
+
+        textStorage.beginEditing()
+        for range in previousRanges {
+            textStorage.removeAttribute(.underlineColor, range: range)
+            textStorage.removeAttribute(.underlineStyle, range: range)
+            textStorage.removeAttribute(.toolTip, range: range)
+        }
+        for error in errors {
+            if let line = error.line, let range = lineRanges[line],
+               range.location + range.length <= textStorage.length {
+                textStorage.addAttributes(attributes(for: error.severity), range: range)
+                textStorage.addAttribute(.toolTip, value: error.message, range: range)
+            }
+        }
+        textStorage.endEditing()
+
+        tvc.textView.layoutManager.layoutLines()
         tvc.textView.needsDisplay = true
+    }
+
+    /// The ranges of the given 1-based lines in `sourceCode`, found in one pass.
+    private func rangesForLines(_ lines: Set<Int>) -> [Int: NSRange] {
+        guard let maxLine = lines.max(), maxLine > 0 else { return [:] }
+        let s = sourceCode as NSString
+        var result: [Int: NSRange] = [:]
+        var lineNumber = 0
+        var index = 0
+        while index < s.length, lineNumber < maxLine {
+            lineNumber += 1
+            let lineRange = s.lineRange(for: NSRange(location: index, length: 0))
+            if lines.contains(lineNumber) { result[lineNumber] = lineRange }
+            index = NSMaxRange(lineRange)
+        }
+        return result
     }
     
     func getRangeForLine(_ line: Int) -> NSRange? {
@@ -4673,9 +4743,9 @@ class SourceEditorBridge: TextViewCoordinator {
         // Guard against infinite loops if we are already in an update
         MainActor.assumeIsolated {
             guard let ctrl = self.controller else { return }
-            if ctrl.sourceCode != controller.text {
-                 ctrl.sourceCode = controller.text
-            }
+            // `sourceCode.didSet` skips equal values, so no separate full-text compare here.
+            let text = controller.text
+            ctrl.syncFromTextView { ctrl.sourceCode = text }
             // Skip side effects while we are the ones driving the text view, or during undo/redo operations.
             // These would otherwise re-enter `insertText` (markdown autoformat) and thrash layout (wrap re-apply)
             // mid-edit, which corrupts text state or causes re-entrant crashes.

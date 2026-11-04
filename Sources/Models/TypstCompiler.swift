@@ -600,10 +600,9 @@ class TypstCompiler: ObservableObject {
             // sanitization below, committed to `noteWarnings` once we publish).
             var pendingNoteWarnings: [TypstError] = []
 
+            // The whole-document text passes below run off the main thread, so a compile that
+            // starts while the user is typing does not stall the editor.
             if ext == "md" || ext == "note" {
-                if ext == "note" {
-                    finalSource = Self.autoFixBrokenNoteSyntax(finalSource)
-                }
                 let textToProcess = finalSource
                 let aiService = AICompletionService.shared
                 let isHybrid = (ext == "note")
@@ -613,7 +612,8 @@ class TypstCompiler: ObservableObject {
                 // numbers for the warnings) and produces backslash escapes that the
                 // sanitizer's hybrid rules already treat as idempotent.
                 let (sanitized, warnings, lineMap) = await Task.detached {
-                    let delimited = isHybrid ? Self.delimitImproperOperators(textToProcess) : (output: textToProcess, warnings: [TypstError]())
+                    let fixed = isHybrid ? Self.autoFixBrokenNoteSyntax(textToProcess) : textToProcess
+                    let delimited = isHybrid ? Self.delimitImproperOperators(fixed) : (output: fixed, warnings: [TypstError]())
                     let cleaned = aiService.sanitizeMarkdownToTypst(delimited.output, isHybrid: isHybrid)
                     // Map converted-output lines back to the user's source so compile
                     // errors land on the line the user actually wrote.
@@ -633,11 +633,13 @@ class TypstCompiler: ObservableObject {
             // fallback face. Substituting the metric-compatible font in the
             // shadow source renders the preview with the intended metrics.
             // Within-line rewrite, so line numbers still map back to the source.
-            finalSource = Self.substituteMissingFonts(finalSource)
-
-            // Map raw-block language tags Typst can't highlight (csharp, ...)
+            //
+            // Then map raw-block language tags Typst can't highlight (csharp, ...)
             // to ones it can, and close up "``` json"-style gaps. Line-preserving.
-            finalSource = Self.normalizeRawLanguages(finalSource)
+            let sourceForFontPass = finalSource
+            finalSource = await Task.detached {
+                Self.normalizeRawLanguages(Self.substituteMissingFonts(sourceForFontPass))
+            }.value
 
             // ---- TypstEdit calculator features -----------------------------
             // Scan for `#calc` / `calc-param` / `plot` / Bessel usage. The
@@ -709,48 +711,10 @@ class TypstCompiler: ObservableObject {
                 injectedPreamble += Self.notePreamble
             }
             if isDarkMode {
-                // 1. Inject the color into partial strokes safely
-                finalSource = CompilerRegex.stroke.stringByReplacingMatches(
-                    in: finalSource,
-                    options: [],
-                    range: NSRange(0..<finalSource.utf16.count),
-                    withTemplate: "$1 + rgb(\"#d1d1d1\")"
-                )
-                
-                // 2. Automatically invert luma() for dark mode (e.g., luma(220) -> luma(35))
-                let nsString = NSMutableString(string: finalSource)
-                let matches = CompilerRegex.luma.matches(in: finalSource, options: [], range: NSRange(0..<finalSource.utf16.count))
-                
-                // Iterate in reverse so replacing text doesn't shift the ranges of earlier matches
-                for match in matches.reversed() {
-                    let valString = nsString.substring(with: match.range(at: 1))
-                    let isPercent = match.range(at: 2).length > 0
-                    
-                    if let val = Double(valString) {
-                        // If it's a percentage use 100 - x, otherwise use 255 - x
-                        let invertedVal = isPercent ? max(0, 100.0 - val) : max(0, 255.0 - val)
-                        
-                        // Format cleanly without trailing decimals if it's a whole number
-                        let formattedVal = invertedVal.truncatingRemainder(dividingBy: 1) == 0 ?
-                                           String(format: "%.0f", invertedVal) :
-                                           String(format: "%.1f", invertedVal)
-                        
-                        let replacement = "luma(\(formattedVal)\(isPercent ? "%" : ""))"
-                        nsString.replaceCharacters(in: match.range, with: replacement)
-                    }
-                }
-                finalSource = nsString as String
-
-                // 3. Catch explicit black colors used in parameters and invert them
-                // Matches "fill: black" or "stroke: rgb(0,0,0)" but ignores the word "black" in regular text
-                finalSource = CompilerRegex.black.stringByReplacingMatches(
-                    in: finalSource,
-                    options: [],
-                    range: NSRange(0..<finalSource.utf16.count),
-                    withTemplate: "$1rgb(\"#d1d1d1\")"
-                )
-
-                // 4. Append the preamble
+                let sourceForDarkMode = finalSource
+                finalSource = await Task.detached {
+                    Self.applyDarkModeRewrites(sourceForDarkMode)
+                }.value
                 injectedPreamble += darkModePreamble
             }
             finalSource = injectedPreamble + finalSource
@@ -1616,6 +1580,52 @@ class TypstCompiler: ObservableObject {
         "dejavu sans mono": "Menlo",
         "consolas": "Menlo",
     ]
+
+    /// Rewrites colours for the dark preview: strokes, `luma()` values and explicit black.
+    nonisolated static func applyDarkModeRewrites(_ source: String) -> String {
+        var finalSource = source
+        // 1. Inject the color into partial strokes safely
+        finalSource = CompilerRegex.stroke.stringByReplacingMatches(
+            in: finalSource,
+            options: [],
+            range: NSRange(0..<finalSource.utf16.count),
+            withTemplate: "$1 + rgb(\"#d1d1d1\")"
+        )
+
+        // 2. Automatically invert luma() for dark mode (e.g., luma(220) -> luma(35))
+        let nsString = NSMutableString(string: finalSource)
+        let matches = CompilerRegex.luma.matches(in: finalSource, options: [], range: NSRange(0..<finalSource.utf16.count))
+
+        // Iterate in reverse so replacing text doesn't shift the ranges of earlier matches
+        for match in matches.reversed() {
+            let valString = nsString.substring(with: match.range(at: 1))
+            let isPercent = match.range(at: 2).length > 0
+
+            if let val = Double(valString) {
+                // If it's a percentage use 100 - x, otherwise use 255 - x
+                let invertedVal = isPercent ? max(0, 100.0 - val) : max(0, 255.0 - val)
+
+                // Format cleanly without trailing decimals if it's a whole number
+                let formattedVal = invertedVal.truncatingRemainder(dividingBy: 1) == 0 ?
+                                   String(format: "%.0f", invertedVal) :
+                                   String(format: "%.1f", invertedVal)
+
+                let replacement = "luma(\(formattedVal)\(isPercent ? "%" : ""))"
+                nsString.replaceCharacters(in: match.range, with: replacement)
+            }
+        }
+        finalSource = nsString as String
+
+        // 3. Catch explicit black colors used in parameters and invert them
+        // Matches "fill: black" or "stroke: rgb(0,0,0)" but ignores the word "black" in regular text
+        finalSource = CompilerRegex.black.stringByReplacingMatches(
+            in: finalSource,
+            options: [],
+            range: NSRange(0..<finalSource.utf16.count),
+            withTemplate: "$1rgb(\"#d1d1d1\")"
+        )
+        return finalSource
+    }
 
     /// Rewrites `font:` named-argument values naming fonts that don't ship on
     /// macOS to their metric-compatible installed equivalents

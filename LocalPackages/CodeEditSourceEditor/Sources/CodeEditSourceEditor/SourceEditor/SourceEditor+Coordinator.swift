@@ -16,6 +16,7 @@ extension SourceEditor {
         private weak var controller: TextViewController?
         var isUpdatingFromRepresentable: Bool = false
         var isUpdateFromTextView: Bool = false
+        private var isUpdateFromTextViewResetScheduled = false
         var text: TextAPI
         @Binding var editorState: SourceEditorState
 
@@ -117,7 +118,7 @@ extension SourceEditor {
             }
             // A plain string binding is one-way (from this view, up the hierarchy) so it's not in the state binding
             if case .binding(let binding) = text {
-                self.isUpdateFromTextView = true
+                markUpdateFromTextView()
                 binding.wrappedValue = textView.string
             }
         }
@@ -165,8 +166,23 @@ extension SourceEditor {
 
         private func updateState(_ modifyCallback: (inout SourceEditorState) -> Void) {
             guard !isUpdatingFromRepresentable else { return }
-            self.isUpdateFromTextView = true
+            markUpdateFromTextView()
             modifyCallback(&editorState)
+        }
+
+        /// Marks the next SwiftUI update as caused by the text view, so it does not push stale state back.
+        ///
+        /// TypstEdit applies text view changes without invalidating SwiftUI, so that update may never come.
+        /// The flag is cleared after this run loop turn; otherwise it would swallow the next programmatic
+        /// state change, such as opening the find panel.
+        private func markUpdateFromTextView() {
+            isUpdateFromTextView = true
+            guard !isUpdateFromTextViewResetScheduled else { return }
+            isUpdateFromTextViewResetScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                self?.isUpdateFromTextViewResetScheduled = false
+                self?.isUpdateFromTextView = false
+            }
         }
 
         deinit {

@@ -25,8 +25,13 @@ struct ContentView: View {
     @State private var exportedPDFURL: URL?
     
     // Debounce timer
-    @State private var workItem: DispatchWorkItem?
-    @State private var pendingCompilationIsForced: Bool = false
+    /// Compile debounce state. A reference type, so updating it on every keystroke does not
+    /// invalidate this view the way `@State` values do.
+    private final class CompileDebounce {
+        var workItem: DispatchWorkItem?
+        var pendingIsForced = false
+    }
+    @State private var compileDebounce = CompileDebounce()
     
     @State private var reloadToken: UUID = UUID()
     @State private var lastSaved: Date?
@@ -463,7 +468,7 @@ struct ContentView: View {
     @ViewBuilder
     private func applyThemeModifiers(to content: some View) -> some View {
         content
-            .onChange(of: editorController.sourceCode) { newValue in
+            .onReceive(editorController.sourceCodeDidChange) { newValue in
                 editorController.checkUnsavedChanges(currentContent: newValue)
                 let isProgrammatic = editorController.isApplyingProgrammaticChange
                 if editorController.isNoteFile && editorController.hasUnsavedChanges,
@@ -1128,14 +1133,14 @@ struct ContentView: View {
         Group {
             if editorController.currentFileType.isTextual {
                 SourceEditor(
-                    $editorController.sourceCode,
+                    editorController.sourceCodeBinding,
                     // Pick the highlighting language based on file extension.
                     //  - .md   -> Markdown
                     //  - .note -> Markdown grammar with a Typst overlay (Typst wins on overlap)
                     //  - else  -> Typst
                     language: editorController.highlightLanguage,
                     configuration: editorController.editorConfiguration,
-                    state: $editorController.editorState,
+                    state: editorController.editorStateBinding,
                     coordinators: [editorController.sourceEditorBridge],
                     completionDelegate: editorController.aiCompletionProvider
                 )
@@ -1794,10 +1799,11 @@ struct ContentView: View {
 
         let url = selectedFile ?? FileManager.default.temporaryDirectory.appendingPathComponent("untitled.typ")
 
-        let effectiveForce = force || (workItem != nil && pendingCompilationIsForced)
-        pendingCompilationIsForced = effectiveForce
+        let debounce = compileDebounce
+        let effectiveForce = force || (debounce.workItem != nil && debounce.pendingIsForced)
+        debounce.pendingIsForced = effectiveForce
 
-        workItem?.cancel()
+        debounce.workItem?.cancel()
         let currentSource = content ?? editorController.sourceCode
         let isDark = editorController.isPreviewDarkMode
         let isNote = url.pathExtension.lowercased() == "note"
@@ -1813,7 +1819,7 @@ struct ContentView: View {
         // empty preview pane forever.
         let shouldCompile = !isNote || effectiveForce || compiler.currentShadowPDFURL == nil
         let newWorkItem = DispatchWorkItem {
-            self.pendingCompilationIsForced = false
+            debounce.pendingIsForced = false
             // Auto-save is only needed when the buffer actually holds unsaved
             // edits; rewriting an unchanged file would pointlessly bump its
             // modification date (and trip anything watching it).
@@ -1850,7 +1856,7 @@ struct ContentView: View {
                 await compiler.updateContent(source: currentSource, fileURL: url)
             }
         }
-        workItem = newWorkItem
+        debounce.workItem = newWorkItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: newWorkItem)
     }
     

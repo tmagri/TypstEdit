@@ -47,7 +47,8 @@ enum NoteTypstRegions {
 
         while index < lines.count {
             let line = lines[index]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Leading whitespace only, as a view: this runs for every line on every keystroke.
+            let trimmed = line.drop { $0.unicodeScalars.allSatisfy { CharacterSet.whitespaces.contains($0) } }
 
             // Fenced code blocks are Markdown, not live Typst — skip wholesale.
             if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {

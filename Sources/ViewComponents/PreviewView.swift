@@ -133,9 +133,12 @@ struct PreviewView: NSViewRepresentable {
                 context.coordinator.lastUrl = url
                 context.coordinator.lastToken = reloadToken
 
-                let text = document.string ?? ""
-                DispatchQueue.global(qos: .userInitiated).async {
-                    
+                // Text extraction walks every page, so it runs off the main thread on a separate
+                // copy of the document. The displayed `PDFDocument` is not shared across threads.
+                DispatchQueue.global(qos: .utility).async {
+                    // The file can be mid-rewrite by the next compile; keep the old count then.
+                    guard let copy = PDFDocument(url: url) else { return }
+                    let text = copy.string ?? ""
                     let words = text.split { $0.isWhitespace || $0.isNewline }
                     let count = words.count
 
