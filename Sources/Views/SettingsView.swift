@@ -1310,9 +1310,19 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Stalled Responses & Auto-Continue",
             icon: "hourglass.bottomhalf.filled",
-            description: "Two separate recoveries. First, a request that fails before anything arrives — a rate limit, an overloaded endpoint, a dropped connection — is re-sent after a jittered backoff (2 s, 4 s, 8 s… capped at 10 s), honouring the provider's own Retry-After when it sends one. Second, local reasoning models (large Qwen and DeepSeek distills in particular) sometimes go quiet mid-reply — the panel shows \"Thinking…\" for minutes and nothing more ever arrives. After this many seconds of total silence the stuck attempt is abandoned and the model is asked to pick up where it left off, up to the number of attempts below. The same budget covers replies that come back empty (a reasoning model can spend the whole reply on thinking and write nothing) — the chat's status line names each retry, so a pause is never unexplained. 0 turns an option off."
+            description: "Three separate recoveries. First, if the Mac's own network disappears mid-request — Wi-Fi down, VPN gone, cable pulled — the chat parks the request (toggle below) until macOS reports a connection again, then re-sends; a reply already streaming when the drop hit is continued, not duplicated. Second, a request that fails before anything arrives — a rate limit, an overloaded endpoint, a dropped connection — is re-sent after a jittered backoff (2 s, 4 s, 8 s… capped at 10 s), honouring the provider's own Retry-After when it sends one. Third, local reasoning models (large Qwen and DeepSeek distills in particular) sometimes go quiet mid-reply — the panel shows \"Thinking…\" for minutes and nothing more ever arrives. After this many seconds of total silence the stuck attempt is abandoned and the model is asked to pick up where it left off, up to the number of attempts below. The same budget covers replies that come back empty (a reasoning model can spend the whole reply on thinking and write nothing) — the chat's status line names each retry, so a pause is never unexplained. 0 turns an option off."
         ) {
             VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Wait for the network instead of failing", isOn: $settings.chatWaitForNetwork)
+                        .font(.body.weight(.medium))
+                    Text("When a request fails because the Mac went offline — Wi-Fi dropped, VPN gone, cable pulled — the chat parks it, counts the outage in its status line, and re-sends the moment macOS reports a network again. A reply already streaming when the drop hit is continued rather than duplicated. The wait costs no retry attempt, and Stop always ends it. Off, the failure runs through the retry budget below as usual.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+
+                Divider()
+
                 HStack(spacing: 10) {
                     Text("Retry a failed request")
                         .font(.caption)

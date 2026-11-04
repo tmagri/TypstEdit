@@ -121,6 +121,40 @@ final class AICompletionServiceTests: XCTestCase {
         XCTAssertTrue(two.contains("2 automatic continue attempts"), two)
     }
 
+    // MARK: - Connection lost mid-reply (idleSeconds 0 conversion)
+
+    // `requestChatStep` converts a mid-stream transport death into
+    // `stalledResponse(idleSeconds: 0, …)`; the zero is the wording helpers'
+    // cue to describe a cut connection instead of a silent hang.
+
+    func testConnectionLossContinueMessageDescribesTheCut() {
+        let message = AICompletionService.stallContinueMessage(idleSeconds: 0, timeoutSeconds: 150)
+        XCTAssertTrue(message.contains("connection dropped"), message)
+        XCTAssertTrue(message.contains("nothing from it was kept"), message)
+        XCTAssertTrue(message.contains("final answer"), message)
+        // No silent period to report, so no stall numbers either.
+        XCTAssertFalse(message.contains("stalled"), message)
+        XCTAssertFalse(message.contains("150s"), message)
+    }
+
+    func testConnectionLossStatusLineAndNoteNameTheCut() {
+        let line = AICompletionService.stallStatusLine(attempt: 1, maxAttempts: 2, idleSeconds: 0)
+        XCTAssertTrue(line.contains("Connection lost"), line)
+        XCTAssertTrue(line.contains("1 of 2"), line)
+        XCTAssertFalse(line.contains("0s"), line)
+
+        let note = AICompletionService.stallContinueStatusNote(attempt: 1, maxAttempts: 2, idleSeconds: 0)
+        XCTAssertTrue(note.contains("connection dropped"), note)
+    }
+
+    func testConnectionLossFailureMessagePointsAtTheNetwork() {
+        let message = AICompletionService.stallFailureMessage(attempts: 2, idleSeconds: 0, timeoutSeconds: 150)
+        XCTAssertTrue(message.contains("connection dropped"), message)
+        XCTAssertTrue(message.contains("2 automatic continue attempts also failed"), message)
+        XCTAssertTrue(message.contains("network"), message)
+        XCTAssertFalse(message.contains("server may be overloaded"), message)
+    }
+
     func testStalledResponseErrorDescribesTheSilence() {
         let error = AIError.stalledResponse(idleSeconds: 150, timeoutSeconds: 150)
         let description = (error as LocalizedError).errorDescription ?? ""

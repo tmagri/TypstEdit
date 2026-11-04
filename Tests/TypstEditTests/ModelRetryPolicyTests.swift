@@ -34,6 +34,36 @@ final class ModelRetryPolicyTests: XCTestCase {
         XCTAssertFalse(ModelRetryPolicy.isRetryable(urlError: .timedOut))
     }
 
+    // MARK: - Waiting out a lost network
+
+    func testUnambiguousConnectivityLossesAreRecognised() {
+        XCTAssertTrue(ModelRetryPolicy.isConnectivityLoss(code: .notConnectedToInternet))
+        XCTAssertTrue(ModelRetryPolicy.isConnectivityLoss(code: .networkConnectionLost))
+        XCTAssertTrue(ModelRetryPolicy.isConnectivityLoss(code: .dataNotAllowed))
+    }
+
+    func testEndpointUnreachabilityIsNotAnUnambiguousConnectivityLoss() {
+        // A dead host or a failed lookup may be either a dead network or a
+        // dead endpoint — the wait is gated on the path monitor, not here.
+        for code in [URLError.Code.dnsLookupFailed, .cannotFindHost, .cannotConnectToHost] {
+            XCTAssertFalse(ModelRetryPolicy.isConnectivityLoss(code: code), "\(code) is ambiguous")
+        }
+    }
+
+    func testAmbiguousCodesAreRecognisedForTheMonitorGate() {
+        for code in [URLError.Code.dnsLookupFailed, .cannotFindHost, .cannotConnectToHost] {
+            XCTAssertTrue(ModelRetryPolicy.mayBeConnectivityLoss(code: code), "\(code) should wait only when the monitor reports no path")
+        }
+        XCTAssertFalse(ModelRetryPolicy.mayBeConnectivityLoss(code: .notConnectedToInternet))
+        XCTAssertFalse(ModelRetryPolicy.mayBeConnectivityLoss(code: .badURL))
+    }
+
+    func testOfflineWaitStatusLineCountsTheWait() {
+        XCTAssertTrue(ModelRetryPolicy.offlineWaitStatusLine(seconds: 0).contains("Network lost"))
+        XCTAssertTrue(ModelRetryPolicy.offlineWaitStatusLine(seconds: 45).contains("(45s)"))
+        XCTAssertTrue(ModelRetryPolicy.offlineWaitStatusLine(seconds: 135).contains("(2m 15s)"))
+    }
+
     // MARK: - Delay
 
     func testDelayGrowsExponentiallyThenCaps() {

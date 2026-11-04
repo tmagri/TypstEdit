@@ -544,6 +544,17 @@ class AISettingsManager: ObservableObject {
     /// where a fresh request is a *continuation*. Retrying here replays the
     /// same request, which is only safe while nothing has been shown yet.
     @AppStorage("aiChatTransportRetries") var chatTransportRetries: Int = ModelRetryPolicy.defaultRetries
+    /// When a request fails because the Mac itself went offline — Wi-Fi
+    /// dropped, VPN gone, cable pulled — keep the turn alive instead of
+    /// failing it: park the request (the chat's status line counts the
+    /// outage) until macOS reports a network path again, then re-send. A
+    /// reply already streaming when the drop hit is continued rather than
+    /// duplicated, via the auto-continue machinery. The wait costs no
+    /// transport-retry attempt, and Stop always ends it. Off, the failure
+    /// runs through the retry budget above like any other transport error.
+    @AppStorage("aiChatWaitForNetwork") var chatWaitForNetwork: Bool = true {
+        willSet { objectWillChange.send() }
+    }
     /// How many times a stuck turn is automatically continued before the
     /// error is surfaced. Covers both triggers: a response that went silent
     /// past the stall timeout, and a response that ended empty because the

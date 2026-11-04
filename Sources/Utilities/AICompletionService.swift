@@ -1641,7 +1641,12 @@ class AICompletionService: ObservableObject {
     /// One-line status for the chat's live generating row while a stalled
     /// attempt is being continued.
     nonisolated static func stallStatusLine(attempt: Int, maxAttempts: Int?, idleSeconds: Int) -> String {
-        "No output for \(idleSeconds)s — continuing (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
+        // idleSeconds 0 marks a stream cut by a connection loss (converted in
+        // requestChatStep) rather than a silent hang — phrase it that way.
+        let cause = idleSeconds == 0
+            ? "Connection lost"
+            : "No output for \(idleSeconds)s"
+        return "\(cause) — continuing (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
     }
 
     /// Note pushed into the live thinking box when an empty reply is nudged,
@@ -1664,7 +1669,12 @@ class AICompletionService: ObservableObject {
     /// the model its previous reply was cut off mid-stream so it resumes
     /// instead of starting over as if nothing happened.
     nonisolated static func stallContinueMessage(idleSeconds: Int, timeoutSeconds: Int) -> String {
-        "Your previous reply stalled — no output arrived for \(idleSeconds)s (limit: \(timeoutSeconds)s) — and nothing from it was kept. Pick up where you left off: re-issue any tool call you were making, or write your final answer now."
+        // idleSeconds 0 marks a stream cut by a connection loss rather than a
+        // silent hang — phrase it that way.
+        let cause = idleSeconds == 0
+            ? "was cut off when the connection dropped, and nothing from it was kept"
+            : "stalled — no output arrived for \(idleSeconds)s (limit: \(timeoutSeconds)s) — and nothing from it was kept"
+        return "Your previous reply \(cause). Pick up where you left off: re-issue any tool call you were making, or write your final answer now."
     }
 
     /// Placeholder for the abandoned attempt in the transcript, mirroring the
@@ -1676,7 +1686,12 @@ class AICompletionService: ObservableObject {
     /// model merely started over for no reason. Never persisted — the saved
     /// reasoning is collected separately.
     nonisolated static func stallContinueStatusNote(attempt: Int, maxAttempts: Int?, idleSeconds: Int) -> String {
-        "\n\n[No output for \(idleSeconds)s — the stalled attempt was abandoned and automatically continued (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
+        // idleSeconds 0 marks a stream cut by a connection loss rather than a
+        // silent hang — phrase it that way.
+        let cause = idleSeconds == 0
+            ? "The connection dropped mid-reply"
+            : "No output for \(idleSeconds)s"
+        return "\n\n[\(cause) — the interrupted attempt was abandoned and automatically continued (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
     }
 
     // MARK: Thinking Re-Seeding (interrupted/empty replies)
@@ -1742,11 +1757,19 @@ class AICompletionService: ObservableObject {
     /// local server rather than the prompt — a stream that keeps going
     /// silent is a server problem, not a wording problem.
     nonisolated static func stallFailureMessage(attempts: Int, idleSeconds: Int, timeoutSeconds: Int) -> String {
-        var message = "The model went silent for \(idleSeconds)s (stall limit: \(timeoutSeconds)s)"
+        // idleSeconds 0 marks a stream cut by a connection loss rather than a
+        // silent hang — phrase it that way.
+        let connectionLoss = idleSeconds == 0
+        var message = connectionLoss
+            ? "The connection dropped mid-reply"
+            : "The model went silent for \(idleSeconds)s (stall limit: \(timeoutSeconds)s)"
         if attempts > 0 {
-            message += " and \(attempts) automatic continue attempt\(attempts == 1 ? "" : "s") also stalled"
+            let verb = connectionLoss ? "also failed" : "also stalled"
+            message += " and \(attempts) automatic continue attempt\(attempts == 1 ? "" : "s") \(verb)"
         }
-        message += ". The AI server may be overloaded or hung — check it, retry, or raise the stall timeout in Settings → AI Assistant → AI Chat."
+        message += connectionLoss
+            ? ". The Mac's network may still be unstable — check the connection, then retry."
+            : ". The AI server may be overloaded or hung — check it, retry, or raise the stall timeout in Settings → AI Assistant → AI Chat."
         return message
     }
 
@@ -2007,8 +2030,22 @@ class AICompletionService: ObservableObject {
                         idleSeconds: Int(settings.timeoutSeconds),
                         timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
                     )
-                } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) && attempt < retries {
+                } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) {
                     if Task.isCancelled { throw CancellationError() }
+                    // The Mac going offline is unlike the endpoint failing:
+                    // backoff retries against a dead link burn the whole
+                    // budget inside a minute and then fail the turn anyway.
+                    // Park on the network instead — no retry attempt spent —
+                    // and re-send the moment it comes back.
+                    if settings.chatWaitForNetwork,
+                       Self.shouldWaitForNetworkRestore(code: error.code, networkIsUp: NetworkMonitor.shared.isConnected) {
+                        if try await Self.waitWhileOffline(onStatus: onStatus) { continue }
+                        // The system already reported a path, so the error is
+                        // stale or the monitor briefly disagreed — treat it
+                        // like any other transport failure below, so a
+                        // misleading error can't spin a tight retry loop.
+                    }
+                    guard attempt < retries else { throw error }
                     attempt += 1
                     try await Self.waitBeforeRetry(
                         attempt: attempt,
@@ -2059,8 +2096,15 @@ class AICompletionService: ObservableObject {
                     idleSeconds: Int(settings.timeoutSeconds),
                     timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
                 )
-            } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) && attempt < retries {
+            } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) {
                 if Task.isCancelled { throw CancellationError() }
+                // Same park-until-the-network-returns as the non-streaming
+                // path above: an outage shouldn't cost the turn.
+                if settings.chatWaitForNetwork,
+                   Self.shouldWaitForNetworkRestore(code: error.code, networkIsUp: NetworkMonitor.shared.isConnected) {
+                    if try await Self.waitWhileOffline(onStatus: onStatus) { continue }
+                }
+                guard attempt < retries else { throw error }
                 attempt += 1
                 try await Self.waitBeforeRetry(
                     attempt: attempt,
@@ -2097,13 +2141,32 @@ class AICompletionService: ObservableObject {
 
             // Connected with a 200: from here a failure is no longer safe to
             // retry by re-sending, so hand off to the stall/continue path.
-            return try await Self.consumeStreamingStep(
-                bytes: bytes,
-                ctx: ctx,
-                settings: settings,
-                reasoningDelta: reasoningDelta,
-                textDelta: textDelta
-            )
+            do {
+                return try await Self.consumeStreamingStep(
+                    bytes: bytes,
+                    ctx: ctx,
+                    settings: settings,
+                    reasoningDelta: reasoningDelta,
+                    textDelta: textDelta
+                )
+            } catch let error as URLError
+                where settings.chatWaitForNetwork && ModelRetryPolicy.isRetryable(urlError: error.code) {
+                // The stream itself died on transport — most often the network
+                // went away mid-reply. Tokens are already on screen, so
+                // re-sending would duplicate them: wait out the outage, then
+                // surface the same recovery a silent stream gets, which
+                // continues the half-delivered reply instead of repeating it.
+                // (`idleSeconds: 0` is the stall wording's cue to describe a
+                // cut connection rather than a silent hang.)
+                if Task.isCancelled { throw CancellationError() }
+                if Self.shouldWaitForNetworkRestore(code: error.code, networkIsUp: NetworkMonitor.shared.isConnected) {
+                    try await Self.waitWhileOffline(onStatus: onStatus)
+                }
+                throw AIError.stalledResponse(
+                    idleSeconds: 0,
+                    timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
+                )
+            }
         }
     }
 
@@ -2125,6 +2188,51 @@ class AICompletionService: ObservableObject {
         let nanoseconds = UInt64(max(0, delay) * 1_000_000_000)
         try await Task.sleep(nanoseconds: nanoseconds)
         onStatus?(nil)
+    }
+
+    /// Whether a failed connection should park until the network returns
+    /// rather than burn the retry budget: either the error unambiguously says
+    /// the machine is offline, or it could as easily be a dead network as a
+    /// dead endpoint and the system currently reports no path at all.
+    private static func shouldWaitForNetworkRestore(
+        code: URLError.Code,
+        networkIsUp: Bool
+    ) -> Bool {
+        ModelRetryPolicy.isConnectivityLoss(code: code)
+            || (!networkIsUp && ModelRetryPolicy.mayBeConnectivityLoss(code: code))
+    }
+
+    /// Parks the request while the Mac has no network path, keeping the
+    /// chat's status line counting the outage, and returns once a path is
+    /// back. The wait is unbounded — a chat left running overnight resumes
+    /// with the network — costs no retry attempt, and `CancellationError`
+    /// (the chat's Stop button, or the window closing) ends it immediately.
+    ///
+    /// Returns whether it actually waited. `false` means the system already
+    /// reported a path, so the error was stale or the monitor briefly
+    /// disagreed; the caller then falls back to the ordinary budgeted retry
+    /// so a misleading error can't spin a tight retry loop.
+    private static func waitWhileOffline(
+        onStatus: (@MainActor (String?) -> Void)?
+    ) async throws -> Bool {
+        let monitor = NetworkMonitor.shared
+        guard !monitor.isConnected else { return false }
+        onStatus?(ModelRetryPolicy.offlineWaitStatusLine(seconds: 0))
+        var seconds = 0
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+            } catch {
+                onStatus?(nil)
+                throw CancellationError()
+            }
+            seconds += 1
+            if monitor.isConnected { break }
+            onStatus?(ModelRetryPolicy.offlineWaitStatusLine(seconds: seconds))
+        }
+        onStatus?(nil)
+        guard !Task.isCancelled else { throw CancellationError() }
+        return true
     }
 
     /// A provider error message with the status code kept for diagnostics.

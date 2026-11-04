@@ -57,6 +57,44 @@ enum ModelRetryPolicy {
         }
     }
 
+    /// Whether a `URLError` unambiguously means this machine lost its own
+    /// network — what a dropped Wi-Fi, a dead VPN, or a pulled cable produce.
+    /// macOS can take a moment to retract a satisfied path after a drop, so
+    /// these are worth waiting on even when the path monitor still claims a
+    /// link. Backoff retries against a dead link burn the whole retry budget
+    /// inside a minute; a wait actually survives the outage.
+    static func isConnectivityLoss(code: URLError.Code) -> Bool {
+        switch code {
+        case .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether a `URLError` could be either a lost network or a dead endpoint
+    /// — a failed DNS lookup and an unreachable host are both sides of that
+    /// line. These wait only when the system currently reports no path at
+    /// all, so a typo'd host or an offline server fails through the retry
+    /// budget instead of parking the request forever.
+    static func mayBeConnectivityLoss(code: URLError.Code) -> Bool {
+        switch code {
+        case .dnsLookupFailed, .cannotFindHost, .cannotConnectToHost:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The line shown while a request is parked for a lost network, counting
+    /// the wait so a long outage still looks alive rather than hung.
+    static func offlineWaitStatusLine(seconds: Int) -> String {
+        let readable = seconds < 60
+            ? "\(seconds)s"
+            : "\(seconds / 60)m \(seconds % 60)s"
+        return "Network lost — waiting for the connection to come back (\(readable))…"
+    }
+
     /// Gap before attempt `attempt` (1-based: 1 is the first retry).
     ///
     /// `retryAfter` is a floor; `jitter` is a multiplier in `0.5...1.5` so
