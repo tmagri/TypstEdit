@@ -155,13 +155,17 @@ public final class TreeSitterState {
     ///   - touchedLayers: A set of layers. Each time a layer is visited, it will be removed from this set.
     ///                    Use this to determine if any layers were not modified after this method was run.
     ///                    Those layers should be removed.
+    ///   - shouldQuery: Returns false for layers whose injections cannot have changed. Their injected layers must
+    ///                  not be in `touchedLayers`, or they are removed.
     /// - Returns: A set of indices of any new layers. This set indicates ranges that should be re-highlighted.
     public func updateInjectedLayers(
         readCallback: @escaping SwiftTreeSitter.Predicate.TextProvider,
         readBlock: @escaping Parser.ReadBlock,
-        touchedLayers: Set<LanguageLayer>
+        touchedLayers: Set<LanguageLayer>,
+        shouldQuery: (LanguageLayer) -> Bool = { _ in true }
     ) -> IndexSet {
         var layerSet = Set(layers)
+        let existingIds = Set(layers.map { ObjectIdentifier($0) })
         var touchedLayers = touchedLayers
         var rangeSet = IndexSet()
 
@@ -171,7 +175,7 @@ public final class TreeSitterState {
         while idx < layers.count {
             let layer = layers[idx]
 
-            if layer.supportsInjections {
+            if layer.supportsInjections && shouldQuery(layer) {
                 rangeSet.formUnion(
                     updateInjectedLanguageLayer(
                         readCallback: readCallback,
@@ -188,6 +192,24 @@ public final class TreeSitterState {
 
         // Delete any layers that weren't touched at some point during the edit.
         removeLanguageLayers(in: touchedLayers)
+
+        // A new layer can replace an existing layer that was outside the queried region, for example when a
+        // `.note` Typst region grows over the next paragraph. Remove older layers of the same language that
+        // overlap a new one.
+        let newLayers = layers.filter { !existingIds.contains(ObjectIdentifier($0)) }
+        if !newLayers.isEmpty {
+            let replaced = layers.filter { layer in
+                existingIds.contains(ObjectIdentifier(layer)) && layer.id != primaryLayer.id && newLayers.contains { new in
+                    new.id == layer.id && new.ranges.contains { newRange in
+                        layer.ranges.contains { NSIntersectionRange($0, newRange).length > 0 }
+                    }
+                }
+            }
+            for layer in replaced {
+                layer.ranges.forEach { rangeSet.insert(range: $0) }
+            }
+            layers.removeAll { layer in replaced.contains { $0 === layer } }
+        }
 
         return rangeSet
     }

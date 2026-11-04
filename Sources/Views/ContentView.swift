@@ -466,7 +466,8 @@ struct ContentView: View {
             .onChange(of: editorController.sourceCode) { newValue in
                 editorController.checkUnsavedChanges(currentContent: newValue)
                 let isProgrammatic = editorController.isApplyingProgrammaticChange
-                if editorController.isNoteFile && editorController.hasUnsavedChanges {
+                if editorController.isNoteFile && editorController.hasUnsavedChanges,
+                   editorController.previewStale != !isProgrammatic {
                     editorController.previewStale = !isProgrammatic
                 }
                 scheduleCompilation(with: newValue, force: isProgrammatic)

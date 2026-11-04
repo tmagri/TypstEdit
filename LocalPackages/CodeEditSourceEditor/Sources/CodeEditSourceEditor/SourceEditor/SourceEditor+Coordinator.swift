@@ -50,17 +50,9 @@ extension SourceEditor {
                 object: controller.textView
             )
 
-            // Needs to be put on the main runloop or SwiftUI gets mad about updating state during view updates.
-            NotificationCenter.default
-                .publisher(
-                    for: TextViewController.scrollPositionDidUpdateNotification,
-                    object: controller
-                )
-                .receive(on: RunLoop.main)
-                .sink { [weak self] notification in
-                    self?.textControllerScrollDidChange(notification)
-                }
-                .store(in: &cancellables)
+            // TypstEdit: the scroll position is not published into `editorState`. Each scroll
+            // tick would otherwise invalidate every SwiftUI view that observes the state, which
+            // makes scrolling stutter. The app does not read `editorState.scrollPosition`.
         }
 
         /// Listen to the cursor publisher on the text view controller.

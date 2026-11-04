@@ -21,8 +21,12 @@ struct ImageDetector {
         let nsText = text as NSString
         let safeIndex = max(0, min(index, nsText.length))
         
-        // 1. Try Markdown Image `![alt](url)`
-        let matches = ImageRegex.markdown.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+        // 1. Try Markdown Image `![alt](url)`. Search only a window around the cursor,
+        // because this runs on every cursor move.
+        let windowStart = max(0, safeIndex - 2000)
+        let windowEnd = min(nsText.length, safeIndex + 2000)
+        let window = NSRange(location: windowStart, length: windowEnd - windowStart)
+        let matches = ImageRegex.markdown.matches(in: text, options: [], range: window)
         for match in matches {
             if safeIndex >= match.range.location && safeIndex <= match.range.upperBound {
                 return match.range
@@ -30,20 +34,7 @@ struct ImageDetector {
         }
         
         // 2. Try Typst Image `#image(...)`
-        let typstMatches = ImageRegex.typst.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
-        for match in typstMatches.reversed() {
-            if match.range.location <= safeIndex {
-                // Potential start. Now find the matching closing parenthesis.
-                if let contentRange = findClosingParenthesis(in: text, startingAt: match.range.location + match.range.length) {
-                    let fullRange = NSRange(location: match.range.location, length: contentRange.upperBound - match.range.location)
-                    if safeIndex >= fullRange.location && safeIndex <= fullRange.upperBound {
-                        return fullRange
-                    }
-                }
-            }
-        }
-        
-        return nil
+        return CallRangeFinder.enclosingCall(matching: ImageRegex.typst, in: text, at: safeIndex, fromEnd: true)
     }
     
     static func parseImage(in text: String, at index: Int) -> ImageInfo? {
@@ -100,26 +91,6 @@ struct ImageDetector {
         }
         
         return ImageInfo(range: range, path: path, width: width, height: height, alt: alt, fit: fit)
-    }
-    
-    private static func findClosingParenthesis(in text: String, startingAt: Int) -> NSRange? {
-        let nsText = text as NSString
-        var depth = 1
-        var index = startingAt
-        
-        while index < nsText.length {
-            let char = nsText.substring(with: NSRange(location: index, length: 1))
-            if char == "(" {
-                depth += 1
-            } else if char == ")" {
-                depth -= 1
-                if depth == 0 {
-                    return NSRange(location: startingAt, length: index - startingAt + 1)
-                }
-            }
-            index += 1
-        }
-        return nil
     }
     
     private static func smartSplit(_ text: String) -> [String] {

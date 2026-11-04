@@ -175,8 +175,13 @@ public class GutterView: NSView {
             forName: TextSelectionManager.selectionChangedNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            self?.needsDisplay = true
+        ) { [weak self] notification in
+            // Only redraw for this editor's selection. The selection manager is replaced when
+            // the text is set, so compare against the current one instead of observing one object.
+            guard let self,
+                  let manager = notification.object as? TextSelectionManager,
+                  manager === self.textView?.selectionManager else { return }
+            self.needsDisplay = true
         }
     }
 

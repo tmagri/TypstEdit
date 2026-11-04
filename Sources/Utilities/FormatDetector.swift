@@ -288,14 +288,19 @@ struct FormatDetector {
     
     private static func findClosingMarker(in text: String, startingAt: Int, opener: String, closer: String) -> NSRange? {
         let nsText = text as NSString
+        // Compare UTF-16 code units instead of allocating a substring per character.
+        // This walk can reach the end of the document when a bracket is unclosed.
+        guard opener.utf16.count == 1, closer.utf16.count == 1,
+              let openUnit = opener.utf16.first, let closeUnit = closer.utf16.first else { return nil }
+        let length = nsText.length
         var depth = 1
         var index = startingAt
         
-        while index < nsText.length {
-            let char = nsText.substring(with: NSRange(location: index, length: 1))
-            if char == opener {
+        while index < length {
+            let char = nsText.character(at: index)
+            if char == openUnit {
                 depth += 1
-            } else if char == closer {
+            } else if char == closeUnit {
                 depth -= 1
                 if depth == 0 {
                     return NSRange(location: startingAt, length: index - startingAt + 1)

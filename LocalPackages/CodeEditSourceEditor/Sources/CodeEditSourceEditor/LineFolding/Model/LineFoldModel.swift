@@ -28,6 +28,11 @@ class LineFoldModel: NSObject, NSTextStorageDelegate, ObservableObject {
     private var textChangedStream: AsyncStream<Void>
     private var textChangedStreamContinuation: AsyncStream<Void>.Continuation
     private var cacheListenTask: Task<Void, Never>?
+    private var pendingRebuild: DispatchWorkItem?
+
+    /// Delay before folds are rebuilt after an edit. A rebuild walks every line in the document,
+    /// so a burst of keystrokes is coalesced into a single rebuild.
+    private static let rebuildDelay: TimeInterval = 0.2
 
     weak var controller: TextViewController?
     weak var foldView: NSView?
@@ -35,7 +40,10 @@ class LineFoldModel: NSObject, NSTextStorageDelegate, ObservableObject {
     init(controller: TextViewController, foldView: NSView) {
         self.controller = controller
         self.foldView = foldView
-        (textChangedStream, textChangedStreamContinuation) = AsyncStream<Void>.makeStream()
+        // Keep at most one pending rebuild. Extra requests made during a rebuild collapse into it.
+        (textChangedStream, textChangedStreamContinuation) = AsyncStream<Void>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
         self.calculator = LineFoldCalculator(
             foldProvider: controller.foldProvider,
             controller: controller,
@@ -67,7 +75,15 @@ class LineFoldModel: NSObject, NSTextStorageDelegate, ObservableObject {
             return
         }
         foldCache.storageUpdated(editedRange: editedRange, changeInLength: delta)
-        textChangedStreamContinuation.yield()
+        scheduleRebuild()
+    }
+
+    private func scheduleRebuild() {
+        pendingRebuild?.cancel()
+        let continuation = textChangedStreamContinuation
+        let item = DispatchWorkItem { continuation.yield() }
+        pendingRebuild = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.rebuildDelay, execute: item)
     }
 
     /// Finds the deepest cached depth of the fold for a line number.

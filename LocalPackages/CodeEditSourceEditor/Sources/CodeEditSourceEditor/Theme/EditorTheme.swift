@@ -160,11 +160,21 @@ public struct EditorTheme: Equatable {
         // this never substitutes an unrelated family (e.g. the proportional SF Pro
         // system font) when the requested face can't be resolved — it stays on the
         // editor's monospaced font, falling back to the base font if a face is missing.
+        // This runs for every highlighted run, so cache the resolved faces.
+        let key = "\(font.fontName)|\(font.pointSize)|\(attributes.bold)|\(attributes.italic)" as NSString
+        if let cached = Self.styledFontCache.object(forKey: key) {
+            return cached
+        }
+
         var traits = font.fontDescriptor.symbolicTraits
         if attributes.bold { traits.insert(.bold) }
         if attributes.italic { traits.insert(.italic) }
 
         let descriptor = font.fontDescriptor.withSymbolicTraits(traits)
-        return NSFont(descriptor: descriptor, size: font.pointSize) ?? font
+        let styled = NSFont(descriptor: descriptor, size: font.pointSize) ?? font
+        Self.styledFontCache.setObject(styled, forKey: key)
+        return styled
     }
+
+    nonisolated(unsafe) private static let styledFontCache = NSCache<NSString, NSFont>()
 }

@@ -833,7 +833,8 @@ class EditorController: NSObject, ObservableObject {
             let oldRanges = oldValue.cursorPositions?.map { $0.range }
             let newRanges = editorState.cursorPositions?.map { $0.range }
             if oldRanges != newRanges {
-                 updateFormattingState()
+                 // Debounced: this fires on every keystroke because the caret moves.
+                 scheduleFormattingUpdate()
             }
         }
     }
@@ -1204,13 +1205,27 @@ class EditorController: NSObject, ObservableObject {
         self.showStatus("File Loaded")
     }
 
+    /// `text` without leading and trailing whitespace and newlines, as a view into the original storage.
+    private static func trimmedView(_ text: String) -> Substring {
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        let scalars = text.unicodeScalars
+        var start = scalars.startIndex
+        var end = scalars.endIndex
+        while start < end, whitespace.contains(scalars[start]) {
+            start = scalars.index(after: start)
+        }
+        while end > start, whitespace.contains(scalars[scalars.index(before: end)]) {
+            end = scalars.index(before: end)
+        }
+        return text[start..<end]
+    }
+
     func checkUnsavedChanges(currentContent: String) {
         // Normalize by trimming trailing whitespace/newlines to avoid SourceEditor auto-adjustments
         // from triggering a false "dirty" state immediately after load.
-        let normalizedCurrent = currentContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedSaved = savedContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        let dirty = (normalizedCurrent != normalizedSaved)
+        // This runs on every keystroke, so compare trimmed views instead of allocating
+        // two trimmed copies of the whole document.
+        let dirty = Self.trimmedView(currentContent) != Self.trimmedView(savedContent)
         
         if self.hasUnsavedChanges != dirty {
             print("[DEBUG] EditorController(\(ObjectIdentifier(self))): checkUnsavedChanges changing to \(dirty) (prev=\(self.hasUnsavedChanges))")
@@ -2970,8 +2985,9 @@ class EditorController: NSObject, ObservableObject {
 
     /// Debounced entry point used by the high-frequency selection-change callback.
     /// Coalesces rapid cursor movements so `updateFormattingState` runs at most
-    /// ~once per 80ms instead of on every selection change. Discrete programmatic
-    /// edits still call `updateFormattingState` directly for immediate toolbar state.
+    /// once the caret has settled for 150ms instead of on every selection change, so
+    /// it stays out of the way while typing. Discrete programmatic edits still call
+    /// `updateFormattingState` directly for immediate toolbar state.
     private var formattingUpdateWorkItem: DispatchWorkItem?
     func scheduleFormattingUpdate() {
         formattingUpdateWorkItem?.cancel()
@@ -2979,7 +2995,7 @@ class EditorController: NSObject, ObservableObject {
             self?.updateFormattingState()
         }
         formattingUpdateWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: item)
     }
     
     // --- Smart Text Selection ---

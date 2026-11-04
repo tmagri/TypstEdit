@@ -20,37 +20,7 @@ enum BibliographyRegex {
 struct BibliographyDetector {
     /// Finds the range of #bibliography surrounds the index.
     static func findBibliographyRange(in text: String, at index: Int) -> NSRange? {
-        let nsText = text as NSString
-        let length = nsText.length
-
-        // Find #bibliography( and then walk to the matching closing parenthesis using
-        // a depth counter. The previous nested-group regex suffered catastrophic
-        // backtracking (ReDoS) when the closing ")" was absent — e.g. while typing
-        // "#bibliography(" — which froze the main thread.
-        let matches = BibliographyRegex.command.matches(in: text, options: [], range: NSRange(location: 0, length: length))
-        // Safety check: Clamp index
-        let safeIndex = max(0, min(index, length))
-
-        for match in matches {
-            let start = match.range.location
-            // Find matching )
-            var depth = 1
-            var i = match.range.location + match.range.length
-            while i < length && depth > 0 {
-                let char = nsText.substring(with: NSRange(location: i, length: 1))
-                if char == "(" { depth += 1 }
-                else if char == ")" { depth -= 1 }
-                i += 1
-            }
-
-            if depth == 0 {
-                let range = NSRange(location: start, length: i - start)
-                if safeIndex >= range.location && safeIndex <= (range.location + range.length) {
-                    return range
-                }
-            }
-        }
-        return nil
+        CallRangeFinder.enclosingCall(matching: BibliographyRegex.command, in: text, at: index)
     }
     
     /// Parses a #bibliography block to extract its properties.

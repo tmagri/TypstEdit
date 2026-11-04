@@ -25,37 +25,7 @@ enum TableRegex {
 struct TableDetector {
     /// Finds the range of a #table(...) block surrounding the given index.
     static func findTableRange(in text: String, at index: Int) -> NSRange? {
-        let nsText = text as NSString
-        let length = nsText.length
-        
-        // Very basic approach: find #table( and then find matching closing parenthesis
-        // This won't handle nested parentheses perfectly but it's a start.
-        let matches = TableRegex.command.matches(in: text, options: [], range: NSRange(location: 0, length: length))
-        
-        // Safety check: Clamp index
-        let safeIndex = max(0, min(index, length))
-        
-        for match in matches {
-            let start = match.range.location
-            // Find matching )
-            var depth = 1
-            var i = match.range.location + match.range.length
-            while i < length && depth > 0 {
-                let char = nsText.substring(with: NSRange(location: i, length: 1))
-                if char == "(" { depth += 1 }
-                else if char == ")" { depth -= 1 }
-                i += 1
-            }
-            
-            if depth == 0 {
-                let range = NSRange(location: start, length: i - start)
-                if safeIndex >= range.location && safeIndex <= (range.location + range.length) {
-                    return range
-                }
-            }
-        }
-        
-        return nil
+        CallRangeFinder.enclosingCall(matching: TableRegex.command, in: text, at: index)
     }
     
     static func parseTable(in text: String, at index: Int) -> TableInfo? {
