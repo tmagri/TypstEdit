@@ -10,6 +10,7 @@ extension Notification.Name {
     static let openProjectAndFile = Notification.Name("openProjectAndFile")
     static let openStandaloneFile = Notification.Name("openStandaloneFile")
     static let openProjectFolder = Notification.Name("openProjectFolder")
+    static let openNotebooks = Notification.Name("openNotebooks")
     /// Posted (object: the file's `URL`) whenever AI Chat's `write_file` or
     /// `edit_file` tool actually changes a file on disk — so any window with
     /// that file open can reload it (or warn if it would clobber unsaved
@@ -358,7 +359,6 @@ class EditorController: NSObject, ObservableObject {
         super.init()
         self.sourceEditorBridge = SourceEditorBridge(controller: self)
         setupDefaultConfiguration()
-        setupErrorSubscription()
         
         // Listen for Ctrl+Scroll or Cmd+Scroll to zoom
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
@@ -540,7 +540,7 @@ class EditorController: NSObject, ObservableObject {
         didSet {
             updateFileType()
             guard currentFileURL != oldValue else { return }
-            AIChatSessionStore.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
+            projectContext.chat.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
             OpenDocumentRegistry.shared.updateEditor(
                 ObjectIdentifier(self),
                 fileURL: currentFileURL,
@@ -551,12 +551,15 @@ class EditorController: NSObject, ObservableObject {
     @Published var projectRootURL: URL? {
         didSet {
             guard projectRootURL != oldValue else { return }
-            SkillsManager.shared.setProjectRoot(projectRootURL)
-            MCPManager.shared.setProjectRoot(projectRootURL)
+            projectContext.setProjectRoot(projectRootURL)
             projectSettings = projectRootURL.map { ProjectSettingsManager(projectRoot: $0) }
-            AIChatSessionStore.shared.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
+            projectContext.chat.updateContext(projectRoot: projectRootURL, currentFileURL: currentFileURL)
         }
     }
+    /// This window's own index, chat sessions, MCP servers and skills. Never
+    /// shared with another window, so two open projects cannot see each
+    /// other's state.
+    let projectContext = ProjectContext()
     /// Project-scoped settings (temp/vectorcache storage overrides, default
     /// enabled skills/MCP servers) for the active project. `nil` in
     /// standalone-file mode.
@@ -1036,25 +1039,29 @@ class EditorController: NSObject, ObservableObject {
         ]
     }
     
-    func setupErrorSubscription() {
-        NotificationCenter.default.addObserver(self, selector: #selector(handleTypstErrors(_:)), name: .typstErrorsUpdated, object: nil)
+    /// Listens to this window's compiler only (never another window's).
+    /// Called by `ContentView`, which owns the compiler.
+    func observeCompiler(_ compiler: TypstCompiler) {
+        NotificationCenter.default.removeObserver(self, name: .typstErrorsUpdated, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .calcDocumentParametersChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleTypstErrors(_:)), name: .typstErrorsUpdated, object: compiler)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleCalcDocumentParameters(_:)),
             name: .calcDocumentParametersChanged,
-            object: nil)
+            object: compiler)
     }
 
     /// Mirrors the open document's `calc-param` declarations onto the
     /// Calculator panel (display-only; the document is the source of truth).
     @objc private func handleCalcDocumentParameters(_ notification: Notification) {
-        let parameters = notification.object as? [CalculatorStoredVariable] ?? []
+        let parameters = notification.userInfo?["parameters"] as? [CalculatorStoredVariable] ?? []
         guard calculatorSession.documentParameters != parameters else { return }
         calculatorSession.documentParameters = parameters
     }
     
     @objc private func handleTypstErrors(_ notification: Notification) {
-        if let errors = notification.object as? [TypstError] {
+        if let errors = notification.userInfo?["errors"] as? [TypstError] {
              self.errors = errors
              DispatchQueue.main.async {
                  self.updateErrorHighlights(errors: errors)
@@ -1634,7 +1641,7 @@ class EditorController: NSObject, ObservableObject {
 
         insertText("#image(\"\(imagePath)\")")
         showStatus("Pasted image saved as \(fileName)")
-        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+        NotificationCenter.default.post(name: .refreshProjectSidebar, object: projectRootURL ?? currentFileURL)
         return true
     }
     
@@ -1808,10 +1815,10 @@ class EditorController: NSObject, ObservableObject {
                 try typstContent.write(to: targetURL, atomically: true, encoding: .utf8)
                 
                 if projectRootURL == nil || !shouldCopy {
-                    NotificationCenter.default.post(name: .openProjectAndFile, object: targetURL)
+                    AppDelegate.shared?.openProject(at: targetURL.deletingLastPathComponent(), file: targetURL, preferring: self)
                 } else {
-                    NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
-                    NotificationCenter.default.post(name: .fileDidCreate, object: targetURL)
+                    NotificationCenter.default.post(name: .refreshProjectSidebar, object: projectRootURL)
+                    NotificationCenter.default.post(name: .fileDidCreate, object: ["target": self, "url": targetURL])
                 }
                 
                 showStatus("LyX File Imported")
@@ -2135,7 +2142,7 @@ class EditorController: NSObject, ObservableObject {
                     imagePath = fileName
                 }
                 
-                NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+                NotificationCenter.default.post(name: .refreshProjectSidebar, object: projectRootURL ?? currentFileURL)
             } catch {
                 print("[ERROR] Failed to copy image: \(error.localizedDescription)")
                 if let currentFile = currentFileURL {
@@ -4193,7 +4200,8 @@ class EditorController: NSObject, ObservableObject {
                 text: self.sourceCode,
                 cursorIndex: self.selectedRange.location,
                 fileURL: self.currentFileURL,
-                errors: self.errors
+                errors: self.errors,
+                rag: self.projectContext.rag
             )
             finalPrompt = "\(context)\n\nUSER REQUEST: \(trimmed)"
         }
@@ -4201,7 +4209,7 @@ class EditorController: NSObject, ObservableObject {
         // Fold in any skills the user enabled for this request: their full
         // body (not just the description) becomes part of the system prompt,
         // same spirit as Agent Skills — cheap to list, only loaded when used.
-        let activeSkills = SkillsManager.shared.allSkills.filter { selectedSkillIDs.contains($0.id) }
+        let activeSkills = projectContext.skills.allSkills.filter { selectedSkillIDs.contains($0.id) }
         
         let isMd = self.isMarkdownFile
         
@@ -4224,8 +4232,8 @@ class EditorController: NSObject, ObservableObject {
         // MCP tools: start every selected server and gather its tools. If
         // none are selected (the common case), this is a no-op and the
         // request goes through the plain, pre-existing chat path unchanged.
-        let scopedServers = MCPManager.shared.allServers.filter { selectedMCPServerIDs.contains($0.id) }
-        let tools = await MCPManager.shared.availableTools(for: scopedServers)
+        let scopedServers = projectContext.mcp.allServers.filter { selectedMCPServerIDs.contains($0.id) }
+        let tools = await projectContext.mcp.availableTools(for: scopedServers)
 
         self.aiToolActivityLog = []
 
@@ -4259,7 +4267,7 @@ class EditorController: NSObject, ObservableObject {
                     let toolName = String(qualifiedName[separatorRange.upperBound...])
                     let argumentsData = Data(argumentsJSON.utf8)
                     let arguments = (try? JSONSerialization.jsonObject(with: argumentsData)) as? [String: Any] ?? [:]
-                    return try await MCPManager.shared.callTool(serverName: serverName, toolName: toolName, arguments: arguments)
+                    return try await self.projectContext.mcp.callTool(serverName: serverName, toolName: toolName, arguments: arguments)
                 }
             )
         }

@@ -96,6 +96,9 @@ final class LocalToolExecutor {
     static let pythonNamespace = "python"
 
     var scope: Scope = .none
+    /// The window's semantic index for `search_project`. `nil` when the chat has
+    /// no window (tests): the tool then falls back to the literal scan.
+    weak var rag: RAGManager?
     var pythonToolEnabled: Bool = false
     /// Whether the `web_fetch` tool is offered at all — off by default, same
     /// risk tier as the Python tool (network egress the user should opt into,
@@ -1055,7 +1058,7 @@ final class LocalToolExecutor {
         guard let query = arguments["query"] as? String, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "query is required"
         }
-        let chunks = await RAGManager.shared.search(query: query, topK: 5)
+        let chunks = await rag?.search(query: query, topK: 5) ?? []
         if !chunks.isEmpty {
             return chunks.map { "--- \($0.fileURL.lastPathComponent) ---\n\($0.text)" }.joined(separator: "\n\n")
         }
@@ -1233,7 +1236,7 @@ final class LocalToolExecutor {
     /// Called after every actual `write_file`/`edit_file` write.
     private static func notifyFileChangedOnDisk(_ url: URL) {
         NotificationCenter.default.post(name: .aiChatModifiedFile, object: url)
-        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+        NotificationCenter.default.post(name: .refreshProjectSidebar, object: url)
     }
 
     /// Advisory Typst compile check appended after `edit_file`/`write_file`
@@ -1692,7 +1695,7 @@ final class LocalToolExecutor {
             written += [md, json]
         }
         for url in written { Self.notifyFileChangedOnDisk(url) }
-        Self.notifyProjectFilesChanged()
+        notifyProjectFilesChanged()
 
         var lines = ["Imported '\(pdf.path)' pages \(range.lowerBound)-\(range.upperBound) of \(pdf.pageCount): \(result.summary)."]
         lines += written.map { "  \(relativePath(for: $0))" }
@@ -1831,7 +1834,7 @@ final class LocalToolExecutor {
         for output in result.outputs {
             Self.notifyFileChangedOnDisk(URL(fileURLWithPath: output))
         }
-        Self.notifyProjectFilesChanged()
+        notifyProjectFilesChanged()
 
         let written = result.outputs.isEmpty
             ? "  \(destination)"
@@ -2042,7 +2045,7 @@ final class LocalToolExecutor {
         guard approved else { throw LocalToolError.approvalDenied }
 
         try fm.createDirectory(at: folderURL, withIntermediateDirectories: true)
-        Self.notifyProjectFilesChanged()
+        notifyProjectFilesChanged()
         return "Created folder '\(relativePath(for: folderURL))'."
     }
 
@@ -2230,8 +2233,8 @@ final class LocalToolExecutor {
         return String(candidate.dropFirst(rootPath.count + 1))
     }
 
-    private static func notifyProjectFilesChanged() {
-        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+    private func notifyProjectFilesChanged() {
+        NotificationCenter.default.post(name: .refreshProjectSidebar, object: scope.root)
     }
 
     // MARK: - Web Fetch

@@ -38,6 +38,14 @@ final class AIChatManager: ObservableObject {
     /// Set by `AIChatSessionStore` when the conversation is registered;
     /// `persist()` reports transcript changes back through it.
     weak var sessionStore: AIChatSessionStore?
+    /// The window this conversation belongs to: its skills, MCP servers and
+    /// semantic index. Set by `AIChatSessionStore`; `nil` in tests, where
+    /// the detached context (no project) stands in.
+    weak var context: ProjectContext? {
+        didSet { localTools.rag = context?.rag }
+    }
+    private var skills: SkillsManager { (context ?? .detached).skills }
+    private var mcp: MCPManager { (context ?? .detached).mcp }
 
     @Published private(set) var messages: [ChatMessage] = []
     @Published var isGenerating: Bool = false
@@ -414,7 +422,7 @@ final class AIChatManager: ObservableObject {
     func defaultSkillIDs() -> Set<String> {
         Self.filteredDefaultSkillIDs(
             AISettingsManager.shared.chatDefaultSkillIDs,
-            available: SkillsManager.shared.allSkills
+            available: skills.allSkills
         )
     }
 
@@ -897,9 +905,9 @@ final class AIChatManager: ObservableObject {
             await compactHistory()
         }
 
-        let activeSkills = SkillsManager.shared.allSkills.filter { selectedSkillIDs.contains($0.id) }
-        let scopedServers = MCPManager.shared.allServers.filter { selectedMCPServerIDs.contains($0.id) }
-        let mcpTools = await MCPManager.shared.availableTools(for: scopedServers)
+        let activeSkills = skills.allSkills.filter { selectedSkillIDs.contains($0.id) }
+        let scopedServers = mcp.allServers.filter { selectedMCPServerIDs.contains($0.id) }
+        let mcpTools = await mcp.availableTools(for: scopedServers)
         localTools.ragToolEnabled = ragToolEnabled
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
@@ -1005,7 +1013,7 @@ final class AIChatManager: ObservableObject {
         }
         // Usage guidance each MCP server's author wrote for the model. Without
         // it the model discovers a server's conventions by failing calls.
-        let mcpInstructions = MCPManager.shared.instructions(for: scopedServers)
+        let mcpInstructions = mcp.instructions(for: scopedServers)
         if !mcpInstructions.isEmpty {
             var block = "<mcp_instructions>"
             for server in scopedServers where mcpInstructions[server.config.name] != nil {
@@ -2351,7 +2359,7 @@ final class AIChatManager: ObservableObject {
         // A user-configured MCP server's output is the same risk as a Python
         // script's: one call can return a whole document. Same bound, same
         // retained file, so the rest stays reachable with read_file.
-        let output = try await MCPManager.shared.callTool(
+        let output = try await mcp.callTool(
             serverName: namespace,
             toolName: toolName,
             arguments: arguments

@@ -1091,7 +1091,7 @@ final class SourceControlManager: ObservableObject {
         }
 
         if touchesWorkingTree {
-            NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+            NotificationCenter.default.post(name: .refreshProjectSidebar, object: target.standardizedFileURL)
             NotificationCenter.default.post(name: .gitWorkingTreeDidChange, object: target.standardizedFileURL)
         }
         if gen == generation {

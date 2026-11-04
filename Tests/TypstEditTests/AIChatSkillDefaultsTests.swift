@@ -78,7 +78,7 @@ final class AIChatSkillDefaultsTests: XCTestCase {
         let original = settings.chatDefaultSkillIDs
         defer { settings.chatDefaultSkillIDs = original }
 
-        let liveIDs = Set(SkillsManager.shared.allSkills.map(\.id))
+        let liveIDs = Set(ProjectContext.detached.skills.allSkills.map(\.id))
         // A stale ID no skill has (UUID makes collision impossible).
         let staleID = "global:deleted-skill-\(UUID().uuidString)"
         settings.chatDefaultSkillIDs = Array(liveIDs) + [staleID]

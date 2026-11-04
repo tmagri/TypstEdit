@@ -103,14 +103,9 @@ class FileSystemModel: ObservableObject {
         panel.allowsMultipleSelection = false
         
         if panel.runModal() == .OK, let url = panel.url {
-            // Projects live in the main window, wherever this was clicked.
-            if let appDelegate = AppDelegate.shared {
-                appDelegate.performInMainWindow(replacingDocument: true) {
-                    NotificationCenter.default.post(name: .openProjectFolder, object: url)
-                }
-            } else {
-                NotificationCenter.default.post(name: .openProjectFolder, object: url)
-            }
+            // A folder that is already open comes forward; otherwise it opens
+            // in an idle window or a new one.
+            AppDelegate.shared?.openProject(at: url)
         }
     }
     
@@ -371,6 +366,7 @@ class FileSystemModel: ObservableObject {
         guard indexesProject else { return }
         guard let folder = currentFolder, !isNotebookFolder else { return }
         guard RAGManager.shouldUseRAG(for: folder) else { return }
+        guard let rag = documentController?.projectContext.rag else { return }
 
         let elapsed = Date().timeIntervalSince(lastIndexRequest)
         guard force || elapsed >= Self.minimumIndexInterval else {
@@ -386,7 +382,7 @@ class FileSystemModel: ObservableObject {
             indexPending = true
             return
         }
-        guard !RAGManager.shared.isIndexing else {
+        guard !rag.isIndexing else {
             // The manual "Update AI Index" button runs a pass outside this
             // model. Retry shortly instead of dropping the change.
             indexPending = true
@@ -398,7 +394,7 @@ class FileSystemModel: ObservableObject {
         indexPending = false
         let project = folder
         indexTask = Task(priority: .background) { [weak self] in
-            await RAGManager.shared.indexProject(at: project)
+            await rag.indexProject(at: project)
             guard let self, !Task.isCancelled else { return }
             self.indexTask = nil
             if self.indexPending { self.indexProjectIfNeeded(force: false) }
@@ -427,9 +423,7 @@ class FileSystemModel: ObservableObject {
                 let mainFile = url.appendingPathComponent("main.typ")
                 let content = template.content
                 try content.write(to: mainFile, atomically: true, encoding: .utf8)
-                self.currentFolder = url
-                self.isNewUnsavedFile = false
-                loadFiles()
+                AppDelegate.shared?.openProject(at: url, file: mainFile, preferring: documentController)
             } catch {
                 print("Error creating project: \(error)")
             }
@@ -444,6 +438,14 @@ class FileSystemModel: ObservableObject {
         }
     }
     
+    /// Adds this model's window as the notification target, so only that
+    /// window reacts.
+    private func windowPayload(_ values: [String: Any]) -> [String: Any] {
+        var payload = values
+        if let documentController { payload["target"] = documentController }
+        return payload
+    }
+
     func createNewFile() {
         // Now "New File" starts as an unsaved buffer instead of immediate save
         self.isNewUnsavedFile = true
@@ -508,7 +510,7 @@ class FileSystemModel: ObservableObject {
         // Renaming in macOS is often done via an alert or inline.
         // For simplicity, we'll use a NSSavePanel-like approach or just a simple input if we were in a custom view.
         // Let's use a simple prompt logic or post a notification for ContentView to handle it with an alert.
-        NotificationCenter.default.post(name: .requestRename, object: url)
+        NotificationCenter.default.post(name: .requestRename, object: windowPayload(["url": url]))
     }
     
     func performRename(from url: URL, to newName: String) {
@@ -516,7 +518,7 @@ class FileSystemModel: ObservableObject {
         do {
             try FileManager.default.moveItem(at: url, to: newURL)
             loadFiles()
-            NotificationCenter.default.post(name: .fileDidRename, object: ["old": url, "new": newURL])
+            NotificationCenter.default.post(name: .fileDidRename, object: windowPayload(["old": url, "new": newURL]))
         } catch {
             print("Error renaming file: \(error)")
         }
@@ -568,13 +570,15 @@ struct SidebarView: View {
     @ObservedObject var model: FileSystemModel
     @Binding var selectedFile: URL?
     @EnvironmentObject var themeManager: ThemeManager
-    @StateObject private var compiler = TypstCompiler()
+    /// The window's own compiler, for the Issues panel.
+    @ObservedObject var compiler: TypstCompiler
     @ObservedObject var editorController: EditorController
     /// Owned by ContentView so switching to AI Chat or Calculator keeps the
     /// repository state instead of scanning again when Files comes back.
     @ObservedObject var sourceControl: SourceControlManager
     @State private var sourceControlLoadingRoot: URL?
-    @ObservedObject private var ragManager = RAGManager.shared
+    /// The window's own semantic index.
+    @ObservedObject var ragManager: RAGManager
     @ObservedObject private var generalSettings = GeneralSettingsManager.shared
 
     @State private var sidebarMode: Int = 0 // 0: Projects, 1: Notebooks
@@ -590,6 +594,13 @@ struct SidebarView: View {
             AccessibleTab(1, title: "Notebooks", systemImage: "book.closed", selectedSystemImage: "book.closed.fill", color: .indigo),
         ]
         return tabs.filter { visibility.browserModes.contains($0.value) }
+    }
+
+    /// True when one path is the other, or contains it.
+    static func overlaps(_ lhs: URL, _ rhs: URL) -> Bool {
+        let a = ProjectWindowRouter.canonicalFolder(lhs)
+        let b = ProjectWindowRouter.canonicalFolder(rhs)
+        return a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/")
     }
 
     private var sourceControlRoot: URL? {
@@ -861,12 +872,13 @@ struct SidebarView: View {
         .sheet(item: $imageCleanupTarget) { target in
             ImageCleanupView(root: target.url)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .typstErrorsUpdated)) { notification in
-            if let errors = notification.object as? [TypstError] {
-                compiler.errors = errors
+        .onReceive(NotificationCenter.default.publisher(for: .refreshProjectSidebar)) { notification in
+            // The object is the changed project, folder or file. Another
+            // window's project is not reloaded here.
+            if let changed = notification.object as? URL, let folder = model.currentFolder,
+               !Self.overlaps(changed, folder) {
+                return
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .refreshProjectSidebar)) { _ in
             model.loadFiles()
             NotebookManager.shared.loadNotebooks()
             if sourceControlRoot != nil {

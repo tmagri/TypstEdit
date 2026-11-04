@@ -196,7 +196,7 @@ class TypstCompiler: ObservableObject {
             )
         }
         self.errors = combined
-        NotificationCenter.default.post(name: .typstErrorsUpdated, object: combined)
+        NotificationCenter.default.post(name: .typstErrorsUpdated, object: self, userInfo: ["errors": combined])
     }
 
     var isDarkMode: Bool = false
@@ -404,6 +404,29 @@ class TypstCompiler: ObservableObject {
         // up just before cleanUp() is called to switch processes.
     }
 
+    /// Set to the window's `ProjectContext.instanceID`. Two windows can
+    /// preview files that share a temp folder (the same project, or a
+    /// standalone copy of a project file); the namespace keeps their shadow
+    /// files apart.
+    var scratchNamespace: String?
+
+    /// `main.typ.preview` or, with a namespace, `main.typ.1a2b3c4d.preview`.
+    nonisolated static func shadowStem(for filename: String, namespace: String?) -> String {
+        guard let namespace, !namespace.isEmpty else { return "\(filename).preview" }
+        return "\(filename).\(namespace).preview"
+    }
+
+    /// Removes only the shadow files one window wrote into `tempDir`, for when
+    /// another window still uses the folder.
+    nonisolated static func cleanUpScratchFiles(in tempDir: URL, namespace: String) {
+        let manager = FileManager.default
+        guard let names = try? manager.contentsOfDirectory(atPath: tempDir.path) else { return }
+        let marker = ".\(namespace).preview."
+        for name in names where name.contains(marker) {
+            try? manager.removeItem(at: tempDir.appendingPathComponent(name))
+        }
+    }
+
     /// Call this when the project or app is about to close to remove the temp/ directory.
     func cleanUpProjectTemp(projectRoot: URL) {
         TypstCompiler.cleanUpTempDirectory(in: projectRoot)
@@ -542,8 +565,9 @@ class TypstCompiler: ObservableObject {
         // contain it — otherwise Typst refuses to compile ("source file must be
         // contained in project root").
         let projectTempDir = ensureTempDirectory(in: workingDirectory)
-        let shadowSourceURL = projectTempDir.appendingPathComponent("\(filename).preview.typ")
-        let shadowPDFURL = projectTempDir.appendingPathComponent("\(filename).preview.pdf")
+        let shadowStem = Self.shadowStem(for: filename, namespace: scratchNamespace)
+        let shadowSourceURL = projectTempDir.appendingPathComponent("\(shadowStem).typ")
+        let shadowPDFURL = projectTempDir.appendingPathComponent("\(shadowStem).pdf")
         
         let projectRoot = workingDirectory
         let compileRoot = Self.compileRoot(projectRoot: projectRoot, shadowDirectory: projectTempDir)
@@ -640,7 +664,8 @@ class TypstCompiler: ObservableObject {
                 // Mirror the document's parameters onto the Calculator panel.
                 NotificationCenter.default.post(
                     name: .calcDocumentParametersChanged,
-                    object: calcPipeline.parameters)
+                    object: self,
+                    userInfo: ["parameters": calcPipeline.parameters])
             }
 
             // The bridge module and the WASM numeric core are loaded by
@@ -905,8 +930,10 @@ class TypstCompiler: ObservableObject {
             isCompiling = false
             compilationStatus = "Watching..."
             // Notify the view with a small delay to ensure the file is fully flushed.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                NotificationCenter.default.post(name: .pdfDidUpdate, object: outputURL)
+            // The compiler is the sender, so only its own window reloads.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self else { return }
+                NotificationCenter.default.post(name: .pdfDidUpdate, object: self, userInfo: ["url": outputURL])
             }
             // A successful compile clears stale compile diagnostics, but keeps the
             // `.note` operator-delimiting warnings, which stay valid until the
@@ -3104,11 +3131,16 @@ actor WebImageCache {
     }
 }
 
+/// All three are posted with the `TypstCompiler` as `object`. Each window
+/// subscribes to its own compiler only, so one window's compile never
+/// changes another window's preview, issues or calculator panel.
 extension Notification.Name {
+    /// `userInfo["url"]`: the preview PDF that was written.
     static let pdfDidUpdate = Notification.Name("pdfDidUpdate")
+    /// `userInfo["errors"]`: `[TypstError]`.
     static let typstErrorsUpdated = Notification.Name("typstErrorsUpdated")
-    /// Posted by `TypstCompiler` after a compile pass resolved a document's
-    /// `#let x = calc-param(…)` declarations. `object` is
+    /// Posted after a compile pass resolved a document's
+    /// `#let x = calc-param(…)` declarations. `userInfo["parameters"]` is
     /// `[CalculatorStoredVariable]`. `EditorController` mirrors the list onto
     /// `CalculatorSession.documentParameters` so the Calculator panel shows
     /// the open document's parameters.

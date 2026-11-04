@@ -7,7 +7,7 @@ import SwiftUI
 /// `mcpServers` config convention shared by Claude Desktop, Cursor, VS Code,
 /// and OpenCode, so configs can be pasted in with minimal changes.
 struct MCPServersSettingsView: View {
-    @ObservedObject private var mcpManager = MCPManager.shared
+    @ObservedObject var mcpManager: MCPManager
     @State private var editingServer: ScopedMCPServer?
     @State private var isCreatingNew = false
     @State private var newServerScope: ConfigScope = .global
@@ -42,10 +42,10 @@ struct MCPServersSettingsView: View {
             .frame(maxWidth: 820)
         }
         .sheet(item: $editingServer) { server in
-            MCPServerEditorSheet(mode: .edit(server))
+            MCPServerEditorSheet(mode: .edit(server), mcpManager: mcpManager)
         }
         .sheet(isPresented: $isCreatingNew) {
-            MCPServerEditorSheet(mode: .create(scope: newServerScope))
+            MCPServerEditorSheet(mode: .create(scope: newServerScope), mcpManager: mcpManager)
         }
     }
 
@@ -179,7 +179,7 @@ private enum MCPServerEditorMode {
 
 private struct MCPServerEditorSheet: View {
     let mode: MCPServerEditorMode
-    @ObservedObject private var mcpManager = MCPManager.shared
+    @ObservedObject var mcpManager: MCPManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String = ""

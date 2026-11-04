@@ -228,7 +228,7 @@ struct ImageCleanupView: View {
             isWorking = false
 
             // Keep the sidebar (and notebooks) in sync with the moved files.
-            NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+            NotificationCenter.default.post(name: .refreshProjectSidebar, object: root)
         }
     }
 }

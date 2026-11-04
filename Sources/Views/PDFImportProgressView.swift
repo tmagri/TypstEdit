@@ -201,7 +201,7 @@ struct PDFImportProgressView: View {
                 Spacer()
                 if progress.phase == .finished, let output = progress.outputURL {
                     Button("Open \(output.lastPathComponent)") {
-                        NotificationCenter.default.post(name: .openProjectAndFile, object: output)
+                        AppDelegate.shared?.openProject(at: output.deletingLastPathComponent(), file: output)
                         onClose()
                     }
                 }

@@ -7,7 +7,7 @@ import AppKit
 /// project; project skills live in `.typstedit/skills/` inside the active
 /// project and are git-shareable with collaborators.
 struct AISkillsSettingsView: View {
-    @ObservedObject private var skillsManager = SkillsManager.shared
+    @ObservedObject var skillsManager: SkillsManager
     @ObservedObject private var aiSettings = AISettingsManager.shared
     @State private var editingSkill: AISkill?
     @State private var isCreatingNew = false
@@ -43,10 +43,10 @@ struct AISkillsSettingsView: View {
             .frame(maxWidth: 820)
         }
         .sheet(item: $editingSkill) { skill in
-            SkillEditorSheet(mode: .edit(skill))
+            SkillEditorSheet(mode: .edit(skill), skillsManager: skillsManager)
         }
         .sheet(isPresented: $isCreatingNew) {
-            SkillEditorSheet(mode: .create(scope: newSkillScope))
+            SkillEditorSheet(mode: .create(scope: newSkillScope), skillsManager: skillsManager)
         }
     }
 
@@ -153,7 +153,7 @@ private enum SkillEditorMode {
 
 private struct SkillEditorSheet: View {
     let mode: SkillEditorMode
-    @ObservedObject private var skillsManager = SkillsManager.shared
+    @ObservedObject var skillsManager: SkillsManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String = ""

@@ -500,9 +500,9 @@ struct AISettingsView: View {
 
             switch selectedSection {
             case .skills:
-                AISkillsSettingsView()
+                ActiveProjectContextReader { AISkillsSettingsView(skillsManager: $0.skills) }
             case .mcp:
-                MCPServersSettingsView()
+                ActiveProjectContextReader { MCPServersSettingsView(mcpManager: $0.mcp) }
             default:
                 ScrollView {
                     VStack(spacing: 18) {

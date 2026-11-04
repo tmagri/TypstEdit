@@ -160,10 +160,7 @@ struct WelcomeView: View {
                     }
                     HStack(spacing: 20) {
                         Button(action: {
-                            // Notebooks live in the main window, wherever this was clicked.
-                            AppDelegate.shared?.performInMainWindow(replacingDocument: true) {
-                                NotificationCenter.default.post(name: Notification.Name("openNotebooks"), object: nil)
-                            }
+                            AppDelegate.shared?.openNotebooks()
                         }) {
                             VStack {
                                 Image(systemName: "book.closed")

@@ -6,8 +6,8 @@ import SwiftUI
 /// Prompt panel opens for it. Persisted to `<project>/.typstedit/config.json`.
 struct ProjectSettingsView: View {
     @ObservedObject var controller: EditorController
-    @ObservedObject private var skillsManager = SkillsManager.shared
-    @ObservedObject private var mcpManager = MCPManager.shared
+    @ObservedObject var skillsManager: SkillsManager
+    @ObservedObject var mcpManager: MCPManager
     @Environment(\.dismiss) private var dismiss
 
     private enum StorageChoice: String, CaseIterable, Identifiable {

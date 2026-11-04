@@ -2,8 +2,8 @@ import SwiftUI
 
 struct AIPromptView: View {
     @ObservedObject var controller: EditorController
-    @ObservedObject private var skillsManager = SkillsManager.shared
-    @ObservedObject private var mcpManager = MCPManager.shared
+    @ObservedObject var skillsManager: SkillsManager
+    @ObservedObject var mcpManager: MCPManager
     @State private var promptText: String = ""
     @State private var generatedResult: String = ""
     @State private var errorMessage: String? = nil

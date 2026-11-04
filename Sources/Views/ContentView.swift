@@ -10,9 +10,6 @@ struct ContentView: View {
     @ObservedObject var editorController: EditorController
     @ObservedObject private var aiService = AICompletionService.shared
     @ObservedObject private var aiSettings = AISettingsManager.shared
-    /// Which conversation the AI Chat panel shows — re-rendered (and the
-    /// panel handed the new manager) whenever the user switches sessions.
-    @ObservedObject private var chatSessions = AIChatSessionStore.shared
     @ObservedObject private var typstUpdater = TypstUpdater.shared
     @ObservedObject private var generalSettings = GeneralSettingsManager.shared
     
@@ -91,12 +88,16 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .backupProject)) { _ in handleBackup() }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertLink"))) { _ in editorController.toggleLink() }
             .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("insertTable"))) { _ in editorController.insertTableSnippet() }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
+                guard let window = notification.object as? NSWindow, window === hostingWindow else { return }
+                ActiveProjectContext.shared.activate(editorController)
+            }
             .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
                 guard shouldHandleMenuCommand() else { return }
                 if let command = notification.object as? String { handleMenuCommand(command) }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate)) { notification in
-                if let url = notification.object as? URL {
+            .onReceive(NotificationCenter.default.publisher(for: .pdfDidUpdate, object: compiler)) { notification in
+                if let url = notification.userInfo?["url"] as? URL {
                     self.currentPDFURL = url
                     self.reloadToken = UUID()
                     if self.editorController.isNoteFile {
@@ -112,11 +113,19 @@ struct ContentView: View {
                     saveFile(to: notification.object as? URL) 
                 }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .resetToWelcome)) { _ in
-                // Only the main window should react to a full UI reset
-                guard self.editorController === AppDelegate.shared?.editorController else { return }
+            .onReceive(NotificationCenter.default.publisher(for: .resetToWelcome)) { notification in
+                guard targetedPayload(notification) != nil else { return }
                 resetToWelcomeState()
             }
+    }
+
+    /// Window-specific notifications carry `["target": EditorController, …]`.
+    /// Returns the payload when it is meant for this window, else `nil`.
+    private func targetedPayload(_ notification: Notification) -> [String: Any]? {
+        guard let payload = notification.object as? [String: Any],
+              let target = payload["target"] as? EditorController,
+              target === editorController else { return nil }
+        return payload
     }
 
     /// Clears all document state so the welcome screen shows. Shared by the
@@ -152,7 +161,6 @@ struct ContentView: View {
             self.fileSystem.isNewUnsavedFile = false
             self.editorController.projectRootURL = nil
             self.editorController.isSidebarVisible = false
-            RAGManager.shared.disableForStandaloneMode()
         }
         // Ask before replacing unsaved edits; the old code loaded first and
         // asked afterwards, so "Save" could write the new file's text over
@@ -182,6 +190,9 @@ struct ContentView: View {
         let url = editorController.currentFileURL
         let title = url?.lastPathComponent ?? (fileSystem.isNewUnsavedFile ? "Untitled" : "TypstEdit")
         if window.title != title { window.title = title }
+        // Tells project windows apart (also in the Window menu's tooltips).
+        let subtitle = editorController.projectRootURL?.lastPathComponent ?? ""
+        if window.subtitle != subtitle { window.subtitle = subtitle }
         let represented = editorController.isFileDeletedOnDisk ? nil : url
         if window.representedURL != represented { window.representedURL = represented }
         if window.isDocumentEdited != editorController.hasUnsavedChanges {
@@ -211,55 +222,63 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
-                guard self.editorController === AppDelegate.shared?.editorController else { return }
-                if let url = notification.object as? URL {
-                    self.selectedFile = url
-                    self.loadFile(url: url)
-                    let folder = url.deletingLastPathComponent()
+                guard let payload = targetedPayload(notification), let url = payload["url"] as? URL else { return }
+                self.selectedFile = url
+                self.loadFile(url: url)
+                // The window already shows the project when the file is one
+                // of its own; only a different folder is (re)loaded.
+                let folder = (payload["root"] as? URL) ?? fileSystem.currentFolder.flatMap { root in
+                    url.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path + "/") ? root : nil
+                } ?? url.deletingLastPathComponent()
+                if fileSystem.currentFolder.map({ !ProjectWindowRouter.isSameFolder($0, folder) }) ?? true {
                     fileSystem.currentFolder = folder
                     fileSystem.loadFiles()
                 }
+                fileSystem.isNewUnsavedFile = false
+                editorController.isSidebarVisible = true
             }
-            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("openNotebooks"))) { _ in
-                guard self.editorController === AppDelegate.shared?.editorController else { return }
+            .onReceive(NotificationCenter.default.publisher(for: .openNotebooks)) { notification in
+                guard let payload = targetedPayload(notification) else { return }
                 fileSystem.currentFolder = NotebookManager.shared.rootDirectory
                 NotebookManager.shared.loadNotebooks()
                 fileSystem.isNewUnsavedFile = false
                 fileSystem.rootNodes = []
                 editorController.isSidebarVisible = true
-                self.selectedFile = nil
-                self.editorController.currentFileURL = nil
-                self.editorController.sourceCode = ""
-                self.currentPDFURL = nil
+                if let note = payload["file"] as? URL {
+                    self.selectedFile = note
+                    self.loadFile(url: note)
+                } else {
+                    self.selectedFile = nil
+                    self.editorController.currentFileURL = nil
+                    self.editorController.sourceCode = ""
+                    self.currentPDFURL = nil
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: .openProjectFolder)) { notification in
-                guard self.editorController === AppDelegate.shared?.editorController else { return }
-                if let url = notification.object as? URL {
-                    fileSystem.currentFolder = url
-                    fileSystem.isNewUnsavedFile = false
-                    fileSystem.loadFiles()
-                    editorController.isSidebarVisible = true
-                    
-                    let mainFile = url.appendingPathComponent("main.typ")
-                    if FileManager.default.fileExists(atPath: mainFile.path) {
-                        self.selectedFile = mainFile
-                        self.loadFile(url: mainFile)
-                    } else {
-                        self.selectedFile = nil
-                        self.editorController.currentFileURL = nil
-                        self.editorController.sourceCode = ""
-                        self.currentPDFURL = nil
-                    }
+                guard let payload = targetedPayload(notification), let url = payload["url"] as? URL else { return }
+                fileSystem.currentFolder = url
+                fileSystem.isNewUnsavedFile = false
+                fileSystem.loadFiles()
+                editorController.isSidebarVisible = true
+
+                let mainFile = url.appendingPathComponent("main.typ")
+                let fileToOpen = (payload["file"] as? URL)
+                    ?? (FileManager.default.fileExists(atPath: mainFile.path) ? mainFile : nil)
+                if let fileToOpen {
+                    self.selectedFile = fileToOpen
+                    self.loadFile(url: fileToOpen)
+                } else {
+                    self.selectedFile = nil
+                    self.editorController.currentFileURL = nil
+                    self.editorController.sourceCode = ""
+                    self.currentPDFURL = nil
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
-                if let dict = notification.object as? [String: Any], let target = dict["target"] as? EditorController {
-                    // Directed "new untitled buffer" for one window.
-                    guard target === self.editorController else { return }
-                } else {
-                    guard self.editorController === AppDelegate.shared?.editorController else { return }
-                }
-                if let url = notification.object as? URL {
+                // Directed at one window: a file to show, or (no "url") a
+                // new untitled buffer.
+                guard let payload = targetedPayload(notification) else { return }
+                if let url = payload["url"] as? URL {
                     self.selectedFile = url
                     fileSystem.isNewUnsavedFile = false
                 } else {
@@ -270,16 +289,14 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
-                guard self.editorController === AppDelegate.shared?.editorController else { return }
-                if let url = notification.object as? URL {
-                    self.renameTargetURL = url
-                    self.newFileName = url.lastPathComponent
-                    self.showRenameAlert = true
-                }
+                guard let url = targetedPayload(notification)?["url"] as? URL else { return }
+                self.renameTargetURL = url
+                self.newFileName = url.lastPathComponent
+                self.showRenameAlert = true
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
-                guard self.editorController === AppDelegate.shared?.editorController else { return }
-                if let info = notification.object as? [String: URL], let newURL = info["new"] { self.selectedFile = newURL }
+                guard let newURL = targetedPayload(notification)?["new"] as? URL else { return }
+                self.selectedFile = newURL
             }
             .onReceive(NotificationCenter.default.publisher(for: .aiChatModifiedFile)) { notification in
                 // Every window's ContentView gets this (not just the main
@@ -320,6 +337,10 @@ struct ContentView: View {
                 }
             }
             .onChange(of: editorController.currentFileURL) { _ in syncWindowDocumentState() }
+            .onChange(of: editorController.projectRootURL) { _ in syncWindowDocumentState() }
+            // Window level, not on the sidebar: the sidebar is not in the view
+            // tree while hidden, and window routing relies on this root.
+            .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
             .onChange(of: editorController.hasUnsavedChanges) { _ in syncWindowDocumentState() }
             .onChange(of: editorController.isFileDeletedOnDisk) { _ in syncWindowDocumentState() }
             .onChange(of: fileSystem.isNewUnsavedFile) { _ in syncWindowDocumentState() }
@@ -454,6 +475,10 @@ struct ContentView: View {
             .preferredColorScheme(themeManager.appTheme.colorScheme)
             .onAppear {
                 fileSystem.documentController = editorController
+                // This window's compiler and scratch files are its own.
+                compiler.scratchNamespace = editorController.projectContext.instanceID
+                editorController.observeCompiler(compiler)
+                ActiveProjectContext.shared.activate(editorController)
                 if editorController.pendingWelcomeReset {
                     // Dock-click reopen: land on the welcome screen, not the
                     // last file (whose URL lingers in `selectedFile`).
@@ -492,14 +517,13 @@ struct ContentView: View {
            if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile && selectedFile == nil {
                 WelcomeView(model: fileSystem, onOpen: { file in
                     if file.isProject {
-                        // Re-open in project mode: show sidebar with parent folder
-                        self.selectedFile = file.url
-                        self.loadFile(url: file.url)
-                        let folder = file.url.deletingLastPathComponent()
-                        fileSystem.currentFolder = folder
-                        fileSystem.loadFiles()
-                        fileSystem.isNewUnsavedFile = false
-                        editorController.isSidebarVisible = true
+                        // Re-open in project mode, with the parent folder as
+                        // the project. Focuses the window that already has it.
+                        AppDelegate.shared?.openProject(
+                            at: file.url.deletingLastPathComponent(),
+                            file: file.url,
+                            preferring: editorController
+                        )
                     } else {
                         // Re-open as standalone single file (no sidebar)
                         AppDelegate.shared?.openDocuments([file.url])
@@ -540,7 +564,6 @@ struct ContentView: View {
                 .onChange(of: compiler.errors) { newErrors in
                     editorController.errors = newErrors
                     editorController.needsRedraw()
-                    NotificationCenter.default.post(name: .typstErrorsUpdated, object: newErrors)
                 }
             }
         }
@@ -570,10 +593,10 @@ struct ContentView: View {
 
             switch sidebarVisibility.resolvedPanel(editorController.sidebarContent) {
             case .files:
-                SidebarView(model: fileSystem, selectedFile: $selectedFile, editorController: editorController,
-                            sourceControl: sourceControl)
+                SidebarView(model: fileSystem, selectedFile: $selectedFile, compiler: compiler, editorController: editorController,
+                            sourceControl: sourceControl, ragManager: editorController.projectContext.rag)
             case .aiChat:
-                AIChatView(controller: editorController, chat: chatSessions.activeManager)
+                AIChatPanel(controller: editorController, store: editorController.projectContext.chat)
             case .calculator:
                 CalculatorView(session: editorController.calculatorSession, editorController: editorController)
             case nil:
@@ -582,7 +605,6 @@ struct ContentView: View {
             }
         }
         .background(themeManager.sidebarBackground)
-        .onChange(of: fileSystem.currentFolder) { newFolder in editorController.projectRootURL = newFolder }
         .onAppear {
             editorController.projectRootURL = fileSystem.currentFolder
             reconcileSidebarSelection()
@@ -1140,8 +1162,8 @@ struct ContentView: View {
                     ImageEditorView(controller: editorController, onInsert: { editorController.saveImageSnippet() }, onCancel: { editorController.showImageEditor = false })
                 }
                 .sheet(isPresented: $editorController.showSymbolPicker) { SymbolPickerView(controller: editorController) }
-                .sheet(isPresented: $editorController.showAIPromptEditor) { AIPromptView(controller: editorController).environmentObject(themeManager) }
-                .sheet(isPresented: $editorController.showProjectSettings) { ProjectSettingsView(controller: editorController) }
+                .sheet(isPresented: $editorController.showAIPromptEditor) { AIPromptView(controller: editorController, skillsManager: editorController.projectContext.skills, mcpManager: editorController.projectContext.mcp).environmentObject(themeManager) }
+                .sheet(isPresented: $editorController.showProjectSettings) { ProjectSettingsView(controller: editorController, skillsManager: editorController.projectContext.skills, mcpManager: editorController.projectContext.mcp) }
                 .sheet(isPresented: $editorController.showAIRefinePreview) { AIRefinePreviewView(controller: editorController).environmentObject(themeManager) }
                 .sheet(isPresented: $editorController.showQuoteEditor) {
                     QuoteEditorView(controller: editorController, onInsert: { t, a, b in editorController.insertQuote(text: t, attribution: a, isBlock: b) }, onCancel: { editorController.showQuoteEditor = false })
@@ -1292,11 +1314,9 @@ struct ContentView: View {
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
             if isDirectory.boolValue {
-                // 1. If it's a folder, open as a project
-                fileSystem.currentFolder = url
-                fileSystem.isNewUnsavedFile = false
-                fileSystem.loadFiles()
-                editorController.isSidebarVisible = true
+                // 1. A folder opens as a project in this window, unless it is
+                // already open in another one (that window comes forward).
+                AppDelegate.shared?.openProject(at: url, preferring: editorController)
 
             } else {
                 // 2. Any single file (typ, note, md, …) opens in standalone mode:
@@ -1512,15 +1532,16 @@ struct ContentView: View {
                  guard performSave(to: savedURL) else { return }
                  fileSystem.isNewUnsavedFile = false
                  self.selectedFile = savedURL
-                 // Only the main window hosts projects; other document
-                 // windows stay single-file windows.
-                 if self.editorController === AppDelegate.shared?.editorController {
+                 // The main window turns the saved file's folder into its
+                 // project, unless another window already has that folder:
+                 // a project is open in one window only.
+                 let folder = savedURL.deletingLastPathComponent()
+                 if self.editorController === AppDelegate.shared?.editorController,
+                    fileSystem.currentFolder == nil,
+                    AppDelegate.shared?.isProjectOpen(folder) != true {
                      self.editorController.isSidebarVisible = true
-                     // If no current folder, maybe set it to the saved location?
-                     if fileSystem.currentFolder == nil {
-                         fileSystem.currentFolder = savedURL.deletingLastPathComponent()
-                         fileSystem.loadFiles()
-                     }
+                     fileSystem.currentFolder = folder
+                     fileSystem.loadFiles()
                  }
             }
             return

@@ -551,7 +551,7 @@ enum GitTools {
     /// Keeps the explorer and the source-control panel in step, and tells
     /// open editor windows to reload a file a pull or checkout rewrote.
     private static func notifyChanged(repository: URL, workingTree: Bool) {
-        NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
+        NotificationCenter.default.post(name: .refreshProjectSidebar, object: repository)
         if workingTree {
             NotificationCenter.default.post(name: .gitWorkingTreeDidChange, object: repository)
         }

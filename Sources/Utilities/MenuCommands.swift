@@ -4,23 +4,22 @@ import AppKit
 struct AppMenuCommands: Commands {
     @ObservedObject var themeManager: ThemeManager
     @Binding var selectedFile: URL?
+    /// The frontmost document window's controller (see
+    /// `ActiveProjectContext`), so menu items act on the window in front.
     @ObservedObject var editorController: EditorController
     @ObservedObject private var recentFilesManager = RecentFilesManager.shared
     @AppStorage("aiAssistantEnabled") private var aiEnabled = false
     @AppStorage("aiChatEnabled") private var chatEnabled = false
     @ObservedObject private var generalSettings = GeneralSettingsManager.shared
     
-    /// Projects, notebooks and imports belong to the main window. Reopens it
-    /// when closed (never a second copy) and, when the action replaces its
-    /// document, asks about unsaved edits first.
-    private func inMainWindow(replacingDocument: Bool = false, _ action: @escaping () -> Void) {
-        if let appDelegate = AppDelegate.shared {
-            appDelegate.performInMainWindow(replacingDocument: replacingDocument, action)
-        } else {
-            action()
-        }
+    private func chooseFolder() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        return panel.runModal() == .OK ? panel.url : nil
     }
-    
+
     var body: some Commands {
         // MARK: - File Menu
         CommandGroup(replacing: .newItem) {
@@ -28,6 +27,11 @@ struct AppMenuCommands: Commands {
                 AppDelegate.shared?.newDocument()
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
+
+            Button("New Window") {
+                AppDelegate.shared?.newWindow()
+            }
+            .keyboardShortcut("n", modifiers: [.command, .option, .shift])
             
             Button("Open File...") {
                 let panel = NSOpenPanel()
@@ -41,19 +45,21 @@ struct AppMenuCommands: Commands {
             }
             .keyboardShortcut("o", modifiers: .command)
             
+            // A folder that is already open brings its window forward.
+            // Otherwise it opens in an idle window, or a new window.
             Button("Open Folder...") {
-                let panel = NSOpenPanel()
-                panel.canChooseFiles = false
-                panel.canChooseDirectories = true
-                panel.allowsMultipleSelection = false
-                
-                if panel.runModal() == .OK, let url = panel.url {
-                    inMainWindow(replacingDocument: true) {
-                        NotificationCenter.default.post(name: .openProjectFolder, object: url)
-                    }
+                if let url = chooseFolder() {
+                    AppDelegate.shared?.openProject(at: url)
                 }
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
+
+            Button("Open Folder in New Window...") {
+                if let url = chooseFolder() {
+                    AppDelegate.shared?.openProject(at: url, forceNewWindow: true)
+                }
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift, .option])
 
             Menu("Open Recent") {
                 if recentFilesManager.recentFiles.isEmpty {
@@ -63,9 +69,10 @@ struct AppMenuCommands: Commands {
                     ForEach(recentFilesManager.recentFiles) { file in
                         Button(action: {
                             if file.isProject {
-                                inMainWindow(replacingDocument: true) {
-                                    NotificationCenter.default.post(name: .openProjectAndFile, object: file.url)
-                                }
+                                AppDelegate.shared?.openProject(
+                                    at: file.url.deletingLastPathComponent(),
+                                    file: file.url
+                                )
                             } else {
                                 AppDelegate.shared?.openDocuments([file.url])
                             }
@@ -97,33 +104,25 @@ struct AppMenuCommands: Commands {
             }
 
             Button("Open Notes") {
-                inMainWindow(replacingDocument: true) {
-                    NotificationCenter.default.post(name: NSNotification.Name("openNotebooks"), object: nil)
-                }
+                AppDelegate.shared?.openNotebooks()
             }
             .keyboardShortcut("n", modifiers: [.command, .option])
             
             Menu("Import") {
                 Button("PDF...") {
-                    inMainWindow {
-                        editorController.importPDF()
-                    }
+                    editorController.importPDF()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift, .option])
 
                 Button("PDF (Force OCR)...") {
-                    inMainWindow {
-                        editorController.importPDF(forceOCR: true)
-                    }
+                    editorController.importPDF(forceOCR: true)
                 }
                 .help("Ignores the PDF's own text and reads every page from its image. Use it when imported text comes out garbled.")
 
                 Divider()
 
                 Button("LyX File...") {
-                    inMainWindow {
-                        editorController.importLyx()
-                    }
+                    editorController.importLyx()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
             }

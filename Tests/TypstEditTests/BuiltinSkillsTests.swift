@@ -11,7 +11,7 @@ final class BuiltinSkillsTests: XCTestCase {
             XCTFail("builtinSkillsDirectory not found in this environment")
             return
         }
-        let skill = SkillsManager.shared.builtinSkills.first { $0.folderName == "typst-reference" }
+        let skill = ProjectContext.detached.skills.builtinSkills.first { $0.folderName == "typst-reference" }
         XCTAssertNotNil(skill, "the typst-reference skill must ship in the bundle")
         XCTAssertEqual(skill?.scope, .builtin)
         XCTAssertEqual(skill?.id, "builtin:typst-reference")
@@ -22,7 +22,7 @@ final class BuiltinSkillsTests: XCTestCase {
 
     func testTypstReferenceAttachmentsAreReadable() throws {
         let skill = try XCTUnwrap(
-            SkillsManager.shared.builtinSkills.first { $0.folderName == "typst-reference" },
+            ProjectContext.detached.skills.builtinSkills.first { $0.folderName == "typst-reference" },
             "typst-reference skill not bundled")
         XCTAssertTrue(skill.attachments.contains("cheatsheet.md"))
         XCTAssertTrue(skill.attachments.contains("function-catalog.md"))
@@ -44,27 +44,27 @@ final class BuiltinSkillsTests: XCTestCase {
 
     func testBuiltinSkillsAreNotUserManageable() throws {
         let skill = try XCTUnwrap(
-            SkillsManager.shared.builtinSkills.first { $0.folderName == "typst-reference" })
+            ProjectContext.detached.skills.builtinSkills.first { $0.folderName == "typst-reference" })
         XCTAssertFalse(skill.scope.isUserManageable)
         // CRUD calls on a built-in skill must be no-ops: the bundled folder
         // must still exist with its SKILL.md after every mutation attempt.
-        SkillsManager.shared.deleteSkill(skill)
-        SkillsManager.shared.updateSkill(skill, name: "x", description: "y", body: "z")
-        SkillsManager.shared.removeAttachment("cheatsheet.md", from: skill)
-        SkillsManager.shared.addAttachment(to: skill, from: skill.folderURL.appendingPathComponent("SKILL.md"))
+        ProjectContext.detached.skills.deleteSkill(skill)
+        ProjectContext.detached.skills.updateSkill(skill, name: "x", description: "y", body: "z")
+        ProjectContext.detached.skills.removeAttachment("cheatsheet.md", from: skill)
+        ProjectContext.detached.skills.addAttachment(to: skill, from: skill.folderURL.appendingPathComponent("SKILL.md"))
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: skill.folderURL.appendingPathComponent("SKILL.md").path))
         XCTAssertTrue(skill.attachments.contains("cheatsheet.md"))
-        XCTAssertEqual(SkillsManager.shared.allSkills.filter { $0.scope == .builtin }.count,
-                       SkillsManager.shared.builtinSkills.count)
+        XCTAssertEqual(ProjectContext.detached.skills.allSkills.filter { $0.scope == .builtin }.count,
+                       ProjectContext.detached.skills.builtinSkills.count)
     }
 
     func testCreateSkillRejectsBuiltinScope() {
-        let created = SkillsManager.shared.createSkill(
+        let created = ProjectContext.detached.skills.createSkill(
             name: "should-not-exist", description: "", body: "",
             scope: .builtin, projectRoot: nil)
         XCTAssertNil(created, "creating a skill in the builtin scope must fail")
         XCTAssertFalse(
-            SkillsManager.shared.allSkills.contains { $0.name == "should-not-exist" })
+            ProjectContext.detached.skills.allSkills.contains { $0.name == "should-not-exist" })
     }
 }

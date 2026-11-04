@@ -1,19 +1,33 @@
 import SwiftUI
 import AppKit
 
+/// What a new document window starts with.
+enum DocumentWindowContent {
+    /// A single file, without a project.
+    case file(URL)
+    /// A new, untitled buffer.
+    case untitled
+    /// The welcome screen (File ▸ New Window).
+    case welcome
+    /// Work that needs the window's `ContentView` to be listening, such as
+    /// opening a project folder in it.
+    case action((EditorController) -> Void)
+}
+
 @MainActor
 private struct ExternalDocumentWindowRoot: View {
     @State private var selectedFile: URL?
-    /// `nil` starts the window with a new, untitled buffer.
-    let initialFile: URL?
+    let content: DocumentWindowContent
     @StateObject private var themeManager = ThemeManager()
     @ObservedObject var editorController: EditorController
 
-    init(initialFile: URL?, editorController: EditorController) {
-        self.initialFile = initialFile
+    init(content: DocumentWindowContent, editorController: EditorController) {
+        self.content = content
         // Inject the file directly into state. 
         // This avoids broadcasting a global notification that overwrites other windows.
-        self._selectedFile = State(initialValue: initialFile)
+        if case .file(let url) = content {
+            self._selectedFile = State(initialValue: url)
+        }
         self.editorController = editorController
     }
 
@@ -22,16 +36,22 @@ private struct ExternalDocumentWindowRoot: View {
             .environmentObject(themeManager)
             .background(VisualEffectView().ignoresSafeArea())
             .onAppear {
-                // Initialize standalone UI locally without global broadcasts
+                // Every window starts without a project. A project is only
+                // ever opened through `AppDelegate.openProject`, which keeps
+                // each folder in one window.
                 DispatchQueue.main.async {
                     self.editorController.isSidebarVisible = false
                     self.editorController.projectRootURL = nil
-                    RAGManager.shared.disableForStandaloneMode()
                 }
-                if initialFile == nil {
-                    // Give ContentView's subscriptions a moment to go live.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                // Give ContentView's subscriptions a moment to go live.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    switch content {
+                    case .file, .welcome:
+                        break
+                    case .untitled:
                         NotificationCenter.default.post(name: .fileDidCreate, object: ["target": self.editorController])
+                    case .action(let action):
+                        action(self.editorController)
                     }
                 }
             }
@@ -521,26 +541,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Projects and notebooks live in the main window. Runs `action` there,
-    /// first asking about unsaved edits in the main window when
-    /// `replacingDocument` is set (the action replaces what it shows).
-    func performInMainWindow(replacingDocument: Bool = false, _ action: @escaping () -> Void) {
-        withMainWindow { [weak self] in
-            guard let self, let controller = self.editorController else { return }
-            guard replacingDocument, controller.hasUnsavedChanges else {
-                action()
-                return
-            }
-            self.showSaveWarningAsync(for: controller) { proceed in
-                if proceed { action() }
-            }
-        }
+    @MainActor
+    private func openExternalFileInNewWindow(_ url: URL?) {
+        openDocumentWindow(url.map { .file($0) } ?? .untitled)
     }
 
     @MainActor
-    private func openExternalFileInNewWindow(_ url: URL?) {
+    private func openDocumentWindow(_ windowContent: DocumentWindowContent) {
         let externalEditorController = EditorController()
-        let content = ExternalDocumentWindowRoot(initialFile: url, editorController: externalEditorController)
+        let content = ExternalDocumentWindowRoot(content: windowContent, editorController: externalEditorController)
+        let url: URL? = if case .file(let fileURL) = windowContent { fileURL } else { nil }
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800),
@@ -597,9 +607,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for url in urls {
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                performInMainWindow(replacingDocument: true) {
-                    NotificationCenter.default.post(name: .openProjectFolder, object: url)
-                }
+                openProject(at: url)
+                continue
+            }
+            // A note goes to the Notes window, unless some window already
+            // shows that exact file (the router below focuses it).
+            if Self.isNote(url),
+               !windows.contains(where: { $0.controller.currentFileURL.map { DocumentWindowRouter.isSameFile($0, url) } ?? false }) {
+                openNotebooks(showing: url)
                 continue
             }
 
@@ -637,6 +652,123 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 } else {
                     openExternalFileInNewWindow(url)
                 }
+            }
+        }
+    }
+
+    // MARK: - Projects
+
+    /// The one entry point for opening a project folder (File ▸ Open Folder,
+    /// Open Recent, Finder, the sidebar, the welcome screen, imports). A
+    /// folder is open in at most one window: when it already is, that window
+    /// comes forward (and shows `file`, when given). Otherwise the folder
+    /// goes to `preferred` (an import replacing its own window), an idle
+    /// window, or a new window.
+    func openProject(
+        at root: URL,
+        file: URL? = nil,
+        preferring preferred: EditorController? = nil,
+        forceNewWindow: Bool = false
+    ) {
+        // The Notes folder, and notes opened through a notebook folder (Open
+        // Recent records a note's notebook as its "project"), belong to the
+        // Notes window. "Open as Project" on a notebook passes no file, so it
+        // still opens that notebook as a project of its own.
+        let notesRoot = NotebookManager.shared.rootDirectory
+        if ProjectWindowRouter.isSameFolder(root, notesRoot)
+            || (file.map(Self.isNote) ?? false) && ProjectWindowRouter.contains(notesRoot, root) {
+            openNotebooks(showing: file)
+            return
+        }
+        routeProject(root: root, file: file, preferring: preferred, forceNewWindow: forceNewWindow) { controller in
+            NotificationCenter.default.post(name: .openProjectFolder, object: [
+                "target": controller,
+                "url": root,
+                "file": file as Any,
+            ])
+        }
+    }
+
+    /// File ▸ Open Notes: the notebooks folder is routed like a project, so
+    /// it too is open in one window only. With `note`, that window shows it.
+    ///
+    /// Notes never open in a window of their own: two windows on the same
+    /// notebook would share one chat history folder and overwrite each
+    /// other's session list.
+    func openNotebooks(showing note: URL? = nil) {
+        routeProject(root: NotebookManager.shared.rootDirectory, file: note, preferring: nil, forceNewWindow: false) { controller in
+            NotificationCenter.default.post(name: .openNotebooks, object: [
+                "target": controller,
+                "file": note as Any,
+            ])
+        }
+    }
+
+    /// True for a file inside the Notes folder.
+    static func isNote(_ url: URL) -> Bool {
+        ProjectWindowRouter.contains(NotebookManager.shared.rootDirectory, url)
+    }
+
+    /// File ▸ New Window: an empty window on the welcome screen.
+    func newWindow() {
+        if !isMainWindowOpen, let mainController = editorController, Self.isIdle(mainController) {
+            withMainWindow {}
+        } else {
+            openDocumentWindow(.welcome)
+        }
+    }
+
+    /// True when some open window shows `root` as its project.
+    func isProjectOpen(_ root: URL) -> Bool {
+        documentWindows().contains { $0.controller.projectRootURL.map { ProjectWindowRouter.isSameFolder($0, root) } ?? false }
+    }
+
+    private func routeProject(
+        root: URL,
+        file: URL?,
+        preferring preferred: EditorController?,
+        forceNewWindow: Bool,
+        open: @escaping (EditorController) -> Void
+    ) {
+        guard let mainController = editorController else {
+            // Cold launch: the main window is not connected yet.
+            pendingExternalOpens.append(file ?? root)
+            return
+        }
+        let windows = documentWindows()
+        let slots = windows.map {
+            ProjectWindowRouter.Slot(
+                projectRoot: $0.controller.projectRootURL,
+                isIdle: Self.isIdle($0.controller),
+                isKey: $0.window?.isKeyWindow == true,
+                isMain: $0.isMain,
+                isPreferred: $0.controller === preferred
+            )
+        }
+        switch ProjectWindowRouter.destination(for: root, file: file, in: slots, forceNewWindow: forceNewWindow) {
+        case .focus(let index):
+            let target = windows[index]
+            Self.debugLog("openProject: '\(root.lastPathComponent)' is already open, focusing its window")
+            bringToFront(target.window)
+            guard let file, target.controller.currentFileURL.map({ !DocumentWindowRouter.isSameFile($0, file) }) ?? true else { return }
+            showSaveWarningAsync(for: target.controller) { proceed in
+                guard proceed else { return }
+                NotificationCenter.default.post(name: .openProjectAndFile, object: [
+                    "target": target.controller,
+                    "url": file,
+                ])
+            }
+        case .load(let index):
+            let target = windows[index]
+            bringToFront(target.window)
+            showSaveWarningAsync(for: target.controller) { proceed in
+                if proceed { open(target.controller) }
+            }
+        case .newWindow:
+            if !forceNewWindow, !isMainWindowOpen, Self.isIdle(mainController) {
+                withMainWindow { open(mainController) }
+            } else {
+                openDocumentWindow(.action(open))
             }
         }
     }
@@ -727,7 +859,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             // MCP servers are local subprocesses spawned on demand — never
             // leave one running after the app itself has quit.
-            MCPManager.shared.stopAll()
+            for controller in allControllers.compactMap({ $0 }) {
+                controller.projectContext.close()
+            }
             return .terminateNow
         }
     }
@@ -735,23 +869,57 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor
     func handleWindowClose(for window: NSWindow, editorController: EditorController?, isMain: Bool) -> Bool {
         guard showSaveWarningIfNeeded(for: editorController) else { return false }
-        if let projectRoot = editorController?.projectRootURL {
-            TypstCompiler.cleanUpTempDirectory(in: projectRoot)
-        } else if let fileURL = editorController?.currentFileURL {
-            TypstCompiler.cleanUpTempDirectory(in: fileURL.deletingLastPathComponent())
+        if let editorController {
+            cleanUpTemp(for: editorController)
         }
         // Forget the document now. The main window's controller outlives
         // its window, and a stale file (possibly deleted, possibly marked
         // dirty) would otherwise trigger save prompts on quit or reopen.
         editorController?.closeDocument()
-        if isMain {
-            editorController?.projectRootURL = nil
-            editorController?.pendingWelcomeReset = true
-            NotificationCenter.default.post(name: .resetToWelcome, object: nil)
+        // The window's project closes with it: its chats stop, its MCP
+        // servers quit, and its index is closed. Other windows are untouched.
+        if let editorController {
+            editorController.projectContext.close()
+            ActiveProjectContext.shared.deactivate(editorController)
+        }
+        if isMain, let editorController {
+            editorController.projectRootURL = nil
+            editorController.pendingWelcomeReset = true
+            NotificationCenter.default.post(name: .resetToWelcome, object: ["target": editorController])
         }
         return true
     }
     
+    /// Removes a closing window's compiler scratch files. The whole temp
+    /// folder goes only when no other open window works in it; otherwise
+    /// only this window's own shadow files are removed.
+    private func cleanUpTemp(for controller: EditorController) {
+        let folders = Self.scratchFolders(of: controller)
+        guard !folders.isEmpty else { return }
+        let others = documentWindows().map(\.controller).filter { $0 !== controller }
+        let otherFolders = Set(others.flatMap { Self.scratchFolders(of: $0) }.map(ProjectWindowRouter.canonicalFolder))
+        for folder in folders {
+            let tempDir = SafeDirectoryManager.safeTempDirectory(in: folder)
+            if otherFolders.contains(ProjectWindowRouter.canonicalFolder(folder)) {
+                TypstCompiler.cleanUpScratchFiles(in: tempDir, namespace: controller.projectContext.instanceID)
+            } else {
+                TypstCompiler.cleanUpTempDirectory(in: folder)
+            }
+        }
+    }
+
+    /// The folders whose `temp/` this window's compiler writes to: the
+    /// project root, and the open file's own folder.
+    private static func scratchFolders(of controller: EditorController) -> [URL] {
+        var folders: [URL] = []
+        if let root = controller.projectRootURL { folders.append(root) }
+        if let fileFolder = controller.currentFileURL?.deletingLastPathComponent(),
+           !folders.contains(where: { ProjectWindowRouter.isSameFolder($0, fileFolder) }) {
+            folders.append(fileFolder)
+        }
+        return folders
+    }
+
     nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
         return MainActor.assumeIsolated {
             return self.handleWindowClose(for: sender, editorController: self.editorController, isMain: true)
@@ -803,6 +971,8 @@ struct TypstEditApp: App {
     @StateObject private var themeManager = ThemeManager()
     @StateObject private var editorController = EditorController()
     @State private var selectedFile: URL?
+    /// The menu bar follows the frontmost document window.
+    @ObservedObject private var activeWindow = ActiveProjectContext.shared
     
     var body: some Scene {
         WindowGroup(id: "main") {
@@ -833,7 +1003,11 @@ struct TypstEditApp: App {
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         .commands {
-            AppMenuCommands(themeManager: themeManager, selectedFile: $selectedFile, editorController: editorController)
+            AppMenuCommands(
+                themeManager: themeManager,
+                selectedFile: $selectedFile,
+                editorController: activeWindow.controller ?? editorController
+            )
         }
         
         Settings {

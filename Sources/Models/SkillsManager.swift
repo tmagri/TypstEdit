@@ -64,7 +64,6 @@ struct AISkill: Identifiable, Equatable {
 
 @MainActor
 final class SkillsManager: ObservableObject {
-    static let shared = SkillsManager()
 
     /// Skills shipped inside the app bundle (`Sources/Resources/Skills/…`).
     /// Read-only: they can be enabled per chat like any other skill, but the
@@ -77,9 +76,28 @@ final class SkillsManager: ObservableObject {
     /// project-scoped skills and know when none is open.
     @Published private(set) var projectRoot: URL?
 
-    private init() {
+    private var peerObserver: NSObjectProtocol?
+
+    /// One instance per window (see `ProjectContext`), so project skills are
+    /// only visible to the window whose project defines them.
+    init() {
         refreshBuiltin()
         refreshGlobal()
+        peerObserver = NotificationCenter.default.addObserver(
+            forName: .globalAIConfigurationDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            let sender = (notification.object as AnyObject?).map(ObjectIdentifier.init)
+            MainActor.assumeIsolated {
+                guard let self, sender != ObjectIdentifier(self) else { return }
+                self.refreshAll()
+            }
+        }
+    }
+
+    /// Reloads after a change made here, and tells the other windows.
+    private func didChangeSkills() {
+        refreshAll()
+        NotificationCenter.default.post(name: .globalAIConfigurationDidChange, object: self)
     }
 
     var allSkills: [AISkill] { builtinSkills + globalSkills + projectSkills }
@@ -296,7 +314,7 @@ final class SkillsManager: ObservableObject {
             return nil
         }
 
-        refreshAll()
+        didChangeSkills()
         return allSkills.first { $0.folderName == folderName && $0.scope == scope }
     }
 
@@ -304,13 +322,13 @@ final class SkillsManager: ObservableObject {
         guard skill.scope.isUserManageable else { return }
         let content = Self.render(name: name, description: description, body: body)
         try? content.write(to: skill.folderURL.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
-        refreshAll()
+        didChangeSkills()
     }
 
     func deleteSkill(_ skill: AISkill) {
         guard skill.scope.isUserManageable else { return }
         try? FileManager.default.removeItem(at: skill.folderURL)
-        refreshAll()
+        didChangeSkills()
     }
 
     // MARK: - Attachments
@@ -333,13 +351,13 @@ final class SkillsManager: ObservableObject {
             print("[SkillsManager] Failed to attach '\(sourceURL.lastPathComponent)' to skill '\(skill.name)': \(error)")
             return false
         }
-        refreshAll()
+        didChangeSkills()
         return true
     }
 
     func removeAttachment(_ fileName: String, from skill: AISkill) {
         guard skill.scope.isUserManageable else { return }
         try? FileManager.default.removeItem(at: skill.folderURL.appendingPathComponent(fileName))
-        refreshAll()
+        didChangeSkills()
     }
 }

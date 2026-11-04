@@ -93,10 +93,10 @@ extension EditorController {
 
     private func finishPDFImport(typURL: URL, openAsProject: Bool, result: PDFImportResult) {
         if openAsProject {
-            NotificationCenter.default.post(name: .openProjectAndFile, object: typURL)
+            AppDelegate.shared?.openProject(at: typURL.deletingLastPathComponent(), file: typURL, preferring: self)
         } else {
-            NotificationCenter.default.post(name: .refreshProjectSidebar, object: nil)
-            NotificationCenter.default.post(name: .fileDidCreate, object: typURL)
+            NotificationCenter.default.post(name: .refreshProjectSidebar, object: projectRootURL)
+            NotificationCenter.default.post(name: .fileDidCreate, object: ["target": self, "url": typURL])
         }
         showStatus("PDF imported: \(result.summary)", duration: 6)
 

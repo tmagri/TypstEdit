@@ -15,10 +15,12 @@ import UniformTypeIdentifiers
 struct AIChatView: View {
     @ObservedObject var controller: EditorController
     @ObservedObject var chat: AIChatManager
-    @ObservedObject private var store = AIChatSessionStore.shared
+    /// The window's own session store, skills and MCP servers (see
+    /// `ProjectContext`).
+    @ObservedObject var store: AIChatSessionStore
+    @ObservedObject var skillsManager: SkillsManager
+    @ObservedObject var mcpManager: MCPManager
     @ObservedObject private var aiSettings = AISettingsManager.shared
-    @ObservedObject private var skillsManager = SkillsManager.shared
-    @ObservedObject private var mcpManager = MCPManager.shared
 
     /// The composer's text lives on the conversation (`chat.draft`), not here:
     /// the panel is destroyed when the sidebar switches to Files or the
@@ -94,6 +96,15 @@ struct AIChatView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if let notice = store.storageNotice {
+                Label(notice, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                Divider()
+            }
 
             if !aiSettings.chatEnabled {
                 disabledState
@@ -2345,5 +2356,22 @@ private struct TranscriptBottomProbe: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.detach()
+    }
+}
+
+/// Shows the window's active conversation, and follows the session store
+/// when the user switches chats.
+struct AIChatPanel: View {
+    @ObservedObject var controller: EditorController
+    @ObservedObject var store: AIChatSessionStore
+
+    var body: some View {
+        AIChatView(
+            controller: controller,
+            chat: store.activeManager,
+            store: store,
+            skillsManager: controller.projectContext.skills,
+            mcpManager: controller.projectContext.mcp
+        )
     }
 }

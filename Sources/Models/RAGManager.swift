@@ -136,7 +136,6 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
 
 @MainActor
 class RAGManager: ObservableObject {
-    static let shared = RAGManager()
     
     @Published var isIndexing: Bool = false
     @Published var indexProgress: Double = 0.0     
@@ -145,7 +144,7 @@ class RAGManager: ObservableObject {
     private var currentProjectDir: URL?
     private var db: OpaquePointer?
     
-    private init() {}
+    init() {}
     
     static func shouldUseRAG(for projectDir: URL) -> Bool {
         guard let specialDir = SafeDirectoryManager.containsSpecialDirectory(projectDir) else {

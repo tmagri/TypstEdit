@@ -291,7 +291,7 @@ struct NotebookRow: View {
             }
             
             Button("Open as Project") {
-                NotificationCenter.default.post(name: .openProjectFolder, object: notebook.url)
+                AppDelegate.shared?.openProject(at: notebook.url)
             }
 
             Button("Cleanup Unused Images…") {

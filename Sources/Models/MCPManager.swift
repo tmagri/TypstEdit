@@ -5,10 +5,11 @@ import Combine
 /// live `MCPClient` process for each one that's actually running. Settings UI
 /// reads/writes configs through this; `AICompletionService`'s tool-calling
 /// loop reads live tools and executes calls through this.
+///
+/// One instance per window (see `ProjectContext`): project servers only run
+/// for the window whose project defines them.
 @MainActor
 final class MCPManager: ObservableObject {
-    static let shared = MCPManager()
-
     @Published private(set) var globalServers: [MCPServerConfig] = []
     @Published private(set) var projectServers: [MCPServerConfig] = []
     @Published private(set) var toolsByServerID: [String: [MCPTool]] = [:]
@@ -20,9 +21,29 @@ final class MCPManager: ObservableObject {
     @Published private(set) var projectRoot: URL?
 
     private var clients: [String: MCPClient] = [:]
+    private var peerObserver: NSObjectProtocol?
 
-    private init() {
+    init() {
         refreshGlobal()
+        peerObserver = NotificationCenter.default.addObserver(
+            forName: .globalAIConfigurationDidChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            let sender = (notification.object as AnyObject?).map(ObjectIdentifier.init)
+            MainActor.assumeIsolated {
+                guard let self, sender != ObjectIdentifier(self) else { return }
+                self.refreshAll()
+                self.stopOutdatedClients()
+            }
+        }
+    }
+
+    /// Another window changed a global server: a running client started from
+    /// the old definition is stopped and restarts on its next use.
+    private func stopOutdatedClients() {
+        let current = Dictionary(allServers.map { ($0.id, $0.config) }, uniquingKeysWith: { first, _ in first })
+        for (id, client) in clients where current[id] != client.config {
+            stopClient(id: id)
+        }
     }
 
     var allServers: [ScopedMCPServer] {
@@ -74,6 +95,7 @@ final class MCPManager: ObservableObject {
         // Restart to pick up the new definition if it was already running.
         stopClient(id: ScopedMCPServer(config: server, scope: scope).id)
         refreshAll()
+        notifyPeers()
     }
 
     func deleteServer(name: String, scope: ConfigScope) {
@@ -83,6 +105,11 @@ final class MCPManager: ObservableObject {
         MCPConfigStore.save(file, to: url)
         stopClient(id: ScopedMCPServer(config: MCPServerConfig(name: name), scope: scope).id)
         refreshAll()
+        notifyPeers()
+    }
+
+    private func notifyPeers() {
+        NotificationCenter.default.post(name: .globalAIConfigurationDidChange, object: self)
     }
 
     private func configURL(for scope: ConfigScope) -> URL {

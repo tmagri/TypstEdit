@@ -132,9 +132,14 @@ enum ChatSessionImportError: LocalizedError {
 /// - standalone file: nowhere — sessions live in memory for this run only
 /// A legacy single `history.json` (or notebook `<hash>.json`) is imported as
 /// one session the first time its scope is opened.
+///
+/// One store per window (see `ProjectContext`). A project is open in at most
+/// one window, so each project's sessions have exactly one owner.
 @MainActor
 final class AIChatSessionStore: ObservableObject {
-    static let shared = AIChatSessionStore()
+    /// The window context whose skills, MCP servers and index the
+    /// conversations use. `nil` only in tests.
+    private(set) weak var context: ProjectContext?
 
     /// Sessions for the current scope, most recently active first. Includes
     /// in-memory-only sessions (standalone scope, or saving turned off).
@@ -151,24 +156,79 @@ final class AIChatSessionStore: ObservableObject {
     /// no longer open.
     private var managers: [UUID: AIChatManager] = [:]
     private var scope: LocalToolExecutor.Scope = .none
+
+    /// Set when another window already saves to this scope's sessions
+    /// folder. This window's chats then stay in memory, so neither window
+    /// overwrites the other's session list. Shown in the chat panel.
+    @Published private(set) var storageNotice: String?
+
+    /// True while this store is the one window allowed to write the scope's
+    /// sessions folder.
+    var ownsStorage: Bool { claimedStoragePath != nil }
+
+    private var claimedStoragePath: String?
+
+    /// Which store writes each sessions folder: one owner per folder.
+    private static var storageOwners: [String: WeakStore] = [:]
+
+    private final class WeakStore {
+        weak var store: AIChatSessionStore?
+        init(_ store: AIChatSessionStore) { self.store = store }
+    }
     private var currentProjectRoot: URL?
     private var currentFileURL: URL?
 
-    private init() {
+    init(context: ProjectContext? = nil) {
         let manager = AIChatManager()
         managers[manager.id] = manager
         activeManager = manager
         activeSessionID = manager.id
+        self.context = context
         // All stored properties are set, so self can be shared now — the
         // same wiring `register(_:)` does for every later manager.
         manager.sessionStore = self
+        manager.context = context
     }
 
     /// Ownership + the callback wiring: the manager is kept alive here and
     /// its `persist()` calls land in `chatSessionDidUpdate`.
     private func register(_ manager: AIChatManager) {
         manager.sessionStore = self
+        manager.context = context
         managers[manager.id] = manager
+    }
+
+    /// The window is closing: nothing may keep running against its project,
+    /// and its sessions folder is free for the next window.
+    func close() {
+        for manager in managers.values where manager.isGenerating {
+            manager.stop()
+        }
+        releaseStorage()
+    }
+
+    // MARK: - Storage Ownership
+
+    /// Claims the scope's sessions folder for this window, unless a live store
+    /// in another window already has it.
+    private func claimStorage(for scope: LocalToolExecutor.Scope) {
+        releaseStorage()
+        storageNotice = nil
+        guard let directory = Self.sessionsDirectory(for: scope) else { return }
+        let key = directory.standardizedFileURL.resolvingSymlinksInPath().path
+        if let owner = Self.storageOwners[key]?.store, owner !== self {
+            storageNotice = "This chat history is open in another window. Chats in this window are not saved."
+            return
+        }
+        Self.storageOwners[key] = WeakStore(self)
+        claimedStoragePath = key
+    }
+
+    private func releaseStorage() {
+        if let key = claimedStoragePath, Self.storageOwners[key]?.store === self {
+            Self.storageOwners[key] = nil
+        }
+        claimedStoragePath = nil
     }
 
     // MARK: - Context (called by `EditorController` and the chat panel)
@@ -193,6 +253,7 @@ final class AIChatSessionStore: ObservableObject {
         }
         managers.removeAll()
         scope = newScope
+        claimStorage(for: newScope)
         migrateLegacyIfNeeded()
         sessions = Self.loadIndex(from: recordDirectory.map(Self.indexURL(in:)))
         // Retained tool outputs live in the scope's own `.typstedit/`, so a
@@ -348,7 +409,7 @@ final class AIChatSessionStore: ObservableObject {
     /// Where this scope's sessions live, or nil when they aren't saved
     /// (standalone scope, or the user turned saving off).
     private var recordDirectory: URL? {
-        guard AISettingsManager.shared.chatSessionsEnabled else { return nil }
+        guard AISettingsManager.shared.chatSessionsEnabled, ownsStorage else { return nil }
         return Self.sessionsDirectory(for: scope)
     }
 

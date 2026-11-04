@@ -10,7 +10,7 @@ class AIContextManager {
     private init() {}
     
     // Change to async and require the user's prompt to perform the search
-    func generateContext(userPrompt: String, text: String, cursorIndex: Int, fileURL: URL?, errors: [TypstError] = []) async -> String {
+    func generateContext(userPrompt: String, text: String, cursorIndex: Int, fileURL: URL?, errors: [TypstError] = [], rag: RAGManager?) async -> String {
         let settings = AISettingsManager.shared
         
         let safeIndex = min(max(0, cursorIndex), text.count)
@@ -37,7 +37,7 @@ class AIContextManager {
         
         if settings.includeProjectContext {
             // Pass the current fileURL to be excluded from the semantic search
-            let relevantChunks = await RAGManager.shared.search(query: userPrompt, topK: 3, excluding: fileURL)
+            let relevantChunks = await rag?.search(query: userPrompt, topK: 3, excluding: fileURL) ?? []
             
             if !relevantChunks.isEmpty {
                 context += "\n\nRELEVANT PROJECT CONTEXT (from semantic search):\n"

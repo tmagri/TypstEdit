@@ -56,7 +56,11 @@ final class ChatTranscriptLayoutTests: XCTestCase {
     private func host(_ chat: AIChatManager) -> (NSWindow, NSView) {
         // Hosted the way FractionalSplitView hosts the sidebar: a hosting
         // controller pinned inside a container with Auto Layout.
-        let controller = NSHostingController(rootView: AIChatView(controller: EditorController(), chat: chat))
+        let editor = EditorController()
+        let context = editor.projectContext
+        let controller = NSHostingController(rootView: AIChatView(
+            controller: editor, chat: chat, store: context.chat,
+            skillsManager: context.skills, mcpManager: context.mcp))
         controller.sizingOptions = [] // as FractionalSplitView sets for the sidebar
         controller.view.translatesAutoresizingMaskIntoConstraints = false
         let view = NSView()
