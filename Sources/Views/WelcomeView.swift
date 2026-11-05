@@ -5,13 +5,30 @@ struct WelcomeView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var recents = RecentFilesManager.shared
-    /// Called when the user taps a recent file. Receives the full RecentFile so the
-    /// caller can decide whether to open in project or standalone mode.
+    /// Called when the user taps a recent file. Receives the full RecentFile so
+    /// the caller can reopen it the way it was last used: in its project, in
+    /// the Notes window, or on its own.
     var onOpen: (RecentFilesManager.RecentFile) -> Void
     
     @State private var showingTemplateSelection = false
     @State private var showClearConfirmation = false
     @State private var openingFileId: UUID? = nil
+
+    private func recentIcon(for file: RecentFilesManager.RecentFile) -> String {
+        switch file.kind {
+        case .project: return "folder"
+        case .notebook: return "book.closed"
+        case .standalone: return "doc.text"
+        }
+    }
+
+    private func recentIconColor(for file: RecentFilesManager.RecentFile) -> Color {
+        switch file.kind {
+        case .project: return .blue
+        case .notebook: return .indigo
+        case .standalone: return .secondary
+        }
+    }
     
     /// Resolves "System" to the actual current appearance so the welcome
     /// screen's logo always matches the Dock icon's light/dark artwork.
@@ -248,22 +265,22 @@ struct WelcomeView: View {
                                             .controlSize(.small)
                                             .frame(width: 16, height: 16)
                                     } else {
-                                        Image(systemName: file.isProject ? "folder" : "doc.text")
-                                            .foregroundColor(file.isProject ? .blue : .secondary)
+                                        Image(systemName: recentIcon(for: file))
+                                            .foregroundColor(recentIconColor(for: file))
                                     }
                                     VStack(alignment: .leading) {
                                         Text(file.name)
                                             .foregroundColor(themeManager.textColor)
                                             .truncationMode(.middle)
                                         HStack(spacing: 4) {
-                                            Text(file.isProject ? "Project" : "File")
+                                            Text(file.kindLabel)
                                                 .font(.caption2)
-                                                .foregroundColor(file.isProject ? .blue.opacity(0.8) : .secondary)
+                                                .foregroundColor(recentIconColor(for: file))
                                                 .padding(.horizontal, 5)
                                                 .padding(.vertical, 1)
                                                 .background(
                                                     RoundedRectangle(cornerRadius: 3)
-                                                        .fill(file.isProject ? Color.blue.opacity(0.1) : Color.secondary.opacity(0.1))
+                                                        .fill(recentIconColor(for: file).opacity(0.1))
                                                 )
                                             Text(file.path)
                                                 .font(.caption)

@@ -1,0 +1,197 @@
+import XCTest
+@testable import TypstEdit
+
+/// Open Recent must reopen a file the way it was last used: inside its real
+/// project, in the Notes window, or alone with no project — a standalone file
+/// must never gain a project (and therefore an index and `vectorcaches/`).
+@MainActor
+final class RecentFileModeTests: XCTestCase {
+    private typealias RecentFile = RecentFilesManager.RecentFile
+
+    private let notesRoot = URL(fileURLWithPath: "/notes")
+    private let file = URL(fileURLWithPath: "/work/book/chapters/ch1.typ")
+    private let projectRoot = URL(fileURLWithPath: "/work/book")
+
+    private func exists(_ paths: Set<String>) -> (URL) -> Bool {
+        { paths.contains($0.path) }
+    }
+
+    // MARK: - Reopen target
+
+    func testProjectEntryKeepsItsRealRootForFilesInSubfolders() {
+        let entry = RecentFile(url: file, lastModified: Date(), projectRoot: projectRoot, kind: .project)
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists(["/work/book"])),
+            .project(root: projectRoot, file: file))
+    }
+
+    func testProjectEntryFallsBackToStandaloneWhenTheFolderIsGone() {
+        let entry = RecentFile(url: file, lastModified: Date(), projectRoot: projectRoot, kind: .project)
+        // Neither the project nor its folder exists any more.
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists([])),
+            .standalone(file))
+    }
+
+    func testProjectEntryFallsBackToStandaloneWhenFileMovedOutOfTheProject() {
+        let moved = URL(fileURLWithPath: "/elsewhere/ch1.typ")
+        let entry = RecentFile(url: moved, lastModified: Date(), projectRoot: projectRoot, kind: .project)
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists(["/work/book"])),
+            .standalone(moved))
+    }
+
+    func testStandaloneEntryNeverBecomesAProject() {
+        let entry = RecentFile(url: file, lastModified: Date(), kind: .standalone)
+        // Even though its parent folder exists and would look like a project,
+        // the recorded mode wins: no index, no chat scope, no vectorcaches/.
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists(["/work/book/chapters"])),
+            .standalone(file))
+    }
+
+    func testNotebookPageOpensInTheNotesWindow() {
+        let note = URL(fileURLWithPath: "/notes/Physics/a.note")
+        let entry = RecentFile(url: note, lastModified: Date(), kind: .notebook)
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot),
+            .notebook(note))
+    }
+
+    func testNoteMovedOutOfTheNotebooksFolderOpensStandalone() {
+        let note = URL(fileURLWithPath: "/work/book/a.note")
+        let entry = RecentFile(url: note, lastModified: Date(), kind: .notebook)
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot),
+            .standalone(note))
+    }
+
+    // MARK: - Recording
+
+    /// `add` is the write side of the mode: it must classify by real state and
+    /// never keep a project root on a standalone or notebook entry.
+    func testAddRecordsModeAndStripsIrrelevantRoots() {
+        let manager = RecentFilesManager.shared
+        let defaults = UserDefaults.standard
+        let key = "recentFiles"
+        let saved = defaults.data(forKey: key)
+        defer {
+            if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) }
+            manager.recentFiles = []
+        }
+
+        let inProject = URL(fileURLWithPath: "/work/book/chapters/ch1.typ")
+        let standalone = URL(fileURLWithPath: "/loose/notes.typ")
+        let note = URL(fileURLWithPath: "/notes/Physics/a.note")
+
+        manager.clearAll()
+        manager.add(url: inProject, projectRoot: projectRoot)
+        manager.add(url: standalone)
+        manager.add(url: note, inNotebook: true)
+
+        XCTAssertEqual(manager.recentFiles.map(\.url), [note, standalone, inProject])
+        XCTAssertEqual(manager.recentFiles.map(\.kind), [.notebook, .standalone, .project])
+
+        let projectEntry = manager.recentFiles[2]
+        XCTAssertEqual(projectEntry.projectRoot, projectRoot)
+        XCTAssertTrue(projectEntry.isProject)
+
+        // A standalone file records no project root at all — so reopening it
+        // cannot make its folder a project (no index, no vectorcaches/).
+        XCTAssertNil(manager.recentFiles[1].projectRoot)
+        XCTAssertNil(manager.recentFiles[0].projectRoot)
+    }
+
+    func testAddUpdatesTheModeWhenTheSameFileIsOpenedOtherwise() {
+        let manager = RecentFilesManager.shared
+        let defaults = UserDefaults.standard
+        let key = "recentFiles"
+        let saved = defaults.data(forKey: key)
+        defer {
+            if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) }
+            manager.recentFiles = []
+        }
+
+        manager.clearAll()
+        manager.add(url: file, projectRoot: projectRoot)
+        XCTAssertEqual(manager.recentFiles.first?.kind, .project)
+
+        // Same file opened on its own later: one entry, and now standalone.
+        manager.add(url: file)
+        XCTAssertEqual(manager.recentFiles.count, 1)
+        XCTAssertEqual(manager.recentFiles.first?.kind, .standalone)
+        XCTAssertNil(manager.recentFiles.first?.projectRoot)
+    }
+
+    // MARK: - Persistence
+
+    private func decoded(from json: String) throws -> RecentFile {
+        try JSONDecoder().decode(RecentFile.self, from: Data(json.utf8))
+    }
+
+    func testDecodesCurrentSchema() throws {
+        let entry = try decoded(from: """
+        {"url":"file:///work/book/ch1.typ","lastModified":0,
+         "kind":"project","projectRoot":"file:///work/book/"}
+        """)
+        XCTAssertEqual(entry.kind, .project)
+        XCTAssertEqual(entry.projectRoot?.path, "/work/book")
+    }
+
+    func testDecodesLegacyIsProjectBool() throws {
+        let flatFile = URL(fileURLWithPath: "/work/book/ch1.typ")
+        let projectEntry = try decoded(from: """
+        {"url":"file:///work/book/ch1.typ","lastModified":0,"isProject":true}
+        """)
+        XCTAssertEqual(projectEntry.kind, .project)
+        // Old entries could not store the root; for a file at the top of the
+        // project, its folder is that root.
+        XCTAssertNil(projectEntry.projectRoot)
+        guard case .project(let root, let opened) = projectEntry.openTarget(
+            notebooksRoot: notesRoot,
+            fileExists: exists(["/work/book"])) else {
+            return XCTFail("Expected a project reopen")
+        }
+        XCTAssertTrue(ProjectWindowRouter.isSameFolder(root, URL(fileURLWithPath: "/work/book")))
+        XCTAssertEqual(opened, flatFile)
+
+        let fileEntry = try decoded(from: """
+        {"url":"file:///work/book/ch1.typ","lastModified":0,"isProject":false}
+        """)
+        XCTAssertEqual(fileEntry.kind, .standalone)
+    }
+
+    func testDecodesOldestSchemaAsProject() throws {
+        // Before modes existed every entry was a project entry.
+        let entry = try decoded(from: """
+        {"url":"file:///work/book/main.typ","lastModified":0}
+        """)
+        XCTAssertEqual(entry.kind, .project)
+    }
+
+    func testRoundTripKeepsModeAndRoot() throws {
+        let original = RecentFile(
+            url: file,
+            lastModified: Date(timeIntervalSince1970: 1000),
+            projectRoot: projectRoot,
+            kind: .project)
+        let data = try JSONEncoder().encode(original)
+        let restored = try JSONDecoder().decode(RecentFile.self, from: data)
+        XCTAssertEqual(restored.url, original.url)
+        XCTAssertEqual(restored.kind, .project)
+        XCTAssertEqual(restored.projectRoot, original.projectRoot)
+        XCTAssertEqual(restored.lastModified, original.lastModified)
+    }
+
+    func testEncodesLegacyKeyForOlderBuilds() throws {
+        let entry = RecentFile(url: file, lastModified: Date(), kind: .standalone)
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any]
+        XCTAssertEqual(json?["isProject"] as? Bool, false)
+    }
+
+    func testKindLabels() {
+        XCTAssertEqual(RecentFile(url: file, lastModified: Date(), kind: .project).kindLabel, "Project")
+        XCTAssertEqual(RecentFile(url: file, lastModified: Date(), kind: .standalone).kindLabel, "File")
+        XCTAssertEqual(RecentFile(url: file, lastModified: Date(), kind: .notebook).kindLabel, "Note")
+    }
+}

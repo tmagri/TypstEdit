@@ -165,13 +165,17 @@ struct ContentView: View {
             // Load directly and keep `onChange(of: selectedFile)` from
             // starting a second load (or a second save prompt).
             if self.selectedFile != url { self.isInternalSelectionChange = true }
-            self.selectedFile = url
-            self.loadFile(url: url)
+            // Leave the project *before* loading: the load records the file in
+            // Open Recent from the window's state, and a standalone file must
+            // be recorded as standalone, not as a member of the project this
+            // window is leaving.
             self.fileSystem.currentFolder = nil
             self.fileSystem.rootNodes = []
             self.fileSystem.isNewUnsavedFile = false
             self.editorController.projectRootURL = nil
             self.editorController.isSidebarVisible = false
+            self.selectedFile = url
+            self.loadFile(url: url)
         }
         // Ask before replacing unsaved edits; the old code loaded first and
         // asked afterwards, so "Save" could write the new file's text over
@@ -234,10 +238,11 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .openProjectAndFile)) { notification in
                 guard let payload = targetedPayload(notification), let url = payload["url"] as? URL else { return }
-                self.selectedFile = url
-                self.loadFile(url: url)
                 // The window already shows the project when the file is one
-                // of its own; only a different folder is (re)loaded.
+                // of its own; only a different folder is (re)loaded. Do this
+                // *before* the load: the load records the file in Open Recent
+                // from the window's project, and it must not be recorded
+                // against the folder this window is leaving.
                 let folder = (payload["root"] as? URL) ?? fileSystem.currentFolder.flatMap { root in
                     url.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path + "/") ? root : nil
                 } ?? url.deletingLastPathComponent()
@@ -247,6 +252,8 @@ struct ContentView: View {
                 }
                 fileSystem.isNewUnsavedFile = false
                 editorController.isSidebarVisible = true
+                self.selectedFile = url
+                self.loadFile(url: url)
             }
             .onReceive(NotificationCenter.default.publisher(for: .openNotebooks)) { notification in
                 guard let payload = targetedPayload(notification) else { return }
@@ -528,17 +535,24 @@ struct ContentView: View {
         Group {
            if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile && selectedFile == nil {
                 WelcomeView(model: fileSystem, onOpen: { file in
-                    if file.isProject {
-                        // Re-open in project mode, with the parent folder as
-                        // the project. Focuses the window that already has it.
+                    switch file.openTarget(notebooksRoot: NotebookManager.shared.rootDirectory) {
+                    case .project(let root, let fileURL):
+                        // Re-open in project mode, with the stored project root
+                        // (not merely the file's folder). Focuses the window
+                        // that already has that project.
                         AppDelegate.shared?.openProject(
-                            at: file.url.deletingLastPathComponent(),
-                            file: file.url,
+                            at: root,
+                            file: fileURL,
                             preferring: editorController
                         )
-                    } else {
-                        // Re-open as standalone single file (no sidebar)
-                        AppDelegate.shared?.openDocuments([file.url])
+                    case .notebook(let noteURL):
+                        // A Notes page belongs in the Notes window, so its
+                        // notebook comes back with it.
+                        AppDelegate.shared?.openNotebooks(showing: noteURL)
+                    case .standalone(let fileURL):
+                        // Re-open as a standalone single file: no project, no
+                        // sidebar, no index and no vectorcaches/.
+                        AppDelegate.shared?.openDocuments([fileURL])
                     }
                 })
                 .background(themeManager.mainBackground)
@@ -1414,6 +1428,23 @@ struct ContentView: View {
         AppDelegate.toggleWindowZoom()
     }
     
+    /// Records `url` in Open Recent together with how this window is showing
+    /// it: inside a project, on its own, or as a Notes page. Reopening uses
+    /// this, so a standalone file must never be recorded as a project (it
+    /// would then create an index and `vectorcaches/` beside it).
+    ///
+    /// `fileSystem.currentFolder` is the window's canonical project state, and
+    /// every caller sets it *before* the load, so the mode is never taken from
+    /// a folder the window is in the middle of leaving.
+    private func recordRecent(_ url: URL) {
+        let root = fileSystem.currentFolder
+        let inNotebook = root.map {
+            ProjectWindowRouter.isSameFolder($0, NotebookManager.shared.rootDirectory)
+        } ?? false
+        let projectRoot = (root != nil && !inNotebook) ? root : nil
+        RecentFilesManager.shared.add(url: url, projectRoot: projectRoot, inNotebook: inNotebook)
+    }
+
     func loadFile(url: URL?) {
         guard let url = url else { return }
         print("[DEBUG] loadFile: Starting load for \(url.lastPathComponent)")
@@ -1435,7 +1466,7 @@ struct ContentView: View {
                 editorController.isSidebarVisible = true
                 editorController.sidebarContent = .calculator
             }
-            RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
+            recordRecent(url)
             return
         }
 
@@ -1465,7 +1496,7 @@ struct ContentView: View {
                     self.currentPDFURL = nil
                     self.reloadToken = UUID()
                     self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-                    RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
+                    self.recordRecent(url)
                     
                     self.editorController.syncSavedContent(content)
                     self.editorController.noteDiskState(for: url)
@@ -1554,6 +1585,9 @@ struct ContentView: View {
                      self.editorController.isSidebarVisible = true
                      fileSystem.currentFolder = folder
                      fileSystem.loadFiles()
+                     // The file just became part of a project, so record it
+                     // that way: reopening it should bring the project back.
+                     recordRecent(savedURL)
                  }
             }
             return
@@ -1593,7 +1627,7 @@ struct ContentView: View {
 
         do {
             try editorController.sourceCode.write(to: url, atomically: true, encoding: .utf8)
-            RecentFilesManager.shared.add(url: url, isProject: fileSystem.currentFolder != nil)
+            recordRecent(url)
             // Mark the buffer saved right away (not on the next run-loop
             // turn): the close/quit prompts check it straight after asking
             // for the save. The document is the one loaded in the editor,

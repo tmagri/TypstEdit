@@ -8,11 +8,81 @@ class RecentFilesManager: ObservableObject {
     private let key = "recentFiles"
     
     struct RecentFile: Codable, Identifiable, Equatable {
+        /// How the file was opened last time. This is what makes reopening
+        /// faithful: a project file must come back in its project (no new
+        /// project rooted at whatever subfolder holds the file), a notebook
+        /// page must come back in the Notes window, and a lone file must come
+        /// back without a project — and therefore without an index,
+        /// `vectorcaches/` or project chat/MCP state.
+        enum Kind: String, Codable {
+            /// Opened inside a project window (a folder in the sidebar).
+            case project
+            /// Opened on its own, with no project.
+            case standalone
+            /// A page opened from the Notes window.
+            case notebook
+        }
+
         var id: UUID = UUID()
         let url: URL
         let lastModified: Date
-        /// Whether this was opened as a project (folder in sidebar) vs standalone single file.
-        var isProject: Bool
+        /// The project folder that was open when this file was last used.
+        /// Only set for `.project` entries, so the real project root survives
+        /// even when the file sits in a subfolder of it.
+        var projectRoot: URL?
+        var kind: Kind
+        
+        private enum CodingKeys: String, CodingKey {
+            case id, url, lastModified, projectRoot, kind
+            /// Only written/read for compatibility with older builds, which
+            /// stored a single Bool instead of `kind` + `projectRoot`.
+            case isProject
+        }
+        
+        init(
+            id: UUID = UUID(),
+            url: URL,
+            lastModified: Date,
+            projectRoot: URL? = nil,
+            kind: Kind
+        ) {
+            self.id = id
+            self.url = url
+            self.lastModified = lastModified
+            self.projectRoot = projectRoot
+            self.kind = kind
+        }
+        
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+            url = try values.decode(URL.self, forKey: .url)
+            lastModified = try values.decode(Date.self, forKey: .lastModified)
+            if let kind = try values.decodeIfPresent(Kind.self, forKey: .kind) {
+                self.kind = kind
+                projectRoot = try values.decodeIfPresent(URL.self, forKey: .projectRoot)
+            } else {
+                // Older builds stored only `isProject`; the oldest stored
+                // nothing and every entry was a project entry. Neither knows
+                // the project root, so `openTarget` falls back to the file's
+                // folder for them.
+                let wasProject = try values.decodeIfPresent(Bool.self, forKey: .isProject) ?? true
+                kind = wasProject ? .project : .standalone
+                projectRoot = nil
+            }
+        }
+        
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(id, forKey: .id)
+            try values.encode(url, forKey: .url)
+            try values.encode(lastModified, forKey: .lastModified)
+            try values.encode(kind, forKey: .kind)
+            try values.encodeIfPresent(projectRoot, forKey: .projectRoot)
+            // Keep the old key accurate too, so going back to an older build
+            // still reads this list instead of dropping it.
+            try values.encode(kind == .project, forKey: .isProject)
+        }
         
         var name: String {
             url.lastPathComponent
@@ -21,18 +91,87 @@ class RecentFilesManager: ObservableObject {
         var path: String {
             url.path
         }
+        
+        /// True when the file was last opened inside a project window.
+        var isProject: Bool { kind == .project }
+        
+        /// Short word for the badge in the welcome screen and Open Recent.
+        var kindLabel: String {
+            switch kind {
+            case .project: return "Project"
+            case .standalone: return "File"
+            case .notebook: return "Note"
+            }
+        }
+        
+        /// Where reopening this entry has to go.
+        enum OpenTarget: Equatable {
+            /// Load this file with this folder as the project.
+            case project(root: URL, file: URL)
+            /// Show this page in the Notes window.
+            case notebook(URL)
+            /// Load this file alone, with no project.
+            case standalone(URL)
+        }
+        
+        /// The destination for this entry. `fileExists` is injectable so the
+        /// decision can be tested without touching the file system.
+        func openTarget(
+            notebooksRoot: URL,
+            fileExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        ) -> OpenTarget {
+            switch kind {
+            case .notebook:
+                // A note that moved out of the notebooks folder can no longer
+                // be shown there; open it on its own instead.
+                guard ProjectWindowRouter.contains(notebooksRoot, url) else {
+                    return .standalone(url)
+                }
+                return .notebook(url)
+            case .project:
+                // A stored root is authoritative. Entries from older builds
+                // only knew the file's folder, which is the project root for
+                // files at the top of a project.
+                let root = projectRoot ?? url.deletingLastPathComponent()
+                guard fileExists(root), ProjectWindowRouter.contains(root, url) else {
+                    // The project folder is gone, or the file was moved out of
+                    // it: do not attach the file to some other project. A lone
+                    // file needs no project index or `vectorcaches/`.
+                    return .standalone(url)
+                }
+                return .project(root: root, file: url)
+            case .standalone:
+                return .standalone(url)
+            }
+        }
     }
     
     init() {
         loadRecents()
     }
     
-    func add(url: URL, isProject: Bool) {
+    /// Records `url` as the most recent file, together with the mode it was
+    /// opened in. Pass the real project folder (not merely the file's parent)
+    /// and set `inNotebook` when the Notes window was showing it.
+    func add(url: URL, projectRoot: URL? = nil, inNotebook: Bool = false) {
         // Remove existing entry for this URL (regardless of previous mode)
         recentFiles.removeAll { $0.url == url }
         
         // Add to top with current mode
-        let newFile = RecentFile(url: url, lastModified: Date(), isProject: isProject)
+        let kind: RecentFile.Kind
+        if inNotebook {
+            kind = .notebook
+        } else if projectRoot != nil {
+            kind = .project
+        } else {
+            kind = .standalone
+        }
+        let newFile = RecentFile(
+            url: url,
+            lastModified: Date(),
+            projectRoot: kind == .project ? projectRoot : nil,
+            kind: kind
+        )
         recentFiles.insert(newFile, at: 0)
         
         // Keep max 10
@@ -72,24 +211,11 @@ class RecentFilesManager: ObservableObject {
     }
     
     private func loadRecents() {
-        if let data = UserDefaults.standard.data(forKey: key) {
-            // Try to decode with the new schema (isProject field)
-            if let decoded = try? JSONDecoder().decode([RecentFile].self, from: data) {
-                recentFiles = decoded
-                validateRecentFiles()
-                return
-            }
-            // Migration: old entries didn't have isProject — default to true (project mode was the only mode)
-            struct LegacyRecentFile: Codable {
-                var id: UUID = UUID()
-                let url: URL
-                let lastModified: Date
-            }
-            if let legacy = try? JSONDecoder().decode([LegacyRecentFile].self, from: data) {
-                recentFiles = legacy.map { RecentFile(id: $0.id, url: $0.url, lastModified: $0.lastModified, isProject: true) }
-                saveRecents()
-                validateRecentFiles()
-            }
-        }
+        guard let data = UserDefaults.standard.data(forKey: key) else { return }
+        // `RecentFile.init(from:)` understands the current schema and both
+        // older ones (`isProject` Bool, and no mode at all).
+        guard let decoded = try? JSONDecoder().decode([RecentFile].self, from: data) else { return }
+        recentFiles = decoded
+        validateRecentFiles()
     }
 }
