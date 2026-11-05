@@ -487,6 +487,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Document windows
 
+    /// True between the user clicking minimize and the miniaturize
+    /// animation finishing. During the animation the window is neither
+    /// visible nor miniaturized yet, which every window-state check here
+    /// would read as "closed" — opening a second main window.
+    private var isMainMiniaturizing = false
+
     /// Called by the main window's `WindowAccessor` each time SwiftUI
     /// (re)creates it.
     ///
@@ -500,7 +506,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Self.debugLog("registerMainWindow: duplicate main window closed")
             window.orderOut(nil)
             DispatchQueue.main.async { window.close() }
-            bringToFront(existing)
+            // Only bring the existing window forward when it is on screen
+            // and not on its way into the Dock. A minimized window sits
+            // there on purpose, and SwiftUI re-creates the group's window
+            // the moment the minimize starts: restoring the original here
+            // cancelled the animation and made it pop back open.
+            if existing.isVisible, !isMainMiniaturizing {
+                bringToFront(existing)
+            }
             return
         }
         mainWindow = window
@@ -509,10 +522,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// While the app is hidden (⌘H) no window is visible, yet the main
     /// window is still open: treating it as closed would open a second one.
+    /// A window mid-minimize reads the same way, so the miniaturizing flag
+    /// counts as open too.
     private var isMainWindowOpen: Bool {
         guard let mainWindow else { return false }
-        return mainWindow.isVisible || mainWindow.isMiniaturized
-            || (NSApp.isHidden && NSApp.windows.contains(mainWindow))
+        if mainWindow.isVisible || mainWindow.isMiniaturized || isMainMiniaturizing { return true }
+        return NSApp.isHidden && NSApp.windows.contains(mainWindow)
     }
 
     private struct DocumentWindow {
@@ -1098,6 +1113,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let isLandscape = screen.frame.width > screen.frame.height
         if editorController?.isVerticalSplit != isLandscape {
             editorController?.isVerticalSplit = isLandscape
+        }
+    }
+
+    /// Marks the miniaturize animation window (see `isMainMiniaturizing`).
+    /// `isVisible` drops before `isMiniaturized` rises, so state checks made
+    /// in between — a reopen event, a SwiftUI window re-registration — would
+    /// otherwise see "no window" and open a duplicate.
+    func windowWillMiniaturize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === mainWindow else { return }
+        isMainMiniaturizing = true
+        // Don't let a stale flag linger if the animation never completes.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.isMainMiniaturizing = false
         }
     }
 }
