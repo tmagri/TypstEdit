@@ -506,13 +506,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Self.debugLog("registerMainWindow: duplicate main window closed")
             window.orderOut(nil)
             DispatchQueue.main.async { window.close() }
-            // Only bring the existing window forward when it is on screen
-            // and not on its way into the Dock. A minimized window sits
-            // there on purpose, and SwiftUI re-creates the group's window
-            // the moment the minimize starts: restoring the original here
-            // cancelled the animation and made it pop back open.
-            if existing.isVisible, !isMainMiniaturizing {
+            // Only bring the existing window forward when it is on screen,
+            // not on its way into the Dock, and the app is already active.
+            // A minimized window sits there on purpose, and SwiftUI
+            // re-creates the group's window the moment the minimize starts:
+            // restoring the original here cancelled the animation and made
+            // it pop back open. When the app is in the background, the user
+            // is working in another app — closing the re-created copy is
+            // enough, and activating here would steal their focus (the chat
+            // completing a reply re-renders the document, which re-creates
+            // this window; that must never bring TypstEdit forward).
+            if existing.isVisible, !isMainMiniaturizing, NSApp.isActive {
                 bringToFront(existing)
+            } else {
+                Self.debugLog("registerMainWindow: duplicate closed without activating")
             }
             return
         }

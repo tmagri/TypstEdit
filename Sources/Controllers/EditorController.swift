@@ -303,6 +303,38 @@ class EditorController: NSObject, ObservableObject {
         }
     }
 
+    /// True when this window's editor text view is the one the user is
+    /// typing into. Used to put the caret back after a rebuild that has to
+    /// replace the text view (a re-render, a file reload, an AI edit), so a
+    /// background refresh can never move the cursor into some other control.
+    var isEditorFirstResponder: Bool {
+        guard let textView = textViewController?.textView else { return false }
+        return textView.window?.firstResponder === textView
+    }
+
+    /// Gives keyboard focus back to the editor after its view had to be
+    /// rebuilt, but only when the user was already typing in it. Rebuilding
+    /// (SwiftUI's `.id()` change on a document reload, the AI writing the
+    /// file back) drops first responder; without this the focus lands on
+    /// whatever control SwiftUI picks next — most visibly the AI Chat input
+    /// box, which then steals the caret from under the user. Never called
+    /// for a window in the background: that window must stay untouched.
+    /// `restoreEditorFocusIfNeeded(wasFocused:)` is the only entry point.
+    private func restoreEditorFocus() {
+        guard let window = textViewController?.textView?.window,
+              window.isKeyWindow, NSApp.isActive else { return }
+        guard window.firstResponder !== textViewController?.textView else { return }
+        textViewController?.textView.window?.makeFirstResponder(textViewController?.textView)
+    }
+
+    /// Called after a document rebuild replaced the hosted editor view.
+    /// Hands focus back only when this window is the key window of an active
+    /// app, so a background re-render can never pull the caret into this
+    /// window (or into any control inside it) while the user is elsewhere.
+    func restoreEditorFocusAfterRebuild() {
+        restoreEditorFocus()
+    }
+
     /// Safety net: if the underlying text view's displayed string has diverged from `sourceCode`
     /// (the model the preview/saving rely on), force the view back in sync. This is what makes the
     /// "editor goes blank / loses text while the PDF preview shows the change" class of bugs
@@ -335,6 +367,7 @@ class EditorController: NSObject, ObservableObject {
         // for non-empty documents — the root cause of sections going blank / losing
         // completion after paste. setText calls setUpHighlighter(), guaranteeing every
         // range is re-queried.
+        let hadFocus = isEditorFirstResponder
         tvc.setText(sourceCode)
 
         textView.selectionManager.setSelectedRange(NSRange(location: clamped, length: 0))
@@ -347,6 +380,10 @@ class EditorController: NSObject, ObservableObject {
         } else {
             textView.scrollSelectionToVisible()
         }
+        // A full resync replaces the text storage under a live editor; put
+        // the caret back where the user was typing instead of letting focus
+        // fall to the AI Chat input or any other control.
+        if hadFocus { restoreEditorFocus() }
     }
 
 
@@ -4723,10 +4760,21 @@ class SourceEditorBridge: TextViewCoordinator {
         let ptr = ObjectIdentifier(controller)
         print("[SourceEditorBridge] prepareCoordinator for \(ptr)")
         MainActor.assumeIsolated {
+            // A rebuild of the same document (a reload from disk after the AI
+            // wrote it, a preview refresh) replaces the hosted view and drops
+            // keyboard focus. Remember whether the caret was in the editor so
+            // it can be handed back once the new view is installed — never
+            // for a file *switch*, where the user is not typing, and never
+            // for a background window.
+            let ctrl = self.controller
+            let shouldRestoreFocus = ctrl?.isEditorFirstResponder ?? false
             self.controller?.textViewController = controller
             // Delay to allow component to finish its own internal setup before we override
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.controller?.setupDefaultConfiguration()
+                if shouldRestoreFocus {
+                    self.controller?.restoreEditorFocusAfterRebuild()
+                }
             }
         }
     }
