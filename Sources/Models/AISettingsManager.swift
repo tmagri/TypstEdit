@@ -336,6 +336,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
 /// without an explicit choice uses the default Chat & Actions model.
 enum AIFeature: String, CaseIterable, Identifiable {
     case chat
+    case chatSubagent
     case prompt
     case refine
     case calculator
@@ -345,6 +346,7 @@ enum AIFeature: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .chat: return "AI Chat"
+        case .chatSubagent: return "AI Chat Subagent"
         case .prompt: return "AI Prompt (Insert)"
         case .refine: return "Refine & Grammar"
         case .calculator: return "Calculator AI Fallback"
@@ -353,7 +355,8 @@ enum AIFeature: String, CaseIterable, Identifiable {
 
     var description: String {
         switch self {
-        case .chat: return "The chat panel, its delegate_task subagent, and history compaction."
+        case .chat: return "The chat panel and history compaction. The delegate_task subagent has its own row below."
+        case .chatSubagent: return "The delegate_task read-only research subagent. Default follows whatever model the AI Chat panel is using, so a cheap local model can do the reading while a stronger cloud model runs the conversation."
         case .prompt: return "The AI Prompt sheet that generates content to insert at the cursor (including Fix with AI)."
         case .refine: return "Refine Writing and Fix Grammar on a selection."
         case .calculator: return "Questions the calculator's math engine cannot evaluate, answered instead of an error."
@@ -646,6 +649,23 @@ class AISettingsManager: ObservableObject {
     /// The same limit for the read-only `delegate_task` subagent, which does
     /// less per turn and so needs fewer. 0 = unlimited.
     @AppStorage("aiChatSubagentMaxTurns") var chatSubagentMaxTurns: Int = 12
+    /// When the subagent has its own model (Model per Feature → AI Chat
+    /// Subagent) and that model can't be used — its server stays busy past
+    /// the busy wait, or the request fails — run the delegation on the model
+    /// the AI Chat panel is using instead, so the job still completes. Off =
+    /// the subagent's error surfaces as it does today.
+    @AppStorage("aiChatSubagentFallbackEnabled") var chatSubagentFallbackEnabled: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    /// Seconds to wait for a busy subagent server to finish its current
+    /// request before falling back to the chat model (when the fallback is
+    /// on). Local servers (Ollama, LM Studio, llama.cpp) usually serve one
+    /// request at a time and queue the rest silently, so a busy server means
+    /// the subagent would otherwise wait with no sign of why. 0 = fall back
+    /// at once.
+    @AppStorage("aiChatSubagentBusyWaitSeconds") var chatSubagentBusyWaitSeconds: Double = 15 {
+        willSet { objectWillChange.send() }
+    }
 
     /// Resolved limit for the main chat loop: 0 → `nil` (unlimited); positive
     /// values clamped so a fat-fingered 10⁶ can't turn a stuck model into an
@@ -1053,6 +1073,7 @@ class AISettingsManager: ObservableObject {
     /// Per-feature model choice: a profile UUID string, or "" for the default
     /// Chat & Actions model.
     @AppStorage("aiFeatureModel.chat") private var chatModelProfileIDRaw: String = ""
+    @AppStorage("aiFeatureModel.chatSubagent") private var chatSubagentModelProfileIDRaw: String = ""
     @AppStorage("aiFeatureModel.prompt") private var promptModelProfileIDRaw: String = ""
     @AppStorage("aiFeatureModel.refine") private var refineModelProfileIDRaw: String = ""
     @AppStorage("aiFeatureModel.calculator") private var calculatorModelProfileIDRaw: String = ""
@@ -1117,6 +1138,7 @@ class AISettingsManager: ObservableObject {
     private func storedModelProfileIDRaw(for feature: AIFeature) -> String {
         switch feature {
         case .chat: return chatModelProfileIDRaw
+        case .chatSubagent: return chatSubagentModelProfileIDRaw
         case .prompt: return promptModelProfileIDRaw
         case .refine: return refineModelProfileIDRaw
         case .calculator: return calculatorModelProfileIDRaw
@@ -1136,6 +1158,7 @@ class AISettingsManager: ObservableObject {
         let raw = id?.uuidString ?? ""
         switch feature {
         case .chat: chatModelProfileIDRaw = raw
+        case .chatSubagent: chatSubagentModelProfileIDRaw = raw
         case .prompt: promptModelProfileIDRaw = raw
         case .refine: refineModelProfileIDRaw = raw
         case .calculator: calculatorModelProfileIDRaw = raw

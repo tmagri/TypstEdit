@@ -132,6 +132,51 @@ final class AIModelProfileTests: XCTestCase {
         }
     }
 
+    /// The chat's delegate_task subagent has its own model choice: any saved
+    /// model — including a second local server — without touching the chat's
+    /// model. `AIChatManager` reads this profile and falls back to the chat's
+    /// current model when the row is unset.
+    func testSubagentUsesItsOwnModelAndLeavesChatAlone() {
+        withCleanProfiles { settings in
+            var profile = settings.addModelProfile()
+            profile.source = .local
+            profile.model = " qwen-reader "
+            profile.endpoint = "http://localhost:1234/v1/chat/completions"
+            settings.updateModelProfile(profile)
+
+            // With no choice the row stays unset so the subagent can follow
+            // whatever model the chat panel is currently using.
+            XCTAssertNil(settings.modelProfileID(for: .chatSubagent))
+            XCTAssertNil(settings.modelProfile(for: .chatSubagent))
+
+            settings.setModelProfileID(profile.id, for: .chatSubagent)
+            let ctx = settings.modelContext(for: .chatSubagent)
+            XCTAssertEqual(ctx.model, "qwen-reader")
+            XCTAssertEqual(ctx.source, .local)
+            XCTAssertEqual(ctx.chatEndpoint, "http://localhost:1234/v1/chat/completions")
+
+            // Picking one for the subagent leaves chat alone.
+            XCTAssertNil(settings.modelProfileID(for: .chat))
+
+            // Removing the profile clears the choice, like every feature.
+            settings.removeModelProfile(id: profile.id)
+            XCTAssertNil(settings.modelProfileID(for: .chatSubagent))
+        }
+    }
+
+    /// The busy/failure fallback defaults on with a 15 s busy wait, so an
+    /// unreachable subagent model degrades to the chat model out of the box.
+    func testSubagentFallbackDefaults() {
+        let settings = AISettingsManager.shared
+        let saved = (settings.chatSubagentFallbackEnabled, settings.chatSubagentBusyWaitSeconds)
+        defer {
+            settings.chatSubagentFallbackEnabled = saved.0
+            settings.chatSubagentBusyWaitSeconds = saved.1
+        }
+        XCTAssertTrue(settings.chatSubagentFallbackEnabled)
+        XCTAssertEqual(settings.chatSubagentBusyWaitSeconds, 15)
+    }
+
     // MARK: - Per-model compaction
 
     func testAutomaticCompactionPicksBySource() {

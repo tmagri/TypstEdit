@@ -2537,12 +2537,83 @@ final class AIChatManager: ObservableObject {
         Scope: \(scopeLabel)
         """
 
-        return try await AICompletionService.shared.fetchCompletionWithTools(
+        // The subagent runs on its own saved model when one is chosen
+        // (Model per Feature → AI Chat Subagent) — any provider, or a second
+        // local server. With no choice it uses whatever model the chat panel
+        // is using right now, exactly as before.
+        let settings = AISettingsManager.shared
+        let chatContext = chatModelContext
+        var context = chatContext
+        var isOwnModel = false
+        if let profile = settings.modelProfile(for: .chatSubagent) {
+            context = settings.modelContext(for: profile)
+            isOwnModel = true
+
+            // A local server usually serves one request at a time and queues
+            // the rest silently, so a busy server means the subagent would
+            // wait with no sign of why. Wait out a short window, then fall
+            // back to the chat model if it stays busy — unless the fallback
+            // is off, in which case queueing quietly is what was asked for.
+            // When both models sit behind the same server the fallback can't
+            // help, so the request just queues.
+            let chatServerKey = URL(string: chatContext.chatEndpoint).map { ModelServerActivity.serverKey(for: $0) }
+            if settings.chatSubagentFallbackEnabled,
+               let url = URL(string: context.chatEndpoint),
+               ModelServerActivity.shared.isBusy(url),
+               chatServerKey != ModelServerActivity.serverKey(for: url) {
+                let wait = settings.chatSubagentBusyWaitSeconds
+                liveStatus = wait > 0
+                    ? "The subagent's server is busy — waiting up to \(Int(wait))s before falling back to the chat model"
+                    : "The subagent's server is busy — falling back to the chat model"
+                let idle = wait > 0 ? await ModelServerActivity.shared.waitUntilIdle(url, timeout: wait) : false
+                if !idle {
+                    context = chatContext
+                    isOwnModel = false
+                    liveStatus = "The subagent's server stayed busy — running the delegation on the chat model"
+                }
+            }
+        }
+
+        do {
+            return try await runSubagentLoop(
+                context: context, tools: subTools, prompt: prompt, systemPrompt: systemPrompt
+            )
+        } catch {
+            // The subagent's own model failed before finishing (server down,
+            // rate limit, dropped request): retry once on the model the chat
+            // itself is using. Stop (task cancellation) is never a model
+            // failure — it ends the run either way.
+            guard isOwnModel,
+                  settings.chatSubagentFallbackEnabled,
+                  !Task.isCancelled,
+                  !(error is CancellationError) else { throw error }
+            liveStatus = "The subagent's model failed (\(error.localizedDescription)) — retrying the delegation on the chat model"
+            do {
+                return try await runSubagentLoop(
+                    context: chatContext, tools: subTools, prompt: prompt, systemPrompt: systemPrompt
+                )
+            } catch let retryError {
+                if retryError is CancellationError { throw retryError }
+                throw AIError.apiError(
+                    "The subagent's model failed: \(error.localizedDescription). "
+                        + "The chat model it fell back to also failed: \(retryError.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    /// One attempt of the delegate_task loop on the given model context.
+    /// Extracted from `runSubagent` so the busy/failure fallback can rerun
+    /// the whole delegation on another model without duplicating plumbing.
+    private func runSubagentLoop(
+        context: ModelContext, tools: [MCPTool], prompt: String, systemPrompt: String
+    ) async throws -> String {
+        try await AICompletionService.shared.fetchCompletionWithTools(
             prompt: prompt,
             systemPrompt: systemPrompt,
             maxTokens: AISettingsManager.shared.effectiveChatMaxTokens,
             maxTokensCeiling: AISettingsManager.shared.chatMaxTokensCeiling,
-            tools: subTools,
+            tools: tools,
             maxTurns: subagentMaxTurns,
             onToolRefused: { [weak self] name, arguments, note in
                 self?.recordSkippedToolCall(qualifiedName: name, argumentsJSON: arguments, note: note, isSubagent: true)
@@ -2550,8 +2621,11 @@ final class AIChatManager: ObservableObject {
             onReasoningDelta: { [weak self] delta in self?.appendLiveReasoning(delta) },
             onStatus: { [weak self] status in self?.liveStatus = status },
             sanitize: false,
-            contextCharBudget: contextBudgetTokens * Self.charsPerToken,
-            model: chatModelContext,
+            // The subagent's saved model can carry its own context budget —
+            // a small local reader gets a conservative one without shrinking
+            // the chat's, and vice versa.
+            contextCharBudget: AISettingsManager.shared.effectiveContextBudgetTokens(for: context) * Self.charsPerToken,
+            model: context,
             executeParallel: { [weak self] batch in
                 guard let self else { return [:] }
                 return await self.runParallelReadOnlyCalls(batch, isSubagent: true)

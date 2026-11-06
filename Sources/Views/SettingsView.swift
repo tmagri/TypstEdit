@@ -1514,6 +1514,42 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
+            title: "Subagent Model",
+            icon: "person.2",
+            description: "delegate_task — the read-only research subagent — can run on a different model or server than the chat panel: a cheap local model does the reading while a stronger cloud model runs the conversation. Leave it on Default and the subagent uses whatever model the chat is using. Local servers (Ollama, LM Studio, llama.cpp) usually serve one request at a time, so a second local server avoids queueing behind other requests; a busy server is waited out, and a failed request falls back to the chat model when the toggle below is on."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                SettingsRow(label: "Subagent model:", caption: "The same saved-model list as every feature. Pick a model from another provider, or point at a second local server.") {
+                    Picker("", selection: featureModelBinding(.chatSubagent)) {
+                        Text("Follow the chat model").tag(UUID?.none)
+                        ForEach(settings.modelProfiles) { profile in
+                            Text(profile.detailedName).tag(Optional(profile.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+
+                Toggle("Fall back to the chat model when the subagent model is busy or fails", isOn: $settings.chatSubagentFallbackEnabled)
+                    .font(.caption)
+
+                HStack(spacing: 10) {
+                    Text("Busy wait")
+                        .font(.caption)
+                    TextField("15", value: $settings.chatSubagentBusyWaitSeconds, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                    Text("seconds (0 = fall back at once)")
+                        .font(.caption)
+                    Spacer()
+                }
+
+                Text("A failed subagent request is retried once on the chat model, and both failures are reported together. Pressing Stop never falls back — it always ends the run.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+
+        SettingsCard(
             title: "Reply Size",
             icon: "text.append",
             description: "The most tokens one AI Chat reply may use. Reasoning models spend their hidden thinking from the same budget, so a small cap can leave nothing for the answer or a tool call: the reply comes back empty, or a tool call is cut off halfway. With retrying on, a reply cut off by the cap is sent again with twice the cap, up to four times the setting."
