@@ -507,20 +507,43 @@ class FileSystemModel: ObservableObject {
     }
     
     func renameFile(url: URL) {
-        // Renaming in macOS is often done via an alert or inline.
-        // For simplicity, we'll use a NSSavePanel-like approach or just a simple input if we were in a custom view.
-        // Let's use a simple prompt logic or post a notification for ContentView to handle it with an alert.
+        // Post to ContentView, which owns the rename alert (with the
+        // extension-change warning). The payload targets this window only.
         NotificationCenter.default.post(name: .requestRename, object: windowPayload(["url": url]))
     }
-    
-    func performRename(from url: URL, to newName: String) {
-        let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
+
+    /// Moves `url` to `newName` within the same folder and refreshes the
+    /// tree. Refuses to run on an empty or unchanged name, names containing
+    /// slashes, or an existing destination (case-only renames of the same
+    /// item are allowed). Failures surface via `.fileOperationDidFail`
+    /// instead of failing silently.
+    @discardableResult
+    func performRename(from url: URL, to newName: String) -> Bool {
+        let trimmedName = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        func fail(_ message: String) -> Bool {
+            NotificationCenter.default.post(name: .fileOperationDidFail, object: windowPayload(["message": message]))
+            return false
+        }
+        guard !trimmedName.isEmpty else { return false }
+        guard trimmedName != url.lastPathComponent else { return false }
+        guard !trimmedName.contains("/") else {
+            return fail("A name cannot contain “/”.")
+        }
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(trimmedName)
+        // A case-only rename ("readme.typ" → "README.typ") hits this check
+        // on case-insensitive volumes even though the target is the source
+        // itself, so it must not count as a collision.
+        let isCaseOnlyRename = trimmedName.lowercased() == url.lastPathComponent.lowercased()
+        if !isCaseOnlyRename, FileManager.default.fileExists(atPath: newURL.path) {
+            return fail("“\(trimmedName)” already exists in this folder.")
+        }
         do {
             try FileManager.default.moveItem(at: url, to: newURL)
             loadFiles()
             NotificationCenter.default.post(name: .fileDidRename, object: windowPayload(["old": url, "new": newURL]))
+            return true
         } catch {
-            print("Error renaming file: \(error)")
+            return fail(error.localizedDescription)
         }
     }
     
@@ -563,6 +586,9 @@ extension Notification.Name {
     static let fileDidCreate = Notification.Name("fileDidCreate")
     static let requestRename = Notification.Name("requestRename")
     static let fileDidRename = Notification.Name("fileDidRename")
+    /// Object: the window payload with a "message" string, e.g. a failed
+    /// rename. ContentView shows it in a file-operation error alert.
+    static let fileOperationDidFail = Notification.Name("fileOperationDidFail")
     static let refreshNotebooks = Notification.Name("refreshNotebooks")
 }
 
@@ -1020,6 +1046,13 @@ struct SidebarRow: View {
             }
 
             Divider()
+
+            // Files and folders alike; the rename alert in ContentView
+            // pre-fills the full name including the extension and warns when
+            // the extension changes.
+            Button("Rename…") {
+                fileSystemModel.renameFile(url: node.url)
+            }
 
             Button("Delete", role: .destructive) {
                 showDeleteAlert = true

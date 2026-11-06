@@ -42,6 +42,11 @@ struct ContentView: View {
     @State private var showRenameAlert: Bool = false
     @State private var renameTargetURL: URL?
     @State private var newFileName: String = ""
+    /// Whether the rename target is a folder — folders have no extension,
+    /// so the extension-change warning does not apply to them.
+    @State private var renameTargetIsFolder: Bool = false
+    @State private var showFileOperationErrorAlert: Bool = false
+    @State private var fileOperationErrorMessage: String = ""
     @State private var currentLoadID: UUID = UUID()
     @State private var isInternalSelectionChange: Bool = false
     @State private var showRecoveryAlert: Bool = false
@@ -137,6 +142,46 @@ struct ContentView: View {
             return nil
         }
         return payload
+    }
+
+    /// Opens the rename alert for a file or folder from the project tree
+    /// (context menu) or for the selected file (File menu). The field starts
+    /// out with the full name including its extension, and the alert carries
+    /// a warning whenever the typed name changes or drops the extension.
+    @MainActor
+    func beginRename(of url: URL) {
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        renameTargetURL = url
+        renameTargetIsFolder = isDirectory.boolValue
+        newFileName = url.lastPathComponent
+        showRenameAlert = true
+    }
+
+    /// True when the typed name changes or drops the file's extension.
+    /// Compared case-insensitively; folders have no extension to preserve.
+    private var renameChangesExtension: Bool {
+        guard let url = renameTargetURL, !renameTargetIsFolder else { return false }
+        let newExtension = (newFileName as NSString).pathExtension
+        return newExtension.caseInsensitiveCompare(url.pathExtension) != .orderedSame
+    }
+
+    private var renameAlertMessage: String {
+        guard let url = renameTargetURL else { return "" }
+        if renameTargetIsFolder {
+            return "Enter a new name for this folder."
+        }
+        if renameChangesExtension {
+            let newExtension = (newFileName as NSString).pathExtension
+            if newExtension.isEmpty {
+                return "Warning: removing the “.\(url.pathExtension)” extension may change how TypstEdit opens this file."
+            }
+            if url.pathExtension.isEmpty {
+                return "Warning: adding the “.\(newExtension)” extension may change how TypstEdit opens this file."
+            }
+            return "Warning: changing the extension from “.\(url.pathExtension)” to “.\(newExtension)” may change how TypstEdit opens this file."
+        }
+        return "Enter a new name, including the extension."
     }
 
     /// Clears all document state so the welcome screen shows. Shared by the
@@ -312,9 +357,12 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .requestRename)) { notification in
                 guard let url = targetedPayload(notification)?["url"] as? URL else { return }
-                self.renameTargetURL = url
-                self.newFileName = url.lastPathComponent
-                self.showRenameAlert = true
+                self.beginRename(of: url)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .fileOperationDidFail)) { notification in
+                guard let message = targetedPayload(notification)?["message"] as? String else { return }
+                self.fileOperationErrorMessage = message
+                self.showFileOperationErrorAlert = true
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileDidRename)) { notification in
                 guard let newURL = targetedPayload(notification)?["new"] as? URL else { return }
@@ -1211,10 +1259,20 @@ struct ContentView: View {
                     Button("Go") { if let line = Int(editorController.targetLineNumber) { editorController.goToLine(line) } }
                     Button("Cancel", role: .cancel) { }
                 }
-                .alert("Rename File", isPresented: $showRenameAlert) {
+                .alert("Rename", isPresented: $showRenameAlert) {
                     TextField("New Name", text: $newFileName)
-                    Button("Rename") { if let url = renameTargetURL { fileSystem.performRename(from: url, to: newFileName) } }
+                    Button("Rename") {
+                        guard let url = renameTargetURL else { return }
+                        fileSystem.performRename(from: url, to: newFileName)
+                    }
                     Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text(renameAlertMessage)
+                }
+                .alert("Rename Failed", isPresented: $showFileOperationErrorAlert) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text(fileOperationErrorMessage)
                 }
                 .alert("Export Error", isPresented: $editorController.showExportErrorAlert) {
                     Button("OK", role: .cancel) { }
@@ -2018,7 +2076,7 @@ struct ContentView: View {
     func handleMenuCommand(_ command: String) {
         switch command {
         case "newFile": fileSystem.createNewFile()
-        case "renameFile": if let url = selectedFile { self.renameTargetURL = url; self.newFileName = url.lastPathComponent; self.showRenameAlert = true }
+        case "renameFile": if let url = selectedFile { beginRename(of: url) }
         case "quickExportPDF": if let url = selectedFile { exportPDF(from: url) }
         case "exportPDF": handleExport(format: "pdf")
         case "exportPNG": handleExport(format: "png")
