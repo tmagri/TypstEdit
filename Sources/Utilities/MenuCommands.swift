@@ -202,29 +202,34 @@ struct AppMenuCommands: Commands {
         // MARK: - Edit Menu
         // Replace each system group individually to avoid duplicate items.
         
+        // These groups replace AppKit's standard items so the actions can run
+        // the editor's text conversion. Every action first gives a focused
+        // native text view (a settings field, an alert's field editor, any
+        // other window's text box) the standard AppKit behaviour — without
+        // that, ⌘C in the Settings window posted a notification no document
+        // window handled and nothing was copied. Only when the document
+        // editor holds focus does the `.menuCommand` route run.
+        let post = { (command: String) in
+            NativeEditingCommand.route(command) { handled in
+                NotificationCenter.default.post(name: .menuCommand, object: handled)
+            }
+        }
+
         // Replaces the system Undo / Redo pair
         CommandGroup(replacing: .undoRedo) {
-            Button("Undo") {
-                NotificationCenter.default.post(name: .menuCommand, object: "undo")
-            }
+            Button("Undo") { post("undo") }
             .keyboardShortcut("z", modifiers: .command)
             
-            Button("Redo") {
-                NotificationCenter.default.post(name: .menuCommand, object: "redo")
-            }
+            Button("Redo") { post("redo") }
             .keyboardShortcut("z", modifiers: [.command, .shift])
         }
         
         // Replaces the system Cut / Copy / Paste trio
         CommandGroup(replacing: .pasteboard) {
-            Button("Cut") {
-                NotificationCenter.default.post(name: .menuCommand, object: "cut")
-            }
+            Button("Cut") { post("cut") }
             .keyboardShortcut("x", modifiers: .command)
             
-            Button("Copy") {
-                NotificationCenter.default.post(name: .menuCommand, object: "copy")
-            }
+            Button("Copy") { post("copy") }
             .keyboardShortcut("c", modifiers: .command)
 
             Button("Copy and Convert as Markdown") {
@@ -233,24 +238,16 @@ struct AppMenuCommands: Commands {
             .keyboardShortcut("c", modifiers: [.command, .option, .shift])
             .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
             
-            Button("Paste") {
-                NotificationCenter.default.post(name: .menuCommand, object: "paste")
-            }
+            Button("Paste") { post("paste") }
             .keyboardShortcut("v", modifiers: .command)
             
-            Button("Paste as Plain Text") {
-                NotificationCenter.default.post(name: .menuCommand, object: "pasteAsPlainText")
-            }
+            Button("Paste as Plain Text") { post("pasteAsPlainText") }
             .keyboardShortcut("v", modifiers: [.command, .shift])
 
-            Button("Paste and Convert to Typst") {
-                NotificationCenter.default.post(name: .menuCommand, object: "pasteForceTypst")
-            }
+            Button("Paste and Convert to Typst") { post("pasteForceTypst") }
             .keyboardShortcut("v", modifiers: [.command, .option])
             
-            Button("Delete") {
-                NotificationCenter.default.post(name: .menuCommand, object: "delete")
-            }
+            Button("Delete") { post("delete") }
             .keyboardShortcut(.delete, modifiers: [])
         }
         
@@ -278,9 +275,7 @@ struct AppMenuCommands: Commands {
             
             Divider()
             
-            Button("Select All") {
-                NotificationCenter.default.post(name: .menuCommand, object: "selectAll")
-            }
+            Button("Select All") { post("selectAll") }
             .keyboardShortcut("a", modifiers: .command)
             
             Divider()
