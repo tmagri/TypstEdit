@@ -455,7 +455,7 @@ struct ContentView: View {
                 editorController.noteDiskState(for: url)
                 return
             }
-            loadFile(url: url)
+            loadFile(url: url, recordInRecents: false)
             editorController.showStatus("Reloaded \(url.lastPathComponent) from disk", duration: 2.0)
             return
         }
@@ -508,7 +508,10 @@ struct ContentView: View {
                     editorController.pendingWelcomeReset = false
                     resetToWelcomeState()
                 } else if let file = selectedFile {
-                    loadFile(url: file)
+                    // Re-showing the file the window already had, not an
+                    // open: SwiftUI re-creates the main window (with fresh,
+                    // project-less state), which must not rewrite its entry.
+                    loadFile(url: file, recordInRecents: false)
                 }
                 applyAppKitAppearance(themeManager.appTheme)
                 editorController.applyTheme()
@@ -1221,7 +1224,7 @@ struct ContentView: View {
                 } message: { Text("The file '\(editorController.missingFileName)' could not be found. It may have been moved or deleted.") }
                 .alert("File Changed on Disk", isPresented: $editorController.showExternalChangeAlert) {
                     Button("Reload from Disk", role: .destructive) {
-                        if let url = externalChangeURL { self.loadFile(url: url) }
+                        if let url = externalChangeURL { self.loadFile(url: url, recordInRecents: false) }
                         externalChangeURL = nil
                     }
                     Button("Keep My Version", role: .cancel) { }
@@ -1431,7 +1434,12 @@ struct ContentView: View {
         RecentFilesManager.shared.add(url: url, projectRoot: projectRoot, inNotebook: inNotebook)
     }
 
-    func loadFile(url: URL?) {
+    /// Loads `url` into the editor. `recordInRecents` is false for reloads of
+    /// the file already shown (it changed on disk, or the window reappeared):
+    /// a reload is not an open, and recording it would overwrite how the file
+    /// was opened. For example, a Notes window that reloads a page edited in
+    /// a project window would otherwise turn its Project entry into a Note.
+    func loadFile(url: URL?, recordInRecents: Bool = true) {
         guard let url = url else { return }
         print("[DEBUG] loadFile: Starting load for \(url.lastPathComponent)")
         let loadID = UUID()
@@ -1452,7 +1460,7 @@ struct ContentView: View {
                 editorController.isSidebarVisible = true
                 editorController.sidebarContent = .calculator
             }
-            recordRecent(url)
+            if recordInRecents { recordRecent(url) }
             return
         }
 
@@ -1482,7 +1490,7 @@ struct ContentView: View {
                     self.currentPDFURL = nil
                     self.reloadToken = UUID()
                     self.exportedPDFURL = url.deletingPathExtension().appendingPathExtension("pdf")
-                    self.recordRecent(url)
+                    if recordInRecents { self.recordRecent(url) }
                     
                     self.editorController.syncSavedContent(content)
                     self.editorController.noteDiskState(for: url)

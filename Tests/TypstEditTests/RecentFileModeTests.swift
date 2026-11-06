@@ -134,15 +134,54 @@ final class RecentFileModeTests: XCTestCase {
             manager.recentFiles = []
         }
 
+        let other = URL(fileURLWithPath: "/loose/other.typ")
+
         manager.clearAll()
         manager.add(url: file, projectRoot: projectRoot)
-        XCTAssertEqual(manager.recentFiles.first?.kind, .project)
+        manager.add(url: other)
+        XCTAssertEqual(manager.recentFiles.first?.url, other)
 
-        // Same file opened on its own later: one entry, and now standalone.
+        // Same file opened on its own later: one entry, moved to the top,
+        // and still a Project entry with its root (never downgraded).
         manager.add(url: file)
+        XCTAssertEqual(manager.recentFiles.count, 2)
+        XCTAssertEqual(manager.recentFiles.first?.url, file)
+        XCTAssertEqual(manager.recentFiles.first?.kind, .project)
+        XCTAssertEqual(manager.recentFiles.first?.projectRoot, projectRoot)
+
+        // A different project does replace the root.
+        let wider = URL(fileURLWithPath: "/work")
+        manager.add(url: file, projectRoot: wider)
+        XCTAssertEqual(manager.recentFiles.first?.projectRoot, wider)
+    }
+
+    func testNotesWindowNeverDowngradesANotebookOpenedAsProject() {
+        let manager = RecentFilesManager.shared
+        let defaults = UserDefaults.standard
+        let key = "recentFiles"
+        let saved = defaults.data(forKey: key)
+        defer {
+            if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) }
+            manager.recentFiles = []
+        }
+        let notebook = URL(fileURLWithPath: "/notes/Physics")
+        let page = URL(fileURLWithPath: "/notes/Physics/a.typ")
+        let plainNote = URL(fileURLWithPath: "/notes/Physics/b.note")
+
+        manager.clearAll()
+        manager.add(url: page, projectRoot: notebook)
+        // The Notes window then opens or saves the same page.
+        manager.add(url: page, inNotebook: true)
         XCTAssertEqual(manager.recentFiles.count, 1)
-        XCTAssertEqual(manager.recentFiles.first?.kind, .standalone)
-        XCTAssertNil(manager.recentFiles.first?.projectRoot)
+        XCTAssertEqual(manager.recentFiles.first?.kind, .project)
+        XCTAssertEqual(manager.recentFiles.first?.projectRoot, notebook)
+        XCTAssertEqual(
+            manager.recentFiles.first?.openTarget(notebooksRoot: notesRoot, fileExists: exists(["/notes/Physics"])),
+            .project(root: notebook, file: page))
+
+        // A page never used in project mode is still a Note.
+        manager.add(url: plainNote, inNotebook: true)
+        XCTAssertEqual(manager.recentFiles.first?.kind, .notebook)
     }
 
     // MARK: - Project folder entries

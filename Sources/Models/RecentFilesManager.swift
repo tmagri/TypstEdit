@@ -181,7 +181,23 @@ class RecentFilesManager: ObservableObject {
     /// Records `url` as the most recent file, together with the mode it was
     /// opened in. Pass the real project folder (not merely the file's parent)
     /// and set `inNotebook` when the Notes window was showing it.
+    ///
+    /// A Project entry is never downgraded: when the file is later used from
+    /// the Notes window or on its own, the entry keeps its project (and only
+    /// moves to the top), so Open Recent still brings the project back. A
+    /// different project replaces it. If the project folder is gone by the
+    /// time it is reopened, `openTarget` falls back to a standalone open.
     func add(url: URL, projectRoot: URL? = nil, inNotebook: Bool = false) {
+        var projectRoot = projectRoot
+        var inNotebook = inNotebook
+        if projectRoot == nil || inNotebook,
+           let existing = recentFiles.first(where: { $0.url == url }),
+           existing.kind == .project, !existing.isFolder,
+           let existingRoot = existing.projectRoot,
+           ProjectWindowRouter.contains(existingRoot, url) {
+            projectRoot = existingRoot
+            inNotebook = false
+        }
         // Remove existing entry for this URL (regardless of previous mode)
         recentFiles.removeAll { $0.url == url }
         // A file entry reopens its project, so the project's folder-only
