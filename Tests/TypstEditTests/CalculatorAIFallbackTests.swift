@@ -62,6 +62,23 @@ final class CalculatorAIFallbackTests: XCTestCase {
             "the derivative of x^2 + 2x + 4 with respect to x"))
     }
 
+    /// Plot requests route wherever the verb sits, however terse the rest —
+    /// the model turns them into plot(…) entries that the sampler draws.
+    func testPlotRequestsRouteToAI() {
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "Plot a sinc function between -10 and 10"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "plot sin(x) from -5 to 5"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "draw cos(x) on 0..6"))
+        XCTAssertTrue(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "please graph x^2 - 3"))
+        // A literal plot( call stays formula-shaped: the calculator parses
+        // it directly and a typo must show the parser's error, not the AI.
+        XCTAssertFalse(CalculatorAIFallback.looksLikeNaturalLanguage(
+            "plot(sin(x), x, -5, 5)"))
+    }
+
     // MARK: - Math-shaped input must never be routed, even on CAS failure,
     // so typos in formulas still show the CAS error.
 
@@ -215,6 +232,82 @@ final class CalculatorAIFallbackTests: XCTestCase {
         let parsed = CalculatorAIFallback.parseInterpretation("EXPR: pi*(1/2)^2")
         XCTAssertEqual(parsed.expression, "pi*(1/2)^2")
         XCTAssertTrue(parsed.answer.contains("pi*(1/2)^2"))
+    }
+
+    /// A plot request's reply is a plot(…) line in EXPR. It must survive
+    /// parsing and be a valid calculator plot call — that is the contract
+    /// between the prompt and the sampler.
+    func testParsePlotInterpretation() throws {
+        let parsed = CalculatorAIFallback.parseInterpretation(
+            """
+            EXPR: plot(sin(x)/x, x, -10, 10)
+            TYPST: none
+            ANSWER: The sinc function $sin(x)/x$ on $[-10, 10]$ has a central peak of height 1.
+            """)
+        let expression = try XCTUnwrap(parsed.expression)
+        XCTAssertNil(parsed.typstMath, "plot requests need no TYPST formula")
+        XCTAssertTrue(parsed.answer.contains("sinc"))
+        let call = try XCTUnwrap(try TIPlot.parse(TISyntax.preprocess(expression)))
+        XCTAssertEqual(call.expressions, ["sin(x)/x"])
+        XCTAssertEqual(call.variable, "x")
+        XCTAssertEqual(call.xMinText, "-10")
+        XCTAssertEqual(call.xMaxText, "10")
+    }
+
+    /// Models sometimes wrap the plot call in markdown or add a period;
+    /// the cleaned EXPR must still parse.
+    func testParseMangledPlotInterpretation() throws {
+        let parsed = CalculatorAIFallback.parseInterpretation(
+            "**EXPR:** `plot(sin(x)/x, x, -10, 10)`\n**ANSWER:** A sinc curve.")
+        let expression = try XCTUnwrap(parsed.expression)
+        XCTAssertNotNil(try TIPlot.parse(TISyntax.preprocess(expression)))
+    }
+
+    /// The bug-report render: the model wrote `\text{sinc}(x)` and the
+    /// normalizer left `text{…}` behind, which Typst math prints literally.
+    func testLatexTextWrappersBecomePlainMath() {
+        XCTAssertEqual(CalculatorAIFallback.normalizeToTypstMath("\\text{sinc}(x)"), "sinc(x)")
+        XCTAssertEqual(CalculatorAIFallback.normalizeToTypstMath("\\operatorname{sinc}(x)"), "sinc(x)")
+        XCTAssertEqual(CalculatorAIFallback.normalizeToTypstMath("\\mathrm{d}x"), "dx")
+        XCTAssertEqual(CalculatorAIFallback.normalizeToTypstMath("\\frac{\\sin x}{x}"), "(sin x)/(x)")
+        XCTAssertEqual(
+            CalculatorAIFallback.normalizeToTypstMath("\\text{sinc}(x) = \\frac{\\sin x}{x}"),
+            "sinc(x) = (sin x)/(x)")
+        // Regression: the spacing heuristic used to split `sinc` into
+        // `sin c`, which is exactly what the bug report rendered.
+        XCTAssertFalse(
+            CalculatorAIFallback.normalizeToTypstMath("\\text{sinc}(x)").contains("sin c"))
+    }
+
+    /// The normalized bug-report formula must compile as Typst math — the
+    /// screenshot showed a half-converted `text{…}` rendered literally.
+    func testBugReportFormulaCompilesAsTypstMath() throws {
+        guard let typstPath = CASMathRenderer.resolveTypstPath() else {
+            throw XCTSkip("typst binary not found")
+        }
+        let math = CalculatorAIFallback.normalizeToTypstMath("\\text{sinc}(x) = \\frac{\\sin x}{x}")
+        let work = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AIFallbackMath-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+        let source = work.appendingPathComponent("snippet.typ")
+        try CASMathRenderer.documentSource(math: math, dark: false)
+            .write(to: source, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: typstPath)
+        process.arguments = ["compile", source.path,
+                             work.appendingPathComponent("snippet.svg").path,
+                             "--root", work.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0,
+                       "math '\(math)' must compile: \(String(data: data, encoding: .utf8) ?? "")")
+        XCTAssertFalse(math.contains("text{"), "no LaTeX wrapper may survive normalization")
     }
 
     func testParseTypstMathInterpretation() {

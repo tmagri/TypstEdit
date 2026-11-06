@@ -98,10 +98,14 @@ enum CalculatorExport {
         for entry in document.entries {
             if entry.isError { continue }
             // Charts export as the exact sampled points, so the exported
-            // document shows the same curve the calculator drew.
+            // document shows the same curve the calculator drew. An AI
+            // interpretation's prose stays under the chart.
             if let plot = entry.plot {
                 lines.append("// Chart: \(escapeText(entry.input))")
                 lines.append(TIPlot.documentCallPointsOnly(for: plot))
+                if let answer = entry.aiAnswer, !answer.isEmpty {
+                    lines.append(escapeText(answer))
+                }
                 lines.append("")
                 continue
             }

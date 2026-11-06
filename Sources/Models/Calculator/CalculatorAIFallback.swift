@@ -79,6 +79,15 @@ enum CalculatorAIFallback {
 
         let lowered = input.lowercased()
 
+        // Plot requests route wherever the verb sits ("plot sin(x) from -5
+        // to 5", "please graph damped cos for 0..10"): the model turns them
+        // into plot(…) entries. A literal `plot(` call is handled above —
+        // formula-shaped input stays with the CAS.
+        if lowered.range(of: #"\b(plot|draw|graph|sketch|chart)\b"#,
+                         options: .regularExpression) != nil {
+            return true
+        }
+
         // Strong prose signals. A question mark never appears in valid CAS
         // syntax, so it is decisive even when the entry embeds math notation.
         if input.contains("?") { return true }
@@ -162,7 +171,14 @@ enum CalculatorAIFallback {
     - Substitute the entry's numbers and convert units so the answer comes out in the unit asked for; keep x only when the entry asks for an expression, like a derivative or a series.
     Otherwise (definitions, general knowledge, counting letters), EXPR is: none
 
-    If the entry asks for an equation, formula, series expansion, or mathematical expression that is not directly computable by the TI engine above, TYPST is the typeset equation in Typst math syntax (without outer $ delimiters).
+    If the entry asks to plot, draw, graph, sketch, or chart a function, EXPR is a plot call:
+    plot(expression, var, x-min, x-max)
+    - One to four curve expressions, then the variable, then the two numeric bounds; prefer x unless the entry names another variable.
+    - Expand named functions into their definitions (sinc is sin(x)/x, sigmoid is 1/(1+e^-x), Gaussian is exp(-x^2)).
+    - The bounds must be plain numbers, not words.
+    Otherwise the plot contract does not apply.
+
+    If the entry asks for an equation, formula, series expansion, or mathematical expression that is not directly computable by the TI engine above, TYPST is the typeset equation in Typst math syntax (without outer $ delimiters). Plot requests need no TYPST.
     Otherwise, TYPST is: none
 
     Reply with EXACTLY these three lines and nothing else:
@@ -175,6 +191,11 @@ enum CalculatorAIFallback {
     EXPR: pi*(1/2)^2
     TYPST: A = pi / 4
     ANSWER: The area is $pi/4$, about 0.785 square centimeters.
+
+    Question: Plot a sinc function between -10 and 10
+    EXPR: plot(sin(x)/x, x, -10, 10)
+    TYPST: none
+    ANSWER: The sinc function $sin(x)/x$ on $[-10, 10]$ — a central peak of height 1 at $x=0$ with decaying lobes.
 
     Question: Find the Fourier series expansion of f(x) = x^2 on (-pi, pi)
     EXPR: none
@@ -368,6 +389,23 @@ enum CalculatorAIFallback {
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Convert LaTeX spacing and symbols
+        // LaTeX text wrappers (\text{sinc}, \operatorname{sinc},
+        // \mathrm{d}) become plain math atoms: Typst math has no
+        // `text{…}` call form, so leaving one behind renders literally.
+        for wrapper in ["\\operatorname", "\\mathrm", "\\mathit", "\\mathbf", "\\text", "\\textrm"] {
+            while let range = text.range(of: wrapper) {
+                let after = text[range.upperBound...]
+                var idx = after.startIndex
+                while idx < after.endIndex && after[idx] == " " { idx = after.index(after: idx) }
+                guard idx < after.endIndex, after[idx] == "{", let close = after[idx...].firstIndex(of: "}") else {
+                    // Not a braced argument: drop the command name only.
+                    text.replaceSubrange(range, with: "")
+                    continue
+                }
+                let inner = String(after[after.index(after: idx)..<close])
+                text.replaceSubrange(range.lowerBound...close, with: inner)
+            }
+        }
         text = text.replacingOccurrences(of: "\\quad", with: " ")
         text = text.replacingOccurrences(of: "\\qquad", with: " ")
         text = text.replacingOccurrences(of: "\\cdot", with: " dot ")
@@ -469,15 +507,23 @@ enum CalculatorAIFallback {
         text = text.replacingOccurrences(of: "^{", with: "^(")
         text = text.replacingOccurrences(of: "}", with: ")")
 
-        // Ensure spacing between digits/letters and Typst math identifiers
+        // Ensure spacing between digits and Typst math identifiers
+        // ("2sin(x)" → "2 sin(x)"). Deliberately conservative: only a
+        // preceding digit, and only when the name is not continued by
+        // letters — "sinc(x)" must stay sinc, not become "sin c(x)".
         text = text.replacingOccurrences(
-            of: #"(?<=[0-9A-Za-z])(?=sum|product|integral|sqrt|pi|cos|sin|tan)"#,
+            of: #"(?<=[0-9])(?=sum(?![a-z])|product(?![a-z])|integral(?![a-z])|sqrt(?![a-z])|pi(?![a-z])|cos(?![a-z])|sin(?![a-z])|tan(?![a-z]))"#,
             with: " ",
             options: .regularExpression)
+        // Keywords glued to a number ("sin2x" → "sin 2x"); a name followed
+        // by a parenthesis is left alone ("sin(x)" is already valid math).
         text = text.replacingOccurrences(
-            of: #"(?<=sum|product|integral|sqrt|pi|cos|sin|tan)(?<=[A-Za-z])(?=[0-9A-Za-z])"#,
-            with: " ",
+            of: #"(?<![A-Za-z])(sum|product|integral|sqrt|pi|cos|sin|tan)(?=[0-9])"#,
+            with: "$1 ",
             options: .regularExpression)
+        // Never leave a space directly inside a bracket from the rewrites.
+        text = text.replacingOccurrences(of: #"\(\s+"#, with: "(", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"\s+\)"#, with: ")", options: .regularExpression)
 
         text = text.replacingOccurrences(of: "\\", with: "")
         text = text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)

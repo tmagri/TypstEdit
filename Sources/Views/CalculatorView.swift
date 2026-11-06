@@ -395,7 +395,30 @@ struct CalculatorView: View {
 
     @ViewBuilder
     private func resultView(_ entry: CalculatorEntry) -> some View {
-        if let answer = entry.aiAnswer, !answer.isEmpty {
+        if let plot = entry.plot {
+            // Charts — typed `plot(…)` entries and AI-interpreted plot
+            // requests alike — draw as a chart; an AI interpretation keeps
+            // its badge and prose under the chart.
+            let interpreted = entry.aiAnswer != nil
+            VStack(alignment: .trailing, spacing: 4) {
+                if interpreted {
+                    Label("AI", systemImage: "sparkles")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.accentColor)
+                }
+                PlotChartView(spec: plot, dark: colorScheme == .dark)
+                    .frame(maxWidth: 320)
+                    .frame(height: 172)
+                    .help("Right-click to insert this chart into the document")
+                if let answer = entry.aiAnswer, !answer.isEmpty {
+                    AIAnswerView(text: answer,
+                                 dark: colorScheme == .dark,
+                                 font: .caption,
+                                 isSecondary: true)
+                }
+            }
+            .frame(maxWidth: 320, alignment: .trailing)
+        } else if let answer = entry.aiAnswer, !answer.isEmpty {
             // AI-fallback entry: when the model's interpretation was
             // computable or provided a math equation, the typeset result
             // shows as math with the model's prose underneath; otherwise
@@ -422,11 +445,6 @@ struct CalculatorView: View {
                 .font(.caption)
                 .foregroundColor(.red)
                 .frame(maxWidth: 320, alignment: .trailing)
-        } else if let plot = entry.plot {
-            PlotChartView(spec: plot, dark: colorScheme == .dark)
-                .frame(maxWidth: 320)
-                .frame(height: 172)
-                .help("Right-click to insert this chart into the document")
         } else if entry.resultTypst.isEmpty {
             Text(entry.resultPlain)
                 .font(.system(.callout, design: .monospaced))
@@ -911,16 +929,18 @@ struct PlotChartView: View {
                 tick += xStep
             }
 
-            // Y grid: five evenly spaced labelled lines.
-            for i in 1...4 {
-                let value = bounds.lo + span * Double(i) / 5
-                let y = py(value, bounds: bounds, height: plotHeight)
+            // Y grid: nice steps, so labels read as clean numbers.
+            let yStep = niceStep(of: span / 5)
+            var yTick = (bounds.lo / yStep).rounded(.up) * yStep
+            while yTick <= bounds.hi + 1e-12 {
+                let y = py(yTick, bounds: bounds, height: plotHeight)
                 context.stroke(Path { path in
                     path.move(to: CGPoint(x: inset.leading, y: y))
                     path.addLine(to: CGPoint(x: inset.leading + plotWidth, y: y))
                 }, with: .color(gridColor), lineWidth: 0.5)
-                draw(text: Self.label(value), at: CGPoint(x: inset.leading - 4, y: y - 5),
+                draw(text: Self.label(yTick), at: CGPoint(x: inset.leading - 4, y: y - 5),
                      color: labelColor, font: font, centered: false, in: context)
+                yTick += yStep
             }
 
             // Zero axes, when the range spans them.
@@ -987,18 +1007,29 @@ struct PlotChartView: View {
         let hi: Double
     }
 
-    /// Robust vertical range: the 2nd–98th percentile of the finite values,
-    /// padded 15%. A lone asymptote then cannot stretch the axis.
+    /// Robust vertical range. Outliers (a pole like `1/x` reaching ±160 at
+    /// the samples next to zero) must not squash the curve, but real
+    /// extremes — a sinc's peak at 1 — must not be clipped either. So the
+    /// data range is used as-is unless it reaches far beyond the 2nd–98th
+    /// percentile band, which only happens for genuine outliers.
     private func yBounds() -> YBounds {
         let values = spec.curves.flatMap { curve in curve.map(\.y) }
             .filter { !$0.isNaN && $0.isFinite }
             .sorted()
         guard values.count >= 2 else { return YBounds(lo: -1, hi: 1) }
-        let low = values[min(values.count - 1, Int(Double(values.count) * 0.02))]
-        let high = values[min(values.count - 1, Int(Double(values.count) * 0.98))]
+        let dataLow = values[0]
+        let dataHigh = values[values.count - 1]
+        let pLow = values[min(values.count - 1, Int(Double(values.count) * 0.02))]
+        let pHigh = values[min(values.count - 1, Int(Double(values.count) * 0.98))]
+        let band = max(pHigh - pLow, 1e-12)
+        // A value within this many band-widths of the percentile band is
+        // part of the curve, not an outlier.
+        let tolerance = 3 * band
+        let low = dataLow >= pLow - tolerance ? dataLow : pLow
+        let high = dataHigh <= pHigh + tolerance ? dataHigh : pHigh
         var span = high - low
         if span <= 0 { span = max(abs(high), 1) }
-        return YBounds(lo: low - span * 0.15, hi: high + span * 0.15)
+        return YBounds(lo: low - span * 0.06, hi: high + span * 0.06)
     }
 
     private func niceStep(of raw: Double) -> Double {
@@ -1018,10 +1049,12 @@ struct PlotChartView: View {
     }
 
     /// Tick text: an en-dash for negatives reads better at 8.5pt than "-".
+    /// Trailing zeros are trimmed so a nice step prints as "1", not "1.00".
     private static func label(_ value: Double) -> String {
         guard value.isFinite else { return "" }
         if abs(value) < 1e-9 { return "0" }
-        return TIPlot.format(value, precision: 4).replacingOccurrences(of: "-", with: "−")
+        let text = String(format: "%.4g", value)
+        return text.replacingOccurrences(of: "-", with: "−")
     }
 
     private func draw(text: String, at point: CGPoint, color: Color, font: Font,

@@ -412,6 +412,35 @@ final class CalculatorPlotTests: XCTestCase {
         }
     }
 
+    /// The AI path's plot interpretation: the model's `plot(…)` expression is
+    /// sampled exactly like a typed one, with the prose kept as the AI
+    /// answer. This is the sinc case from the bug report.
+    func testAIPlotInterpretationDrawsAChart() async throws {
+        try requireHelper()
+        let interpretation = CalculatorAIFallback.Interpretation(
+            expression: "plot(sin(x)/x, x, -10, 10)",
+            typstMath: nil,
+            answer: "The sinc function $sin(x)/x$ on $[-10, 10]$ has a central peak of height 1 at $x = 0$.")
+        let session = await MainActor.run { CalculatorSession() }
+        await session.submitPlotInterpretation(interpretation,
+                                               input: "Plot a sinc function between -10 and 10",
+                                               approx: false)
+        await MainActor.run {
+            XCTAssertEqual(session.entries.count, 1)
+            let entry = session.entries[0]
+            XCTAssertFalse(entry.isError, entry.errorMessage)
+            let plot = try? XCTUnwrap(entry.plot)
+            XCTAssertEqual(plot?.expressions, ["sin(x)/x"])
+            XCTAssertEqual(plot?.xMin ?? 0, -10, accuracy: 1e-9)
+            XCTAssertEqual(plot?.xMax ?? 0, 10, accuracy: 1e-9)
+            // The central peak: sin(x)/x → 1 at x = 0, found near the middle.
+            let middle = plot?.curves[0].map(\.y).max() ?? 0
+            XCTAssertEqual(middle, 1, accuracy: 0.01)
+            // The prose survives for the history and the export.
+            XCTAssertTrue(entry.aiAnswer?.contains("sinc") ?? false)
+        }
+    }
+
     // MARK: - Persistence and export
 
     func testPlotEntryRoundTripsThroughTcalcFile() throws {

@@ -140,6 +140,7 @@ Example asks:
 
 ```
 Solve 3x^2 - 5x + 2 = 0 and insert the roots as an equation.
+Plot a sinc function between -10 and 10.
 Compute ∫ x^2 sin(x) dx from 0 to pi, then check it numerically.
 ```
 
@@ -162,6 +163,13 @@ Wolfram|Alpha style:
   expression that the CAS evaluates locally, so the number is exact even
   from a small local model. The result shows as math with the model's prose
   underneath. Knowledge and counting questions get a prose answer.
+- **Plot requests become charts.** Ask "Plot a sinc function between -10
+  and 10" (or "draw cos on 0..6", "graph x^2 − 3") and the model answers
+  with a `plot(…)` expression; the calculator samples it exactly like a
+  typed plot, so the history shows a real chart with the AI badge and the
+  model's one-line description underneath. Named functions are expanded
+  first (`sinc` → `sin(x)/x`); right-click the chart to insert it like any
+  other.
 - The model the fallback uses is its own choice: pick it under *Model* in the
   AI Fallback card, in Settings → AI → Model per Feature, or from the model
   chip in the calculator's status strip — which also shows what is in use.

@@ -135,6 +135,14 @@ final class CalculatorSession: ObservableObject {
                    CalculatorAIFallback.looksLikeNaturalLanguage(trimmed) {
                     do {
                         let interpretation = try await CalculatorAIFallback.interpret(trimmed)
+                        // Plot interpretations draw a chart instead of a
+                        // number — the same sampled, cached entry a typed
+                        // plot(…) produces, with the model's prose attached.
+                        if await submitPlotInterpretation(interpretation,
+                                                          input: trimmed,
+                                                          approx: approx) {
+                            return
+                        }
                         var computed: CASEvalResult?
                         if let expression = interpretation.expression {
                             let candidate = await CASEngine.shared.eval(
@@ -202,6 +210,44 @@ final class CalculatorSession: ObservableObject {
                 isError: true,
                 errorMessage: error.localizedDescription))
             hasUnsavedChanges = true
+        }
+    }
+
+    /// Draws a plot request the AI interpreted: samples the model's
+    /// `plot(…)` expression exactly like a typed one and appends a chart
+    /// entry with the prose answer. Returns false when the interpretation
+    /// is not a plot (or could not be sampled), so the caller can continue
+    /// with the numeric/prose path.
+    @discardableResult
+    func submitPlotInterpretation(_ interpretation: CalculatorAIFallback.Interpretation,
+                                  input: String,
+                                  approx: Bool) async -> Bool {
+        guard let expression = interpretation.expression,
+              let plotCall = try? TIPlot.parse(TISyntax.preprocess(expression)) else {
+            return false
+        }
+        busy = true
+        defer { busy = false }
+        do {
+            let spec = try await TIPlot.sample(
+                plotCall,
+                angle: angle,
+                digits: displayDigits,
+                timeout: GeneralSettingsManager.shared.calcTimeout)
+            entries.append(CalculatorEntry(
+                input: input,
+                approx: approx,
+                resultPlain: spec.summary,
+                aiAnswer: interpretation.answer,
+                plot: spec))
+            hasUnsavedChanges = true
+            recallIndex = nil
+            return true
+        } catch {
+            // Not drawable as interpreted: keep the model's prose/math
+            // answer instead, and say why there is no chart.
+            lastStatus = "The interpreted chart could not be sampled: \(error.localizedDescription)"
+            return false
         }
     }
 
