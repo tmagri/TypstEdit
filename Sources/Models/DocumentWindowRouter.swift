@@ -88,13 +88,24 @@ enum ProjectWindowRouter {
     ///
     /// With `file`, a window whose project already contains that file is
     /// focused too (the deepest such project wins), as VS Code opens a file in
-    /// the window of the folder it belongs to.
-    static func destination(for root: URL, file: URL? = nil, in slots: [Slot], forceNewWindow: Bool = false) -> Destination {
+    /// the window of the folder it belongs to. A window whose project is
+    /// `ignoredOwner` is never focused that way (the Notes window must not
+    /// take over a notebook that is opened as a project of its own).
+    static func destination(
+        for root: URL,
+        file: URL? = nil,
+        in slots: [Slot],
+        forceNewWindow: Bool = false,
+        ignoringOwner ignoredOwner: URL? = nil
+    ) -> Destination {
         if let index = slots.firstIndex(where: { $0.projectRoot.map { isSameFolder($0, root) } ?? false }) {
             return .focus(index)
         }
         if let file {
-            let owners = slots.indices.filter { slots[$0].projectRoot.map { contains($0, file) } ?? false }
+            let owners = slots.indices.filter { index in
+                guard let owner = slots[index].projectRoot, contains(owner, file) else { return false }
+                return ignoredOwner.map { !isSameFolder(owner, $0) } ?? true
+            }
             if let deepest = owners.max(by: { canonicalFolder(slots[$0].projectRoot!).count < canonicalFolder(slots[$1].projectRoot!).count }) {
                 return .focus(deepest)
             }

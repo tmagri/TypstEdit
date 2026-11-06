@@ -58,6 +58,28 @@ final class RecentFileModeTests: XCTestCase {
             .notebook(note))
     }
 
+    func testNotebookOpenedAsProjectReopensAsThatProject() {
+        // "Open as Project" on a notebook (e.g. one under Git): the page is
+        // recorded with the notebook folder as its root and must come back
+        // in that project, not in the Notes window.
+        let notebook = URL(fileURLWithPath: "/notes/Physics")
+        let page = URL(fileURLWithPath: "/notes/Physics/a.note")
+        let entry = RecentFile(url: page, lastModified: Date(), projectRoot: notebook, kind: .project)
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists(["/notes/Physics"])),
+            .project(root: notebook, file: page))
+    }
+
+    func testLegacyProjectEntryForANoteStillOpensInNotes() {
+        // Older builds recorded Notes-window pages as "project" entries with
+        // no root; those keep opening in the Notes window.
+        let page = URL(fileURLWithPath: "/notes/Physics/a.note")
+        let entry = RecentFile(url: page, lastModified: Date(), kind: .project)
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists(["/notes/Physics"])),
+            .notebook(page))
+    }
+
     func testNoteMovedOutOfTheNotebooksFolderOpensStandalone() {
         let note = URL(fileURLWithPath: "/work/book/a.note")
         let entry = RecentFile(url: note, lastModified: Date(), kind: .notebook)
@@ -121,6 +143,61 @@ final class RecentFileModeTests: XCTestCase {
         XCTAssertEqual(manager.recentFiles.count, 1)
         XCTAssertEqual(manager.recentFiles.first?.kind, .standalone)
         XCTAssertNil(manager.recentFiles.first?.projectRoot)
+    }
+
+    // MARK: - Project folder entries
+
+    func testFolderEntryReopensTheProjectWithNoFile() {
+        let notebook = URL(fileURLWithPath: "/notes/Physics")
+        let entry = RecentFile(url: notebook, lastModified: Date(), projectRoot: notebook, kind: .project)
+        XCTAssertTrue(entry.isFolder)
+        XCTAssertEqual(entry.iconName, "folder.fill")
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists(["/notes/Physics"])),
+            .project(root: notebook, file: nil))
+    }
+
+    func testFolderEntryForADeletedFolderIsMissing() {
+        let entry = RecentFile(url: projectRoot, lastModified: Date(), projectRoot: projectRoot, kind: .project)
+        XCTAssertEqual(
+            entry.openTarget(notebooksRoot: notesRoot, fileExists: exists([])),
+            .missing)
+    }
+
+    func testFileEntryIsNotAFolderEntry() {
+        let entry = RecentFile(url: file, lastModified: Date(), projectRoot: projectRoot, kind: .project)
+        XCTAssertFalse(entry.isFolder)
+        XCTAssertEqual(entry.iconName, "folder")
+    }
+
+    func testOpeningAFileReplacesItsProjectFolderEntry() {
+        let manager = RecentFilesManager.shared
+        let defaults = UserDefaults.standard
+        let key = "recentFiles"
+        let saved = defaults.data(forKey: key)
+        defer {
+            if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) }
+            manager.recentFiles = []
+        }
+        let other = URL(fileURLWithPath: "/work/other")
+
+        manager.clearAll()
+        manager.addProjectFolder(other)
+        manager.addProjectFolder(projectRoot)
+        // Opening the same folder again keeps one entry, at the top.
+        manager.addProjectFolder(URL(fileURLWithPath: "/work/book/"))
+        XCTAssertEqual(manager.recentFiles.count, 2)
+        XCTAssertTrue(manager.recentFiles[0].isFolder)
+
+        // A file of the project replaces the project's folder entry only.
+        manager.add(url: file, projectRoot: projectRoot)
+        XCTAssertEqual(manager.recentFiles.map(\.url), [file, other])
+        XCTAssertFalse(manager.recentFiles[0].isFolder)
+        XCTAssertTrue(manager.recentFiles[1].isFolder)
+
+        // A standalone file never removes a project folder entry.
+        manager.add(url: URL(fileURLWithPath: "/work/other/x.typ"))
+        XCTAssertTrue(manager.recentFiles.contains { $0.isFolder && $0.url == other })
     }
 
     // MARK: - Persistence

@@ -741,28 +741,59 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// comes forward (and shows `file`, when given). Otherwise the folder
     /// goes to `preferred` (an import replacing its own window), an idle
     /// window, or a new window.
+    ///
+    /// `notebookAsProject` keeps a notebook folder (inside the Notes folder)
+    /// as a project of its own even when `file` is one of its pages: Open
+    /// Recent passes it for a page last used in a notebook opened with "Open
+    /// as Project" (for example, a notebook under Git).
     func openProject(
         at root: URL,
         file: URL? = nil,
         preferring preferred: EditorController? = nil,
-        forceNewWindow: Bool = false
+        forceNewWindow: Bool = false,
+        notebookAsProject: Bool = false
     ) {
-        // The Notes folder, and notes opened through a notebook folder (Open
-        // Recent records a note's notebook as its "project"), belong to the
-        // Notes window. "Open as Project" on a notebook passes no file, so it
-        // still opens that notebook as a project of its own.
+        // The Notes folder, and notes opened through a notebook folder, belong
+        // to the Notes window. "Open as Project" on a notebook passes no file,
+        // and Open Recent passes `notebookAsProject`, so both still open that
+        // notebook as a project of its own.
         let notesRoot = NotebookManager.shared.rootDirectory
         if ProjectWindowRouter.isSameFolder(root, notesRoot)
-            || (file.map(Self.isNote) ?? false) && ProjectWindowRouter.contains(notesRoot, root) {
+            || !notebookAsProject && (file.map(Self.isNote) ?? false) && ProjectWindowRouter.contains(notesRoot, root) {
             openNotebooks(showing: file)
             return
         }
-        routeProject(root: root, file: file, preferring: preferred, forceNewWindow: forceNewWindow) { controller in
+        // A notebook opened as a project must not be taken over by the Notes
+        // window just because the Notes folder contains the file.
+        let ignoredOwner = ProjectWindowRouter.contains(notesRoot, root) ? notesRoot : nil
+        routeProject(root: root, file: file, preferring: preferred, forceNewWindow: forceNewWindow, ignoringOwner: ignoredOwner) { controller in
             NotificationCenter.default.post(name: .openProjectFolder, object: [
                 "target": controller,
                 "url": root,
                 "file": file as Any,
             ])
+        }
+    }
+
+    /// Reopens an Open Recent entry (the welcome screen or File ▸ Open
+    /// Recent) the way it was last used: in its project, in the Notes
+    /// window, or on its own with no project (no index, no vectorcaches/).
+    func openRecent(_ entry: RecentFilesManager.RecentFile, preferring preferred: EditorController? = nil) {
+        switch entry.openTarget(notebooksRoot: NotebookManager.shared.rootDirectory) {
+        case .project(let root, let file):
+            // A stored root inside the Notes folder is a notebook that was
+            // opened as a project: keep it one.
+            openProject(at: root, file: file, preferring: preferred, notebookAsProject: true)
+        case .notebook(let note):
+            openNotebooks(showing: note)
+        case .standalone(let file):
+            openDocuments([file])
+        case .missing:
+            RecentFilesManager.shared.remove(url: entry.url)
+            let alert = NSAlert()
+            alert.messageText = "“\(entry.name)” can’t be opened"
+            alert.informativeText = "The folder no longer exists. It was removed from Open Recent."
+            alert.runModal()
         }
     }
 
@@ -805,6 +836,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         file: URL?,
         preferring preferred: EditorController?,
         forceNewWindow: Bool,
+        ignoringOwner ignoredOwner: URL? = nil,
         open: @escaping (EditorController) -> Void
     ) {
         guard let mainController = editorController else {
@@ -822,7 +854,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 isPreferred: $0.controller === preferred
             )
         }
-        switch ProjectWindowRouter.destination(for: root, file: file, in: slots, forceNewWindow: forceNewWindow) {
+        switch ProjectWindowRouter.destination(for: root, file: file, in: slots, forceNewWindow: forceNewWindow, ignoringOwner: ignoredOwner) {
         case .focus(let index):
             let target = windows[index]
             Self.debugLog("openProject: '\(root.lastPathComponent)' is already open, focusing its window")

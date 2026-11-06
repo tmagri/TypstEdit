@@ -290,6 +290,10 @@ struct ContentView: View {
                     self.editorController.currentFileURL = nil
                     self.editorController.sourceCode = ""
                     self.currentPDFURL = nil
+                    // No file to record, so record the project itself: it can
+                    // then be reopened from Open Recent (a notebook under Git
+                    // opened with "Open as Project", for one).
+                    RecentFilesManager.shared.addProjectFolder(url)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileDidCreate)) { notification in
@@ -535,25 +539,7 @@ struct ContentView: View {
         Group {
            if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile && selectedFile == nil {
                 WelcomeView(model: fileSystem, onOpen: { file in
-                    switch file.openTarget(notebooksRoot: NotebookManager.shared.rootDirectory) {
-                    case .project(let root, let fileURL):
-                        // Re-open in project mode, with the stored project root
-                        // (not merely the file's folder). Focuses the window
-                        // that already has that project.
-                        AppDelegate.shared?.openProject(
-                            at: root,
-                            file: fileURL,
-                            preferring: editorController
-                        )
-                    case .notebook(let noteURL):
-                        // A Notes page belongs in the Notes window, so its
-                        // notebook comes back with it.
-                        AppDelegate.shared?.openNotebooks(showing: noteURL)
-                    case .standalone(let fileURL):
-                        // Re-open as a standalone single file: no project, no
-                        // sidebar, no index and no vectorcaches/.
-                        AppDelegate.shared?.openDocuments([fileURL])
-                    }
+                    AppDelegate.shared?.openRecent(file, preferring: editorController)
                 })
                 .background(themeManager.mainBackground)
             } else {

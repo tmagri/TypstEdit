@@ -20,14 +20,6 @@ struct AppMenuCommands: Commands {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
-    private func recentIcon(for file: RecentFilesManager.RecentFile) -> String {
-        switch file.kind {
-        case .project: return "folder"
-        case .notebook: return "book.closed"
-        case .standalone: return "doc.text"
-        }
-    }
-
     var body: some Commands {
         // MARK: - File Menu
         CommandGroup(replacing: .newItem) {
@@ -76,17 +68,10 @@ struct AppMenuCommands: Commands {
                 } else {
                     ForEach(recentFilesManager.recentFiles) { file in
                         Button(action: {
-                            switch file.openTarget(notebooksRoot: NotebookManager.shared.rootDirectory) {
-                            case .project(let root, let fileURL):
-                                AppDelegate.shared?.openProject(at: root, file: fileURL)
-                            case .notebook(let noteURL):
-                                AppDelegate.shared?.openNotebooks(showing: noteURL)
-                            case .standalone(let fileURL):
-                                AppDelegate.shared?.openDocuments([fileURL])
-                            }
+                            AppDelegate.shared?.openRecent(file)
                         }) {
                             HStack {
-                                Image(systemName: recentIcon(for: file))
+                                Image(systemName: file.iconName)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(file.name)
                                     Text(file.path)

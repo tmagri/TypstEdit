@@ -95,6 +95,12 @@ class RecentFilesManager: ObservableObject {
         /// True when the file was last opened inside a project window.
         var isProject: Bool { kind == .project }
         
+        /// True for a project folder opened with no file in it (for example
+        /// a notebook opened with "Open as Project"). `url` is the folder.
+        var isFolder: Bool {
+            kind == .project && projectRoot.map { ProjectWindowRouter.isSameFolder($0, url) } ?? false
+        }
+        
         /// Short word for the badge in the welcome screen and Open Recent.
         var kindLabel: String {
             switch kind {
@@ -104,14 +110,26 @@ class RecentFilesManager: ObservableObject {
             }
         }
         
+        /// SF Symbol for this entry in the welcome screen and Open Recent.
+        var iconName: String {
+            if isFolder { return "folder.fill" }
+            switch kind {
+            case .project: return "folder"
+            case .notebook: return "book.closed"
+            case .standalone: return "doc.text"
+            }
+        }
+        
         /// Where reopening this entry has to go.
         enum OpenTarget: Equatable {
-            /// Load this file with this folder as the project.
-            case project(root: URL, file: URL)
+            /// Open this folder as the project, showing `file` when given.
+            case project(root: URL, file: URL?)
             /// Show this page in the Notes window.
             case notebook(URL)
             /// Load this file alone, with no project.
             case standalone(URL)
+            /// A project folder entry whose folder no longer exists.
+            case missing
         }
         
         /// The destination for this entry. `fileExists` is injectable so the
@@ -129,6 +147,16 @@ class RecentFilesManager: ObservableObject {
                 }
                 return .notebook(url)
             case .project:
+                if isFolder, let root = projectRoot {
+                    return fileExists(root) ? .project(root: root, file: nil) : .missing
+                }
+                // Older builds stored no root, and recorded pages shown in the
+                // Notes window as "project" entries. Keep sending those to
+                // Notes. A stored root inside the Notes folder is a notebook
+                // that was opened as a project (e.g. under Git): it stays one.
+                if projectRoot == nil, ProjectWindowRouter.contains(notebooksRoot, url) {
+                    return .notebook(url)
+                }
                 // A stored root is authoritative. Entries from older builds
                 // only knew the file's folder, which is the project root for
                 // files at the top of a project.
@@ -156,6 +184,11 @@ class RecentFilesManager: ObservableObject {
     func add(url: URL, projectRoot: URL? = nil, inNotebook: Bool = false) {
         // Remove existing entry for this URL (regardless of previous mode)
         recentFiles.removeAll { $0.url == url }
+        // A file entry reopens its project, so the project's folder-only
+        // entry is no longer needed.
+        if let projectRoot, !inNotebook {
+            recentFiles.removeAll { $0.isFolder && ProjectWindowRouter.isSameFolder($0.url, projectRoot) }
+        }
         
         // Add to top with current mode
         let kind: RecentFile.Kind
@@ -179,6 +212,21 @@ class RecentFilesManager: ObservableObject {
             recentFiles = Array(recentFiles.prefix(10))
         }
         
+        saveRecents()
+    }
+    
+    /// Records a project folder that was opened with no file in it, so it
+    /// can be reopened as a project from Open Recent. When a file of the
+    /// project is opened later, `add` replaces this entry with the file's.
+    func addProjectFolder(_ root: URL) {
+        recentFiles.removeAll { $0.isFolder && ProjectWindowRouter.isSameFolder($0.url, root) }
+        recentFiles.insert(
+            RecentFile(url: root, lastModified: Date(), projectRoot: root, kind: .project),
+            at: 0
+        )
+        if recentFiles.count > 10 {
+            recentFiles = Array(recentFiles.prefix(10))
+        }
         saveRecents()
     }
     

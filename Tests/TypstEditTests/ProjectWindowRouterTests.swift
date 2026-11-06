@@ -212,6 +212,34 @@ final class NotesAndChatOwnershipTests: XCTestCase {
             .focus(0))
     }
 
+    func testNotebookOpenedAsProjectIsNotTakenOverByTheNotesWindow() {
+        let slots = [
+            Slot(projectRoot: URL(fileURLWithPath: "/notes"), isIdle: false, isKey: false, isMain: true),
+            Slot(projectRoot: nil, isIdle: true, isKey: true, isMain: false),
+        ]
+        XCTAssertEqual(
+            ProjectWindowRouter.destination(
+                for: URL(fileURLWithPath: "/notes/Physics"),
+                file: URL(fileURLWithPath: "/notes/Physics/a.note"),
+                in: slots,
+                ignoringOwner: URL(fileURLWithPath: "/notes")),
+            .load(1))
+    }
+
+    func testNotebookAlreadyOpenAsProjectIsFocused() {
+        let slots = [
+            Slot(projectRoot: URL(fileURLWithPath: "/notes"), isIdle: false, isKey: true, isMain: true),
+            Slot(projectRoot: URL(fileURLWithPath: "/notes/Physics"), isIdle: false, isKey: false, isMain: false),
+        ]
+        XCTAssertEqual(
+            ProjectWindowRouter.destination(
+                for: URL(fileURLWithPath: "/notes/Physics"),
+                file: URL(fileURLWithPath: "/notes/Physics/a.note"),
+                in: slots,
+                ignoringOwner: URL(fileURLWithPath: "/notes")),
+            .focus(1))
+    }
+
     func testDeepestOwningProjectWins() {
         let slots = [
             Slot(projectRoot: URL(fileURLWithPath: "/work"), isIdle: false, isKey: false, isMain: true),

@@ -14,14 +14,6 @@ struct WelcomeView: View {
     @State private var showClearConfirmation = false
     @State private var openingFileId: UUID? = nil
 
-    private func recentIcon(for file: RecentFilesManager.RecentFile) -> String {
-        switch file.kind {
-        case .project: return "folder"
-        case .notebook: return "book.closed"
-        case .standalone: return "doc.text"
-        }
-    }
-
     private func recentIconColor(for file: RecentFilesManager.RecentFile) -> Color {
         switch file.kind {
         case .project: return .blue
@@ -265,7 +257,7 @@ struct WelcomeView: View {
                                             .controlSize(.small)
                                             .frame(width: 16, height: 16)
                                     } else {
-                                        Image(systemName: recentIcon(for: file))
+                                        Image(systemName: file.iconName)
                                             .foregroundColor(recentIconColor(for: file))
                                     }
                                     VStack(alignment: .leading) {
