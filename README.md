@@ -37,7 +37,7 @@
 ### Visual Editors
 * **🧮 Visual Equation Editor:** Interactive equation editor with live LaTeX preview for mathematical expressions.
 * **📈 Calculator in Documents:** Plot Bessel/Airy/erf/… functions, tabulate CAS expressions and inline exact results while the document compiles — see [Calculator Inside Your Documents](#-calculator-inside-your-documents-unique-to-typstedit).
-* **🖥️ Calculator Mode:** TI-89 style CAS home screen (solve, factor, d, ∫, Σ, matrices, exact/approx, ans recall) powered by the bundled Giac engine — right-click any result to insert it into your document as Typst math, save sessions as `.tcalc` files, browse a verified function catalogue, and let AI Chat evaluate math with `evaluate_math`. See `Docs/calculator.md`.
+* **🖥️ Calculator Mode:** TI-89 style CAS home screen (solve, factor, d, ∫, Σ, matrices, exact/approx, ans recall, `plot(…)` charts) powered by the bundled Giac engine — right-click any result or chart to insert it into your document as Typst math, `#plot` code, sampled points or an image, save sessions as `.tcalc` files, browse a verified function catalogue, and let AI Chat evaluate math with `evaluate_math`. See `Docs/calculator.md`.
 * **🖼️ Figure Editor:** Visual interface for inserting and editing figures with captions and references.
 * **🔧 Foundation Item Picker:** Drill-down navigation for Typst foundation items (arrays, strings, datetime, calc, etc.) with searchable methods and properties.
 * **🎯 Contextual Editing:** Smart "Edit at Cursor" feature that detects and opens appropriate editors for tables, links, equations, and more.

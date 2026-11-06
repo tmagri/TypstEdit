@@ -41,7 +41,7 @@ final class CalculatorFunctionCatalogTests: XCTestCase {
     func testCatalogueHasExpectedSize() {
         let count = CalculatorFunctionCatalog.entries.count
         XCTAssertGreaterThanOrEqual(count, 35, "The catalogue should stay a useful size.")
-        XCTAssertLessThanOrEqual(count, 50, "Keep the catalogue curated; it is a guide, not a dump.")
+        XCTAssertLessThanOrEqual(count, 51, "Keep the catalogue curated; it is a guide, not a dump.")
     }
 
     func testIdentifiersAreUniqueAndStable() {
@@ -169,8 +169,23 @@ final class CalculatorFunctionCatalogTests: XCTestCase {
             // "In documents" entries are Typst code (#calc, plot, BesselJ …),
             // not calculator input; they are covered by CalcBridgeTests.
             guard guide.category != .documents else { continue }
-            let result = await eval(guide.example)
             let preprocessed = TISyntax.preprocess(guide.example)
+            // Plot entries are sampled by the session, not sent to the CAS
+            // verbatim; verify them through the same sampling path.
+            if let plotCall = try? TIPlot.parse(preprocessed) {
+                do {
+                    let spec = try await TIPlot.sample(plotCall, engine: engine,
+                                                       angle: .radians, digits: 12, timeout: 30)
+                    let finite = spec.curves.flatMap { $0 }.count(where: { !$0.y.isNaN })
+                    if finite == 0 {
+                        failures.append("\(guide.id) (\(guide.example)): the chart sampled no numbers")
+                    }
+                } catch {
+                    failures.append("\(guide.id) (\(guide.example)): \(error.localizedDescription)")
+                }
+                continue
+            }
+            let result = await eval(guide.example)
             if !result.ok {
                 failures.append("\(guide.id) (\(guide.example)): \(result.errorMessage)")
             } else if result.resultText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -271,6 +286,18 @@ final class CalculatorFunctionCatalogTests: XCTestCase {
             // Typst-side helpers are not calculator input; CalcBridgeTests
             // compiles them against the real plugin instead.
             guard guide.category != .documents else { continue }
+            // Plot entries answer with a chart, not math: their "result"
+            // compiles as the document #plot call, verified in
+            // CalculatorPlotTests.
+            if let plotCall = try? TIPlot.parse(TISyntax.preprocess(guide.example)) {
+                do {
+                    _ = try await TIPlot.sample(plotCall, engine: engine,
+                                                angle: .radians, digits: 12, timeout: 30)
+                } catch {
+                    failures.append("\(guide.id): sampling failed — \(error.localizedDescription)")
+                }
+                continue
+            }
             let result = await eval(guide.example)
             guard result.ok else {
                 failures.append("\(guide.id): evaluation failed")

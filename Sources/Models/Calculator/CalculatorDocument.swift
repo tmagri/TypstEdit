@@ -87,8 +87,24 @@ enum CalculatorExport {
         let title = sessionName.isEmpty ? "Calculator" : sessionName
         lines.append("= \(escapeText(title))")
         lines.append("")
+        // Charts draw through the bridge's plot(); the two sidecar files
+        // (TypstEditCalcBridge.typ + TypstEditCalc.wasm, bundled with
+        // TypstEdit) must sit next to this file for the import to resolve.
+        if document.entries.contains(where: { $0.plot != nil }) {
+            lines.append("// Charts need TypstEditCalcBridge.typ and TypstEditCalc.wasm next to this file.")
+            lines.append("#import \"TypstEditCalcBridge.typ\": plot")
+            lines.append("")
+        }
         for entry in document.entries {
             if entry.isError { continue }
+            // Charts export as the exact sampled points, so the exported
+            // document shows the same curve the calculator drew.
+            if let plot = entry.plot {
+                lines.append("// Chart: \(escapeText(entry.input))")
+                lines.append(TIPlot.documentCallPointsOnly(for: plot))
+                lines.append("")
+                continue
+            }
             // AI-fallback answers are prose (plus an exact result when the
             // model's interpretation was computable), not plain math.
             if let answer = entry.aiAnswer, !answer.isEmpty {

@@ -363,7 +363,7 @@ struct CalculatorView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Type an expression below, or pick a template.")
                 .foregroundColor(themeManager.textColor.opacity(0.55))
-            Text("Try: solve(x^2-4=0,x)   d(x^3,x)   ∫(x^2,x,0,1)   5→a")
+            Text("Try: solve(x^2-4=0,x)   d(x^3,x)   ∫(x^2,x,0,1)   plot(sin(x)/x, x, -5, 5)   5→a")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(themeManager.textColor.opacity(0.45))
         }
@@ -422,6 +422,11 @@ struct CalculatorView: View {
                 .font(.caption)
                 .foregroundColor(.red)
                 .frame(maxWidth: 320, alignment: .trailing)
+        } else if let plot = entry.plot {
+            PlotChartView(spec: plot, dark: colorScheme == .dark)
+                .frame(maxWidth: 320)
+                .frame(height: 172)
+                .help("Right-click to insert this chart into the document")
         } else if entry.resultTypst.isEmpty {
             Text(entry.resultPlain)
                 .font(.system(.callout, design: .monospaced))
@@ -571,43 +576,83 @@ struct CalculatorView: View {
     @ViewBuilder
     private func entryContextMenu(_ entry: CalculatorEntry) -> some View {
         // Insertions target the current document; only Typst-capable files
-        // (or a fresh untitled document) can receive them.
+        // (or a fresh untitled document) can receive them. Markdown files
+        // accept the image form, which needs no calculator code.
         let currentURL = editorController.currentFileURL
         let canInsert: Bool = {
             guard let ext = currentURL?.pathExtension.lowercased(), !ext.isEmpty else { return true }
             return ext == "typ" || ext == "note"
         }()
+        let canInsertImage = canInsert || editorController.isMarkdownFile
 
-        Section("Insert into document") {
-            Button("Inline equation  $…$") {
-                insertIntoDocument(CalculatorSession.inlineEquation(entry.resultTypst))
+        if let plot = entry.plot {
+            let callback = TIPlot.callbackCall(for: plot)
+            Section("Insert into document") {
+                Button("Chart with sampled points") {
+                    insertIntoDocument(TIPlot.documentCall(for: plot))
+                }
+                .disabled(!canInsert)
+                .help("The exact data the calculator sampled, drawn by the document's plot() — compiles everywhere")
+                Button(callback == nil
+                       ? "Chart as #plot code (uses points — a curve does not translate)"
+                       : "Chart as #plot code (resamples in the document)") {
+                    insertIntoDocument(TIPlot.callbackCall(for: plot)
+                                       ?? TIPlot.documentCallPointsOnly(for: plot))
+                }
+                .disabled(!canInsert)
+                .help(callback == nil
+                      ? "A curve uses a name Typst cannot express — inserts the sampled points instead"
+                      : "A #plot(…) call the document resamples itself; fails to compile if a curve has a pole inside the range")
+                Button("Chart as image") {
+                    insertPlotAsImage(plot)
+                }
+                .disabled(!canInsertImage)
+                .help("Saves a PNG next to the document and inserts #image(…)")
             }
-            .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty)
-            Button("Block equation  $ … $") {
-                insertIntoDocument(CalculatorSession.blockEquation(entry.resultTypst))
+            Section("Copy") {
+                Button("Copy chart as PNG") { copyPlotAsImage(plot) }
+                Button("Copy as plain text") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(entry.resultPlain, forType: .string)
+                }
+                .disabled(entry.resultPlain.isEmpty)
+                Button("Copy Typst #plot code") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(TIPlot.documentCall(for: plot), forType: .string)
+                }
             }
-            .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty)
-            Button("Input = Result") {
-                insertIntoDocument(CalculatorSession.inputEqualsResult(entry))
+        } else {
+            Section("Insert into document") {
+                Button("Inline equation  $…$") {
+                    insertIntoDocument(CalculatorSession.inlineEquation(entry.resultTypst))
+                }
+                .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty)
+                Button("Block equation  $ … $") {
+                    insertIntoDocument(CalculatorSession.blockEquation(entry.resultTypst))
+                }
+                .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty)
+                Button("Input = Result") {
+                    insertIntoDocument(CalculatorSession.inputEqualsResult(entry))
+                }
+                .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty || entry.inputTypst.isEmpty)
             }
-            .disabled(!canInsert || entry.isError || entry.resultTypst.isEmpty || entry.inputTypst.isEmpty)
-        }
-        Section("Copy") {
-            Button("Copy as Typst") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entry.resultTypst, forType: .string)
+            Section("Copy") {
+                Button("Copy as Typst") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(entry.resultTypst, forType: .string)
+                }
+                .disabled(entry.resultTypst.isEmpty)
+                Button("Copy as plain text") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(entry.resultPlain, forType: .string)
+                }
+                .disabled(entry.resultPlain.isEmpty)
+                Button("Copy AI answer") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(entry.aiAnswer ?? "", forType: .string)
+                }
+                .disabled(entry.aiAnswer == nil)
             }
-            .disabled(entry.resultTypst.isEmpty)
-            Button("Copy as plain text") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entry.resultPlain, forType: .string)
-            }
-            .disabled(entry.resultPlain.isEmpty)
-            Button("Copy AI answer") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entry.aiAnswer ?? "", forType: .string)
-            }
-            .disabled(entry.aiAnswer == nil)
         }
         Section {
             Button("Reuse in entry line") {
@@ -618,6 +663,47 @@ struct CalculatorView: View {
                 session.deleteEntry(id: entry.id)
             }
         }
+    }
+
+    /// Renders the chart as a PNG next to the open document and inserts an
+    /// `#image(…)` reference — the one import path that works everywhere,
+    /// including Markdown and stock Typst with no calculator at all.
+    private func insertPlotAsImage(_ plot: CalculatorPlotSpec) {
+        guard let data = PlotChartView.pngData(plot) else {
+            session.lastStatus = "Could not render the chart image"
+            return
+        }
+        let directory = editorController.currentFileURL?.deletingLastPathComponent()
+            ?? editorController.projectRootURL
+        guard let directory else {
+            session.lastStatus = "No file or project open — cannot save the chart image"
+            return
+        }
+        let fileName = "calculator_plot_\(Int(Date().timeIntervalSince1970)).png"
+        let fileURL = directory.appendingPathComponent(fileName)
+        do {
+            try data.write(to: fileURL)
+        } catch {
+            session.lastStatus = "Could not save the chart image: \(error.localizedDescription)"
+            return
+        }
+        // Saved next to the open file, so the bare name resolves both in the
+        // live preview and in stock Typst.
+        editorController.insertText("#image(\"\(fileName)\")")
+        session.lastStatus = "Saved \(fileName) and inserted the image"
+        NotificationCenter.default.post(
+            name: .refreshProjectSidebar,
+            object: editorController.projectRootURL ?? editorController.currentFileURL)
+    }
+
+    private func copyPlotAsImage(_ plot: CalculatorPlotSpec) {
+        guard let data = PlotChartView.pngData(plot) else {
+            session.lastStatus = "Could not render the chart image"
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(data, forType: .png)
+        session.lastStatus = "Chart copied as PNG"
     }
 
     private func insertIntoDocument(_ text: String) {
@@ -769,6 +855,201 @@ struct AIAnswerView: View {
     }
 }
 
+// MARK: - Chart
+
+/// Draws one plotted calculator entry: labelled axes with a nice grid,
+/// zero axes when the range spans them, one colored curve per expression
+/// (the same palette the document `plot()` uses), and a legend for two or
+/// more curves. Y bounds come from the data robustly — percentiles, not
+/// raw extremes — so a pole like 1/x at 0 cannot squash the interesting
+/// part of the curve.
+struct PlotChartView: View {
+    let spec: CalculatorPlotSpec
+    let dark: Bool
+
+    /// Same colors as `bridge.typ`'s `_plot-palette`, so a curve keeps its
+    /// color when the same function is inserted into a document.
+    private static let palette: [(red: Double, green: Double, blue: Double)] = [
+        (0x3b, 0x82, 0xf6), (0xef, 0x44, 0x44), (0x22, 0xc5, 0x5e),
+        (0xa8, 0x55, 0xf7), (0xf5, 0x9e, 0x0b),
+    ]
+
+    private var curveColor: Color {
+        dark ? .white.opacity(0.85) : Color(red: 0.1, green: 0.1, blue: 0.12)
+    }
+    private var gridColor: Color { Color.primary.opacity(0.12) }
+    private var axisColor: Color { Color.primary.opacity(0.35) }
+    private var labelColor: Color { dark ? .white.opacity(0.5) : Color.primary.opacity(0.55) }
+
+    /// The insets around the plot area: room for the y labels on the left
+    /// and the x labels below.
+    private let inset = EdgeInsets(top: 6, leading: 38, bottom: 16, trailing: 8)
+
+    var body: some View {
+        Canvas { context, size in
+            let plotWidth = max(10, size.width - inset.leading - inset.trailing)
+            let plotHeight = max(10, size.height - inset.top - inset.bottom)
+            let bounds = yBounds()
+            let span = bounds.hi - bounds.lo
+
+            // Frame
+            let frame = CGRect(x: inset.leading, y: inset.top, width: plotWidth, height: plotHeight)
+            context.stroke(Path(frame), with: .color(gridColor), lineWidth: 0.5)
+
+            // X ticks: a "nice" step like the document plot().
+            let xStep = niceStep(of: (spec.xMax - spec.xMin) / 6)
+            var tick = (spec.xMin / xStep).rounded(.up) * xStep
+            let font = Font.system(size: 8.5, design: .monospaced)
+            while tick <= spec.xMax + 1e-12 {
+                let x = px(tick, bounds: bounds, width: plotWidth)
+                context.stroke(Path { path in
+                    path.move(to: CGPoint(x: x, y: inset.top))
+                    path.addLine(to: CGPoint(x: x, y: inset.top + plotHeight))
+                }, with: .color(gridColor), lineWidth: 0.5)
+                draw(text: Self.label(tick), at: CGPoint(x: x, y: inset.top + plotHeight + 3),
+                     color: labelColor, font: font, centered: true, in: context)
+                tick += xStep
+            }
+
+            // Y grid: five evenly spaced labelled lines.
+            for i in 1...4 {
+                let value = bounds.lo + span * Double(i) / 5
+                let y = py(value, bounds: bounds, height: plotHeight)
+                context.stroke(Path { path in
+                    path.move(to: CGPoint(x: inset.leading, y: y))
+                    path.addLine(to: CGPoint(x: inset.leading + plotWidth, y: y))
+                }, with: .color(gridColor), lineWidth: 0.5)
+                draw(text: Self.label(value), at: CGPoint(x: inset.leading - 4, y: y - 5),
+                     color: labelColor, font: font, centered: false, in: context)
+            }
+
+            // Zero axes, when the range spans them.
+            if spec.xMin < 0 && spec.xMax > 0 {
+                let x = px(0, bounds: bounds, width: plotWidth)
+                context.stroke(Path { path in
+                    path.move(to: CGPoint(x: x, y: inset.top))
+                    path.addLine(to: CGPoint(x: x, y: inset.top + plotHeight))
+                }, with: .color(axisColor), lineWidth: 1)
+            }
+            if bounds.lo < 0 && bounds.hi > 0 {
+                let y = py(0, bounds: bounds, height: plotHeight)
+                context.stroke(Path { path in
+                    path.move(to: CGPoint(x: inset.leading, y: y))
+                    path.addLine(to: CGPoint(x: inset.leading + plotWidth, y: y))
+                }, with: .color(axisColor), lineWidth: 1)
+            }
+
+            // Curves: gaps (NaN or far outside the drawn range) break the
+            // segment, so poles do not draw vertical walls.
+            for (index, curve) in spec.curves.enumerated() {
+                let color = Self.palette[index % Self.palette.count]
+                var path = Path()
+                var started = false
+                for point in curve {
+                    guard !point.y.isNaN, point.y.isFinite,
+                          point.y >= bounds.lo - span, point.y <= bounds.hi + span else {
+                        started = false
+                        continue
+                    }
+                    let location = CGPoint(x: px(point.x, bounds: bounds, width: plotWidth),
+                                           y: py(point.y, bounds: bounds, height: plotHeight))
+                    if started {
+                        path.addLine(to: location)
+                    } else {
+                        path.move(to: location)
+                        started = true
+                    }
+                }
+                let shade = Color(red: color.red / 255, green: color.green / 255, blue: color.blue / 255)
+                context.stroke(path, with: .color(shade), lineWidth: 1.4)
+            }
+
+            // Legend for multi-curve charts, above the plot area's top-right.
+            if spec.curves.count > 1 {
+                var y = inset.top + 2
+                for (index, expression) in spec.expressions.prefix(5).enumerated() {
+                    let color = Self.palette[index % Self.palette.count]
+                    let shade = Color(red: color.red / 255, green: color.green / 255, blue: color.blue / 255)
+                    context.fill(Path(CGRect(x: inset.leading + plotWidth - 98, y: y + 2, width: 7, height: 2.5)),
+                                 with: .color(shade))
+                    draw(text: expression, at: CGPoint(x: inset.leading + plotWidth - 88, y: y),
+                         color: shade, font: font, centered: false, in: context)
+                    y += 12
+                }
+            }
+        }
+    }
+
+    // MARK: Geometry
+
+    private struct YBounds {
+        let lo: Double
+        let hi: Double
+    }
+
+    /// Robust vertical range: the 2nd–98th percentile of the finite values,
+    /// padded 15%. A lone asymptote then cannot stretch the axis.
+    private func yBounds() -> YBounds {
+        let values = spec.curves.flatMap { curve in curve.map(\.y) }
+            .filter { !$0.isNaN && $0.isFinite }
+            .sorted()
+        guard values.count >= 2 else { return YBounds(lo: -1, hi: 1) }
+        let low = values[min(values.count - 1, Int(Double(values.count) * 0.02))]
+        let high = values[min(values.count - 1, Int(Double(values.count) * 0.98))]
+        var span = high - low
+        if span <= 0 { span = max(abs(high), 1) }
+        return YBounds(lo: low - span * 0.15, hi: high + span * 0.15)
+    }
+
+    private func niceStep(of raw: Double) -> Double {
+        guard raw > 0, raw.isFinite else { return 1 }
+        let magnitude = pow(10, floor(log10(raw)))
+        let normalized = raw / magnitude
+        let factor = normalized <= 1 ? 1.0 : (normalized <= 2 ? 2.0 : (normalized <= 5 ? 5.0 : 10.0))
+        return factor * magnitude
+    }
+
+    private func px(_ x: Double, bounds: YBounds, width: Double) -> CGFloat {
+        inset.leading + (x - spec.xMin) / (spec.xMax - spec.xMin) * width
+    }
+
+    private func py(_ y: Double, bounds: YBounds, height: Double) -> CGFloat {
+        inset.top + (bounds.hi - y) / (bounds.hi - bounds.lo) * height
+    }
+
+    /// Tick text: an en-dash for negatives reads better at 8.5pt than "-".
+    private static func label(_ value: Double) -> String {
+        guard value.isFinite else { return "" }
+        if abs(value) < 1e-9 { return "0" }
+        return TIPlot.format(value, precision: 4).replacingOccurrences(of: "-", with: "−")
+    }
+
+    private func draw(text: String, at point: CGPoint, color: Color, font: Font,
+                      centered: Bool, in context: GraphicsContext) {
+        context.draw(Text(text).font(font).foregroundColor(color), at: point,
+                     anchor: centered ? .top : .topLeading)
+    }
+
+    // MARK: PNG
+
+    /// The chart as a PNG for the clipboard or the document folder. Rendered
+    /// on white with dark text: documents are usually light, and an inserted
+    /// image should not flip with the UI theme.
+    @MainActor
+    static func pngData(_ spec: CalculatorPlotSpec) -> Data? {
+        let view = PlotChartView(spec: spec, dark: false)
+            .frame(width: 680, height: 400)
+            .background(Color.white)
+            .environment(\.colorScheme, .light)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        guard let image = renderer.nsImage,
+              let tiff = image.tiffRepresentation,
+              let representation = NSBitmapImageRep(data: tiff) else { return nil }
+        return representation.representation(using: .png, properties: [:])
+    }
+}
+
 // MARK: - TI-89 menu contents
 
 /// One item of the template menus: label + the text placed on the
@@ -811,6 +1092,7 @@ enum TICommands {
 
     static let other: [TICommand] = [
         TICommand("Browse all functions…", "__catalog__", caretOffset: 0),
+        TICommand("plot( chart", "plot(sin(x), x, -5, 5)", caretOffset: 5),
         TICommand("2×2 matrix", "[[1,2][3,4]]", caretOffset: 2),
         TICommand("det( determinant", "det(", caretOffset: 4),
         TICommand("transpose(", "transpose(", caretOffset: 10),

@@ -67,6 +67,50 @@ final class CalculatorSession: ObservableObject {
             busy = true
             lastStatus = nil
             let approx = forceApprox || exactMode == .approx
+
+            // Plot entries never reach the CAS verbatim: the line is parsed,
+            // its bounds resolved, and every curve sampled in one CAS call
+            // each. Plot-shaped input that fails to parse stays a plain
+            // error (never routed to the AI: it is formula-shaped).
+            do {
+                if let plotCall = try TIPlot.parse(prepared) {
+                    defer { busy = false }
+                    do {
+                        let spec = try await TIPlot.sample(
+                            plotCall,
+                            angle: angle,
+                            digits: displayDigits,
+                            timeout: GeneralSettingsManager.shared.calcTimeout)
+                        entries.append(CalculatorEntry(
+                            input: trimmed,
+                            approx: approx,
+                            resultPlain: spec.summary,
+                            plot: spec))
+                        hasUnsavedChanges = true
+                        recallIndex = nil
+                        return
+                    } catch {
+                        entries.append(CalculatorEntry(
+                            input: trimmed,
+                            approx: approx,
+                            isError: true,
+                            errorMessage: error.localizedDescription))
+                        hasUnsavedChanges = true
+                        recallIndex = nil
+                        return
+                    }
+                }
+            } catch let error as TIPlotError {
+                entries.append(CalculatorEntry(
+                    input: trimmed,
+                    approx: approx,
+                    isError: true,
+                    errorMessage: error.errorDescription ?? "plot: invalid input"))
+                hasUnsavedChanges = true
+                busy = false
+                return
+            }
+
             let result = await CASEngine.shared.eval(
                 input: prepared,
                 approx: approx,

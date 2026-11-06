@@ -41,6 +41,10 @@ struct CalculatorEntry: Identifiable, Codable, Hashable, Sendable {
     /// written before the feature existed still decode; when set, `resultPlain`
     /// holds the same answer so copy/export treat it like any other result.
     var aiAnswer: String?
+    /// The sampled chart, when this line was a `plot(…)` entry. Optional so
+    /// older `.tcalc` files still decode; the points are cached with the
+    /// entry, so reopening a saved session redraws the chart for free.
+    var plot: CalculatorPlotSpec?
     var timestamp: Date
 
     init(id: UUID = UUID(),
@@ -52,6 +56,7 @@ struct CalculatorEntry: Identifiable, Codable, Hashable, Sendable {
          isError: Bool = false,
          errorMessage: String = "",
          aiAnswer: String? = nil,
+         plot: CalculatorPlotSpec? = nil,
          timestamp: Date = Date()) {
         self.id = id
         self.input = input
@@ -62,6 +67,7 @@ struct CalculatorEntry: Identifiable, Codable, Hashable, Sendable {
         self.isError = isError
         self.errorMessage = errorMessage
         self.aiAnswer = aiAnswer
+        self.plot = plot
         self.timestamp = timestamp
     }
 }

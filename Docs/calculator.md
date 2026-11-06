@@ -44,9 +44,53 @@ nSolve(cos(x)=x,x)      numeric root
 [[1,2];[3,4]]*2         matrices with ; rows
 ans, ans(n), entry(n)   recall previous results/inputs
 expr | x=3              evaluate with x=3
+plot(sin(x), x, -5, 5)  chart (up to 4 curves)
 ```
 
 `approx(...)` / `exact(...)` force one-off precision like the TI's MATH menu.
+
+## Charting a function
+
+`plot(expr, …, var, x-min, x-max)` draws one to four curves in the history,
+right where the result would be. Every point is evaluated by the CAS
+(`expr | var = …` sampled over the range), so expressions keep their stored
+variables, bounds may be expressions (`-pi`), and gaps — `1/x` at 0, `sqrt`
+on the negative half — draw as gaps, never as fake lines:
+
+```
+plot(sin(x)/x, x, -20, 20)
+plot(sin(x), cos(x), x, -2*pi, 2*pi)
+plot(k*x^2, x, -1, 1)          uses the stored k
+plot(f1(x), x, 0, 10)          uses a Defined function
+```
+
+A curve over a name that is itself stored still plots the function over the
+range (the TI way), and the stored value is untouched afterwards. If an
+expression does not evaluate to numbers — an unknown name, a typo — the
+entry is an error, not a plausible-looking flat line.
+
+### Taking a chart into the document
+
+Right-click a chart (or its history line):
+
+- **Chart with sampled points** — inserts the exact points the calculator
+  sampled as `#plot(points: ((…), …), x-min: …, x-max: …)`. This is the
+  default: it draws the same chart the calculator showed, and it cannot
+  crash the document. (A callback like `x => sin(x)/x` would divide by zero
+  at the pole while the document resamples it.)
+- **Chart as `#plot` code** — inserts `#plot(x => calc.sin(x), -20, 20)`;
+  the document resamples the curve itself, and registry functions translate
+  to `calc-call("name", …)`. Choose it for curves you know are smooth on
+  the range — it fails to compile when a curve has a pole inside the range,
+  and a curve Typst cannot express falls back to the sampled points.
+- **Chart as image** — saves a PNG next to the open file and inserts
+  `#image("calculator_plot_….png")`. Works in `.typ`, `.note` and `.md`,
+  and the exported image compiles anywhere — no calculator involved.
+- **Copy chart as PNG** — the same image on the clipboard.
+
+The first two need the bridge (already injected into previews, and written
+as sidecars by **Export As ▸ Standard Typst**). "Export as .typ" turns
+charts into the sampled-points form automatically.
 
 ## Inserting into the document
 
@@ -63,9 +107,9 @@ Insertion is available for `.typ` and `.note` documents.
 ## Saving sessions
 
 - **Save** (⌘S while the panel is focused) writes a `.tcalc` file: history,
-  cached results, stored variables and modes. Results are cached in the
-  file, so reopening never re-evaluates; stored variables are replayed
-  quietly so later entries keep working.
+  cached results, chart points, stored variables and modes. Results are
+  cached in the file, so reopening never re-evaluates; stored variables are
+  replayed quietly so later entries keep working.
 - **Export as .typ** writes the history as display equations.
 
 ## Finding functions

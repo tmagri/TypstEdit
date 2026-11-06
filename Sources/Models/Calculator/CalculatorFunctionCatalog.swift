@@ -148,6 +148,15 @@ enum CalculatorFunctionCatalog {
             example: "Define f(x)=x^2",
             compatibility: .alias),
 
+        CalculatorFunctionGuide(
+            id: "plot",
+            title: "Plot a curve",
+            category: .session,
+            syntax: "plot(expr, …, var, x-min, x-max)",
+            description: "Draws one to four curves in a chart in the history, with every point evaluated by the CAS. Bounds may be expressions, for example -pi. Right-click the chart to insert it into the open document as #plot code, as the exact sampled points, or as an image.",
+            example: "plot(sin(x)/x, x, -20, 20)",
+            compatibility: .verified),
+
         // MARK: Arithmetic
 
         CalculatorFunctionGuide(
