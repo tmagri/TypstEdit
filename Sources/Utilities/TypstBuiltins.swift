@@ -175,8 +175,9 @@ enum TypstBuiltins {
         guard case .datetime(let date) = args.first?.value ?? .none else {
             throw TypstEvalError("expected datetime, found none")
         }
-        // display() with no pattern uses typst's documented default.
-        var pattern = "[year]-[month repr:short]-[day]"
+        // display() with no pattern uses typst's documented default for a
+        // date: [year]-[month]-[day] (numeric month, zero-padded fields).
+        var pattern = "[year]-[month]-[day]"
         if case .str(let text) = args.dropFirst().first(where: { $0.name == nil })?.value ?? .none {
             pattern = text
         }

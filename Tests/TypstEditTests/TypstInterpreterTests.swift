@@ -528,7 +528,7 @@ final class TypstInterpreterTests: XCTestCase {
     func testDatetimeTodayDisplaysRealDate() {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "MMMM d, yyyy"
+        formatter.dateFormat = "MMMM dd, yyyy"
         XCTAssertEqual(
             convert("#datetime.today().display(\"[month repr:long] [day], [year]\")"),
             formatter.string(from: Date()) + "\n"
@@ -537,10 +537,10 @@ final class TypstInterpreterTests: XCTestCase {
 
     func testDatetimeDisplayWithoutPatternUsesTypstDefault() {
         // Regression: display() with no pattern rendered empty (typst's
-        // documented default is [year]-[month repr:short]-[day]).
+        // documented default is [year]-[month]-[day], numeric and zero-padded).
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MMM-d"
+        formatter.dateFormat = "yyyy-MM-dd"
         XCTAssertEqual(
             convert("#datetime.today().display()"),
             formatter.string(from: Date()) + "\n"

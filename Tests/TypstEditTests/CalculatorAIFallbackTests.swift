@@ -120,7 +120,7 @@ final class CalculatorAIFallbackTests: XCTestCase {
     func testStringEchoViaQuotedTextIsDetected() {
         let quoted = CASEvalResult(
             inputTree: nil, resultTree: nil,
-            resultText: "\"WHat is the Area of a circle, if diameter is 1 cm?\"",
+            resultText: "\"What is the Area of a circle, if diameter is 1 cm?\"",
             resultTypst: "", inputTypst: "", errorMessage: "", ok: true)
         XCTAssertTrue(CalculatorAIFallback.isStringEcho(
             quoted, input: "What is the Area of a circle, if diameter is 1 cm?"))
