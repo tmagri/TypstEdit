@@ -37,8 +37,6 @@ struct ContentView: View {
     @State private var lastSaved: Date?
     @State private var showSavePopup: Bool = false
 
-    /// PDF preview zoom. Persisted across launches. `0` means "auto / fit".
-    @AppStorage("pdfZoomFactor") private var pdfZoomFactor: Double = 0
     @State private var showRenameAlert: Bool = false
     @State private var renameTargetURL: URL?
     @State private var newFileName: String = ""
@@ -928,10 +926,15 @@ struct ContentView: View {
                 reloadToken: reloadToken,
                 colorBlindnessMode: editorController.colorBlindnessMode,
                 isPreviewDarkMode: editorController.isPreviewDarkMode,
-                zoomScale: CGFloat(pdfZoomFactor),
+                zoomScale: CGFloat(editorController.pdfZoomFactor),
                 onZoomScaleChange: { newZoom in
                     DispatchQueue.main.async {
-                        pdfZoomFactor = Double(newZoom)
+                        editorController.pdfZoomFactor = Double(newZoom)
+                    }
+                },
+                onEffectiveScaleChange: { scale in
+                    DispatchQueue.main.async {
+                        editorController.pdfEffectiveScale = scale
                     }
                 },
                 onWordCountChange: { count in DispatchQueue.main.async { editorController.wordCount = count } }
@@ -988,8 +991,7 @@ struct ContentView: View {
 
     private var pdfZoomControls: some View {
         HStack(spacing: 2) {
-            zoomButton(icon: "minus") { adjustZoom(by: 1.0 / 1.2) }
-                .keyboardShortcut("-", modifiers: .command)
+            zoomButton(icon: "minus") { editorController.pdfZoomOut() }
 
             Text(zoomLabel)
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -997,17 +999,17 @@ struct ContentView: View {
                 .foregroundColor(themeManager.textColor)
                 .help("Current zoom")
                 .contentShape(Rectangle())
-                .onTapGesture(count: 2) { resetZoom() }
+                .onTapGesture(count: 2) { editorController.fitPDFToWindow() }
 
-            zoomButton(icon: "plus") { adjustZoom(by: 1.2) }
-                .keyboardShortcut("+", modifiers: .command)
+            zoomButton(icon: "plus") { editorController.pdfZoomIn() }
 
             Divider()
                 .frame(height: 14)
                 .padding(.horizontal, 2)
 
-            zoomButton(icon: "arrow.up.left.and.arrow.down.right") { resetZoom() }
-                .keyboardShortcut("0", modifiers: .command)
+            zoomButton(icon: "arrow.up.left.and.arrow.down.right") {
+                editorController.fitPDFToWindow()
+            }
 
             Divider()
                 .frame(height: 14)
@@ -1026,7 +1028,9 @@ struct ContentView: View {
     }
 
     private var zoomLabel: String {
-        pdfZoomFactor > 0 ? "\(Int(pdfZoomFactor * 100))%" : "Fit"
+        editorController.pdfZoomFactor > 0
+            ? "\(Int(editorController.pdfZoomFactor * 100))%"
+            : "Fit"
     }
 
     private func zoomButton(icon: String, action: @escaping () -> Void) -> some View {
@@ -1038,18 +1042,9 @@ struct ContentView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(icon == "minus" ? "Zoom Out (Cmd−)" : icon == "plus" ? "Zoom In (Cmd+)" : "Fit to Window (Cmd+0)")
+        .help(icon == "minus" ? "Zoom Out (Cmd−)" : icon == "plus" ? "Zoom In (Cmd+)" : "Fit to Window")
     }
 
-    private func adjustZoom(by factor: Double) {
-        let current = pdfZoomFactor > 0 ? pdfZoomFactor : 1.0
-        pdfZoomFactor = max(0.1, min(5.0, current * factor))
-    }
-
-    private func resetZoom() {
-        pdfZoomFactor = 0
-    }
-    
     private var emptyStateView: some View {
         ZStack {
             themeManager.contentOverlay.ignoresSafeArea()
@@ -2144,6 +2139,9 @@ struct ContentView: View {
         case "openFoundationEditor": editorController.openFoundationEditor()
         case "zoomIn": editorController.zoomIn()
         case "zoomOut": editorController.zoomOut()
+        case "previewZoomIn": editorController.pdfZoomIn()
+        case "previewZoomOut": editorController.pdfZoomOut()
+        case "previewZoomFit": editorController.fitPDFToWindow()
         case "refreshPreview":
             scheduleCompilation(with: editorController.sourceCode, force: true)
             reloadToken = UUID()

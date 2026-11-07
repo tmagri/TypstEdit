@@ -1,22 +1,71 @@
 import SwiftUI
 @preconcurrency import PDFKit
 
+/// A `PDFView` that reports the user's *own* zoom gestures separately from
+/// `autoScales` re-fitting the page. A refit (window resize, split drag) must
+/// keep fit mode; a pinch, double-tap, or ⌘+/− must leave it. Inferring this
+/// from `PDFViewScaleChanged` alone is unreliable, because PDFKit also posts
+/// that notification for refits.
+final class PreviewPDFView: PDFView {
+    /// Called after a user zoom gesture changed the scale. The view has
+    /// already left autoScales.
+    var onUserZoom: ((CGFloat) -> Void)?
+
+    override func magnify(with event: NSEvent) {
+        handleUserZoom { super.magnify(with: event) }
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        handleUserZoom { super.smartMagnify(with: event) }
+    }
+
+    override func zoomIn(_ sender: Any?) {
+        handleUserZoom { super.zoomIn(sender) }
+    }
+
+    override func zoomOut(_ sender: Any?) {
+        handleUserZoom { super.zoomOut(sender) }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // ⌘-scroll zooms. Handle it like the other gestures so autoScales
+        // does not refit the page and silently undo it.
+        guard event.modifierFlags.contains(.command) else {
+            super.scrollWheel(with: event)
+            return
+        }
+        handleUserZoom { super.scrollWheel(with: event) }
+    }
+
+    private func handleUserZoom(_ body: () -> Void) {
+        // Take manual control *before* zooming: otherwise autoScales refits
+        // and silently undoes the gesture on the next resize.
+        autoScales = false
+        body()
+        onUserZoom?(scaleFactor)
+    }
+}
+
 struct PreviewView: NSViewRepresentable {
     var url: URL?
     var reloadToken: UUID?
     var colorBlindnessMode: EditorController.ColorBlindnessMode = .none
     var isPreviewDarkMode: Bool = true
-    /// Desired zoom factor. `0` means "auto / fit" (let PDFView autoScales decide).
+    /// Desired zoom factor. `0` means "fit to window" (PDFView autoScales decides).
     var zoomScale: CGFloat = 0
-    /// Called whenever the user changes zoom (pinch, CMD+/−, etc.) or autoScales fits.
+    /// Called whenever the user changes zoom (pinch, CMD+/−, etc.).
+    /// Final values only; fit-mode refits are not reported.
     var onZoomScaleChange: ((CGFloat) -> Void)?
+    /// The scale actually in use, including the one autoScales picks while
+    /// fitting. Lets "zoom in" start from what is on screen during fit mode.
+    var onEffectiveScaleChange: ((CGFloat) -> Void)?
     var onWordCountChange: ((Int) -> Void)?
 
     @EnvironmentObject var themeManager: ThemeManager
 
     func makeNSView(context: Context) -> PDFView {
         print("[DEBUG] PreviewView makeNSView called")
-        let pdfView = PDFView()
+        let pdfView = PreviewPDFView()
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         pdfView.backgroundColor = isPreviewDarkMode ? NSColor(calibratedWhite: 0.1, alpha: 1.0) : .white
@@ -24,12 +73,16 @@ struct PreviewView: NSViewRepresentable {
 
         context.coordinator.startObservingScale(pdfView)
         context.coordinator.lastIsPreviewDarkMode = isPreviewDarkMode
+        (pdfView as? PreviewPDFView)?.onUserZoom = { [weak coordinator = context.coordinator] scale in
+            coordinator?.reportScale(scale)
+        }
         return pdfView
     }
 
     func updateNSView(_ pdfView: PDFView, context: Context) {
         // Keep the callback wiring fresh.
         context.coordinator.onUserZoomChange = onZoomScaleChange
+        context.coordinator.onEffectiveScaleChange = onEffectiveScaleChange
 
         // 1. Sync Background Color with Dark/Light state first to avoid any flash.
         let targetColor = isPreviewDarkMode ? NSColor(calibratedWhite: 0.1, alpha: 1.0) : .white
@@ -54,13 +107,16 @@ struct PreviewView: NSViewRepresentable {
             }
         }
 
-        guard !context.coordinator.isTransitioning else { return }
-
         // 3. Apply externally-requested zoom (from the toolbar controls / state).
-        // `zoomScale == 0` means "let autoScales fit", so we don't override.
-        if zoomScale > 0, abs(pdfView.scaleFactor - zoomScale) > 0.01 {
-            context.coordinator.applyExternalZoom(zoomScale, to: pdfView)
+        // `zoomScale == 0` means "fit to window" (autoScales). Only react when the
+        // *requested* value changes, so pinch-zoom and autoScales refits are not
+        // fought on every SwiftUI update. Done before the transition guard so a
+        // click during the 200 ms crossfade is not dropped.
+        if context.coordinator.lastRequestedZoom != zoomScale {
+            context.coordinator.applyZoomRequest(zoomScale, to: pdfView)
         }
+
+        guard !context.coordinator.isTransitioning else { return }
 
         if context.coordinator.lastUrl != url || context.coordinator.lastToken != reloadToken {
             print("[DEBUG] PreviewView: url/token changed. newURL=\(url?.lastPathComponent ?? "nil")")
@@ -90,6 +146,7 @@ struct PreviewView: NSViewRepresentable {
             if let document = PDFDocument(url: url), document.pageCount > 0 {
                 // --- Capture current view state BEFORE swapping ---
                 let savedScale = pdfView.scaleFactor
+                let wasFitting = context.coordinator.lastRequestedZoom <= 0
                 let savedPoint = pdfView.currentDestination?.point ?? .zero
                 let savedPageIndex = pdfView.currentPage.map { pdfView.document?.index(for: $0) ?? 0 } ?? 0
 
@@ -100,11 +157,18 @@ struct PreviewView: NSViewRepresentable {
 
                     pdfView.document = document
 
-                    // Restore zoom + position (overrides autoScales refit on new doc).
-                    context.coordinator.restoreViewState(scale: savedScale,
-                                                        pageIndex: savedPageIndex,
-                                                        point: savedPoint,
-                                                        on: pdfView)
+                    // Restore zoom + position, or refit when the user is in fit mode.
+                    if wasFitting {
+                        context.coordinator.restoreViewState(scale: nil,
+                                                            pageIndex: savedPageIndex,
+                                                            point: savedPoint,
+                                                            on: pdfView)
+                    } else {
+                        context.coordinator.restoreViewState(scale: savedScale,
+                                                            pageIndex: savedPageIndex,
+                                                            point: savedPoint,
+                                                            on: pdfView)
+                    }
 
                     if let snap = snapshotView {
                         pdfView.addSubview(snap)
@@ -124,9 +188,11 @@ struct PreviewView: NSViewRepresentable {
                     }
                 } else {
                     pdfView.document = document
-                    // First load: let autoScales fit, then capture the resulting zoom.
-                    DispatchQueue.main.async {
-                        context.coordinator.reportScale(pdfView.scaleFactor)
+                    // First load: apply fit or the requested zoom, then report it.
+                    if context.coordinator.lastRequestedZoom <= 0 {
+                        context.coordinator.enterFitMode(on: pdfView)
+                    } else {
+                        context.coordinator.applyExternalZoom(context.coordinator.lastRequestedZoom, to: pdfView)
                     }
                 }
 
@@ -201,8 +267,12 @@ struct PreviewView: NSViewRepresentable {
         var isTransitioning: Bool = false
         var lastIsPreviewDarkMode: Bool = true
 
-        /// The most recent user/auto scale factor, used to dedupe notifications.
+        /// The most recent user scale factor, used to dedupe notifications.
         var lastReportedScale: CGFloat = 0
+        /// The last effective (on-screen) scale, including autoScales fits.
+        var lastEffectiveScale: CGFloat = 0
+        /// The last zoom value SwiftUI asked for. `0` means fit mode.
+        var lastRequestedZoom: CGFloat = 0
         /// True while we are programmatically setting scaleFactor (suppresses echo).
         var isApplyingExternalZoom: Bool = false
 
@@ -210,6 +280,7 @@ struct PreviewView: NSViewRepresentable {
         private weak var overlaySnapshot: NSImageView?
 
         var onUserZoomChange: ((CGFloat) -> Void)?
+        var onEffectiveScaleChange: ((CGFloat) -> Void)?
 
         nonisolated(unsafe) private var scaleObserver: NSObjectProtocol?
         private weak var observedPdfView: PDFView?
@@ -231,30 +302,102 @@ struct PreviewView: NSViewRepresentable {
 
         private func handleScaleChanged(in pdfView: PDFView) {
             guard !isApplyingExternalZoom else { return }
+            reportEffectiveScale(pdfView.scaleFactor)
+
+            // While autoScales owns the scale, every change is a refit caused
+            // by a resize (window, split drag) and fit mode must survive it.
+            // User zooms turn autoScales off first (see PreviewPDFView), so
+            // only those reach the report below.
+            guard !pdfView.autoScales else { return }
             reportScale(pdfView.scaleFactor)
+        }
+
+        /// Tells SwiftUI which scale is really on screen. Used by the zoom
+        /// buttons so "zoom in" from fit mode continues from the fitted size.
+        func reportEffectiveScale(_ scale: CGFloat) {
+            guard abs(scale - lastEffectiveScale) > 0.001 else { return }
+            lastEffectiveScale = scale
+            onEffectiveScaleChange?(scale)
         }
 
         func reportScale(_ scale: CGFloat) {
             guard !isApplyingExternalZoom else { return }
             guard abs(scale - lastReportedScale) > 0.001 else { return }
             lastReportedScale = scale
+            lastEffectiveScale = scale
+            onEffectiveScaleChange?(scale)
             onUserZoomChange?(scale)
+        }
+
+        /// Applies a SwiftUI-requested zoom. `0` re-enters fit mode.
+        func applyZoomRequest(_ zoom: CGFloat, to pdfView: PDFView) {
+            lastRequestedZoom = zoom
+            if zoom <= 0 {
+                if !pdfView.autoScales {
+                    enterFitMode(on: pdfView)
+                }
+                return
+            }
+            // The request may just be the echo of a scale we reported after a
+            // pinch. Writing it back would fight the live gesture, so ignore
+            // values that already match what is on screen.
+            if abs(pdfView.scaleFactor - zoom) < 0.005 {
+                lastReportedScale = zoom
+                lastEffectiveScale = zoom
+                return
+            }
+            applyExternalZoom(zoom, to: pdfView)
+        }
+
+        /// Turns autoScales back on and reports the resulting fitted scale.
+        func enterFitMode(on pdfView: PDFView) {
+            isApplyingExternalZoom = true
+            pdfView.autoScales = true
+            // `scaleFactorForSizeToFit` is correct immediately; the actual
+            // scaleFactor can lag until the next layout pass.
+            let fitted = pdfView.scaleFactorForSizeToFit
+            lastReportedScale = fitted
+            lastEffectiveScale = fitted
+            onEffectiveScaleChange?(fitted)
+            DispatchQueue.main.async { [weak self, weak pdfView] in
+                guard let self else { return }
+                if let pdfView {
+                    let settled = pdfView.scaleFactor
+                    self.lastEffectiveScale = settled
+                    self.onEffectiveScaleChange?(settled)
+                }
+                self.isApplyingExternalZoom = false
+            }
         }
 
         func applyExternalZoom(_ scale: CGFloat, to pdfView: PDFView) {
             isApplyingExternalZoom = true
+            // Setting scaleFactor alone leaves autoScales on, which would
+            // refit (and undo the zoom) on the next resize.
+            pdfView.autoScales = false
             pdfView.scaleFactor = scale
             lastReportedScale = scale
+            lastEffectiveScale = scale
             DispatchQueue.main.async { [weak self] in
                 self?.isApplyingExternalZoom = false
             }
         }
 
-        /// Restore zoom + scroll position after a document swap (overrides autoScales).
-        func restoreViewState(scale: CGFloat, pageIndex: Int, point: NSPoint, on pdfView: PDFView) {
+        /// Restore zoom + scroll position after a document swap. A `nil` scale
+        /// means the view is in fit mode, so autoScales keeps handling it.
+        func restoreViewState(scale: CGFloat?, pageIndex: Int, point: NSPoint, on pdfView: PDFView) {
             isApplyingExternalZoom = true
-            pdfView.scaleFactor = scale
-            lastReportedScale = scale
+            if let scale {
+                pdfView.autoScales = false
+                pdfView.scaleFactor = scale
+                lastReportedScale = scale
+                lastEffectiveScale = scale
+            } else {
+                pdfView.autoScales = true
+                let fitted = pdfView.scaleFactorForSizeToFit
+                lastReportedScale = fitted
+                lastEffectiveScale = fitted
+            }
             if let doc = pdfView.document, let page = doc.page(at: max(0, min(pageIndex, doc.pageCount - 1))) {
                 pdfView.go(to: PDFDestination(page: page, at: point))
             }

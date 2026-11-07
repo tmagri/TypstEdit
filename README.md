@@ -67,6 +67,7 @@
 * **🌑 Dark Mode Optimized:** Designed for a comfortable, eye-friendly dark editing environment.
 * **♿️ Accessibility Features:** Color blindness simulation modes (Protanopia, Deuteranopia, Tritanopia).
 * **📐 Flexible Layout:** Split views vertically or horizontally, editor-only, preview-only, or both panels.
+* **🔍 Per-Window Preview Zoom:** Each window keeps its own preview scale. Zoom in, zoom out, or Fit to Window from the preview toolbar or **Editor → Preview Zoom**; fitting one window never changes another.
 
 ### AI (100% opt-in)
 * **🤖 Assistant:** Autocomplete, cursor-insertion prompts, selection rewrite/grammar fixes, and a persistent agentic chat panel — each configurable to OpenAI, Anthropic, Gemini, OpenRouter, or a local model.

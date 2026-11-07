@@ -611,6 +611,23 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "zoomOut")
             }
             .keyboardShortcut("-", modifiers: .command)
+
+            Menu("Preview Zoom") {
+                Button("Zoom In") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "previewZoomIn")
+                }
+
+                Button("Zoom Out") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "previewZoomOut")
+                }
+
+                Divider()
+
+                Button("Fit to Window") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "previewZoomFit")
+                }
+                .keyboardShortcut("0", modifiers: [.command, .shift])
+            }
             
             Divider()
             

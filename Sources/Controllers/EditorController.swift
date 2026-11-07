@@ -803,6 +803,36 @@ class EditorController: NSObject, ObservableObject {
             }
         }
     }
+
+    // MARK: - PDF preview zoom (per window)
+    /// Preview zoom for the window that owns this controller. `0` means
+    /// "fit to window". Kept here, not in `ContentView` or `@AppStorage`,
+    /// because each window has its own controller: zooming one window must
+    /// never change the scale shown in another.
+    @Published var pdfZoomFactor: Double = 0
+    /// The scale currently on screen, including the value PDFKit's
+    /// autoScales picks while fitting. Zoom-in/out start from this so the
+    /// first step from "Fit" does not jump to 100%. Not `@Published`: it
+    /// changes on every resize/layout pass and is only read on demand.
+    var pdfEffectiveScale: CGFloat = 1.0
+
+    func pdfZoomIn() {
+        adjustPDFZoom(by: 1.2)
+    }
+
+    func pdfZoomOut() {
+        adjustPDFZoom(by: 1.0 / 1.2)
+    }
+
+    func fitPDFToWindow() {
+        pdfZoomFactor = 0
+    }
+
+    func adjustPDFZoom(by factor: Double) {
+        let current = pdfZoomFactor > 0 ? pdfZoomFactor : max(0.01, Double(pdfEffectiveScale))
+        pdfZoomFactor = max(0.1, min(5.0, current * factor))
+    }
+
     @Published var isSidebarVisible: Bool = true
     /// Set when a Dock-click reopen should land on the welcome screen. The
     /// close-time `.resetToWelcome` notification is unreliable (SwiftUI tears
