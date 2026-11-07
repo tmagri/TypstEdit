@@ -73,10 +73,6 @@ cp "$BUILD_DIR/$APP_NAME-universal" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 # Strip debug symbols from the release binary to reduce size
 strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
-# Hardlink CLI helper into Contents/Helpers so CLI/MCP invocations don't register as the primary GUI app in LaunchServices
-mkdir -p "$APP_BUNDLE/Contents/Helpers"
-ln -f "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/Helpers/typstedit"
-
 # Use this build's actual output, never stale global .build/out bundles.
 echo "Copying SPM resource bundles..."
 for NAME in TypstEdit_TypstEdit.bundle CodeEditLanguages_CodeEditLanguages.bundle; do
@@ -292,6 +288,14 @@ done
 # absolute Xcode rpath.
 bash "$SCRIPT_DIR/Tools/packaging/prepare_bundle.sh" "$APP_BUNDLE" arm64 x86_64
 
+# CLI/MCP helper: a symlink to the main binary, run from Contents/Helpers so
+# LaunchServices never records the headless MCP process as the GUI app (which
+# would block opening the editor until the AI harness exits). Running through
+# the link keeps Bundle.enclosingAppBundle resolving this `.app`, and dyld
+# resolves @executable_path to Contents/MacOS, so the main binary's rpaths work.
+mkdir -p "$APP_BUNDLE/Contents/Helpers"
+ln -sfn "../MacOS/$APP_NAME" "$APP_BUNDLE/Contents/Helpers/typstedit"
+
 # Sign inside-out (NOT --deep), so the Info.plist (incl. folder usage
 # descriptions) is bound and TCC grants folder access instead of prompting
 # per file. Nested code first, then the outer bundle.
@@ -302,7 +306,6 @@ done
 codesign --force --sign - "$APP_BUNDLE/Contents/Frameworks/vector.framework"
 codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst"
 codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
-codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/typstedit"
 codesign --force --sign - "$APP_BUNDLE"
 codesign --verify --strict "$APP_BUNDLE"
 

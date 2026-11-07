@@ -1,8 +1,13 @@
 import Foundation
 
 extension Bundle {
-    /// The enclosing `.app` bundle, even when running as a helper tool
-    /// in `Contents/Helpers/` or `Contents/Resources/bin/`.
+    /// The enclosing `.app` bundle, even when running as a helper tool in
+    /// `Contents/Helpers/` (where `Bundle.main` is just that folder).
+    ///
+    /// LaunchServices only treats a process as the GUI application when it is
+    /// started from `<app>.app/Contents/MacOS/<CFBundleExecutable>`, so the CLI
+    /// and MCP server run from `Contents/Helpers/typstedit` and must look up
+    /// resources through the enclosing bundle instead of `Bundle.main`.
     static var enclosingAppBundle: Bundle {
         if Bundle.main.bundleURL.pathExtension == "app" {
             return .main

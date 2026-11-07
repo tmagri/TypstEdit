@@ -209,11 +209,10 @@ enum TypstEditCLI {
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             .first { !$0.isTerminated && $0.activationPolicy == .regular && $0.bundleURL != nil }
         let target: [String]
-        let appBundle = Bundle.enclosingAppBundle
         if let runningPath = running?.bundleURL?.path {
             target = ["-a", runningPath]
-        } else if appBundle.bundleURL.pathExtension == "app" {
-            target = ["-a", appBundle.bundlePath]
+        } else if Bundle.enclosingAppBundle.bundleURL.pathExtension == "app" {
+            target = ["-a", Bundle.enclosingAppBundle.bundlePath]
         } else {
             target = ["-b", bundleIdentifier]
         }
@@ -279,47 +278,60 @@ enum TypstEditCLI {
       (tools: typst_check, typst_compile, typst_render_preview, typstedit_open,
       typstedit_info, read_pdf). See TypstEdit > Settings > Integrations.
     """
-    /// When a CLI subcommand (like `mcp` or `compile`) is executed directly through the
-    /// main GUI binary (`Contents/MacOS/TypstEdit`), macOS LaunchServices tracks that process
-    /// as the running instance of the GUI application `com.tmagri.TypstEdit`.
+
+    /// When a CLI subcommand (like `mcp` or `compile`) runs through the main GUI
+    /// binary (`Contents/MacOS/TypstEdit`), macOS LaunchServices records that
+    /// headless process as the running instance of `com.tmagri.TypstEdit`.
+    /// Opening the editor afterwards routes the open event to the headless
+    /// process, which cannot answer it, so the launch fails ("the application is
+    /// not valid", LaunchServices error -600) until the harness exits.
     ///
-    /// If the user then attempts to open the editor while the CLI/MCP process is running,
-    /// LaunchServices tries to route the open event to the headless process, fails (error -600),
-    /// and reports that the application is not valid.
-    ///
-    /// Re-executing via `Contents/Helpers/typstedit` (a hard link to the binary inside the bundle)
-    /// keeps all bundle resources accessible while preventing LaunchServices from claiming this
-    /// process as the primary GUI application.
+    /// Re-executing from `Contents/Helpers/typstedit` — a symlink to the same
+    /// binary inside the bundle — keeps every bundled resource reachable through
+    /// `Bundle.enclosingAppBundle` while LaunchServices no longer treats the
+    /// process as the GUI application.
     static func reexecAsHelperIfNeeded() {
         let appBundle = Bundle.enclosingAppBundle
         guard appBundle.bundleURL.pathExtension == "app" else { return }
-        let helpersDir = appBundle.bundleURL.appendingPathComponent("Contents/Helpers").path
-        let helperPath = (helpersDir as NSString).appendingPathComponent(AgentIntegrationManager.toolName)
-        let currentExec = CommandLine.arguments[0]
 
-        // If already running as the helper, nothing to do.
-        if currentExec == helperPath || (currentExec as NSString).resolvingSymlinksInPath == (helperPath as NSString).resolvingSymlinksInPath {
-            return
-        }
+        let helpersDirectory = appBundle.bundleURL.appendingPathComponent("Contents/Helpers").path
+        let helperPath = (helpersDirectory as NSString)
+            .appendingPathComponent(AgentIntegrationManager.toolName)
+        // Already the helper: nothing to do.
+        if Self.isHelperExecutable(CommandLine.arguments[0], helperPath: helperPath) { return }
 
         let fm = FileManager.default
         if !fm.isExecutableFile(atPath: helperPath) {
-            // Attempt to create the helper hard link or symlink if missing
-            try? fm.createDirectory(atPath: helpersDir, withIntermediateDirectories: true)
-            let mainExec = appBundle.bundleURL.appendingPathComponent("Contents/MacOS/TypstEdit").path
-            if fm.isExecutableFile(atPath: mainExec) {
-                if link(mainExec, helperPath) != 0 {
-                    _ = symlink(mainExec, helperPath)
-                }
+            // Bundles built by `bundle.sh` ship the link already; a
+            // hand-assembled bundle may not. Best effort — a missing link
+            // only means we stay in this process.
+            try? fm.createDirectory(atPath: helpersDirectory, withIntermediateDirectories: true)
+            let mainExecutable = appBundle.bundleURL
+                .appendingPathComponent("Contents/MacOS/TypstEdit").path
+            if fm.isExecutableFile(atPath: mainExecutable) {
+                _ = symlink("../MacOS/TypstEdit", helperPath)
             }
         }
-
         guard fm.isExecutableFile(atPath: helperPath) else { return }
 
-        var newArgs = CommandLine.arguments
-        newArgs[0] = helperPath
-        let cArgs = newArgs.map { strdup($0) } + [nil]
-        execv(helperPath, cArgs)
+        // execv keeps the PID and stdio but replaces the LaunchServices identity.
+        var arguments = CommandLine.arguments
+        arguments[0] = helperPath
+        var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
+        argv.append(nil)
+        execv(helperPath, &argv)
+        // Only reached if execv failed; keep running headless in this process.
+        for case let pointer? in argv { free(pointer) }
+    }
+
+    /// Whether `executable` is the helper itself. The helper is a symlink to the
+    /// main binary, so this compares lexical paths: resolving symlinks would make
+    /// both paths equal and wrongly skip the re-exec when running as the GUI
+    /// binary, and re-exec'ing the helper would then loop forever.
+    nonisolated static func isHelperExecutable(_ executable: String, helperPath: String) -> Bool {
+        let base = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        return URL(fileURLWithPath: executable, relativeTo: base).standardizedFileURL.path
+            == URL(fileURLWithPath: helperPath, relativeTo: base).standardizedFileURL.path
     }
 }
 

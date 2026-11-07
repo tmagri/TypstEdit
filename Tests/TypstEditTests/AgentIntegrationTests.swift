@@ -135,13 +135,32 @@ final class AgentIntegrationTests: XCTestCase {
 
     // MARK: - Install / config
 
+    /// The helper is a symlink to the main binary, so the "am I the helper?"
+    /// check must compare lexical paths. Resolving symlinks makes the GUI binary
+    /// look like the helper, which would skip the re-exec and reintroduce the
+    /// LaunchServices bug; a wrong answer in the other direction loops forever.
+    func testHelperExecutableDetection() {
+        let app = "/Applications/TypstEdit.app"
+        let main = "\(app)/Contents/MacOS/TypstEdit"
+        let helper = "\(app)/Contents/Helpers/typstedit"
+
+        XCTAssertTrue(TypstEditCLI.isHelperExecutable(helper, helperPath: helper))
+        XCTAssertFalse(TypstEditCLI.isHelperExecutable(main, helperPath: helper))
+        // Trailing-slash and `..` spellings still name the same file.
+        XCTAssertTrue(TypstEditCLI.isHelperExecutable(helper + "/./", helperPath: helper))
+        XCTAssertFalse(TypstEditCLI.isHelperExecutable("\(app)/Contents/MacOS/./TypstEdit", helperPath: helper))
+    }
+
     func testShimInstallsAndNeverOverwritesForeignFiles() throws {
         let bin = workDir.appendingPathComponent("bin")
         let url = try AgentIntegrationManager.installCommandLineTool(into: bin)
         XCTAssertTrue(AgentIntegrationManager.isOurShim(url))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: url.path))
         let script = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(script.contains("Contents/Helpers/typstedit"), "shim should prefer helper binary to avoid LaunchServices lock")
+        XCTAssertTrue(
+            script.contains("Contents/Helpers/typstedit"),
+            "shim must prefer the helper binary, else LaunchServices locks the GUI"
+        )
         // Reinstalling over our own shim is fine.
         XCTAssertNoThrow(try AgentIntegrationManager.installCommandLineTool(into: bin))
 
@@ -149,9 +168,11 @@ final class AgentIntegrationTests: XCTestCase {
         XCTAssertThrowsError(try AgentIntegrationManager.installCommandLineTool(into: bin))
     }
 
+    /// `Bundle.enclosingAppBundle` must resolve the app bundle from a helper
+    /// location (`Contents/Helpers/`), where `Bundle.main` is just that folder.
     func testEnclosingAppBundleDiscovery() throws {
-        // In unit test runner, Bundle.enclosingAppBundle returns a bundle
         let bundle = Bundle.enclosingAppBundle
+        XCTAssertFalse(bundle.bundleURL.path.isEmpty)
         XCTAssertNotNil(bundle.bundleIdentifier ?? bundle.bundlePath)
     }
 

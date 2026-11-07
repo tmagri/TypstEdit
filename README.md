@@ -167,7 +167,7 @@ claude mcp add --scope user typstedit -- typstedit mcp
 { "mcpServers": { "typstedit": { "command": "typstedit", "args": ["mcp"] } } }
 ```
 
-If you skip the install, use the full path `/Applications/TypstEdit.app/Contents/MacOS/TypstEdit` as the command. Tools exposed: `typst_check`, `typst_compile`, `typst_render_preview` (returns page images), `typstedit_open`, `typstedit_info` and `read_pdf` (reads a PDF as Markdown with the [PDF importer](Docs/pdf-import.md)).
+If you skip the install, use the full path `/Applications/TypstEdit.app/Contents/Helpers/typstedit` as the command — not `Contents/MacOS/TypstEdit`, because a headless process started from the GUI binary makes macOS treat it as the running app and the editor then refuses to open until that process exits. Tools exposed: `typst_check`, `typst_compile`, `typst_render_preview` (returns page images), `typstedit_open`, `typstedit_info` and `read_pdf` (reads a PDF as Markdown with the [PDF importer](Docs/pdf-import.md)).
 
 </details>
 

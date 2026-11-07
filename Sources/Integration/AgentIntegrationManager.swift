@@ -90,10 +90,11 @@ enum AgentIntegrationManager {
 
     // MARK: - Shim
 
-    /// A tiny launcher script. It prefers the app's current location, then
-    /// /Applications, then Spotlight — so it keeps working if the app moves.
-    /// It executes via Contents/Helpers/typstedit when available so macOS
-    /// LaunchServices does not track the headless process as the GUI app.
+    /// A tiny launcher script. It prefers the helper binary in `Contents/Helpers`
+    /// (running the GUI executable headless makes LaunchServices claim the MCP
+    /// process as the app, so opening the editor then fails), then the app's
+    /// current location, then /Applications, then Spotlight — so it keeps
+    /// working if the app moves.
     static func shimScript() -> String {
         let current = appBundlePath.map { "\"\($0)\"" } ?? ""
         return """
