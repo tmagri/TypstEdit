@@ -27,11 +27,18 @@ enum AgentIntegrationManager {
     // MARK: - Paths
 
     static var executablePath: String {
-        Bundle.main.executablePath ?? CommandLine.arguments[0]
+        if let app = appBundlePath {
+            let helper = (app as NSString).appendingPathComponent("Contents/Helpers/\(toolName)")
+            if FileManager.default.isExecutableFile(atPath: helper) {
+                return helper
+            }
+        }
+        return Bundle.main.executablePath ?? CommandLine.arguments[0]
     }
 
     static var appBundlePath: String? {
-        Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundlePath : nil
+        let bundle = Bundle.enclosingAppBundle
+        return bundle.bundleURL.pathExtension == "app" ? bundle.bundlePath : nil
     }
 
     /// Folders checked (in order) for an installed shim.
@@ -85,6 +92,8 @@ enum AgentIntegrationManager {
 
     /// A tiny launcher script. It prefers the app's current location, then
     /// /Applications, then Spotlight — so it keeps working if the app moves.
+    /// It executes via Contents/Helpers/typstedit when available so macOS
+    /// LaunchServices does not track the headless process as the GUI app.
     static func shimScript() -> String {
         let current = appBundlePath.map { "\"\($0)\"" } ?? ""
         return """
@@ -92,9 +101,11 @@ enum AgentIntegrationManager {
         \(shimMarker)
         # Command-line access to TypstEdit: `typstedit --help`. Remove via TypstEdit > Settings > Integrations.
         for APP in \(current) "/Applications/TypstEdit.app" "$HOME/Applications/TypstEdit.app"; do
+          if [ -x "$APP/Contents/Helpers/\(toolName)" ]; then exec "$APP/Contents/Helpers/\(toolName)" "$@"; fi
           if [ -x "$APP/Contents/MacOS/TypstEdit" ]; then exec "$APP/Contents/MacOS/TypstEdit" "$@"; fi
         done
         APP=$(mdfind 'kMDItemCFBundleIdentifier == "\(TypstEditCLI.bundleIdentifier)"' 2>/dev/null | head -n 1)
+        if [ -n "$APP" ] && [ -x "$APP/Contents/Helpers/\(toolName)" ]; then exec "$APP/Contents/Helpers/\(toolName)" "$@"; fi
         if [ -n "$APP" ] && [ -x "$APP/Contents/MacOS/TypstEdit" ]; then exec "$APP/Contents/MacOS/TypstEdit" "$@"; fi
         echo "typstedit: TypstEdit.app was not found. Open TypstEdit and reinstall the command-line tool." >&2
         exit 127

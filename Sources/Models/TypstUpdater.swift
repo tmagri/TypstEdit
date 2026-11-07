@@ -59,7 +59,7 @@ class TypstUpdater: ObservableObject {
         }
 
         // Priority 1: Bundled inside the app bundle
-        if let bundlePath = Bundle.main.resourcePath {
+        if let bundlePath = Bundle.enclosingAppBundle.resourcePath {
             let bundledTypst = "\(bundlePath)/bin/typst"
             if FileManager.default.fileExists(atPath: bundledTypst) {
                 return bundledTypst
@@ -101,7 +101,7 @@ class TypstUpdater: ObservableObject {
     /// the active binary can't be queried so dialogs never show a hardcoded guess.
     @discardableResult
     func detectBundledVersion() async -> String? {
-        guard let bundlePath = Bundle.main.resourcePath else { return nil }
+        guard let bundlePath = Bundle.enclosingAppBundle.resourcePath else { return nil }
         let bundledTypst = "\(bundlePath)/bin/typst"
         guard FileManager.default.fileExists(atPath: bundledTypst) else { return nil }
 

@@ -132,7 +132,7 @@ actor CASMathRenderer {
 
     /// Mirrors TypstCompiler's lookup so both always use the same binary.
     nonisolated static func resolveTypstPath() -> String? {
-        if let resourcePath = Bundle.main.resourcePath {
+        if let resourcePath = Bundle.enclosingAppBundle.resourcePath {
             let bundled = "\(resourcePath)/bin/typst"
             if FileManager.default.isExecutableFile(atPath: bundled) {
                 return bundled

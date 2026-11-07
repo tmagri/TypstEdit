@@ -140,11 +140,19 @@ final class AgentIntegrationTests: XCTestCase {
         let url = try AgentIntegrationManager.installCommandLineTool(into: bin)
         XCTAssertTrue(AgentIntegrationManager.isOurShim(url))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: url.path))
+        let script = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(script.contains("Contents/Helpers/typstedit"), "shim should prefer helper binary to avoid LaunchServices lock")
         // Reinstalling over our own shim is fine.
         XCTAssertNoThrow(try AgentIntegrationManager.installCommandLineTool(into: bin))
 
         try "#!/bin/sh\necho other tool\n".write(to: url, atomically: true, encoding: .utf8)
         XCTAssertThrowsError(try AgentIntegrationManager.installCommandLineTool(into: bin))
+    }
+
+    func testEnclosingAppBundleDiscovery() throws {
+        // In unit test runner, Bundle.enclosingAppBundle returns a bundle
+        let bundle = Bundle.enclosingAppBundle
+        XCTAssertNotNil(bundle.bundleIdentifier ?? bundle.bundlePath)
     }
 
     func testConfigSnippetsAreValid() throws {

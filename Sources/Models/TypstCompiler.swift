@@ -295,7 +295,7 @@ class TypstCompiler: ObservableObject {
         }
 
         // Priority 1: Check if bundled with the app
-        if let bundlePath = Bundle.main.resourcePath {
+        if let bundlePath = Bundle.enclosingAppBundle.resourcePath {
             let bundledTypst = "\(bundlePath)/bin/typst"
             if FileManager.default.fileExists(atPath: bundledTypst) {
                 return bundledTypst

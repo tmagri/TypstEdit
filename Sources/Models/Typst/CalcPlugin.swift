@@ -48,12 +48,12 @@ nonisolated enum CalcPlugin {
             paths.append("\(moduleResources)/Calc/\(fileName)")
             paths.append("\(moduleResources)/\(fileName)")
         }
-        if let resources = Bundle.main.resourcePath {
+        if let resources = Bundle.enclosingAppBundle.resourcePath {
             paths.append("\(resources)/bin/\(fileName)")
             paths.append("\(resources)/Calc/\(fileName)")
             paths.append("\(resources)/\(fileName)")
         }
-        if let executable = Bundle.main.executableURL?.deletingLastPathComponent() {
+        if let executable = Bundle.enclosingAppBundle.executableURL?.deletingLastPathComponent() {
             paths.append(executable.appendingPathComponent("build/calc/\(fileName)").path)
             paths.append(executable.appendingPathComponent(fileName).path)
         }

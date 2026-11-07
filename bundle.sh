@@ -68,6 +68,10 @@ cp "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 # Strip debug symbols from the binary to reduce size
 strip -x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
+# Hardlink CLI helper into Contents/Helpers so CLI/MCP invocations don't register as the primary GUI app in LaunchServices
+mkdir -p "$APP_BUNDLE/Contents/Helpers"
+ln -f "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/Helpers/typstedit"
+
 # Copy all SwiftPM resource bundles from this architecture's build.
 echo "Copying resources bundle..."
 find "$BIN_DIR" -maxdepth 1 -type d -name "*.bundle" -exec cp -R {} "$APP_BUNDLE/Contents/Resources/" \;
@@ -327,6 +331,7 @@ done
 codesign --force --sign - "$APP_BUNDLE/Contents/Frameworks/vector.framework"
 codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typst"
 codesign --force --sign - "$APP_BUNDLE/Contents/Resources/bin/typstedit-cas"
+codesign --force --sign - "$APP_BUNDLE/Contents/Helpers/typstedit"
 codesign --force --sign - "$APP_BUNDLE"
 codesign --verify --strict "$APP_BUNDLE"
 

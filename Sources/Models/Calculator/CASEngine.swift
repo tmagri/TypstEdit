@@ -91,7 +91,7 @@ actor CASEngine {
     /// Where the helper binary is expected. Mirrors how TypstEdit finds its
     /// bundled `typst`: app bundle first, then the developer workspace.
     nonisolated static func locateHelperBinary() -> String? {
-        if let resourcePath = Bundle.main.resourcePath {
+        if let resourcePath = Bundle.enclosingAppBundle.resourcePath {
             let bundled = "\(resourcePath)/bin/typstedit-cas"
             if FileManager.default.isExecutableFile(atPath: bundled) {
                 return bundled
@@ -106,7 +106,7 @@ actor CASEngine {
         ]
         // Xcode/SwiftPM run from different working directories; walk up from
         // the executable so `swift run` in a subdirectory still finds it.
-        if let execURL = Bundle.main.executableURL?.deletingLastPathComponent() {
+        if let execURL = Bundle.enclosingAppBundle.executableURL?.deletingLastPathComponent() {
             candidates.append(execURL.appendingPathComponent("build/cas/typstedit-cas").path)
         }
         for candidate in candidates {

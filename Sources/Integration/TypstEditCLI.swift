@@ -14,7 +14,7 @@ enum TypstEditCLI {
     static let bundleIdentifier = "com.tmagri.TypstEdit"
 
     static var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        Bundle.enclosingAppBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     }
 
     /// The subcommand arguments when this launch is a CLI invocation, else nil.
@@ -170,6 +170,7 @@ enum TypstEditCLI {
 
     static func infoDictionary() async -> [String: Any] {
         let service = AgentCompileService.shared
+        let appBundle = Bundle.enclosingAppBundle
         var info: [String: Any] = [
             "app": "TypstEdit",
             "version": appVersion,
@@ -179,7 +180,7 @@ enum TypstEditCLI {
             "inputTypes": ["typ", "md", "note"],
             "mcpCommand": [AgentIntegrationManager.preferredCommandPath, "mcp"]
         ]
-        if Bundle.main.bundleURL.pathExtension == "app" { info["appBundle"] = Bundle.main.bundlePath }
+        if appBundle.bundleURL.pathExtension == "app" { info["appBundle"] = appBundle.bundlePath }
         if let path = service.typstPath { info["typstPath"] = path }
         if let version = await service.typstVersion() { info["typstVersion"] = version }
         if let shim = AgentIntegrationManager.installedCommandLineTool() { info["cliTool"] = shim.path }
@@ -208,10 +209,11 @@ enum TypstEditCLI {
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             .first { !$0.isTerminated && $0.activationPolicy == .regular && $0.bundleURL != nil }
         let target: [String]
+        let appBundle = Bundle.enclosingAppBundle
         if let runningPath = running?.bundleURL?.path {
             target = ["-a", runningPath]
-        } else if Bundle.main.bundleURL.pathExtension == "app" {
-            target = ["-a", Bundle.main.bundlePath]
+        } else if appBundle.bundleURL.pathExtension == "app" {
+            target = ["-a", appBundle.bundlePath]
         } else {
             target = ["-b", bundleIdentifier]
         }
@@ -277,6 +279,48 @@ enum TypstEditCLI {
       (tools: typst_check, typst_compile, typst_render_preview, typstedit_open,
       typstedit_info, read_pdf). See TypstEdit > Settings > Integrations.
     """
+    /// When a CLI subcommand (like `mcp` or `compile`) is executed directly through the
+    /// main GUI binary (`Contents/MacOS/TypstEdit`), macOS LaunchServices tracks that process
+    /// as the running instance of the GUI application `com.tmagri.TypstEdit`.
+    ///
+    /// If the user then attempts to open the editor while the CLI/MCP process is running,
+    /// LaunchServices tries to route the open event to the headless process, fails (error -600),
+    /// and reports that the application is not valid.
+    ///
+    /// Re-executing via `Contents/Helpers/typstedit` (a hard link to the binary inside the bundle)
+    /// keeps all bundle resources accessible while preventing LaunchServices from claiming this
+    /// process as the primary GUI application.
+    static func reexecAsHelperIfNeeded() {
+        let appBundle = Bundle.enclosingAppBundle
+        guard appBundle.bundleURL.pathExtension == "app" else { return }
+        let helpersDir = appBundle.bundleURL.appendingPathComponent("Contents/Helpers").path
+        let helperPath = (helpersDir as NSString).appendingPathComponent(AgentIntegrationManager.toolName)
+        let currentExec = CommandLine.arguments[0]
+
+        // If already running as the helper, nothing to do.
+        if currentExec == helperPath || (currentExec as NSString).resolvingSymlinksInPath == (helperPath as NSString).resolvingSymlinksInPath {
+            return
+        }
+
+        let fm = FileManager.default
+        if !fm.isExecutableFile(atPath: helperPath) {
+            // Attempt to create the helper hard link or symlink if missing
+            try? fm.createDirectory(atPath: helpersDir, withIntermediateDirectories: true)
+            let mainExec = appBundle.bundleURL.appendingPathComponent("Contents/MacOS/TypstEdit").path
+            if fm.isExecutableFile(atPath: mainExec) {
+                if link(mainExec, helperPath) != 0 {
+                    _ = symlink(mainExec, helperPath)
+                }
+            }
+        }
+
+        guard fm.isExecutableFile(atPath: helperPath) else { return }
+
+        var newArgs = CommandLine.arguments
+        newArgs[0] = helperPath
+        let cArgs = newArgs.map { strdup($0) } + [nil]
+        execv(helperPath, cArgs)
+    }
 }
 
 /// Process entry point: a CLI subcommand runs headless, anything else starts the app.
@@ -285,6 +329,7 @@ enum TypstEditCLI {
 enum TypstEditMain {
     static func main() {
         if let arguments = TypstEditCLI.invocation(from: CommandLine.arguments) {
+            TypstEditCLI.reexecAsHelperIfNeeded()
             TypstEditCLI.start(arguments)
         }
         TypstEditApp.main()
