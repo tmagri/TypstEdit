@@ -1141,8 +1141,14 @@ class EditorController: NSObject, ObservableObject {
             print("[ERROR] saveEquation aborted: range is nil")
             return
         }
-        
-        let replacement = "$\(newContent)$"
+
+        // An equation the user opened as `$$ … $$` must stay a display
+        // equation; rewriting it with single dollars would silently change
+        // how the document lays out.
+        let isDisplay = range.length >= 4
+            && (sourceCode as NSString).substring(with: NSRange(location: range.location, length: 2)) == "$$"
+        let delimiter = isDisplay ? "$$" : "$"
+        let replacement = "\(delimiter)\(newContent)\(delimiter)"
         
         if range.location != NSNotFound {
             insertText(replacement, replacementRange: range)

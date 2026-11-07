@@ -125,7 +125,9 @@ final class AgentIntegrationTests: XCTestCase {
     func testMCPToolDefinitionsAreValid() throws {
         let tools = TypstEditMCPServer.toolDefinitions
         XCTAssertEqual(Set(tools.compactMap { $0["name"] as? String }),
-                       ["typst_check", "typst_compile", "typst_render_preview", "typstedit_open", "typstedit_info", "read_pdf"])
+                       ["typst_check", "typst_compile", "typst_render_preview",
+                        "markdown_to_typst", "typst_to_markdown",
+                        "typstedit_open", "typstedit_info", "read_pdf"])
         for tool in tools {
             let schema = try XCTUnwrap(tool["inputSchema"] as? [String: Any])
             XCTAssertEqual(schema["type"] as? String, "object")

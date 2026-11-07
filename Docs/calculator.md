@@ -199,11 +199,37 @@ TypstEdit-native format, and their preview always comes from this app.
 
 Put the cursor inside an equation (`$ … $`), then use the toolbar's
 **Send Equation to Calculator** button or the editor's right-click menu →
-**Send to Calculator**. The Typst math is translated to TI/Giac syntax
-(fractions, powers, `sqrt`, trig, integrals, sums, limits, derivatives,
-matrices) and loaded into the calculator's entry line. Constructs the
-translator cannot express (for example `cases(...)` or `&` alignment) are
-refused with a message instead of loading something wrong.
+**Send to Calculator**. The Typst math is translated to TI/Giac syntax and
+loaded into the calculator's entry line.
+
+Typst math looks like calculator input but several constructs mean something
+different, so the translator rewrites rather than passes text through:
+
+| Typst | Calculator gets |
+|---|---|
+| `$x^2 + 3x$` | `x^2 + 3*x` (juxtaposition is multiplication) |
+| `$frac(a, b)$` | `a/b` (Giac's `frac` is integer parts) |
+| `$root(3, x)$` | `x^(1/3)` (Giac's `root` takes the order last) |
+| `$log(x)$`, `$log_2(x)$` | `log10(x)`, `logb(x, 2)` (Typst's `log` is base 10) |
+| `$sin^2 x$` | `(sin(x))^2` (the power belongs to the function) |
+| `$sin^(-1)(x)$` | `asin(x)` |
+| `$sec(x)$` | `1/cos(x)` (Giac has no `sec`) |
+| `$integral_0^1 x^2 dif x$` | `integrate(x^2, x, 0, 1)` |
+| `$(dif f)/(dif x)$`, `$f'(x)$` | `diff(f, x)` |
+| `$sum_(k=1)^n k$` | `sum(k, k, 1, n)` |
+| `$lim_(x -> 0^+) 1/x$` | `limit(1/x, x, 0, 1)` |
+| `$vec(1,2)$`, `$mat(1,2;3,4)$` | `[1,2]`, `[[1,2],[3,4]]` |
+| `$90 degree$` | `90*pi/180` |
+| `$50%$` | `50/100` |
+| `$cases(x & "if" x > 0, -x & "otherwise")$` | `piecewise(x > 0, x, true, -x)` |
+| `$upright(d) x$`, `$|x|$`, `$x mod 2$` | `d*x`, `abs(x)`, `mod(x, 2)` |
+
+Layout, presentation and code have no calculator equivalent, so the action
+refuses them with a reason instead of loading something wrong: alignment
+points outside `cases`, accents (`hat`, `overline`, …), set notation
+(`in`, `subset`), quoted text, `#` interpolation, `±`, and multi-line
+derivations.
+
 
 ### Use calculator functions in a document
 

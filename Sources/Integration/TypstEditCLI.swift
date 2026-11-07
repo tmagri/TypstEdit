@@ -9,7 +9,10 @@ import AppKit
 /// Dock, `open`) starts the normal app.
 @MainActor
 enum TypstEditCLI {
-    nonisolated static let commands: Set<String> = ["compile", "check", "mcp", "info", "open", "install-cli", "help", "--help", "-h", "--version", "version"]
+    nonisolated static let commands: Set<String> = [
+        "compile", "check", "convert", "to-markdown", "mcp", "info", "open",
+        "install-cli", "help", "--help", "-h", "--version", "version",
+    ]
 
     static let bundleIdentifier = "com.tmagri.TypstEdit"
 
@@ -55,6 +58,10 @@ enum TypstEditCLI {
             return await compile(&args, checkOnly: false, output: output)
         case "check":
             return await compile(&args, checkOnly: true, output: output)
+        case "convert":
+            return await convert(&args, direction: .markdownToTypst, output: output)
+        case "to-markdown":
+            return await convert(&args, direction: .typstToMarkdown, output: output)
         case "info":
             let info = await infoDictionary()
             if args.contains("--json") {
@@ -166,6 +173,76 @@ enum TypstEditCLI {
         return result.success ? 0 : 1
     }
 
+    /// `typstedit convert` (Markdown → Typst) and `typstedit to-markdown`
+    /// (Typst/Note → Markdown). Both print the converted text, write it with
+    /// an output path, and take `-` to read the source from stdin.
+    private static func convert(
+        _ args: inout [String],
+        direction: AgentDocumentConverter.Direction,
+        output: ProtocolOutput
+    ) async -> Int32 {
+        var request = AgentConvertRequest()
+        request.workingDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        var positional: [String] = []
+        var asJSON = false
+
+        func value(_ flag: String, _ index: inout Int) -> String? {
+            guard index + 1 < args.count else {
+                output.writeLine("error: \(flag) needs a value")
+                return nil
+            }
+            index += 1
+            return args[index]
+        }
+
+        var index = 0
+        while index < args.count {
+            let argument = args[index]
+            switch argument {
+            case "--json": asJSON = true
+            case "--hybrid": request.isHybrid = true
+            case "--verify": request.verify = true
+            case "--output", "-o": guard let v = value(argument, &index) else { return 2 }; request.outputPath = v
+            case "--kind":
+                guard let v = value(argument, &index) else { return 2 }
+                request.sourceKind = v
+            default:
+                if argument.hasPrefix("-") && argument != "-" {
+                    output.writeLine("error: unknown option '\(argument)'\n\n\(usage)")
+                    return 2
+                }
+                positional.append(argument)
+            }
+            index += 1
+        }
+
+        guard let input = positional.first else {
+            output.writeLine("error: missing input file\n\n\(usage)")
+            return 2
+        }
+        if input == "-" {
+            let data = FileHandle.standardInput.readDataToEndOfFile()
+            request.source = String(data: data, encoding: .utf8) ?? ""
+        } else {
+            request.inputPath = input
+        }
+        if positional.count > 1 { request.outputPath = positional[1] }
+
+        let result = await AgentDocumentConverter.convert(request)
+        if asJSON {
+            output.writeLine(result.jsonString())
+        } else if result.outputPath != nil {
+            // A write was requested: report where it went, not the whole text.
+            output.writeLine(result.summary)
+        } else {
+            output.write(result.output.hasSuffix("\n") ? result.output : result.output + "\n")
+            if !result.warnings.isEmpty {
+                for warning in result.warnings { output.writeLine("warning: \(warning)") }
+            }
+        }
+        return result.success ? 0 : 1
+    }
+
     // MARK: - Shared helpers (CLI + MCP)
 
     static func infoDictionary() async -> [String: Any] {
@@ -250,6 +327,8 @@ enum TypstEditCLI {
     USAGE
       typstedit compile <file|-> [output] [options]   Compile to PDF/PNG/SVG
       typstedit check   <file|-> [options]            Report errors/warnings only
+      typstedit convert <file|-> [output] [options]   Convert Markdown to Typst
+      typstedit to-markdown <file|-> [output]         Convert Typst/Note to Markdown
       typstedit open    <file>...                     Open files in the TypstEdit app
       typstedit info    [--json]                      Show versions and paths
       typstedit mcp                                   Run the MCP server (stdio) for AI agents
@@ -270,13 +349,20 @@ enum TypstEditCLI {
       --json                     Machine-readable result
       --open                     Open the output after compiling
 
+    CONVERT OPTIONS
+      -o, --output FILE          Write the result instead of printing it
+      --hybrid                   Convert for a .note file (live Typst preserved)
+      --verify                   Compile the converted Typst and report errors
+      --kind typ|md|note         Syntax of stdin source (default md)
+
     EXIT STATUS
       0 success, 1 compile errors, 2 usage error
 
     AI AGENTS
       Add an MCP server with command `typstedit` and argument `mcp`
-      (tools: typst_check, typst_compile, typst_render_preview, typstedit_open,
-      typstedit_info, read_pdf). See TypstEdit > Settings > Integrations.
+      (tools: typst_check, typst_compile, typst_render_preview,
+      markdown_to_typst, typst_to_markdown, typstedit_open, typstedit_info,
+      read_pdf). See TypstEdit > Settings > Integrations.
     """
 
     /// When a CLI subcommand (like `mcp` or `compile`) runs through the main GUI

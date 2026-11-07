@@ -137,8 +137,16 @@ typstedit check report.typ --json     # machine-readable diagnostics
 typstedit compile report.typ          # → report.pdf
 typstedit compile notes.md out.png --ppi 200   # Markdown/.note files are converted first
 echo '= Hi' | typstedit check -       # source from stdin
+typstedit convert notes.md notes.typ  # Markdown → Typst (written to notes.typ)
+typstedit to-markdown report.typ      # Typst/Note → Markdown (prints it)
 typstedit open report.typ             # show it in the editor
 ```
+
+`convert` and `to-markdown` use the same converters as the editor, so what an
+agent produces matches what you would get by pasting or copying in the app.
+`--hybrid` converts Markdown for a `.note` file (live Typst regions survive),
+and `--verify` compiles the converted Typst and reports errors with the same
+diagnostic shape as `check`.
 
 `--json` emits a stable, agent-oriented shape rather than Typst's box-drawing
 text. Every diagnostic carries what an agent needs to act without guessing:
@@ -167,7 +175,14 @@ claude mcp add --scope user typstedit -- typstedit mcp
 { "mcpServers": { "typstedit": { "command": "typstedit", "args": ["mcp"] } } }
 ```
 
-If you skip the install, use the full path `/Applications/TypstEdit.app/Contents/Helpers/typstedit` as the command — not `Contents/MacOS/TypstEdit`, because a headless process started from the GUI binary makes macOS treat it as the running app and the editor then refuses to open until that process exits. Tools exposed: `typst_check`, `typst_compile`, `typst_render_preview` (returns page images), `typstedit_open`, `typstedit_info` and `read_pdf` (reads a PDF as Markdown with the [PDF importer](Docs/pdf-import.md)).
+If you skip the install, use the full path `/Applications/TypstEdit.app/Contents/Helpers/typstedit` as the command — not `Contents/MacOS/TypstEdit`, because a headless process started from the GUI binary makes macOS treat it as the running app and the editor then refuses to open until that process exits. Tools exposed: `typst_check`, `typst_compile`, `typst_render_preview` (returns page images), `markdown_to_typst`, `typst_to_markdown`, `typstedit_open`, `typstedit_info` and `read_pdf` (reads a PDF as Markdown with the [PDF importer](Docs/pdf-import.md)).
+
+`markdown_to_typst` exists so an agent never has to hand-write Typst
+delimiters from memory: it runs the editor's own Markdown→Typst pass (headings,
+lists, tables, links, images, code and math). `typst_to_markdown` goes the other
+way, for handing a document to a tool or person that needs Markdown; layout and
+page setup have no Markdown equivalent and are dropped, while functions the
+converter does not know are left as visible Typst source.
 
 </details>
 

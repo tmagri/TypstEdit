@@ -133,6 +133,10 @@ final class TypstEditMCPServer {
             return await previewTool(arguments)
         case "typstedit_open":
             return openTool(arguments)
+        case "typst_to_markdown":
+            return await convertTool(arguments, direction: .typstToMarkdown)
+        case "markdown_to_typst":
+            return await convertTool(arguments, direction: .markdownToTypst)
         case "read_pdf":
             return await readPDFTool(arguments)
         case "typstedit_info":
@@ -141,6 +145,55 @@ final class TypstEditMCPServer {
         default:
             return Self.toolResult(text: "Unknown tool '\(name)'. Call tools/list for the available tools.", isError: true)
         }
+    }
+
+    /// Shared body for the two conversion tools. `direction` decides which
+    /// way the text goes; the file extension only overrides the default.
+    private func convertTool(_ arguments: [String: Any], direction: AgentDocumentConverter.Direction) async -> [String: Any] {
+        let path = (arguments["path"] as? String)?.isEmpty == false
+        let source = arguments["source"] is String
+        if path && source { return Self.toolResult(text: "Pass either `path` or `source`, not both.", isError: true) }
+        if !path && !source {
+            return Self.toolResult(text: "Pass `path` (a file) or `source` (inline text).", isError: true)
+        }
+
+        var request = AgentConvertRequest()
+        request.workingDirectory = FileManager.default.homeDirectoryForCurrentUser
+        request.isHybrid = arguments["hybrid"] as? Bool ?? false
+        request.verify = arguments["verify"] as? Bool ?? false
+        request.outputPath = arguments["output"] as? String
+        if let rawPath = arguments["path"] as? String {
+            request.inputPath = rawPath
+        } else {
+            request.source = arguments["source"] as? String ?? ""
+            switch direction {
+            case .markdownToTypst:
+                request.sourceKind = "md"
+            case .typstToMarkdown:
+                request.sourceKind = arguments["source_format"] as? String ?? "typ"
+            case .copy:
+                request.sourceKind = "typ"
+            }
+        }
+
+        let result = await AgentDocumentConverter.convert(request)
+        let text = result.summary + "\n\n" + result.output
+        var structured: [String: Any] = [
+            "status": result.status,
+            "inputKind": result.inputKind,
+            "outputKind": result.outputKind,
+            "bytes": result.bytes,
+            "lines": result.lineCount,
+            "warnings": result.warnings,
+            "notes": result.notes,
+        ]
+        if let outputPath = result.outputPath { structured["output"] = outputPath }
+        if !result.diagnostics.isEmpty,
+           let data = try? JSONEncoder().encode(result.diagnostics),
+           let parsed = try? JSONSerialization.jsonObject(with: data) {
+            structured["diagnostics"] = parsed
+        }
+        return Self.toolResult(text: text, structured: structured, isError: !result.success)
     }
 
     private func request(from arguments: [String: Any]) -> AgentCompileRequest {
@@ -278,7 +331,9 @@ final class TypstEditMCPServer {
     column; typst_compile to write PDF/PNG/SVG; typst_render_preview to look at pages as \
     images; typstedit_open to show a file to the user in the editor. Use read_pdf to read any \
     PDF as Markdown (tables, headings, code and scanned pages included), a page range at a \
-    time. Paths should be absolute.
+    time. Use markdown_to_typst when writing new content (Markdown is safer to write than \
+    hand-typed Typst delimiters) and typst_to_markdown when another tool or person needs the \
+    document as Markdown. Paths should be absolute.
 
     Each diagnostic carries `code` (a stable slug such as `unknown-variable` or \
     `incompatible-operands` to branch on, because Typst has no diagnostic codes), \
@@ -337,6 +392,38 @@ final class TypstEditMCPServer {
                 "title": "Open in TypstEdit",
                 "description": "Opens a file in the TypstEdit app so the user can see it with live preview.",
                 "inputSchema": ["type": "object", "properties": ["path": ["type": "string", "description": "Absolute path of the file to open."]], "required": ["path"]],
+                "annotations": ["readOnlyHint": true, "openWorldHint": false]
+            ],
+            [
+                "name": "markdown_to_typst",
+                "title": "Convert Markdown to Typst",
+                "description": "Converts Markdown into native Typst markup with TypstEdit's own converter — the same pass the editor uses when you paste Markdown into a .typ document. Headings, lists, tables, links, images, code and LaTeX/Typst math are translated. Use it instead of hand-writing Typst delimiters from memory. Set `hybrid` for a .note file (Markdown prose plus live Typst code regions). Returns the converted Typst; pass `output` to also write a file, and `verify` to compile it and get diagnostics.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "source": ["type": "string", "description": "Markdown text to convert. Use this OR `path`."],
+                        "path": ["type": "string", "description": "Absolute path to a .md file to convert. Use this OR `source`."],
+                        "hybrid": ["type": "boolean", "description": "Convert for a .note file: Markdown prose with live Typst regions preserved. Default false."],
+                        "output": ["type": "string", "description": "Write the Typst to this path (added .typ when it has no extension). Omit to only return the text."],
+                        "verify": ["type": "boolean", "description": "Compile the result and include diagnostics. Default false."]
+                    ]
+                ],
+                "annotations": ["readOnlyHint": true, "openWorldHint": false]
+            ],
+            [
+                "name": "typst_to_markdown",
+                "title": "Convert Typst to Markdown",
+                "description": "Converts a Typst (.typ) or TypstEdit Note (.note) document into Markdown with TypstEdit's own converter: headings, lists, tables, links, images, quotes, figures and math are translated, and unknown functions are left as visible Typst source. Page setup, styling and layout have no Markdown equivalent and are dropped. Pass `output` to write a .md copy. Use this to hand a document to a tool or person that needs Markdown.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Absolute path to the .typ or .note file to convert."],
+                        "source": ["type": "string", "description": "Inline Typst source to convert instead of a file."],
+                        "source_format": ["type": "string", "enum": ["typ", "note"], "description": "Syntax of `source` (default: typ)."],
+                        "output": ["type": "string", "description": "Write the Markdown to this path (added .md when it has no extension). Omit to only return the text."]
+                    ],
+                    "required": []
+                ],
                 "annotations": ["readOnlyHint": true, "openWorldHint": false]
             ],
             [
