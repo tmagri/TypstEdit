@@ -11,7 +11,9 @@ let package = Package(
             path: "Sources/CSQLite",
             cSettings: [
                 .define("SQLITE_ENABLE_LOAD_EXTENSION", to: "1"),
-                .define("SQLITE_OMIT_LOAD_EXTENSION", to: "0")
+                .define("SQLITE_OMIT_LOAD_EXTENSION", to: "0"),
+                // Keyword (BM25) search next to the vector index.
+                .define("SQLITE_ENABLE_FTS5", to: "1")
             ]
         )
     ]

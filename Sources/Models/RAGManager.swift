@@ -58,6 +58,312 @@ struct DocumentChunk: Codable {
     /// ranking happens inside the vector scan, so shipping the vector back
     /// only allocated and immediately freed `topK` copies of it.
     let embedding: [Float]
+    /// Path relative to the project root, as stored in the index. Two files
+    /// can share a name, so callers show this rather than the last component.
+    var relativePath: String = ""
+    /// Exact cosine distance to the query (0 = same direction, 2 = opposite).
+    var distance: Float = 0
+    /// Line range in the file (1-based, inclusive); 0 when unknown.
+    var startLine: Int = 0
+    var endLine: Int = 0
+    /// The headings the passage sits under, "Results > Error bars".
+    var heading: String = ""
+    /// The passage also matched the query's words, not only its meaning.
+    var keywordMatch: Bool = false
+    /// The file changed (or was removed) after this passage was indexed, so
+    /// the text and line numbers may no longer match it.
+    var isStale: Bool = false
+
+    var similarity: Float { 1 - distance }
+
+    /// "chapters/intro.typ:10-24", or the path alone when lines are unknown.
+    var location: String {
+        let path = relativePath.isEmpty ? fileURL.lastPathComponent : relativePath
+        guard startLine > 0 else { return path }
+        return endLine > startLine ? "\(path):\(startLine)-\(endLine)" : "\(path):\(startLine)"
+    }
+}
+
+/// What a semantic search produced. Kept apart from a plain hit list so a
+/// caller can tell "nothing relevant" from "the index can't answer".
+enum RAGSearchOutcome {
+    case hits([DocumentChunk])
+    /// The index was searched, but no chunk passed the relevance cutoff.
+    case noRelevantHits
+    /// There is no usable index: none built yet, built with another
+    /// embedding model, or the query could not be embedded.
+    case unavailable(String)
+}
+
+/// One candidate passage before the relevance rules are applied.
+struct RAGCandidate: Equatable {
+    /// The unit the per-source cap counts in: a file path, or a message id.
+    let path: String
+    let text: String
+    /// Exact cosine distance to the query.
+    let distance: Float
+    /// Position in the keyword (BM25) ranking, 0 = best. `nil` when the
+    /// passage did not match the query's words.
+    var keywordRank: Int? = nil
+    var startLine: Int = 0
+    var endLine: Int = 0
+    var heading: String = ""
+    var indexedAt: Double = 0
+    /// Caller-defined key for mapping a selected candidate back to its source.
+    var sourceID: String = ""
+}
+
+/// Rules that decide which nearest neighbours are worth showing the model.
+///
+/// A vector scan always returns `k` rows, however unrelated they are. Without
+/// a cutoff every request got three to five chunks injected even when the
+/// project has nothing on the topic, which reads to the model as evidence.
+///
+/// The values are deliberately lenient defaults. Similarity scales differ
+/// between embedding models, so the relative margin does most of the work:
+/// it keeps hits that are close to the best one rather than relying on one
+/// absolute number fitting every model.
+enum RAGRelevance {
+    /// Hits farther than this are dropped outright (similarity below 0.15).
+    static let maxDistance: Float = 0.85
+    /// Hits more than this far behind the best hit are dropped.
+    static let relativeMargin: Float = 0.3
+    /// Most chunks returned from one file, so one long document cannot fill
+    /// every slot with near-duplicates of the same passage.
+    static let perFileCap = 2
+    /// The best keyword matches are kept even when their meaning scores
+    /// low: an exact label, symbol or number is what embeddings miss most.
+    static let keywordSlots = 3
+    /// …unless they point the opposite way in meaning.
+    static let keywordMaxDistance: Float = 1.0
+    /// Reciprocal-rank-fusion constant. Larger values flatten the ranks.
+    static let fusionK: Float = 60
+    /// How far above the measured noise floor a hit must be at least.
+    static let floorMargin: Float = 0.02
+    /// Share of the gap between the noise floor and the best hit that a hit
+    /// must cover. With nomic-embed-text (floor ≈ 0.42), a best hit of 0.53
+    /// keeps hits down to ≈ 0.48 — the next-best passages at 0.44 were about
+    /// other topics.
+    static let floorShare: Float = 0.5
+
+    /// Applies the cutoffs, the per-file cap and duplicate removal, and
+    /// returns at most `topK` candidates, best first.
+    ///
+    /// A candidate is eligible when its meaning is close enough (within the
+    /// absolute ceiling and the margin behind the best hit) or when it is
+    /// one of the top keyword matches. Eligible candidates are ordered by
+    /// reciprocal rank fusion of the two rankings, so a passage that both
+    /// means and says the right thing comes first.
+    ///
+    /// With a measured `noiseFloor` (see `EmbeddingCalibration`) the cutoff
+    /// follows the model's own scale: a hit must beat the similarity that
+    /// unrelated texts reach, and must be at least `floorShare` of the way
+    /// from that floor to the best hit. Without one, the fixed
+    /// `maxDistance` and `relativeMargin` apply.
+    static func select(
+        _ candidates: [RAGCandidate],
+        topK: Int,
+        noiseFloor: Float? = nil,
+        maxDistance: Float = maxDistance,
+        relativeMargin: Float = relativeMargin,
+        perFileCap: Int = perFileCap
+    ) -> [RAGCandidate] {
+        let byDistance = candidates.sorted { $0.distance < $1.distance }
+        guard let best = byDistance.first?.distance, topK > 0 else { return [] }
+        let ceiling: Float
+        if let noiseFloor {
+            let bestSimilarity = 1 - best
+            let cut = max(noiseFloor + floorMargin, noiseFloor + (bestSimilarity - noiseFloor) * floorShare)
+            ceiling = 1 - cut
+        } else {
+            ceiling = min(maxDistance, best + relativeMargin)
+        }
+
+        var fused: [(candidate: RAGCandidate, score: Float)] = []
+        for (vectorRank, candidate) in byDistance.enumerated() {
+            let semantic = candidate.distance <= ceiling
+            let keyword = candidate.keywordRank.map { $0 < keywordSlots } ?? false
+            guard semantic || (keyword && candidate.distance <= keywordMaxDistance) else { continue }
+            var score = 1 / (fusionK + Float(vectorRank))
+            if let rank = candidate.keywordRank { score += 1 / (fusionK + Float(rank)) }
+            fused.append((candidate, score))
+        }
+        // Stable for equal scores: nearer in meaning first.
+        let ordered = fused.enumerated()
+            .sorted { $0.element.score != $1.element.score ? $0.element.score > $1.element.score : $0.offset < $1.offset }
+            .map(\.element.candidate)
+
+        var kept: [RAGCandidate] = []
+        var keptTexts: [String] = []
+        var perFile: [String: Int] = [:]
+        for candidate in ordered {
+            guard perFile[candidate.path, default: 0] < perFileCap else { continue }
+            let normalized = normalize(candidate.text)
+            guard !keptTexts.contains(where: { $0.contains(normalized) || normalized.contains($0) }) else { continue }
+            kept.append(candidate)
+            keptTexts.append(normalized)
+            perFile[candidate.path, default: 0] += 1
+            if kept.count == topK { break }
+        }
+        return kept
+    }
+
+    /// Exact cosine distance, `1 - cos(a, b)`. The quantized scan only gives
+    /// an approximation, which is fine for ranking but too noisy for a cutoff.
+    /// `nil` when the lengths differ or either vector is zero.
+    static func cosineDistance(_ a: [Float], _ b: [Float]) -> Float? {
+        guard a.count == b.count, !a.isEmpty else { return nil }
+        var dot: Float = 0
+        var normA: Float = 0
+        var normB: Float = 0
+        vDSP_dotpr(a, 1, b, 1, &dot, vDSP_Length(a.count))
+        vDSP_svesq(a, 1, &normA, vDSP_Length(a.count))
+        vDSP_svesq(b, 1, &normB, vDSP_Length(b.count))
+        guard normA > 0, normB > 0 else { return nil }
+        return 1 - dot / (normA.squareRoot() * normB.squareRoot())
+    }
+
+    private static func normalize(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
+// MARK: - Index Fingerprint
+
+/// Identifies the vector space an index was built in. Vectors from two
+/// embedding models are not comparable, even when they happen to have the
+/// same length, so an index is only searched with the model that built it.
+struct EmbeddingIndexFingerprint: Equatable {
+    /// Bump when chunking or the stored schema changes, so existing indexes
+    /// are rebuilt. 2: section-aware chunks with line ranges, embedded with
+    /// their file and heading path, plus the keyword table.
+    static let chunkerVersion = 2
+
+    let source: String
+    let model: String
+    let endpoint: String
+    let dimensions: Int
+    var chunkerVersion: Int = EmbeddingIndexFingerprint.chunkerVersion
+
+    /// Everything except the dimension count, which is only known after a
+    /// probe embedding. Searches compare this without making that request.
+    var identity: String { "\(chunkerVersion)|\(source)|\(model)|\(endpoint)" }
+
+    static let identityKey = "identity"
+    static let dimensionsKey = "dimensions"
+
+    /// Whether a stored index may be reused. An index with chunks but no
+    /// stored fingerprint predates this check: its model is unknown and its
+    /// dimension count was guessed from the model name, so it is rebuilt.
+    static func isCompatible(stored: [String: String], hasChunks: Bool, current: EmbeddingIndexFingerprint) -> Bool {
+        guard let identity = stored[identityKey], let dimensions = stored[dimensionsKey] else {
+            return !hasChunks
+        }
+        return identity == current.identity && Int(dimensions) == current.dimensions
+    }
+
+    static func readMeta(_ db: OpaquePointer) -> [String: String] {
+        var meta: [String: String] = [:]
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT key, value FROM index_meta;", -1, &stmt, nil) == SQLITE_OK else { return meta }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let key = sqlite3_column_text(stmt, 0), let value = sqlite3_column_text(stmt, 1) else { continue }
+            meta[String(cString: key)] = String(cString: value)
+        }
+        return meta
+    }
+
+    func writeMeta(_ db: OpaquePointer) {
+        Self.writeMetaValue(identity, forKey: Self.identityKey, in: db)
+        Self.writeMetaValue(String(dimensions), forKey: Self.dimensionsKey, in: db)
+    }
+
+    static func writeMetaValue(_ value: String, forKey key: String, in db: OpaquePointer) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?);", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        stmt?.bind(key, at: 1)
+        stmt?.bind(value, at: 2)
+        sqlite3_step(stmt)
+    }
+
+    static let createMetaSQL = "CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT);"
+}
+
+// MARK: - Schema
+
+/// The index's tables. Internal so tests can build the same schema on a
+/// plain SQLite connection (without the vector extension).
+enum RAGSchema {
+    static let baseSQL = """
+    CREATE TABLE IF NOT EXISTS files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT UNIQUE,
+        last_modified REAL,
+        file_size INTEGER DEFAULT 0,
+        content_hash TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER,
+        text TEXT,
+        embedding BLOB,
+        start_line INTEGER DEFAULT 0,
+        end_line INTEGER DEFAULT 0,
+        heading TEXT DEFAULT '',
+        input_hash TEXT DEFAULT '',
+        FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+    );
+    """
+
+    /// Columns added after the first release. `ALTER TABLE … ADD COLUMN`
+    /// fails harmlessly once a column exists.
+    static let migrations = [
+        "ALTER TABLE files ADD COLUMN file_size INTEGER DEFAULT 0;",
+        "ALTER TABLE files ADD COLUMN content_hash TEXT DEFAULT '';",
+        "ALTER TABLE chunks ADD COLUMN start_line INTEGER DEFAULT 0;",
+        "ALTER TABLE chunks ADD COLUMN end_line INTEGER DEFAULT 0;",
+        "ALTER TABLE chunks ADD COLUMN heading TEXT DEFAULT '';",
+        "ALTER TABLE chunks ADD COLUMN input_hash TEXT DEFAULT '';"
+    ]
+
+    /// The keyword index: an FTS5 table over `chunks` (external content, so
+    /// the text is stored once), kept in step by triggers. Porter stemming
+    /// lets "bars" match "bar".
+    static let keywordSQL = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        text, heading, content='chunks', content_rowid='id',
+        tokenize='porter unicode61 remove_diacritics 2'
+    );
+    CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+        INSERT INTO chunks_fts(rowid, text, heading) VALUES (new.id, new.text, new.heading);
+    END;
+    CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+        INSERT INTO chunks_fts(chunks_fts, rowid, text, heading) VALUES ('delete', old.id, old.text, old.heading);
+    END;
+    """
+
+    /// Removes a file and its chunks. Chunks are deleted explicitly rather
+    /// than left to the foreign-key cascade, so the keyword trigger runs for
+    /// each one whatever the connection's foreign-key setting.
+    static func deleteFile(id: Int64, in db: OpaquePointer) {
+        sqlite3_exec(db, "DELETE FROM chunks WHERE file_id = \(id); DELETE FROM files WHERE id = \(id);", nil, nil, nil)
+    }
+
+    /// Creates every table on `db`. Returns false when the keyword table
+    /// could not be created (an SQLite built without FTS5); vector search
+    /// then works alone.
+    @discardableResult
+    static func create(on db: OpaquePointer) -> Bool {
+        sqlite3_exec(db, baseSQL, nil, nil, nil)
+        for migration in migrations { sqlite3_exec(db, migration, nil, nil, nil) }
+        sqlite3_exec(db, EmbeddingIndexFingerprint.createMetaSQL, nil, nil, nil)
+        return sqlite3_exec(db, keywordSQL, nil, nil, nil) == SQLITE_OK
+    }
 }
 
 enum EmbeddingError: LocalizedError {
@@ -78,6 +384,20 @@ enum EmbeddingError: LocalizedError {
 protocol EmbeddingProvider: Sendable {
     var dimensions: Int { get }
     func getEmbedding(for text: String) async throws -> [Float]
+    /// One vector per text, in order. Providers that can embed several texts
+    /// in one request override this; the default makes one call per text.
+    func getEmbeddings(for texts: [String]) async throws -> [[Float]]
+}
+
+extension EmbeddingProvider {
+    func getEmbeddings(for texts: [String]) async throws -> [[Float]] {
+        var vectors: [[Float]] = []
+        vectors.reserveCapacity(texts.count)
+        for text in texts {
+            vectors.append(try await getEmbedding(for: text))
+        }
+        return vectors
+    }
 }
 
 // MARK: - Local Provider (Apple Native)
@@ -98,11 +418,27 @@ struct LocalEmbeddingProvider: EmbeddingProvider {
 // MARK: - Generic API Provider (Handles OpenAI & Ollama via /v1/embeddings)
 struct GenericAPIEmbeddingProvider: EmbeddingProvider {
     var dimensions: Int
-    let endpointURL: URL
+    /// `nil` when the configured endpoint is not a valid URL; every request
+    /// then fails with an error instead of the app crashing on a typo.
+    let endpointURL: URL?
     let apiKey: String
     let modelName: String
     
     func getEmbedding(for text: String) async throws -> [Float] {
+        guard let vector = try await getEmbeddings(for: [text]).first else {
+            throw EmbeddingError.generationFailed
+        }
+        return vector
+    }
+
+    /// OpenAI's `/v1/embeddings` takes an array of inputs, and so do
+    /// Ollama's and LM Studio's OpenAI-compatible endpoints. One request
+    /// for a whole batch instead of one per passage.
+    func getEmbeddings(for texts: [String]) async throws -> [[Float]] {
+        guard !texts.isEmpty else { return [] }
+        guard let endpointURL else {
+            throw EmbeddingError.apiError("The embeddings endpoint is not a valid URL. Check it in Settings.")
+        }
         // Embeddings often share a local server with the chat model.
         let activity = ModelServerActivity.shared.begin(endpointURL)
         defer { ModelServerActivity.shared.end(activity) }
@@ -114,9 +450,9 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
         }
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        let cleanText = text.replacingOccurrences(of: "\n", with: " ")
+        let cleanTexts = texts.map { $0.replacingOccurrences(of: "\n", with: " ") }
         let body: [String: Any] = [
-            "input": cleanText,
+            "input": cleanTexts.count == 1 ? cleanTexts[0] as Any : cleanTexts as Any,
             "model": modelName
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -125,15 +461,112 @@ struct GenericAPIEmbeddingProvider: EmbeddingProvider {
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             throw EmbeddingError.apiError("API failed. Make sure the endpoint is correct and running.")
         }
-        
+        return try Self.parseEmbeddings(data, expected: texts.count)
+    }
+
+    /// Reads an OpenAI-style embeddings response. Results are put back in
+    /// input order by their `index`, which the API does not promise to keep.
+    static func parseEmbeddings(_ data: Data, expected: Int) throws -> [[Float]] {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataArray = json["data"] as? [[String: Any]],
-              let firstResult = dataArray.first,
-              let embedding = firstResult["embedding"] as? [Double] else {
+              dataArray.count == expected else {
             throw EmbeddingError.generationFailed
         }
-        
-        return embedding.map { Float($0) }
+        var vectors = [[Float]?](repeating: nil, count: expected)
+        for (position, item) in dataArray.enumerated() {
+            guard let embedding = item["embedding"] as? [Double] else { throw EmbeddingError.generationFailed }
+            let index = (item["index"] as? Int) ?? position
+            guard vectors.indices.contains(index), vectors[index] == nil else { throw EmbeddingError.generationFailed }
+            vectors[index] = embedding.map { Float($0) }
+        }
+        return try vectors.map { vector in
+            guard let vector else { throw EmbeddingError.generationFailed }
+            return vector
+        }
+    }
+}
+
+/// Measures where "unrelated" sits for an embedding model.
+///
+/// Similarity scales differ widely between models: with nomic-embed-text,
+/// two texts about nothing in common still score around 0.35–0.45, while
+/// OpenAI's models put them near 0.1. A fixed cutoff is either useless for
+/// the first or too strict for the second. Embedding a fixed set of mutually
+/// unrelated sentences once per index shows the model's own noise level.
+enum EmbeddingCalibration {
+    /// Deliberately about nothing in common with each other.
+    static let sentences = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Quarterly earnings beat analyst expectations.",
+        "Add two cups of flour and stir gently.",
+        "The train to the airport leaves every ten minutes.",
+        "Photosynthesis converts light into chemical energy.",
+        "She tuned the guitar before the concert.",
+        "The committee postponed the vote until Friday.",
+        "Glaciers carve deep valleys over thousands of years."
+    ]
+
+    /// Stored with the index; versioned so a change of method re-measures.
+    static let metaKey = "noise_floor_v1"
+
+    /// The 90th percentile of pairwise similarity between unrelated texts.
+    /// `nil` with fewer than three vectors.
+    static func noiseFloor(from vectors: [[Float]]) -> Float? {
+        guard vectors.count >= 3 else { return nil }
+        var similarities: [Float] = []
+        for i in vectors.indices {
+            for j in vectors.indices where j > i {
+                if let distance = RAGRelevance.cosineDistance(vectors[i], vectors[j]) {
+                    similarities.append(1 - distance)
+                }
+            }
+        }
+        guard !similarities.isEmpty else { return nil }
+        similarities.sort()
+        return similarities[Int(Double(similarities.count - 1) * 0.9)]
+    }
+
+    /// Embeds the calibration sentences (one batch request where the
+    /// provider supports it) and returns the model's noise floor.
+    static func measure(with provider: EmbeddingProvider) async -> Float? {
+        let vectors = await EmbeddingBatcher.embed(sentences, with: provider).compactMap { $0 }
+        guard vectors.count == sentences.count else { return nil }
+        return noiseFloor(from: vectors)
+    }
+}
+
+/// Embeds many texts with as few requests as the provider allows.
+enum EmbeddingBatcher {
+    static let batchSize = 32
+    /// Keeps one request comfortably under typical request-size limits.
+    static let maxBatchChars = 48_000
+
+    /// One vector per text, `nil` where that text could not be embedded. A
+    /// batch the server rejects is retried one text at a time, so a server
+    /// without array input — or one bad passage — costs only speed, not the
+    /// whole batch.
+    static func embed(_ texts: [String], with provider: EmbeddingProvider) async -> [[Float]?] {
+        var results = [[Float]?](repeating: nil, count: texts.count)
+        var start = 0
+        while start < texts.count {
+            var end = start
+            var chars = 0
+            while end < texts.count, end - start < batchSize, end == start || chars + texts[end].count <= maxBatchChars {
+                chars += texts[end].count
+                end += 1
+            }
+            let batch = Array(texts[start..<end])
+            if let vectors = try? await provider.getEmbeddings(for: batch), vectors.count == batch.count {
+                for (offset, vector) in vectors.enumerated() { results[start + offset] = vector }
+            } else {
+                for offset in batch.indices {
+                    results[start + offset] = try? await provider.getEmbedding(for: batch[offset])
+                }
+            }
+            if Task.isCancelled { break }
+            start = end
+        }
+        return results
     }
 }
 
@@ -146,6 +579,18 @@ class RAGManager: ObservableObject {
     
     private var currentProjectDir: URL?
     private var db: OpaquePointer?
+    /// The vector space the open index was built in. `nil` until a pass has
+    /// set the database up.
+    private var indexedFingerprint: EmbeddingIndexFingerprint?
+    /// Project and database path the open connection belongs to, so a pass
+    /// over the same project reuses it. Reopening `:memory:` on every pass
+    /// threw the whole in-memory index away and re-embedded every file.
+    private var openConnectionKey: String?
+    /// Whether the connection has the FTS5 keyword table.
+    private var keywordSearchAvailable = false
+    /// The embedding model's measured similarity between unrelated texts,
+    /// which the relevance cutoff is set against. `nil` until measured.
+    private var indexNoiseFloor: Float?
     
     init() {}
     
@@ -192,16 +637,24 @@ class RAGManager: ObservableObject {
         return nil
     }
     
-    private var activeProvider: EmbeddingProvider {
-        let settings = AISettingsManager.shared
-        
-        let ctx = settings.modelContext(for: .embedding)
+    /// Replaces the Settings provider. For tests only.
+    var embeddingProviderOverride: EmbeddingProvider?
+    /// Path to the vector extension, ahead of the app-bundle locations. For
+    /// tests only: a test runner has no app bundle to look in.
+    static var vectorExtensionPathOverride: String?
+
+    private var activeProvider: EmbeddingProvider { embeddingProviderOverride ?? Self.makeActiveProvider() }
+
+    /// The embedding provider selected in Settings. Shared with the chat's
+    /// conversation recall, which embeds with the same model.
+    static func makeActiveProvider() -> EmbeddingProvider {
+        let ctx = AISettingsManager.shared.modelContext(for: .embedding)
 
         switch ctx.source {
         case .openAI:
             return GenericAPIEmbeddingProvider(
                 dimensions: ctx.model.contains("large") ? 3072 : 1536,
-                endpointURL: URL(string: ctx.embeddingEndpoint)!,
+                endpointURL: URL(string: ctx.embeddingEndpoint),
                 apiKey: ctx.apiKey,
                 modelName: ctx.model
             )
@@ -209,7 +662,7 @@ class RAGManager: ObservableObject {
         case .local:
             return GenericAPIEmbeddingProvider(
                 dimensions: ctx.model.contains("mxbai") ? 1024 : 768,
-                endpointURL: URL(string: ctx.embeddingEndpoint)!,
+                endpointURL: URL(string: ctx.embeddingEndpoint),
                 apiKey: ctx.apiKey,
                 modelName: ctx.model
             )
@@ -218,10 +671,35 @@ class RAGManager: ObservableObject {
             return LocalEmbeddingProvider()
         }
     }
+
+    private func currentFingerprint(dimensions: Int) -> EmbeddingIndexFingerprint {
+        Self.activeFingerprint(dimensions: dimensions)
+    }
+
+    /// The fingerprint of the embedding model currently selected in Settings.
+    static func activeFingerprint(dimensions: Int) -> EmbeddingIndexFingerprint {
+        let ctx = AISettingsManager.shared.modelContext(for: .embedding)
+        switch ctx.source {
+        case .openAI, .local:
+            return EmbeddingIndexFingerprint(
+                source: ctx.source.rawValue,
+                model: ctx.model,
+                endpoint: ctx.embeddingEndpoint,
+                dimensions: dimensions
+            )
+        default:
+            return EmbeddingIndexFingerprint(
+                source: "Apple NLEmbedding",
+                model: "sentenceEmbedding.english",
+                endpoint: "",
+                dimensions: dimensions
+            )
+        }
+    }
     
     // MARK: - Database Management
     
-    private func setupDatabase() {
+    private func setupDatabase(fingerprint: EmbeddingIndexFingerprint) {
          guard let projectDir = currentProjectDir else {
             print("Standalone mode active: Aborting vector database setup.")
             return
@@ -238,17 +716,99 @@ class RAGManager: ObservableObject {
             }
         }
         
+        // Use :memory: if dbFileURL is nil (though our guard above makes this safer)
+        let dbPath = dbFileURL?.path ?? ":memory:"
+        let connectionKey = projectDir.path + "|" + dbPath
+
+        if db != nil, openConnectionKey == connectionKey, indexedFingerprint == fingerprint {
+            return
+        }
         if db != nil {
             sqlite3_close(db)
             db = nil
         }
-        
-        // Use :memory: if dbFileURL is nil (though our guard above makes this safer)
-        let dbPath = dbFileURL?.path ?? ":memory:"
-        
+        openConnectionKey = nil
+        indexedFingerprint = nil
+        indexNoiseFloor = nil
+
+        guard openConnection(at: dbPath) else { return }
+
+        // An index built with another embedding model (or one too old to
+        // say) is in a different vector space: searching it with this
+        // model's query vectors returns confident nonsense. Start over.
+        if let db {
+            let stored = EmbeddingIndexFingerprint.readMeta(db)
+            if !EmbeddingIndexFingerprint.isCompatible(stored: stored, hasChunks: Self.hasChunks(db), current: fingerprint) {
+                print("[RAG] Index was built with a different embedding model or chunker. Rebuilding it.")
+                sqlite3_close(db)
+                self.db = nil
+                if dbPath != ":memory:" {
+                    try? FileManager.default.removeItem(atPath: dbPath)
+                }
+                guard openConnection(at: dbPath) else { return }
+            }
+        }
+        guard let db else { return }
+
+        fingerprint.writeMeta(db)
+        indexNoiseFloor = EmbeddingIndexFingerprint.readMeta(db)[EmbeddingCalibration.metaKey].flatMap(Float.init)
+        sqlite3_exec(db, "SELECT vector_init('chunks', 'embedding', 'type=FLOAT32,dimension=\(fingerprint.dimensions),distance=COSINE');", nil, nil, nil)
+        sqlite3_exec(db, "SELECT vector_quantize_preload('chunks', 'embedding');", nil, nil, nil)
+        indexedFingerprint = fingerprint
+        openConnectionKey = connectionKey
+    }
+
+    /// `fileURL` relative to `root`, the key the index stores. Both sides are
+    /// resolved first: the file enumerator reports `/private/var/…` for a
+    /// project opened as `/var/…`, and a plain prefix strip then produced
+    /// keys like "/privatechapters/a.typ" — every file looked deleted on the
+    /// next pass and the whole project was re-embedded.
+    nonisolated static func relativePath(of fileURL: URL, in root: URL) -> String {
+        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+        let filePath = fileURL.standardizedFileURL.resolvingSymlinksInPath().path
+        if filePath.hasPrefix(rootPath + "/") {
+            return String(filePath.dropFirst(rootPath.count + 1))
+        }
+        return fileURL.path.replacingOccurrences(of: root.path + "/", with: "")
+    }
+
+    /// Identifies an embedding input, so an unchanged passage can keep its vector.
+    nonisolated static func inputHash(_ input: String) -> String {
+        SHA256.hash(data: Data(input.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The stored vectors of one file, keyed by embedding-input hash.
+    private func storedVectors(forFile fileId: Int64, in db: OpaquePointer, dimensions: Int) -> [String: Data] {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT input_hash, embedding FROM chunks WHERE file_id = ? AND input_hash != '';", -1, &stmt, nil) == SQLITE_OK else { return [:] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, fileId)
+        var vectors: [String: Data] = [:]
+        let expectedBytes = dimensions * MemoryLayout<Float>.size
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let hash = sqlite3_column_text(stmt, 0),
+                  Int(sqlite3_column_bytes(stmt, 1)) == expectedBytes,
+                  let bytes = sqlite3_column_blob(stmt, 1) else { continue }
+            vectors[String(cString: hash)] = Data(bytes: bytes, count: expectedBytes)
+        }
+        return vectors
+    }
+
+    private static func hasChunks(_ db: OpaquePointer) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM chunks LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    /// Opens `dbPath`, loads the vector extension and creates the tables.
+    /// Returns false when the database cannot be opened.
+    private func openConnection(at dbPath: String) -> Bool {
         if sqlite3_open(dbPath, &db) != SQLITE_OK {
             print("Failed to open vector DB.")
-            return
+            sqlite3_close(db)
+            db = nil
+            return false
         }
         
         sqlite3_enable_load_extension(db, 1)
@@ -257,6 +817,7 @@ class RAGManager: ObservableObject {
         // standard location, on the app's rpath). Older bundles placed it
         // next to the executable, so keep that as a fallback.
         let candidates = [
+            Self.vectorExtensionPathOverride,
             Bundle.main.privateFrameworksURL?
                 .appendingPathComponent("vector.framework/vector").path,
             Bundle.main.executableURL?.deletingLastPathComponent()
@@ -270,38 +831,14 @@ class RAGManager: ObservableObject {
             sqlite3_free(errMsg)
         }
         
-        let createSQL = """
-        CREATE TABLE IF NOT EXISTS files (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT UNIQUE,
-            last_modified REAL,
-            file_size INTEGER DEFAULT 0,
-            content_hash TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id INTEGER,
-            text TEXT,
-            embedding BLOB,
-            FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
-        );
-        """
-        
-        // Migrate existing databases that don't have the new columns yet.
-        sqlite3_exec(db, "ALTER TABLE files ADD COLUMN file_size INTEGER DEFAULT 0;", nil, nil, nil)
-        sqlite3_exec(db, "ALTER TABLE files ADD COLUMN content_hash TEXT DEFAULT '';", nil, nil, nil)
-        
-        if sqlite3_exec(db, createSQL, nil, nil, &errMsg) != SQLITE_OK {
-            print("Failed to create tables: \(String(cString: errMsg!))")
-            sqlite3_free(errMsg)
+        if let db {
+            keywordSearchAvailable = RAGSchema.create(on: db)
+            if !keywordSearchAvailable {
+                print("[RAG] Keyword index unavailable (SQLite without FTS5); using vector search only.")
+            }
         }
-        
-        let provider = activeProvider
-        let initVectorSQL = "SELECT vector_init('chunks', 'embedding', 'type=FLOAT32,dimension=\(provider.dimensions),distance=COSINE');"
-        sqlite3_exec(db, initVectorSQL, nil, nil, nil)
-        
-        sqlite3_exec(db, "SELECT vector_quantize_preload('chunks', 'embedding');", nil, nil, nil)
         sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nil, nil, nil)
+        return true
     }
     // MARK: - Standalone Mode Management
     
@@ -313,6 +850,9 @@ class RAGManager: ObservableObject {
             sqlite3_close(db)
             db = nil
         }
+        openConnectionKey = nil
+        indexedFingerprint = nil
+        indexNoiseFloor = nil
         
         // Reset any indexing state just in case it was interrupted
         isIndexing = false
@@ -327,6 +867,9 @@ class RAGManager: ObservableObject {
             sqlite3_close(db)
             db = nil
         }
+        openConnectionKey = nil
+        indexedFingerprint = nil
+        indexNoiseFloor = nil
         
         if let fileURL = dbFileURL, FileManager.default.fileExists(atPath: fileURL.path) {
             try? FileManager.default.removeItem(at: fileURL)
@@ -361,6 +904,9 @@ class RAGManager: ObservableObject {
                 sqlite3_close(db)
                 db = nil
             }
+            openConnectionKey = nil
+            indexedFingerprint = nil
+            indexNoiseFloor = nil
             self.currentProjectDir = nil
             isIndexing = false
             indexProgress = 0.0
@@ -374,9 +920,27 @@ class RAGManager: ObservableObject {
         if forceReindex {
             clearIndexCache()
         }
-        
-        setupDatabase()
+
+        // The vector length comes from the model itself. Guessing it from the
+        // model name ("large" → 3072, "mxbai" → 1024, else 768) was wrong for
+        // most local models, and every insert then had the wrong size.
+        let provider = activeProvider
+        let dimensions: Int
+        do {
+            dimensions = try await provider.getEmbedding(for: "TypstEdit embedding probe").count
+        } catch {
+            print("[RAG] Embedding model unavailable, index not updated: \(error.localizedDescription)")
+            return
+        }
+        guard dimensions > 0 else { return }
+
+        setupDatabase(fingerprint: currentFingerprint(dimensions: dimensions))
         guard let db = db else { return }
+
+        if indexNoiseFloor == nil, let floor = await EmbeddingCalibration.measure(with: provider) {
+            indexNoiseFloor = floor
+            EmbeddingIndexFingerprint.writeMetaValue(String(floor), forKey: EmbeddingCalibration.metaKey, in: db)
+        }
 
         // `gatherFiles` walks the whole tree and `contentsOfDirectory`-style
         // enumeration is blocking I/O. On the main actor it stalled the UI for
@@ -387,7 +951,6 @@ class RAGManager: ObservableObject {
         let filesToProcess = await Task.detached(priority: .utility) {
             Self.gatherFiles(in: projectDir)
         }.value
-        let provider = activeProvider
         var cacheUpdated = false
 
         let cleanupSQL = "SELECT id, path FROM files;"
@@ -408,8 +971,7 @@ class RAGManager: ObservableObject {
             if !idsToDelete.isEmpty {
                 sqlite3_exec(db, "BEGIN TRANSACTION;", nil, nil, nil)
                 for id in idsToDelete {
-                    let delSQL = "DELETE FROM files WHERE id = \(id);"
-                    sqlite3_exec(db, delSQL, nil, nil, nil)
+                    RAGSchema.deleteFile(id: id, in: db)
                 }
                 sqlite3_exec(db, "COMMIT;", nil, nil, nil)
                 print("Cleaned up \(idsToDelete.count) deleted files from vector DB.")
@@ -431,7 +993,7 @@ class RAGManager: ObservableObject {
             let lastModified = lastModifiedDate.timeIntervalSince1970
             let currentFileSize = Int64(resourceValues?.fileSize ?? 0)
             
-            let fileKey = fileURL.path.replacingOccurrences(of: projectDir.path + "/", with: "")
+            let fileKey = Self.relativePath(of: fileURL, in: projectDir)
             
             var needsIndexing = true
             var fileId: Int64 = -1
@@ -480,68 +1042,80 @@ class RAGManager: ObservableObject {
             }
             
             // Content actually changed (or new file) — fall through to re-index.
-            
-            var extractedTextChunks: [String] = []
-            
-            let plaintextExtensions = Self.indexedFileExtensions.subtracting(["json"])
-            if plaintextExtensions.contains(ext) {
-                if let data = try? Data(contentsOf: fileURL) {
-                    let content = TextFileEncoding.decode(data).text
-                    extractedTextChunks = content.components(separatedBy: "\n\n")
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { $0.count > 50 }
-                }
-            } else if ext == "json" {
-               if let data = try? Data(contentsOf: fileURL),
-                   let json = try? JSONSerialization.jsonObject(with: data) {
-                    extractedTextChunks = extractSemanticChunks(
-                        from: json, 
-                        fileName: fileURL.lastPathComponent
-                    )
+
+            let passages: [TextChunk]
+            if ext == "json" {
+                let json = try? JSONSerialization.jsonObject(with: fileData)
+                passages = json.map {
+                    DocumentChunker.unlinedChunks(extractSemanticChunks(from: $0, fileName: fileURL.lastPathComponent))
+                } ?? []
+            } else {
+                passages = DocumentChunker.chunks(in: TextFileEncoding.decode(fileData).text, fileExtension: ext)
+            }
+            let inputs = passages.map { $0.embeddingInput(path: fileKey) }
+            let inputHashes = inputs.map(Self.inputHash)
+
+            // Most saves change a paragraph or two. Passages whose embedding
+            // input is unchanged keep their stored vector, so only the edited
+            // ones cost an embedding request.
+            let reusable = fileId != -1 ? storedVectors(forFile: fileId, in: db, dimensions: dimensions) : [:]
+            var vectors: [Data?] = inputHashes.map { reusable[$0] }
+            let missing = vectors.indices.filter { vectors[$0] == nil }
+            if !missing.isEmpty {
+                self.indexStatus = "Embedding \(fileURL.lastPathComponent) (\(missing.count) passage\(missing.count == 1 ? "" : "s"))..."
+                let fresh = await EmbeddingBatcher.embed(missing.map { inputs[$0] }, with: provider)
+                for (offset, index) in missing.enumerated() {
+                    guard let vector = fresh[offset], vector.count == dimensions else { continue }
+                    vectors[index] = vector.withUnsafeBufferPointer { Data(buffer: $0) }
                 }
             }
-            
+            let embeddingFailed = vectors.contains { $0 == nil }
+            if embeddingFailed {
+                print("[RAG Error] \(fileURL.lastPathComponent): \(vectors.filter { $0 == nil }.count) passage(s) could not be embedded; the file is retried next pass.")
+            }
+            guard isIndexing else { break }
+
+            // Embedding happens before the transaction, so the database is
+            // never held locked across network requests.
             sqlite3_exec(db, "BEGIN TRANSACTION;", nil, nil, nil)
-            
+
             if fileId != -1 {
-                let delSQL = "DELETE FROM files WHERE id = \(fileId);"
-                sqlite3_exec(db, delSQL, nil, nil, nil)
+                RAGSchema.deleteFile(id: fileId, in: db)
             }
-            
+
             let insertFileSQL = "INSERT INTO files (path, last_modified, file_size, content_hash) VALUES (?, ?, ?, ?);"
             var insertFileStmt: OpaquePointer?
             if sqlite3_prepare_v2(db, insertFileSQL, -1, &insertFileStmt, nil) == SQLITE_OK {
                 insertFileStmt?.bind(fileKey, at: 1)
-                sqlite3_bind_double(insertFileStmt, 2, lastModified)
+                // A file with missing passages must not look up to date, or an
+                // endpoint outage during one pass leaves it out of the index
+                // until the file happens to change again.
+                sqlite3_bind_double(insertFileStmt, 2, embeddingFailed ? 0 : lastModified)
                 sqlite3_bind_int64(insertFileStmt, 3, currentFileSize)
-                insertFileStmt?.bind(newHash, at: 4)
+                insertFileStmt?.bind(embeddingFailed ? "" : newHash, at: 4)
                 if sqlite3_step(insertFileStmt) == SQLITE_DONE {
                     fileId = sqlite3_last_insert_rowid(db)
                 }
             }
             sqlite3_finalize(insertFileStmt)
-            
-            let insertChunkSQL = "INSERT INTO chunks (file_id, text, embedding) VALUES (?, ?, ?);"
+
+            let insertChunkSQL = "INSERT INTO chunks (file_id, text, embedding, start_line, end_line, heading, input_hash) VALUES (?, ?, ?, ?, ?, ?, ?);"
             var insertChunkStmt: OpaquePointer?
             sqlite3_prepare_v2(db, insertChunkSQL, -1, &insertChunkStmt, nil)
-            
-            for textChunk in extractedTextChunks {
-                do {
-                    let vector = try await provider.getEmbedding(for: textChunk)
-                    sqlite3_bind_int64(insertChunkStmt, 1, fileId)
-                    insertChunkStmt?.bind(textChunk, at: 2)
-                    
-                    let vectorData = vector.withUnsafeBufferPointer { Data(buffer: $0) }
-                    insertChunkStmt?.bind(blob: vectorData, at: 3)
-                    
-                    sqlite3_step(insertChunkStmt)
-                    sqlite3_reset(insertChunkStmt)
-                } catch {
-                    print("[RAG Error] Failed to embed chunk in \(fileURL.lastPathComponent): \(error)")
-                }
+            for (index, passage) in passages.enumerated() {
+                guard let vectorData = vectors[index] else { continue }
+                sqlite3_bind_int64(insertChunkStmt, 1, fileId)
+                insertChunkStmt?.bind(passage.text, at: 2)
+                insertChunkStmt?.bind(blob: vectorData, at: 3)
+                sqlite3_bind_int64(insertChunkStmt, 4, Int64(passage.startLine))
+                sqlite3_bind_int64(insertChunkStmt, 5, Int64(passage.endLine))
+                insertChunkStmt?.bind(passage.headingPath, at: 6)
+                insertChunkStmt?.bind(inputHashes[index], at: 7)
+                sqlite3_step(insertChunkStmt)
+                sqlite3_reset(insertChunkStmt)
             }
             sqlite3_finalize(insertChunkStmt)
-            
+
             sqlite3_exec(db, "COMMIT;", nil, nil, nil)
             cacheUpdated = true
         }
@@ -598,82 +1172,177 @@ class RAGManager: ObservableObject {
     }
     
     // MARK: - Searching
-    // MARK: - Searching
-    
+
+    /// The nearest chunks that pass `RAGRelevance`, or an empty list. For
+    /// callers that only inject context and have no use for the reason.
     func search(query: String, topK: Int = 3, excluding excludeURL: URL? = nil) async -> [DocumentChunk] {
-        guard let db = db, let currentProjectDir = currentProjectDir else { return [] }
-        
+        if case .hits(let chunks) = await searchOutcome(query: query, topK: topK, excluding: excludeURL) {
+            return chunks
+        }
+        return []
+    }
+
+    func searchOutcome(query: String, topK: Int = 3, excluding excludeURL: URL? = nil) async -> RAGSearchOutcome {
+        guard let db = db, let currentProjectDir = currentProjectDir, let indexed = indexedFingerprint else {
+            return .unavailable("the project has not been indexed yet")
+        }
+        // Settings may have switched the embedding model since the index was
+        // built. Its query vectors would be compared against another model's.
+        guard currentFingerprint(dimensions: indexed.dimensions).identity == indexed.identity else {
+            return .unavailable("the index was built with a different embedding model; it is rebuilt on the next indexing pass")
+        }
+
         // The DB stores paths relative to the project root. Convert the URL to match.
-        let excludedPath = excludeURL?.path.replacingOccurrences(of: currentProjectDir.path + "/", with: "")
-        
-        // If excluding a file, ask the vector scan for a few extra chunks so we aren't 
-        // short-changed after the WHERE clause filters out the current file.
-        let fetchLimit = excludedPath != nil ? topK + 5 : topK
-        
+        let excludedPath = excludeURL.map { Self.relativePath(of: $0, in: currentProjectDir) }
+
+        // Fetch more than will be shown: the relevance rules drop weak,
+        // duplicate and same-file hits, and the WHERE clause drops the
+        // excluded file after the scan has picked its `k`.
+        let fetchLimit = max(topK * 4, 12) + (excludedPath != nil ? 5 : 0)
+
+        let queryVector: [Float]
         do {
-            let queryVector = try await activeProvider.getEmbedding(for: query)
-            let vectorData = queryVector.withUnsafeBufferPointer { Data(buffer: $0) }
-            
-            let whereClause = excludedPath != nil ? "WHERE f.path != ?" : ""
-            
-            // Use vector_quantize_scan for SIMD-accelerated approximate nearest neighbor search.
-            // The stored embedding blob is deliberately not selected: ranking
-            // happens inside the scan, and no caller reads the vector back —
-            // copying one per hit only produced garbage that was freed at once.
-            var searchSQL = """
-            SELECT c.text, f.path, v.distance 
-            FROM chunks AS c 
+            queryVector = try await activeProvider.getEmbedding(for: query)
+        } catch {
+            print("Search failed: \(error)")
+            return .unavailable("the query could not be embedded (\(error.localizedDescription))")
+        }
+        guard queryVector.count == indexed.dimensions else {
+            return .unavailable("the embedding model returned \(queryVector.count) values, the index expects \(indexed.dimensions)")
+        }
+
+        var byID: [Int64: RAGCandidate] = [:]
+        for row in vectorRows(db: db, query: queryVector, limit: fetchLimit, excluding: excludedPath) {
+            byID[row.id] = row.candidate
+        }
+        // Keyword matches the vector scan did not reach are scored exactly
+        // too, so the same relevance rules apply to both.
+        if keywordSearchAvailable, let expression = KeywordQuery.ftsExpression(for: query) {
+            for (rank, row) in keywordRows(db: db, expression: expression, query: queryVector, limit: max(topK * 2, 8), excluding: excludedPath).enumerated() {
+                var candidate = byID[row.id] ?? row.candidate
+                candidate.keywordRank = rank
+                byID[row.id] = candidate
+            }
+        }
+
+        let selected = RAGRelevance.select(Array(byID.values), topK: topK, noiseFloor: indexNoiseFloor)
+        guard !selected.isEmpty else { return .noRelevantHits }
+        return .hits(selected.map { candidate in
+            let fileURL = currentProjectDir.appendingPathComponent(candidate.path)
+            return DocumentChunk(
+                fileURL: fileURL,
+                text: candidate.text,
+                embedding: [],
+                relativePath: candidate.path,
+                distance: candidate.distance,
+                startLine: candidate.startLine,
+                endLine: candidate.endLine,
+                heading: candidate.heading,
+                keywordMatch: candidate.keywordRank != nil,
+                isStale: Self.changedSinceIndexed(fileURL, indexedAt: candidate.indexedAt)
+            )
+        })
+    }
+
+    /// True when the file is gone or was modified after the indexed copy.
+    /// The watcher re-indexes within seconds of a save, but a search can land
+    /// in between, and line numbers from a stale passage point at the wrong
+    /// text.
+    private static func changedSinceIndexed(_ url: URL, indexedAt: Double) -> Bool {
+        guard let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate else {
+            return true
+        }
+        return indexedAt <= 0 || modified.timeIntervalSince1970 > indexedAt + 1
+    }
+
+    private typealias CandidateRow = (id: Int64, candidate: RAGCandidate)
+
+    private static let candidateColumns = "c.id, c.text, f.path, c.embedding, c.start_line, c.end_line, c.heading, f.last_modified"
+
+    /// Nearest neighbours by meaning. The quantized scan ranks; its
+    /// distances are approximate, so each row is re-scored exactly.
+    private func vectorRows(db: OpaquePointer, query: [Float], limit: Int, excluding excludedPath: String?) -> [CandidateRow] {
+        let whereClause = excludedPath != nil ? "WHERE f.path != ?" : ""
+        func sql(_ scan: String) -> String {
+            """
+            SELECT \(Self.candidateColumns)
+            FROM chunks AS c
             JOIN files AS f ON c.file_id = f.id
-            JOIN vector_quantize_scan('chunks', 'embedding', ?, ?) AS v 
+            JOIN \(scan)('chunks', 'embedding', ?, ?) AS v
             ON c.id = v.rowid
             \(whereClause)
             ORDER BY v.distance ASC
-            LIMIT \(topK);
+            LIMIT \(limit);
             """
-            
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, searchSQL, -1, &stmt, nil) != SQLITE_OK {
-                // Fallback to brute-force full scan if quantization index isn't built yet
-                searchSQL = """
-                SELECT c.text, f.path, v.distance 
-                FROM chunks AS c 
-                JOIN files AS f ON c.file_id = f.id
-                JOIN vector_full_scan('chunks', 'embedding', ?, ?) AS v 
-                ON c.id = v.rowid
-                \(whereClause)
-                ORDER BY v.distance ASC
-                LIMIT \(topK);
-                """
-                if sqlite3_prepare_v2(db, searchSQL, -1, &stmt, nil) != SQLITE_OK {
-                    let err = String(cString: sqlite3_errmsg(db))
-                    print("Search query prepare failed: \(err)")
-                    return []
-                }
+        }
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql("vector_quantize_scan"), -1, &stmt, nil) != SQLITE_OK {
+            // Fallback to brute-force full scan if quantization index isn't built yet
+            if sqlite3_prepare_v2(db, sql("vector_full_scan"), -1, &stmt, nil) != SQLITE_OK {
+                print("Search query prepare failed: \(String(cString: sqlite3_errmsg(db)))")
+                return []
             }
-            
-            stmt?.bind(blob: vectorData, at: 1)
-            sqlite3_bind_int64(stmt, 2, Int64(fetchLimit))
-            
-            // Bind the excluded path to the WHERE clause if we have one
-            if let excludedPath = excludedPath {
-                stmt?.bind(excludedPath, at: 3)
-            }
-            
-            var results: [DocumentChunk] = []
-            results.reserveCapacity(topK)
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                let text = String(cString: sqlite3_column_text(stmt, 0))
-                let path = String(cString: sqlite3_column_text(stmt, 1))
-                let fileURL = currentProjectDir.appendingPathComponent(path)
-                results.append(DocumentChunk(fileURL: fileURL, text: text, embedding: []))
-            }
-            
-            sqlite3_finalize(stmt)
-            return results
-        } catch {
-            print("Search failed: \(error)")
+        }
+        defer { sqlite3_finalize(stmt) }
+        stmt?.bind(blob: query.withUnsafeBufferPointer { Data(buffer: $0) }, at: 1)
+        sqlite3_bind_int64(stmt, 2, Int64(limit))
+        if let excludedPath { stmt?.bind(excludedPath, at: 3) }
+        return Self.readCandidates(stmt, query: query)
+    }
+
+    /// Passages that contain the query's words, best BM25 score first. The
+    /// heading column counts double: a term in the section title is a
+    /// strong signal.
+    private func keywordRows(db: OpaquePointer, expression: String, query: [Float], limit: Int, excluding excludedPath: String?) -> [CandidateRow] {
+        let exclusion = excludedPath != nil ? "AND f.path != ?" : ""
+        let sql = """
+        SELECT \(Self.candidateColumns)
+        FROM chunks_fts
+        JOIN chunks AS c ON c.id = chunks_fts.rowid
+        JOIN files AS f ON c.file_id = f.id
+        WHERE chunks_fts MATCH ? \(exclusion)
+        ORDER BY bm25(chunks_fts, 1.0, 2.0)
+        LIMIT \(limit);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            print("Keyword query prepare failed: \(String(cString: sqlite3_errmsg(db)))")
             return []
         }
+        defer { sqlite3_finalize(stmt) }
+        stmt?.bind(expression, at: 1)
+        if let excludedPath { stmt?.bind(excludedPath, at: 2) }
+        return Self.readCandidates(stmt, query: query)
+    }
+
+    /// Reads rows in `candidateColumns` order, scoring each stored vector
+    /// against `query`. Rows whose vector has the wrong size are skipped.
+    private static func readCandidates(_ stmt: OpaquePointer?, query: [Float]) -> [CandidateRow] {
+        var rows: [CandidateRow] = []
+        let expectedBytes = query.count * MemoryLayout<Float>.size
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard Int(sqlite3_column_bytes(stmt, 3)) == expectedBytes,
+                  let bytes = sqlite3_column_blob(stmt, 3) else { continue }
+            // Copied rather than reinterpreted: SQLite does not promise the
+            // blob is aligned for Float.
+            var stored = [Float](repeating: 0, count: query.count)
+            _ = stored.withUnsafeMutableBytes { memcpy($0.baseAddress!, bytes, expectedBytes) }
+            guard let distance = RAGRelevance.cosineDistance(query, stored) else { continue }
+            let heading = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
+            rows.append((
+                id: sqlite3_column_int64(stmt, 0),
+                candidate: RAGCandidate(
+                    path: String(cString: sqlite3_column_text(stmt, 2)),
+                    text: String(cString: sqlite3_column_text(stmt, 1)),
+                    distance: distance,
+                    startLine: Int(sqlite3_column_int64(stmt, 4)),
+                    endLine: Int(sqlite3_column_int64(stmt, 5)),
+                    heading: heading,
+                    indexedAt: sqlite3_column_double(stmt, 7)
+                )
+            ))
+        }
+        return rows
     }
     
     // MARK: - Helpers

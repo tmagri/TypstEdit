@@ -2063,7 +2063,7 @@ struct AISettingsView: View {
                     if ctx.isLocal || ctx.source == .openAI {
                         let provider = GenericAPIEmbeddingProvider(
                             dimensions: 768,
-                            endpointURL: URL(string: ctx.embeddingEndpoint)!,
+                            endpointURL: URL(string: ctx.embeddingEndpoint),
                             apiKey: ctx.apiKey,
                             modelName: ctx.model
                         )

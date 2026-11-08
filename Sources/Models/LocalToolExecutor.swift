@@ -307,10 +307,12 @@ final class LocalToolExecutor {
                 tools.append(MCPTool(
                     serverName: Self.namespace,
                     name: "search_project",
-                    description: "Semantic search across the project's indexed files (RAG) for relevant snippets.",
+                    description: "Search the project's files by meaning (semantic index). Use it for conceptual questions when you don't know the exact wording — where a topic is discussed, which section covers an idea. For an exact word, symbol, label or heading, use grep_project instead. Returns the closest passages with their path and similarity; weak matches are left out, and with no semantic match a literal search runs instead. Passages are excerpts that can lag behind recent edits: read_file the path before quoting or editing it.",
                     inputSchema: [
                         "type": "object",
-                        "properties": ["query": ["type": "string"]],
+                        "properties": [
+                            "query": ["type": "string", "description": "What you are looking for, described in plain words, e.g. \"how the results section explains error bars\"."]
+                        ],
                         "required": ["query"]
                     ]
                 ))
@@ -1058,9 +1060,15 @@ final class LocalToolExecutor {
         guard let query = arguments["query"] as? String, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "query is required"
         }
-        let chunks = await rag?.search(query: query, topK: 5) ?? []
-        if !chunks.isEmpty {
-            return chunks.map { "--- \($0.fileURL.lastPathComponent) ---\n\($0.text)" }.joined(separator: "\n\n")
+        let outcome = await rag?.searchOutcome(query: query, topK: 5) ?? .unavailable("no project index in this window")
+        let reason: String
+        switch outcome {
+        case .hits(let chunks):
+            return Self.formatSemanticHits(chunks)
+        case .noRelevantHits:
+            reason = "No passage was close enough in meaning to count as a match."
+        case .unavailable(let why):
+            reason = "Semantic search is unavailable: \(why)."
         }
         // Semantic search can miss exact terms entirely (or there's no index
         // yet). Fall back to a case-insensitive literal scan so an exact
@@ -1070,7 +1078,23 @@ final class LocalToolExecutor {
             "literal": true,
             "max_results": 30
         ], noteIfEmpty: true)) ?? "(search unavailable)"
-        return "No semantic matches. Literal (case-insensitive) results:\n\n\(fallback)"
+        return "\(reason) Literal (case-insensitive) results:\n\n\(fallback)"
+    }
+
+    /// One block per passage, headed by its project-relative path and
+    /// similarity, so the model can tell a strong match from a weak one and
+    /// knows exactly which file to read. Internal for tests.
+    static func formatSemanticHits(_ chunks: [DocumentChunk]) -> String {
+        let blocks = chunks.map { chunk in
+            var header = chunk.location
+            if !chunk.heading.isEmpty { header += " · \(chunk.heading)" }
+            var notes = ["similarity \(String(format: "%.2f", chunk.similarity))"]
+            if chunk.keywordMatch { notes.append("keyword match") }
+            if chunk.isStale { notes.append("file changed since indexed — line numbers may be off") }
+            return "--- \(header) (\(notes.joined(separator: ", "))) ---\n\(chunk.text)"
+        }
+        return blocks.joined(separator: "\n\n")
+            + "\n\n(Excerpts from the semantic index. To quote or edit, read_file the path with offset/limit set to the lines shown.)"
     }
 
     // MARK: - Grep

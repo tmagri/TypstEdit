@@ -25,3 +25,4 @@ LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13
 LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13/p28598--fdfdb0/lock.mdb
 LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13/saved/data.mdb
 LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13/saved/lock.mdb
+LocalPackages/CSQLite/.build/index-build/*

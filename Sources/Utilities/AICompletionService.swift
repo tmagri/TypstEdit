@@ -143,7 +143,7 @@ struct ToolCallRepeatGuard {
     /// Tools whose identical repeats are pure waste while nothing changes.
     static let readOnlyToolNames: Set<String> = [
         "list_files", "read_file", "grep_project", "search_project",
-        "read_skill_file", "web_fetch", "git_status", "git_diff", "git_log"
+        "read_skill_file", "web_fetch", "git_status", "git_diff", "git_log", "recall"
     ]
     /// Tools that change nothing on disk, so they don't invalidate the
     /// history, but aren't worth tracking either.

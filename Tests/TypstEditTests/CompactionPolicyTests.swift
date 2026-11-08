@@ -75,6 +75,64 @@ final class CompactionPolicyTests: XCTestCase {
         XCTAssertTrue(cut!.covered.contains { $0.role == .user })
     }
 
+    // MARK: - Summarizer input
+
+    func testToolCallsBecomePointersInTheToolLog() {
+        let covered: ArraySlice<ChatMessage> = [
+            ChatMessage(role: .user, text: "Fix the intro"),
+            ChatMessage(role: .toolCall, toolName: "project__read_file",
+                        toolArgumentsJSON: #"{"path":"chapters/intro.typ","offset":10,"limit":40}"#,
+                        toolStatus: .succeeded, toolOutput: "[lines 10-49 of 300]\nThe intro text."),
+            ChatMessage(role: .toolCall, toolName: "agent__update_plan",
+                        toolArgumentsJSON: #"{"items":[]}"#, toolStatus: .succeeded, toolOutput: "ok"),
+            ChatMessage(role: .toolCall, isSubagent: true, toolName: "project__grep_project",
+                        toolArgumentsJSON: #"{"pattern":"intro"}"#, toolStatus: .succeeded, toolOutput: "a.typ:1: intro"),
+            ChatMessage(role: .assistant, text: "The intro is on lines 10-49.")
+        ][...]
+
+        let source = AIChatManager.compactionSource(from: covered)
+
+        XCTAssertTrue(source.toolLog.contains("read_file(path: \"chapters/intro.typ\", offset: 10, limit: 40) → ok, lines 10-49 of 300"))
+        XCTAssertFalse(source.toolLog.contains("update_plan"), "the plan has its own prompt block")
+        XCTAssertFalse(source.toolLog.contains("grep_project"), "subagent internals are covered by its delegate_task row")
+        XCTAssertFalse(source.toolLog.contains("The intro text."), "the log points at evidence; it does not copy it")
+        XCTAssertEqual(source.transcript, "User: Fix the intro\n\nAssistant: The intro is on lines 10-49.")
+        XCTAssertNil(source.previousSummary)
+    }
+
+    func testAnEarlierSummaryIsUpdatedNotSummarizedAgain() {
+        let covered: ArraySlice<ChatMessage> = [
+            ChatMessage(role: .user, text: "gone", isCompacted: true),
+            ChatMessage(role: .assistant, text: "[Summary of earlier conversation]\n\n## Objective\nShorten chapter 2.", isSummary: true),
+            ChatMessage(role: .user, text: "Now chapter 3")
+        ][...]
+
+        let source = AIChatManager.compactionSource(from: covered)
+
+        XCTAssertEqual(source.previousSummary, "## Objective\nShorten chapter 2.", "the label is dropped so it is not nested again")
+        XCTAssertEqual(source.transcript, "User: Now chapter 3", "neither the summary nor compacted turns are replayed as conversation")
+
+        let prompt = AIChatManager.compactionPrompt(for: source)
+        XCTAssertTrue(prompt.contains("PREVIOUS SUMMARY:\n## Objective\nShorten chapter 2."))
+        XCTAssertTrue(prompt.contains("## Evidence"))
+        XCTAssertFalse(prompt.contains("TOOL LOG"), "no empty section when there were no tool calls")
+    }
+
+    func testAPromptWithoutAnEarlierSummaryHasNoUpdateInstruction() {
+        let prompt = AIChatManager.compactionPrompt(for: .init(previousSummary: nil, transcript: "User: hi", toolLog: ""))
+        XCTAssertFalse(prompt.contains("PREVIOUS SUMMARY"))
+        XCTAssertTrue(prompt.hasSuffix("CONVERSATION:\nUser: hi"))
+    }
+
+    func testClippingKeepsTheNewestEntries() {
+        let entries = (1...10).map { "entry \($0) " + String(repeating: "x", count: 20) }
+        let clipped = AIChatManager.clipKeepingNewest(entries, cap: 100, separator: "\n")
+        XCTAssertTrue(clipped.contains("entry 10 "))
+        XCTAssertFalse(clipped.contains("entry 1 "), "the oldest entries go first")
+        XCTAssertTrue(clipped.hasPrefix("… ("), "the cut is stated, not silent")
+        XCTAssertEqual(AIChatManager.clipKeepingNewest(["a", "b"], cap: 100), "a\n\nb")
+    }
+
     // MARK: - Applicability
 
     func testAPrecomputedSummaryAppliesWhileItsTurnsAreStillLive() {

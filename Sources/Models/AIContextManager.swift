@@ -37,12 +37,14 @@ class AIContextManager {
         
         if settings.includeProjectContext {
             // Pass the current fileURL to be excluded from the semantic search
-            let relevantChunks = await rag?.search(query: userPrompt, topK: 3, excluding: fileURL) ?? []
+            let query = Self.retrievalQuery(prompt: userPrompt, textBeforeCursor: prefix)
+            let relevantChunks = await rag?.search(query: query, topK: 3, excluding: fileURL) ?? []
             
             if !relevantChunks.isEmpty {
                 context += "\n\nRELEVANT PROJECT CONTEXT (from semantic search):\n"
                 for chunk in relevantChunks {
-                    context += "--- File: \(chunk.fileURL.lastPathComponent) ---\n"
+                    let section = chunk.heading.isEmpty ? "" : " · \(chunk.heading)"
+                    context += "--- File: \(chunk.location)\(section) ---\n"
                     context += "\(chunk.text)\n\n"
                 }
             }
@@ -50,6 +52,15 @@ class AIContextManager {
         return context
     }
     
+    /// The semantic-search query for an AI Prompt request. Prompts such as
+    /// "continue this" or "add a citation here" say little on their own, so
+    /// the text just before the cursor is added: it is what the request is
+    /// about.
+    nonisolated static func retrievalQuery(prompt: String, textBeforeCursor: String, contextChars: Int = 600) -> String {
+        let nearby = textBeforeCursor.suffix(contextChars).trimmingCharacters(in: .whitespacesAndNewlines)
+        return nearby.isEmpty ? prompt : "\(prompt)\n\n\(nearby)"
+    }
+
     /// Generates a fast, scoped prompt specifically for inline autocomplete.
     /// Does not perform workspace semantic searches (RAG) to ensure sub-millisecond prep.
     func generateCompletionContext(

@@ -63,6 +63,21 @@ enum AgentHarnessTools {
         ]
     ) }
 
+    /// Searches the parts of the conversation that left the context. Offered
+    /// only once there is something to recall (`ConversationRecall`).
+    static var recallTool: MCPTool { MCPTool(
+        serverName: namespace,
+        name: "recall",
+        description: "Search the earlier parts of this conversation that are no longer in your context: turns that were folded into the summary, and what earlier tool calls returned (file reads, searches, web pages, script output, subagent reports). Use it when you need the exact words behind something the summary or work log mentions — what the user asked for, a decision and its reason, a value a tool returned — instead of guessing or re-running a call whose result may differ. For the current content of a file, use read_file instead.",
+        inputSchema: [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "What you are trying to find, in plain words, e.g. \"the citation style the user asked for\"."]
+            ],
+            "required": ["query"]
+        ]
+    ) }
+
     /// Asks the user a structured question and waits for the answer in place,
     /// instead of ending the turn and hoping the reply covers it. Only offered
     /// while Settings → AI Chat → Ask Questions is on, since a question blocks

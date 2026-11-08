@@ -201,6 +201,13 @@ final class AIChatManager: ObservableObject {
     @Published var ragToolEnabled: Bool = AISettingsManager.shared.chatRAGToolEnabledDefault
 
     private let localTools = LocalToolExecutor()
+    /// Semantic search over the parts of this conversation that left the
+    /// context, behind the `recall` tool.
+    private let recall = ConversationRecall()
+    /// Set when older turns were just summarized: the next turn re-fetches
+    /// project passages for the objective, since the evidence the summary
+    /// replaced is no longer in the context.
+    private var pendingRehydration = false
     /// The document in the active editor tab, if any.
     private var openFileURL: URL?
     /// Calls blocked on approval, oldest first. A queue rather than a single
@@ -766,6 +773,9 @@ final class AIChatManager: ObservableObject {
             // competes with a request the user is waiting on — which matters
             // on a local server that serves one request at a time.
             startCompactionPrecomputeIfUseful()
+            // Same timing for the recall index: embed the passages compaction
+            // just moved out of the context while the user is reading.
+            startRecallWarmUpIfUseful()
         }
         await turn.value
     }
@@ -904,6 +914,11 @@ final class AIChatManager: ObservableObject {
         if estimatedContextTokens > compactionTriggerTokens {
             await compactHistory()
         }
+        var rehydration: String?
+        if pendingRehydration {
+            pendingRehydration = false
+            rehydration = await rehydrationBlock(for: trimmed)
+        }
 
         let activeSkills = skills.allSkills.filter { selectedSkillIDs.contains($0.id) }
         let scopedServers = mcp.allServers.filter { selectedMCPServerIDs.contains($0.id) }
@@ -944,6 +959,9 @@ final class AIChatManager: ObservableObject {
         if AISettingsManager.shared.chatAskQuestionEnabled {
             harnessTools.append(AgentHarnessTools.askQuestionTool)
         }
+        if ConversationRecall.hasRecallableHistory(messages) {
+            harnessTools.append(AgentHarnessTools.recallTool)
+        }
         let builtInTools = localTools.toolDescriptors()
             + GitTools.descriptors(permissions: AISettingsManager.shared.chatGitPermissions)
             + harnessTools
@@ -967,6 +985,8 @@ final class AIChatManager: ObservableObject {
         - For a job with several distinct steps, call update_plan first and keep it current. The plan must cover the whole request — every file and part the user mentions, not only the first one. When a CURRENT PLAN is shown below, continue from it rather than starting over.
         - If you can't finish everything in this reply, end with what is done and what is still left (for example, a file you didn't get to), so the user can ask you to continue.
         - When a WORK LOG is shown below, use it to go straight to the right file and line range. Don't repeat a read or search you've already made in this request unless something has changed since — use what it returned.
+        - A summary of earlier conversation stands in for older turns. Trust its Objective, Decisions and Open items; treat its Evidence lines as pointers, not quotations — read_file the cited range before you quote it or copy old_string from it. When you need the exact words of a summarized turn or an earlier tool result, use recall.
+        - A <project_context> block before the user's message holds passages re-fetched from the project index after older turns were summarized. Use them as leads; read_file before quoting or editing.
         - If understanding a large document or several files would flood this conversation, use delegate_task: a read-only subagent explores and reports back just the facts and quotes you ask for.
         - When the same file name exists in more than one place, work on the one the user means: the file open in the editor, or the one at the top of the project — not a copy under backups/, deploy/ or an export folder. Say which path you changed.
         - Explain briefly what you're about to do before calling a tool that changes anything.
@@ -1048,7 +1068,10 @@ final class AIChatManager: ObservableObject {
         // steer as `userText`: it is already the transcript's last user
         // message, so `dropLast()` keeps the history and the text stays
         // unduplicated there too.
-        var userText = trimmed
+        // The re-fetched passages ride on this request's user message only.
+        // That keeps the system prompt — and the cached prefix behind it —
+        // unchanged, and the passages don't linger in later turns.
+        var userText = rehydration.map { "\($0)\n\n\(trimmed)" } ?? trimmed
         do {
             while !Task.isCancelled {
                 // The goal reminder is composed per iteration (not folded
@@ -1576,6 +1599,7 @@ final class AIChatManager: ObservableObject {
             }
             precomputedSummary = nil
             apply(summary)
+            pendingRehydration = true
             // The plan itself isn't rebuilt here: it is the live state (and
             // may have been closed out at the end of a turn), while the
             // `update_plan` rows it came from stay in the transcript anyway.
@@ -1614,24 +1638,135 @@ final class AIChatManager: ObservableObject {
     /// Returns `nil` when there is nothing old enough to summarize. Throws only
     /// for a real failure (the summary request itself), which the foreground
     /// path surfaces and the background path discards.
+    /// What the summarizer is given for the turns being compacted.
+    struct CompactionSource: Equatable {
+        /// The summary an earlier compaction wrote, when the cut covers it.
+        /// It is updated rather than summarized again, so its entries are not
+        /// paraphrased a little further on every compaction.
+        var previousSummary: String?
+        /// The user and assistant turns, newest kept when clipped.
+        var transcript: String
+        /// One line per tool call — what was read or searched, where, and how
+        /// it went — so the summary can cite paths and line ranges. The raw
+        /// output is left out: the summary points at evidence, and the model
+        /// re-reads it when it needs the exact words.
+        var toolLog: String
+    }
+
+    nonisolated static let compactionTranscriptCap = 24_000
+    nonisolated static let compactionToolLogCap = 6_000
+
+    /// Splits the covered turns into the parts the summarizer needs. Pure and
+    /// internal so the selection rules are testable.
+    nonisolated static func compactionSource(from covered: ArraySlice<ChatMessage>) -> CompactionSource {
+        var previous: [String] = []
+        var turns: [String] = []
+        var toolLines: [String] = []
+        let planToolName = "\(AgentHarnessTools.namespace)__update_plan"
+        for message in covered where !message.isCompacted {
+            switch message.role {
+            case .toolCall:
+                guard !message.isSubagent, message.toolName != planToolName,
+                      message.toolStatus != .running, message.toolStatus != .skipped else { continue }
+                toolLines.append(AgentHarnessTools.workLogLine(message))
+            case .user, .assistant:
+                if message.isSummary {
+                    // Drop the "[label]" header `apply` added, or every
+                    // compaction would nest another one.
+                    var text = message.text
+                    if text.hasPrefix("["), let end = text.range(of: "]\n\n") {
+                        text = String(text[end.upperBound...])
+                    }
+                    previous.append(text)
+                    continue
+                }
+                let speaker = message.role == .user ? "User" : "Assistant"
+                let body = message.text.count > 2_000 ? String(message.text.prefix(2_000)) + "…" : message.text
+                turns.append("\(speaker): \(body)")
+            }
+        }
+        return CompactionSource(
+            previousSummary: previous.isEmpty ? nil : previous.joined(separator: "\n\n"),
+            transcript: clipKeepingNewest(turns, cap: compactionTranscriptCap),
+            toolLog: clipKeepingNewest(toolLines, cap: compactionToolLogCap, separator: "\n")
+        )
+    }
+
+    /// Joins `entries` and drops the oldest until the result fits `cap`. The
+    /// oldest exchanges are the ones an earlier summary, if any, already holds.
+    nonisolated static func clipKeepingNewest(_ entries: [String], cap: Int, separator: String = "\n\n") -> String {
+        var kept: [String] = []
+        var size = 0
+        for entry in entries.reversed() {
+            let cost = entry.count + separator.count
+            if size + cost > cap {
+                if kept.isEmpty { kept.append(String(entry.suffix(cap))) }
+                break
+            }
+            kept.append(entry)
+            size += cost
+        }
+        let dropped = entries.count - kept.count
+        let body = kept.reversed().joined(separator: separator)
+        return dropped > 0 ? "… (\(dropped) older entr\(dropped == 1 ? "y" : "ies") left out)\(separator)\(body)" : body
+    }
+
+    /// The summarizer's instructions. The sections exist so the summary keeps
+    /// what the transcript alone can provide — intent, decisions, open
+    /// work — and records project facts as pointers the model can re-read,
+    /// not as paraphrases it would otherwise trust as quotations.
+    nonisolated static func compactionPrompt(for source: CompactionSource) -> String {
+        var prompt = """
+        Write the working summary of this conversation so the same assistant can continue the job after the older turns are removed from its context.
+
+        Use these sections, in this order, with these exact headings:
+        ## Objective
+        The user's goal and constraints, in their terms.
+        ## Decisions
+        What was agreed or decided, and options that were rejected, with the reason.
+        ## Evidence
+        One line per fact taken from the project files: `path:lines — fact`. Use only paths and line ranges that appear in the tool log or the conversation; give the path alone when the range is unknown. Do not quote text that is not in the input.
+        ## Changes made
+        Files created or edited, with paths, and whether they compiled.
+        ## Open items
+        What is still to do, and any question waiting for the user.
+
+        Keep each entry short. Leave out pleasantries and anything superseded. Write "None" under a section that has nothing.
+        """
+        if let previous = source.previousSummary {
+            prompt += """
+
+
+            A PREVIOUS SUMMARY covers the turns before these. Update it: keep its entries unless the newer turns supersede them, and do not reword entries that are still true.
+
+            PREVIOUS SUMMARY:
+            \(previous)
+            """
+        }
+        if !source.toolLog.isEmpty {
+            prompt += "\n\nTOOL LOG (oldest first):\n\(source.toolLog)"
+        }
+        prompt += "\n\nCONVERSATION:\n\(source.transcript)"
+        return prompt
+    }
+
     private func buildCompactionSummary() async throws -> PrecomputedSummary? {
         guard let cut = Self.compactionCut(in: messages) else { return nil }
-
-        var transcript = ""
-        for message in cut.covered where !message.isCompacted && message.role != .toolCall {
-            let speaker = message.role == .user ? "User" : "Assistant"
-            let body = message.text.count > 2_000 ? String(message.text.prefix(2_000)) + "…" : message.text
-            transcript += "\(speaker): \(body)\n\n"
-        }
-        let clipped = transcript.count > 24_000 ? String(transcript.prefix(24_000)) + "\n…" : transcript
+        let source = Self.compactionSource(from: cut.covered)
 
         // Token-filter fast path: when a verbatim compressor is configured
         // (and it fits in half the budget, leaving room for the new turn), no
         // LLM summary is needed at all — the older turns survive as *their own
-        // words*, which is exactly what small local models handle best.
-        if let compressed = await compressedTranscriptIfFits(clipped) {
+        // words*, which is exactly what small local models handle best. An
+        // earlier extract and the tool log are kept as they are: filtering an
+        // extract again degrades it, and filtering drops the paths.
+        var preserved: [String] = []
+        if let previous = source.previousSummary { preserved.append(previous) }
+        if !source.toolLog.isEmpty { preserved.append("Tool calls in these turns:\n\(source.toolLog)") }
+        let preservedText = preserved.joined(separator: "\n\n")
+        if let compressed = await compressedTranscriptIfFits(source.transcript, reservedChars: preservedText.count) {
             return PrecomputedSummary(
-                text: compressed,
+                text: preservedText.isEmpty ? compressed : "\(preservedText)\n\n\(compressed)",
                 label: "Earlier conversation kept as a filtered extract (original wording, filler words removed)",
                 cutIndex: cut.cutIndex,
                 builtAtChars: Self.estimatedChars(in: messages)
@@ -1639,13 +1774,9 @@ final class AIChatManager: ObservableObject {
         }
 
         let summary = try await AICompletionService.shared.fetchCompletion(
-            prompt: """
-            Summarize this conversation for another pass by the same assistant. Preserve: the user's goal and constraints, decisions made, files read or changed (with paths), facts verified from the documents, and anything still outstanding. Drop pleasantries and superseded details. Write plain prose, no headings.
-
-            \(clipped)
-            """,
-            systemPrompt: "You compress conversations faithfully and concisely. Never invent facts that aren't in the transcript.",
-            maxTokens: 800,
+            prompt: Self.compactionPrompt(for: source),
+            systemPrompt: "You compress conversations faithfully and concisely. Never invent facts, paths or line numbers that aren't in the input.",
+            maxTokens: 1_000,
             purpose: .chat,
             model: chatModelContext,
             sanitize: false
@@ -1693,6 +1824,49 @@ final class AIChatManager: ObservableObject {
     /// Called after a turn finishes rather than before one starts, so the
     /// summary request never competes with the user's own request for the
     /// model — which matters a lot on a local server that serves one at a time.
+    /// Embeds the recallable history in the background once part of the
+    /// conversation has been compacted — the point from which `recall` is
+    /// likely to be used. Skipped when semantic search is off in Settings,
+    /// since that is the user's consent to send text to the embedding model.
+    private func startRecallWarmUpIfUseful() {
+        guard AISettingsManager.shared.includeProjectContext,
+              messages.contains(where: { $0.isCompacted }) else { return }
+        recall.prepare(messages: messages)
+    }
+
+    /// Project passages for a turn that starts right after a compaction,
+    /// found from the summary's objective and open items plus the new
+    /// message. `nil` when project search is off or nothing is relevant.
+    private func rehydrationBlock(for userText: String) async -> String? {
+        guard ragToolEnabled, let rag = context?.rag,
+              let summary = messages.last(where: { $0.isSummary && !$0.isCompacted }) else { return nil }
+        let query = Self.rehydrationQuery(summary: summary.text, userText: userText)
+        guard case .hits(let chunks) = await rag.searchOutcome(query: query, topK: 4) else { return nil }
+        return """
+        <project_context source="semantic index" reason="older turns were just summarized">
+        \(LocalToolExecutor.formatSemanticHits(chunks))
+        </project_context>
+        """
+    }
+
+    /// The new message first (it is what the turn is about), then the
+    /// summary's objective and open items. A filtered extract has no
+    /// sections, so only the message is used then.
+    nonisolated static func rehydrationQuery(summary: String, userText: String) -> String {
+        let sections = ["Objective", "Open items"].compactMap { summarySection($0, in: summary) }
+        return String(([userText] + sections).joined(separator: "\n").prefix(1_500))
+    }
+
+    /// The body under "## <name>" in a structured summary, or `nil` when the
+    /// section is missing or says "None".
+    nonisolated static func summarySection(_ name: String, in summary: String) -> String? {
+        guard let heading = summary.range(of: "## \(name)\n") else { return nil }
+        let rest = summary[heading.upperBound...]
+        let body = rest.range(of: "\n## ").map { rest[..<$0.lowerBound] } ?? rest
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed.lowercased() == "none" ? nil : trimmed
+    }
+
     private func startCompactionPrecomputeIfUseful() {
         guard shouldPrecomputeCompaction else { return }
         precomputeTask = Task { [weak self] in
@@ -1724,7 +1898,7 @@ final class AIChatManager: ObservableObject {
     /// Returns nil — meaning "use the LLM summary" — when the method is
     /// llmSummary, no compressor is available, or even the filtered
     /// transcript is still too large for the configured budget.
-    private func compressedTranscriptIfFits(_ clipped: String) async -> String? {
+    private func compressedTranscriptIfFits(_ clipped: String, reservedChars: Int = 0) async -> String? {
         let settings = AISettingsManager.shared
         // The chat model's own choice (saved-model override, or the global
         // setting with "Automatic" resolved for cloud vs. local).
@@ -1732,7 +1906,9 @@ final class AIChatManager: ObservableObject {
         guard method != .llmSummary,
               let resolved = await ChatCompressor.resolve(method: method) else { return nil }
 
-        let targetChars = contextBudgetTokens / 2 * Self.charsPerToken
+        // `reservedChars` is text that goes into the summary uncompressed.
+        let targetChars = contextBudgetTokens / 2 * Self.charsPerToken - reservedChars
+        guard targetChars > 0 else { return nil }
         // Deepen the cut when the user's rate wouldn't fit the transcript.
         let effectiveRate = max(
             0.1,
@@ -2412,6 +2588,18 @@ final class AIChatManager: ObservableObject {
             let files = (arguments["files"] as? [String]) ?? []
             let findings = try await runSubagent(task: task, files: files)
             return "Subagent findings:\n\n\(findings)"
+
+        case "recall":
+            guard let query = arguments["query"] as? String,
+                  !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw LocalToolError.invalidArguments("query is required")
+            }
+            let outcome = await recall.search(
+                query,
+                messages: messages,
+                useEmbeddings: AISettingsManager.shared.includeProjectContext
+            )
+            return ConversationRecall.format(outcome)
 
         case "ask_question":
             let questions = Self.parseQuestions(arguments)
