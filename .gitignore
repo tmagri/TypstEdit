@@ -21,3 +21,7 @@ vectorcaches/project_index.sqlite
 Docs/media
 Docs/tools
 Docs/typst-documentation.md
+LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13/p28598--fdfdb0/data.mdb
+LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13/p28598--fdfdb0/lock.mdb
+LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13/saved/data.mdb
+LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/index/db/v13/saved/lock.mdb
