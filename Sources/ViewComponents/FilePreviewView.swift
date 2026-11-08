@@ -7,6 +7,11 @@ struct FilePreviewView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @State private var reloadToken: UUID = UUID()
     @State private var isSpinning: Bool = false
+    /// The decoded image, kept in state so a SwiftUI body pass caused by an
+    /// unrelated change (theme, window resize, a sibling update) does not
+    /// decode the whole file again — a multi-megapixel photo became a fresh
+    /// full-size bitmap on every redraw.
+    @State private var loadedImage: NSImage?
     
     var body: some View {
         ZStack {
@@ -88,13 +93,7 @@ struct FilePreviewView: View {
     
     private var imageSection: some View {
         Group {
-            // Read raw data from disk on each reload to bypass NSImage memory cache
-            if let data = try? Data(contentsOf: fileURL), let nsImage = NSImage(data: data) {
-                Image(nsImage: nsImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .shadow(radius: 5)
-            } else if let nsImage = NSImage(contentsOf: fileURL) {
+            if let nsImage = loadedImage {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
@@ -108,6 +107,30 @@ struct FilePreviewView: View {
                         .foregroundColor(.secondary)
                 }
             }
+        }
+        .task(id: LoadKey(url: fileURL, token: reloadToken)) { loadImageIfNeeded() }
+    }
+
+    /// Identity of one image load: the file and the reload counter. Switching
+    /// to another image file must reload even though no refresh was asked for.
+    private struct LoadKey: Equatable {
+        let url: URL
+        let token: UUID
+    }
+
+    /// Decodes the file once per reload, off the main thread, and keeps the
+    /// result for this view's lifetime. The previous code decoded inside a
+    /// computed property, so every body evaluation re-read and re-decoded the
+    /// whole image.
+    private func loadImageIfNeeded() {
+        guard fileType == .image else { return }
+        let url = fileURL
+        Task.detached(priority: .userInitiated) {
+            // Read raw data rather than `NSImage(contentsOf:)` so AppKit's
+            // own image cache is bypassed and a replaced file really reloads.
+            let data = try? Data(contentsOf: url)
+            let image = data.flatMap(NSImage.init(data:)) ?? NSImage(contentsOf: url)
+            await MainActor.run { loadedImage = image }
         }
     }
     

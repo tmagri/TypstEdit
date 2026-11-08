@@ -173,6 +173,10 @@ class TypstCompiler: ObservableObject {
     // parameters and the modes) and parameter stores only replay on change.
     private var calcResolutionCache: [String: String] = [:]
     private var calcStoredParameters: [CalculatorStoredVariable] = []
+    /// Cap on remembered `#calc` results. A document with a huge table of
+    /// calls, recompiled after many edits, would otherwise accumulate one
+    /// entry per version of each call for the life of the window.
+    private static let maxCalcCacheEntries = 2_000
 
     /// Merges real errors + advisory warnings into the published `errors` list and
     /// notifies observers. Real compile errors are listed first (they block output);
@@ -861,12 +865,18 @@ class TypstCompiler: ObservableObject {
         pendingOutputBuffer += chunk
         var lines = pendingOutputBuffer.components(separatedBy: "\n")
         // The final element is an incomplete line unless the chunk ended with "\n";
-        // keep it buffered until its remainder arrives.
-        pendingOutputBuffer = lines.popLast() ?? ""
+        // keep it buffered until its remainder arrives. A partial line is a few
+        // hundred bytes in practice; anything past this cap is a compiler
+        // spewing without newlines, and holding all of it would grow for as
+        // long as the watch runs.
+        pendingOutputBuffer = String((lines.popLast() ?? "").suffix(Self.maxPendingOutputBytes))
         for line in lines {
             consumeCompilerOutputLine(line, outputURL: outputURL)
         }
     }
+
+    /// Upper bound on one incomplete watch-output line kept across chunks.
+    private static let maxPendingOutputBytes = 64 * 1024
 
     private func consumeCompilerOutputLine(_ line: String, outputURL: URL) {
         print("[TYPST-OUTPUT]: \(line)")
@@ -2397,7 +2407,16 @@ class TypstCompiler: ObservableObject {
         var result = CalcPipelineResult(
             content: content, summary: summary, diagnostics: [], parameters: [],
             bridgeImported: false, bridgeMissing: false, lineCountChanged: false)
-        guard summary.usesAny else { return result }
+        guard summary.usesAny else {
+            // The document no longer uses calculator features: its cached
+            // results are unreachable, so release them and the stored
+            // parameters rather than keeping both for the window's lifetime.
+            if !calcResolutionCache.isEmpty {
+                calcResolutionCache.removeAll()
+                calcStoredParameters = []
+            }
+            return result
+        }
 
         if summary.needsResolution {
             let resolved = await CalcResolutionPass.resolve(
@@ -2407,6 +2426,11 @@ class TypstCompiler: ObservableObject {
                 cache: calcResolutionCache,
                 storedParameters: calcStoredParameters)
             calcResolutionCache = resolved.cache
+            if calcResolutionCache.count > Self.maxCalcCacheEntries {
+                // Over budget: the cache only saves CAS round-trips, so
+                // dropping it costs a few evaluations and nothing else.
+                calcResolutionCache.removeAll()
+            }
             calcStoredParameters = resolved.storedParameters
             result.lineCountChanged = Self.lineCount(of: resolved.outcome.output) != Self.lineCount(of: content)
             result.content = resolved.outcome.output
@@ -3077,12 +3101,45 @@ private final class DataBox: @unchecked Sendable {
 }
 
 // MARK: - Web Image Caching Actor
+/// Downloads images referenced with `http(s)` in a document so the preview can
+/// embed them. Results are cached because a recompile re-resolves every image
+/// in the document, and a burst of network requests per keystroke would be
+/// worse than useless.
+///
+/// The cache is bounded, oldest-first, by bytes: a page of photos can otherwise
+/// hold tens of megabytes of `Data` for images that were scrolled past and will
+/// never be compiled again. `MemoryPressureMonitor` empties it outright.
 actor WebImageCache {
     static let shared = WebImageCache()
+
+    /// How much decoded-free image bytes the cache may hold. One image is
+    /// always kept even when it alone exceeds this, so a single large figure
+    /// still does not re-download on every compile.
+    private static let maxBytes = 32 * 1024 * 1024
+
     private var cache: [String: (Data, String)] = [:]
+    /// Insertion order, oldest first, so eviction is O(1) from the front.
+    private var order: [String] = []
+    private var cachedBytes = 0
     private var activeDownloads: [String: Task<(Data, String)?, Never>] = [:]
+    private var memoryObserver: NSObjectProtocol?
+
+    /// Registered on first use rather than in `init`, so the observer closure
+    /// can capture the fully-formed actor.
+    private func observeMemoryPressureIfNeeded() {
+        guard memoryObserver == nil else { return }
+        MemoryPressureMonitor.shared.start()
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: MemoryPressureMonitor.willFreeMemory,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { await self?.removeAll() }
+        }
+    }
 
     func download(urlString: String) async -> (Data, String)? {
+        observeMemoryPressureIfNeeded()
         if let cached = cache[urlString] { return cached }
         
         // If we are already downloading this image, wait for it
@@ -3135,9 +3192,36 @@ actor WebImageCache {
 
         activeDownloads[urlString] = task
         let result = await task.value
-        if let res = result { cache[urlString] = res }
+        if let res = result { store(res, for: urlString) }
         activeDownloads[urlString] = nil
         return result
+    }
+
+    /// Inserts one entry, evicting the oldest until the byte budget holds.
+    private func store(_ entry: (Data, String), for key: String) {
+        if let existing = cache[key] {
+            cachedBytes -= existing.0.count
+            order.removeAll { $0 == key }
+        }
+        cache[key] = entry
+        order.append(key)
+        cachedBytes += entry.0.count
+
+        while cachedBytes > Self.maxBytes, order.count > 1 {
+            let oldest = order.removeFirst()
+            if let evicted = cache.removeValue(forKey: oldest) {
+                cachedBytes -= evicted.0.count
+            }
+        }
+    }
+
+    /// Drops every cached image. Called under memory pressure; anything still
+    /// on screen has already been copied into the shadow document's temp
+    /// folder, so nothing visible disappears.
+    func removeAll() {
+        cache.removeAll()
+        order.removeAll()
+        cachedBytes = 0
     }
 }
 

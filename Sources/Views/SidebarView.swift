@@ -333,15 +333,18 @@ class FileSystemModel: ObservableObject {
         }
     }
 
-    /// Called when a folder row is collapsed. Its contents stay cached (so the
-    /// rows come back instantly) but stop being refreshed: nothing inside a
-    /// collapsed subtree can be on screen.
+    /// Called when a folder row is collapsed. Its listing is dropped rather
+    /// than cached: expanding always re-reads the directory anyway, so a
+    /// cached copy would only occupy memory for a subtree nobody can see
+    /// (and grow with every folder the user opens and closes). The placeholder
+    /// `children: []` keeps the disclosure chevron.
     func noteCollapsed(_ node: FileNode) {
         expandedFolders.remove(node.url)
         let prefix = ProjectTreeLoader.canonical(node.url).path + "/"
         expandedFolders = expandedFolders.filter {
             !ProjectTreeLoader.canonical($0).path.hasPrefix(prefix)
         }
+        rootNodes = ProjectTreeLoader.droppingChildren(of: node.url, in: rootNodes)
     }
 
     // MARK: - Semantic index

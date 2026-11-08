@@ -119,6 +119,21 @@ final class ProjectFileTreeTests: XCTestCase {
         XCTAssertEqual(tree.first?.children?.map(\.name), ["two.typ"])
     }
 
+    func testCollapsingAFolderDropsItsCachedListing() throws {
+        try makeDirectory("chapters/deeper")
+        try makeFile("chapters/one.typ")
+        let chapters = root.appendingPathComponent("chapters", isDirectory: true)
+
+        var tree = ProjectTreeLoader.buildTree(root: root, reloading: [chapters])
+        XCTAssertEqual(tree.first?.children?.count, 2)
+
+        tree = ProjectTreeLoader.droppingChildren(of: chapters, in: tree)
+        // Back to the on-demand placeholder: the disclosure chevron survives,
+        // but no rows are held for a subtree that is not on screen.
+        XCTAssertEqual(tree.first?.children, [])
+        XCTAssertTrue(tree.first?.isDirectory == true)
+    }
+
     // MARK: - Visible rows
 
     func testVisibleRowsFlattenOnlyExpandedSubtrees() throws {

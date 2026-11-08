@@ -56,9 +56,29 @@ final class LLMLingua2Manager: ObservableObject {
 
     private var cachedEngine: LLMLingua2Engine?
     private let loadQueue = DispatchQueue(label: "com.typstedit.llmlingua2.load")
+    private var memoryObserver: NSObjectProtocol?
 
     private init() {
         isInstalled = Self.installedModelURL != nil && Self.installedVocabURL != nil
+        // A loaded Core ML BERT is roughly a hundred megabytes of weights plus
+        // its scratch buffers, held for a chat compression that may not run
+        // again for hours. Under pressure, drop it: `loadEngineIfNeeded`
+        // reloads from the installed model on the next compression.
+        MemoryPressureMonitor.shared.start()
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: MemoryPressureMonitor.willFreeMemory,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.unloadEngine()
+        }
+    }
+
+    /// Releases the loaded Core ML model. Compression falls back to the
+    /// heuristic filter until the model is loaded again on demand.
+    func unloadEngine() {
+        cachedEngine = nil
+        engineReady = false
     }
 
     // MARK: Storage layout

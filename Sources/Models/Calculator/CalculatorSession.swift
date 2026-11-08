@@ -67,6 +67,11 @@ final class CalculatorSession: ObservableObject {
             busy = true
             lastStatus = nil
             let approx = forceApprox || exactMode == .approx
+            // A helper that was shut down while idle starts with an empty
+            // context. The engine re-sends the stores it recorded (`5►a`) on
+            // its own; remember the session's here so they honour the session
+            // that is actually loaded (opening a `.tcalc` replaces them).
+            await CASEngine.shared.adoptStoredVariables(storedVariables)
 
             // Plot entries never reach the CAS verbatim: the line is parsed,
             // its bounds resolved, and every curve sampled in one CAS call

@@ -177,6 +177,24 @@ enum ProjectTreeLoader {
         }
     }
 
+    /// Returns `nodes` with the loaded listing of `target` discarded
+    /// (`children` back to the `[]` placeholder), leaving the rest of the tree
+    /// untouched. Used when a folder is collapsed: its rows are not on screen,
+    /// and expanding re-reads the directory anyway.
+    static func droppingChildren(of target: URL, in nodes: [FileNode]) -> [FileNode] {
+        nodes.map { node in
+            if node.url == target {
+                var updated = node
+                updated.children = updated.isDirectory ? [] : nil
+                return updated
+            }
+            guard let existing = node.children else { return node }
+            var updated = node
+            updated.children = droppingChildren(of: target, in: existing)
+            return updated
+        }
+    }
+
     /// True when a changed path is noise for the Projects list: hidden
     /// (`.git`, `.typstedit`, `.DS_Store`) or inside a generated folder
     /// (`temp/`, `backups/`, `vectorcaches/`). Filtering here keeps compiles,

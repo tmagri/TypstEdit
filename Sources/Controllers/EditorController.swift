@@ -4497,7 +4497,15 @@ class EditorController: NSObject, ObservableObject {
                 maxTokens: AISettingsManager.shared.maxTokens,
                 tools: tools,
                 onToolCall: { [weak self] qualifiedName, argumentsJSON in
-                    self?.aiToolActivityLog.append("Called \(qualifiedName.replacingOccurrences(of: "__", with: " → ")) with \(argumentsJSON)")
+                    guard let self else { return }
+                    // The arc of a prompt is a few dozen calls; a runaway loop
+                    // must not grow this trace without bound. One long line
+                    // carries no extra value over its first kilobyte.
+                    let line = "Called \(qualifiedName.replacingOccurrences(of: "__", with: " → ")) with \(argumentsJSON.prefix(1_024))"
+                    self.aiToolActivityLog.append(line)
+                    if self.aiToolActivityLog.count > 500 {
+                        self.aiToolActivityLog.removeFirst(self.aiToolActivityLog.count - 500)
+                    }
                 },
                 model: promptModel,
                 executeTool: { qualifiedName, argumentsJSON in

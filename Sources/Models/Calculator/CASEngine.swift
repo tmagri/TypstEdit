@@ -86,6 +86,38 @@ actor CASEngine {
     private(set) var lastLaunchError: String?
     private(set) var launchCount = 0
 
+    /// The Giac helper is a full computer-algebra system in a process: several
+    /// tens of megabytes that stay resident while its context holds variables
+    /// for `5→a`-style recalls. When the calculator has not been used for a
+    /// while, nothing needs that context — so it is shut down and started again
+    /// on the next entry. `CalculatorSession` re-stores its `storedVariables`
+    /// after a restart, so nothing observable is lost.
+    private var lastActivity = Date()
+    private var idleShutdownTask: Task<Void, Never>?
+    private static let idleShutdownDelay: TimeInterval = 5 * 60
+
+    private func ensureIdleShutdownScheduled() {
+        guard idleShutdownTask == nil else { return }
+        idleShutdownTask = Task { [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                if await self.shutDownIfIdle() { return }
+            }
+        }
+    }
+
+    /// True when the helper has had no work for `idleShutdownDelay`, in which
+    /// case it is shut down. Never while a call is in flight.
+    private func shutDownIfIdle() -> Bool {
+        guard pending.isEmpty,
+              Date().timeIntervalSince(lastActivity) >= Self.idleShutdownDelay,
+              process != nil else { return false }
+        idleShutdownTask = nil
+        shutdown()
+        return true
+    }
+
     // MARK: - Binary lookup
 
     /// Where the helper binary is expected. Mirrors how TypstEdit finds its
@@ -155,6 +187,7 @@ actor CASEngine {
         process = process2
         stdinHandle = stdinPipe.fileHandleForWriting
         launchCount += 1
+        needsRestore = true
         pending.removeAll()
         timeoutTasks.values.forEach { $0.cancel() }
         timeoutTasks.removeAll()
@@ -186,6 +219,76 @@ actor CASEngine {
         }
     }
 
+    /// Every variable store (`5►a`, `f(x)=…`) sent to the helper, in order.
+    ///
+    /// Giac keeps these in its context, and that context dies with the process
+    /// — on an idle shutdown or a crash. Recording the stores here means a
+    /// relaunched helper gets them back, whichever feature created them: the
+    /// calculator panel's `storedVariables` and a document's `calc-param`
+    /// declarations both arrive as ordinary `►` stores.
+    private var variableStores: [(name: String, input: String)] = []
+    /// True only for a launch whose context starts empty, so `variableStores`
+    /// has to be replayed before the next request.
+    private var needsRestore = false
+
+    /// Aligns the recorded stores with a calculator session's state, so a
+    /// relaunched helper is restored to the session the user actually has open
+    /// — not to stores from a `.tcalc` file that was replaced since.
+    func adoptStoredVariables(_ variables: [CalculatorStoredVariable]) async {
+        let wanted = Set(variables.map(\.name))
+        variableStores.removeAll { !wanted.contains($0.name) }
+        for variable in variables {
+            guard variable.name.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else { continue }
+            if variableStores.contains(where: { $0.name == variable.name }) { continue }
+            let input = TISyntax.preprocess("\(variable.value)►\(variable.name)")
+            variableStores.append((variable.name, input))
+        }
+    }
+
+    /// Remembers (or replaces) a store, so it survives a helper restart.
+    private func noteStore(_ input: String) {
+        guard let arrow = input.firstIndex(of: "►") else { return }
+        let name = String(input[input.index(after: arrow)...]).trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        variableStores.removeAll { $0.name == name }
+        variableStores.append((name, input))
+    }
+
+    /// `purge(x)` drops the variable from the helper; forget it too, or it
+    /// would come back after a restart.
+    private func notePurge(_ input: String) {
+        guard input.hasPrefix("purge("), input.hasSuffix(")") else { return }
+        let name = String(input.dropFirst("purge(".count).dropLast())
+            .trimmingCharacters(in: .whitespaces)
+        variableStores.removeAll { $0.name == name }
+    }
+
+    /// Re-sends every recorded store to a just-started helper. The helper
+    /// answers requests in order, so these land before the request that
+    /// follows. Replies are ignored on purpose: a store the engine rejects
+    /// must not fail the evaluation the user actually asked for.
+    private func replayVariableStoresIfNeeded() {
+        guard needsRestore else { return }
+        needsRestore = false
+        for store in variableStores {
+            sendRequest(["v": 1, "id": nextRequestID(), "op": "eval", "input": store.input,
+                         "approx": true, "angle": "rad", "digits": 12])
+        }
+    }
+
+    /// Next request id, kept unique across replays and real requests.
+    private func nextRequestID() -> Int {
+        let id = nextID
+        nextID += 1
+        return id
+    }
+
+    /// Encodes and writes one request, with no pending-reply bookkeeping.
+    private func sendRequest(_ request: [String: Any]) {
+        guard let line = Self.jsonLine(request) else { return }
+        send(line: line)
+    }
+
     func shutdown() {
         if stdinHandle != nil {
             send(line: "{\"v\":1,\"op\":\"shutdown\"}")
@@ -195,6 +298,9 @@ actor CASEngine {
         stdinHandle = nil
         readerTask?.cancel()
         readerTask = nil
+        // The next process starts with an empty context, so recorded stores
+        // must be replayed again.
+        needsRestore = true
     }
 
     deinit {
@@ -215,9 +321,11 @@ actor CASEngine {
         } catch {
             return failed(error.localizedDescription, kind: "launch")
         }
+        replayVariableStoresIfNeeded()
 
-        let id = nextID
-        nextID += 1
+        let id = nextRequestID()
+        lastActivity = Date()
+        ensureIdleShutdownScheduled()
 
         let request: [String: Any] = [
             "v": 1,
@@ -232,6 +340,11 @@ actor CASEngine {
             return failed("Could not encode the request.", kind: "protocol")
         }
         send(line: line)
+        if input.contains("►") {
+            noteStore(input)
+        } else {
+            notePurge(input)
+        }
 
         // The helper answers exactly one reply per request.
         return await withCheckedContinuation { continuation in
@@ -270,6 +383,8 @@ actor CASEngine {
         if let process, process.isRunning, stdinHandle != nil {
             send(line: "{\"v\":1,\"op\":\"reset\"}")
         }
+        // A reset context is empty, exactly like a fresh launch.
+        needsRestore = true
     }
 
     // MARK: - Replies

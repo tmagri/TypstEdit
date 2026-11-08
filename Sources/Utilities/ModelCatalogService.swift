@@ -35,8 +35,30 @@ final class ModelCatalogService {
     private var cache: [String: [AvailableModel]] = [:]
     /// Safety bound on paged providers (Anthropic, Gemini, Portkey).
     private static let maxPages = 10
+    /// At most this many provider/endpoint combinations are remembered. A
+    /// user who edits endpoints or keys in Settings would otherwise keep one
+    /// full model list per attempt for the life of the app.
+    private static let maxCacheEntries = 16
+    /// Cache keys in least-recently-used order.
+    private var cacheOrder: [String] = []
+    private var memoryObserver: NSObjectProtocol?
 
-    private init() {}
+    private init() {
+        MemoryPressureMonitor.shared.start()
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: MemoryPressureMonitor.willFreeMemory,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.clearCache()
+        }
+    }
+
+    /// Forgets every cached model list. They are re-fetched on demand.
+    func clearCache() {
+        cache.removeAll()
+        cacheOrder.removeAll()
+    }
 
     /// The models available for `source`. `localEndpoint` is only used for
     /// `.local` (the chat or embeddings URL configured for that model).
@@ -59,6 +81,7 @@ final class ModelCatalogService {
 
         let cacheKey = [source.rawValue, endpoint, kind.rawValue, String(apiKey.hashValue), extraHeaders.description].joined(separator: "|")
         if !forceRefresh, let cached = cache[cacheKey] {
+            touchCacheKey(cacheKey)
             return cached
         }
 
@@ -92,8 +115,25 @@ final class ModelCatalogService {
         }
 
         let result = Self.finalize(all, source: source, kind: kind)
-        cache[cacheKey] = result
+        storeInCache(result, forKey: cacheKey)
         return result
+    }
+
+    /// Inserts a model list, evicting the least recently used entry past the
+    /// cap. Provider lists are large (OpenRouter alone reports hundreds), so
+    /// keeping an unbounded set for every edited endpoint adds up.
+    private func storeInCache(_ models: [AvailableModel], forKey key: String) {
+        cache[key] = models
+        touchCacheKey(key)
+        while cacheOrder.count > Self.maxCacheEntries, let oldest = cacheOrder.first {
+            cacheOrder.removeFirst()
+            cache[oldest] = nil
+        }
+    }
+
+    private func touchCacheKey(_ key: String) {
+        cacheOrder.removeAll { $0 == key }
+        cacheOrder.append(key)
     }
 
     // MARK: - Request Building (pure, testable)

@@ -8,12 +8,51 @@ actor CASMathRenderer {
 
     private let cache = NSCache<NSString, NSImage>()
     private let scratchRoot: URL
+    /// Rendered snippets are kept bounded *by count* before, which says nothing
+    /// about size: a rendered chart can be several megabytes. A byte budget
+    /// and a memory-pressure purge keep the history cache honest.
+    private static let maxCacheBytes = 24 * 1024 * 1024
+    private var cachedBytes = 0
+    /// Written once in `init`, read in `deinit`; matches the pattern used for
+    /// notification tokens elsewhere in the app.
+    nonisolated(unsafe) private var memoryObserver: NSObjectProtocol?
 
     init() {
         let base = NSTemporaryDirectory()
         scratchRoot = URL(fileURLWithPath: base).appendingPathComponent("TypstEditCalc", isDirectory: true)
         try? FileManager.default.createDirectory(at: scratchRoot, withIntermediateDirectories: true)
         cache.countLimit = 512
+        cache.totalCostLimit = Self.maxCacheBytes
+        MemoryPressureMonitor.shared.start()
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: MemoryPressureMonitor.willFreeMemory,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { await self?.purgeCache() }
+        }
+    }
+
+    deinit {
+        if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
+    }
+
+    /// Drops every rendered snippet; the next look at the history re-renders
+    /// the rows that are visible.
+    func purgeCache() {
+        cache.removeAllObjects()
+        cachedBytes = 0
+    }
+
+    /// Stores an image with its approximate pixel cost, so NSCache evicts by
+    /// real size rather than by count.
+    private func store(_ image: NSImage, forKey key: NSString) {
+        let cost = Int(image.size.width * image.size.height * 4)
+        cachedBytes += cost
+        cache.setObject(image, forKey: key, cost: cost)
+        if cachedBytes > Self.maxCacheBytes {
+            purgeCache()
+        }
     }
 
     /// Compiles a Typst math snippet to an image. Returns nil when the
@@ -53,7 +92,7 @@ actor CASMathRenderer {
               FileManager.default.fileExists(atPath: outputURL.path) else { return nil }
         guard let image = NSImage(contentsOf: outputURL) else { return nil }
 
-        cache.setObject(image, forKey: key)
+        store(image, forKey: key)
         return image
     }
 
@@ -99,7 +138,7 @@ actor CASMathRenderer {
               FileManager.default.fileExists(atPath: outputURL.path) else { return nil }
         guard let image = NSImage(contentsOf: outputURL) else { return nil }
 
-        cache.setObject(image, forKey: key)
+        store(image, forKey: key)
         return image
     }
 

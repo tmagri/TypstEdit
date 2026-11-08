@@ -54,6 +54,9 @@ extension OpaquePointer {
 struct DocumentChunk: Codable {
     let fileURL: URL
     let text: String
+    /// The chunk's stored embedding. Empty for results handed to callers:
+    /// ranking happens inside the vector scan, so shipping the vector back
+    /// only allocated and immediately freed `topK` copies of it.
     let embedding: [Float]
 }
 
@@ -613,9 +616,12 @@ class RAGManager: ObservableObject {
             
             let whereClause = excludedPath != nil ? "WHERE f.path != ?" : ""
             
-            // Use vector_quantize_scan for SIMD-accelerated approximate nearest neighbor search
+            // Use vector_quantize_scan for SIMD-accelerated approximate nearest neighbor search.
+            // The stored embedding blob is deliberately not selected: ranking
+            // happens inside the scan, and no caller reads the vector back —
+            // copying one per hit only produced garbage that was freed at once.
             var searchSQL = """
-            SELECT c.text, f.path, c.embedding, v.distance 
+            SELECT c.text, f.path, v.distance 
             FROM chunks AS c 
             JOIN files AS f ON c.file_id = f.id
             JOIN vector_quantize_scan('chunks', 'embedding', ?, ?) AS v 
@@ -629,7 +635,7 @@ class RAGManager: ObservableObject {
             if sqlite3_prepare_v2(db, searchSQL, -1, &stmt, nil) != SQLITE_OK {
                 // Fallback to brute-force full scan if quantization index isn't built yet
                 searchSQL = """
-                SELECT c.text, f.path, c.embedding, v.distance 
+                SELECT c.text, f.path, v.distance 
                 FROM chunks AS c 
                 JOIN files AS f ON c.file_id = f.id
                 JOIN vector_full_scan('chunks', 'embedding', ?, ?) AS v 
@@ -654,21 +660,12 @@ class RAGManager: ObservableObject {
             }
             
             var results: [DocumentChunk] = []
+            results.reserveCapacity(topK)
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let text = String(cString: sqlite3_column_text(stmt, 0))
                 let path = String(cString: sqlite3_column_text(stmt, 1))
-                let embeddingBytes = sqlite3_column_blob(stmt, 2)
-                let embeddingLen = sqlite3_column_bytes(stmt, 2)
-                
-                var embedding: [Float] = []
-                if let embeddingBytes = embeddingBytes, embeddingLen > 0 {
-                    let floatCount = Int(embeddingLen) / MemoryLayout<Float>.size
-                    let pointer = embeddingBytes.bindMemory(to: Float.self, capacity: floatCount)
-                    embedding = Array(UnsafeBufferPointer(start: pointer, count: floatCount))
-                }
-                
                 let fileURL = currentProjectDir.appendingPathComponent(path)
-                results.append(DocumentChunk(fileURL: fileURL, text: text, embedding: embedding))
+                results.append(DocumentChunk(fileURL: fileURL, text: text, embedding: []))
             }
             
             sqlite3_finalize(stmt)
