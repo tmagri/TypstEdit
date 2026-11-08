@@ -1100,6 +1100,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let editorController {
             editorController.projectContext.close()
             ActiveProjectContext.shared.deactivate(editorController)
+            // The preview's `typst watch` belongs to the window too. Stopping
+            // it here does not depend on the window (and its compiler) being
+            // deallocated promptly.
+            NotificationCenter.default.post(name: .stopPreviewCompiler, object: ["target": editorController])
         }
         if isMain, let editorController {
             editorController.projectRootURL = nil
@@ -1172,6 +1176,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 extension Notification.Name {
     static let requestSave = Notification.Name("requestSave")
     static let resetToWelcome = Notification.Name("resetToWelcome") 
+    /// A document window is closing: its preview compiler must stop.
+    /// `object` is `["target": EditorController]`.
+    static let stopPreviewCompiler = Notification.Name("stopPreviewCompiler")
 }
 
 /// Holds the SwiftUI `openWindow` action so AppKit-level entry points (a

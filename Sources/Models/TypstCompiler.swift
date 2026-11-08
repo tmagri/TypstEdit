@@ -329,6 +329,10 @@ class TypstCompiler: ObservableObject {
     
     private var currentProcess: Process?
     private var processOutputPipe: Pipe?
+    /// Owns the running `typst watch`. `Process` does not stop its child when
+    /// it is released, so without this a compiler torn down with its window
+    /// (no `cleanUp()` call) left the watch running until the app quit.
+    private let watchOwner = WatchProcessOwner()
     
     // We keep track of the current shadow file being watched
     private var currentShadowSourceURL: URL?
@@ -387,11 +391,8 @@ class TypstCompiler: ObservableObject {
     private var shadowToSourceLine: [Int: Int] = [:]
     
     func cleanUp() {
-        if let process = currentProcess {
-            process.terminate()
-        }
+        watchOwner.stop()
         currentProcess = nil
-        processOutputPipe?.fileHandleForReading.readabilityHandler = nil
         processOutputPipe = nil
         currentShadowSourceURL = nil
         currentShadowPDFURL = nil
@@ -834,6 +835,7 @@ class TypstCompiler: ObservableObject {
         
         do {
             try process.run()
+            watchOwner.adopt(process, pipe: pipe)
             self.isCompiling = true
             self.compilationStatus = "Watching..."
             
@@ -847,7 +849,12 @@ class TypstCompiler: ObservableObject {
     private func monitorOutput(pipe: Pipe, outputURL: URL) {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            if data.isEmpty { return }
+            if data.isEmpty {
+                // EOF: the watch exited. A handler left installed at EOF keeps
+                // firing with empty reads, spinning a CPU and holding the pipe.
+                handle.readabilityHandler = nil
+                return
+            }
 
             guard let chunk = String(data: data, encoding: .utf8) else { return }
 
@@ -2997,6 +3004,53 @@ class TypstCompiler: ObservableObject {
     }
     #endif
 } // End of TypstCompiler class
+
+// MARK: - Watch process ownership
+
+/// Holds the preview compiler's long-lived `typst watch` and guarantees it
+/// stops: on `stop()`, on `adopt` of a replacement, and when the owner itself
+/// is released. Not actor-bound, so its `deinit` can run from the compiler's
+/// nonisolated `deinit` path without touching main-actor state.
+final class WatchProcessOwner: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var pipe: Pipe?
+
+    /// Takes ownership of a started watch, stopping any previous one.
+    func adopt(_ process: Process, pipe: Pipe) {
+        lock.lock()
+        let old = (self.process, self.pipe)
+        self.process = process
+        self.pipe = pipe
+        lock.unlock()
+        Self.end(old.0, old.1)
+    }
+
+    func stop() {
+        lock.lock()
+        let old = (process, pipe)
+        process = nil
+        pipe = nil
+        lock.unlock()
+        Self.end(old.0, old.1)
+    }
+
+    deinit {
+        Self.end(process, pipe)
+    }
+
+    /// Detaches the reader, then SIGTERMs the child; SIGKILL follows if it is
+    /// still alive shortly after, so a wedged compiler cannot linger.
+    private static func end(_ process: Process?, _ pipe: Pipe?) {
+        pipe?.fileHandleForReading.readabilityHandler = nil
+        guard let process, process.isRunning else { return }
+        process.terminate()
+        let pid = process.processIdentifier
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+            if process.isRunning { kill(pid, SIGKILL) }
+        }
+    }
+}
 
 // MARK: - Blocking process helper
 

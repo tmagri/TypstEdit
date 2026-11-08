@@ -137,6 +137,10 @@ struct ContentView: View {
                 guard targetedPayload(notification) != nil else { return }
                 resetToWelcomeState()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .stopPreviewCompiler)) { notification in
+                guard targetedPayload(notification) != nil else { return }
+                compiler.cleanUp()
+            }
     }
 
     /// Window-specific notifications carry `["target": EditorController, …]`.
@@ -201,6 +205,9 @@ struct ContentView: View {
         // `onChange(of: selectedFile)` handler (fired by the `selectedFile = nil`
         // below) sees a nil `currentFileURL` and no unsaved changes, and returns
         // early instead of triggering a load or a save warning.
+        // No document is shown on the welcome screen, and closing the window
+        // also deletes its temp folder: stop the preview's `typst watch`.
+        self.compiler.cleanUp()
         self.editorController.currentFileURL = nil
         self.editorController.syncSavedContent("")
         self.editorController.projectRootURL = nil
