@@ -29,6 +29,7 @@ extension TextSelectionManager {
                 modifySelection: modifySelection
             )
         }
+        mergeOverlappingSelections()
         updateSelectionViews()
         delegate?.setNeedsDisplay()
         NotificationCenter.default.post(Notification(name: Self.selectionChangedNotification, object: self))

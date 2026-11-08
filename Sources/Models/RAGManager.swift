@@ -157,8 +157,17 @@ class RAGManager: ObservableObject {
     /// Extensions `gatherFiles` indexes. Shared with the file watcher so a
     /// change to a file the index doesn't read (an image, the exported PDF)
     /// never schedules an indexing pass.
+    ///
+    /// Source code is included: AI Chat searches the whole project, and the
+    /// question "where is this parsed?" is as likely to point at a `.py` or
+    /// `.ts` file as at the document. Binary media stays out.
     nonisolated static let indexedFileExtensions: Set<String> = [
-        "typ", "md", "json", "bib", "txt", "csv", "yaml", "yml", "note",
+        "typ", "md", "markdown", "note", "json", "bib", "txt", "csv", "yaml",
+        "yml", "toml", "html", "css", "xml",
+        "py", "js", "jsx", "ts", "tsx", "sh", "bash", "zsh",
+        "c", "h", "cc", "cpp", "hpp", "cs", "java", "kt", "swift", "go",
+        "rs", "rb", "php", "scala", "dart", "lua", "ex", "exs", "hs", "ml",
+        "sql", "zig",
     ]
 
     /// True when editing `url` can change the semantic index.
@@ -471,7 +480,7 @@ class RAGManager: ObservableObject {
             
             var extractedTextChunks: [String] = []
             
-            let plaintextExtensions = ["typ", "md", "bib", "txt", "csv", "yaml", "yml", "note"]
+            let plaintextExtensions = Self.indexedFileExtensions.subtracting(["json"])
             if plaintextExtensions.contains(ext) {
                 if let data = try? Data(contentsOf: fileURL) {
                     let content = TextFileEncoding.decode(data).text

@@ -490,13 +490,22 @@ class EditorController: NSObject, ObservableObject {
         let scaledFontSize = baseFontSize * zoomLevel
         
         let newFont = NSFont(name: "Menlo", size: scaledFontSize) ?? .monospacedSystemFont(ofSize: scaledFontSize, weight: .regular)
+
+        // Typst and Markdown read well at two-space indentation, but Python is
+        // indentation-sensitive and the ecosystem convention is four spaces.
+        // Tab width follows the language so pasted or reindented code lines up.
+        let isCodeFile = currentFileType == .text && !isTypstFile && !isMarkdownFile
+        let indentWidth = isCodeFile ? 4 : 2
         
         self.editorConfiguration = SourceEditorConfiguration(
             appearance: .init(
                 theme: customTheme,
                 font: newFont,
                 wrapLines: wrapLines,
-                tabWidth: 2
+                tabWidth: indentWidth
+            ),
+            behavior: .init(
+                indentOption: .spaces(count: indentWidth)
             )
         )
         
@@ -1017,7 +1026,17 @@ class EditorController: NSObject, ObservableObject {
         }
         
         let isMarkdown = isMarkdownFile
-        
+        // Code files get their own palette; Typst documents keep the refined
+        // purple-forward scheme they were tuned with. In code, keywords are
+        // blue and types are teal — the convention every programmer's editor
+        // uses — so Python/JSON/XML read instantly.
+        let isCode = currentFileType == .text
+
+        func keywordColor() -> NSColor { isCode ? blue : (isMarkdown ? blue : purple) }
+        func typeColor() -> NSColor { isCode ? teal : (isMarkdown ? orange : blue) }
+        func variableColor() -> NSColor { isCode ? fg : (isMarkdown ? yellow : purple) }
+        func attributeColor() -> NSColor { isCode ? orange : (isMarkdown ? green : purple) }
+
         let theme = EditorTheme(
             text: attr(fg),
             insertionPoint: insertionPoint,
@@ -1025,15 +1044,18 @@ class EditorController: NSObject, ObservableObject {
             background: safeColor(bg),
             lineHighlight: safeColor(isDark ? NSColor.white.withAlphaComponent(0.05) : NSColor.black.withAlphaComponent(0.05)),
             selection: safeColor(NSColor.selectedTextBackgroundColor).withAlphaComponent(0.4),
-            keywords: attr(isMarkdown ? blue : purple, bold: true),
-            commands: attr(isMarkdown ? teal : purple),
-            types: attr(isMarkdown ? orange : blue, bold: true),
-            attributes: attr(isMarkdown ? green : purple, italic: true),
-            variables: attr(isMarkdown ? yellow : purple),
+            keywords: attr(keywordColor(), bold: true),
+            commands: attr(isMarkdown ? teal : (isCode ? blue : purple)),
+            types: attr(typeColor(), bold: !isCode),
+            attributes: attr(attributeColor(), italic: !isCode),
+            variables: attr(variableColor()),
+            // Functions get their own hue only for code; Typst and Markdown keep
+            // their established look where functions read like variables.
+            functions: attr(isCode ? yellow : variableColor()),
             values: attr(teal),
             numbers: attr(yellow),
             strings: attr(green),
-            characters: attr(green),
+            characters: attr(isCode ? orange : green),
             comments: attr(gray, italic: true),
             markupHeading: attr(blue, bold: true),
             markupBold: attr(orange, bold: true),
@@ -1075,16 +1097,17 @@ class EditorController: NSObject, ObservableObject {
         switch ext {
         case "typ", "note":
             currentFileType = .typst
-        case "txt", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg":
-            currentFileType = .text
-        case "md":
+        case "md", "markdown", "mkd", "mkdn", "mdwn", "mdown":
             currentFileType = .markdown
         case "png", "jpg", "jpeg", "gif", "tiff", "bmp", "heic", "webp":
             currentFileType = .image
         case "pdf":
             currentFileType = .pdf
         default:
-            currentFileType = .other
+            // Every other text file — source code, JSON, XML, YAML, logs —
+            // opens in the plain text editor. `EditorFileTypes` is the one
+            // place that decides what counts as text.
+            currentFileType = EditorFileTypes.isEditableTextFile(url) ? .text : .other
         }
         applyTheme() // Auto-update the theme if the file type switches natively
     }
@@ -1104,6 +1127,14 @@ class EditorController: NSObject, ObservableObject {
         currentFileURL?.pathExtension.lowercased() == "note"
     }
 
+    /// True for documents whose content is prose markup (Typst, Markdown,
+    /// notes) rather than source code. The Typst ribbon, the formatting
+    /// commands (bold, lists, headings…) and the PDF preview only make sense
+    /// for these; code files are edited as plain text with highlighting.
+    var isProseFile: Bool {
+        isTypstFile || isMarkdownFile
+    }
+
     /// True when the PDF preview is out of date relative to the editor's text.
     /// Only meaningful for `.note` files, whose preview is regenerated solely on
     /// explicit Save (not on every edit/autosave) to keep large documents responsive.
@@ -1112,13 +1143,21 @@ class EditorController: NSObject, ObservableObject {
     /// The `CodeLanguage` used by the source editor for syntax highlighting.
     /// `.note` files use a Markdown grammar with a Typst overlay: Typst constructs are
     /// highlighted as Typst and win on overlap, while Markdown fills in everything else.
+    /// Every other editable file asks `EditorFileTypes`: source code gets its own
+    /// tree-sitter grammar (Python, JSON, XML, YAML, …), and plain text gets the
+    /// no-grammar language so nothing is mis-colored.
     var highlightLanguage: CodeLanguage {
-        let ext = currentFileURL?.pathExtension.lowercased()
-        switch ext {
-        case "md": return .markdown
-        case "note": return .note
-        default: return .typst
-        }
+        guard let url = currentFileURL else { return .typst }
+        if EditorFileTypes.noteExtensions.contains(url.pathExtension.lowercased()) { return .note }
+        if EditorFileTypes.markdownExtensions.contains(url.pathExtension.lowercased()) { return .markdown }
+        if EditorFileTypes.isTypstFamily(url) { return .typst }
+        return EditorFileTypes.syntax(for: url)?.language ?? .default
+    }
+
+    /// Human-readable name of the current file's syntax, for the status bar
+    /// and tooltips (e.g. "Python", "XML", "Markdown", "Plain Text").
+    var currentSyntaxName: String {
+        EditorFileTypes.displayName(for: currentFileURL)
     }
     
     func openEquationEditor(at range: NSRange, initialContent: String) {
@@ -3698,8 +3737,32 @@ class EditorController: NSObject, ObservableObject {
     }
     
     // --- Commenting Actions ---
-    
+
+    /// The line-comment prefix for the current document, taken from
+    /// `EditorFileTypes` (which knows Markdown's comment is `<!-- -->`,
+    /// Python's is `#`, SQL's is `--`, …). `nil` when the language has none.
+    private var lineCommentPrefix: String? {
+        EditorFileTypes.lineCommentPrefix(for: currentFileURL)
+    }
+
+    /// The block-comment delimiters for the current document, or `nil` when
+    /// the grammar has none (Python has no block comment).
+    private var blockCommentDelimiters: (open: String, close: String)? {
+        EditorFileTypes.blockCommentDelimiters(for: currentFileURL)
+    }
+
     func toggleLineComment() {
+        // Grammars without a line comment (HTML, XML, Markdown) toggle their
+        // block delimiter instead — inserting `//` there would be plain text.
+        guard let prefix = lineCommentPrefix else {
+            if blockCommentDelimiters != nil {
+                toggleBlockComment()
+            } else {
+                showStatus("\(currentSyntaxName) has no comment syntax")
+            }
+            return
+        }
+
         let nsString = sourceCode as NSString
         let range = selectedRange
         let lineRange = nsString.lineRange(for: range)
@@ -3708,21 +3771,29 @@ class EditorController: NSObject, ObservableObject {
         let lines = selectedLinesText.components(separatedBy: .newlines)
         var newLines: [String] = []
         
-        // If all non-empty lines start with //, remove them. Otherwise add them.
-        let nonEmptyLines = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        let areAllCommented = !nonEmptyLines.isEmpty && nonEmptyLines.allSatisfy { $0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        // If all non-empty lines start with the prefix, remove one; otherwise
+        // add it. Leading indentation is preserved.
+        let normalize: (String) -> String = { $0.trimmingCharacters(in: .whitespaces) }
+        let nonEmptyLines = lines.filter { !normalize($0).isEmpty }
+        let areAllCommented = !nonEmptyLines.isEmpty
+            && nonEmptyLines.allSatisfy { normalize($0).hasPrefix(prefix) }
         
         for line in lines {
             if areAllCommented {
-                if let prefixRange = line.range(of: "//") {
+                if let prefixRange = line.range(of: prefix) {
                     var newLine = line
                     newLine.removeSubrange(prefixRange)
+                    // Drop the single space added on insert, when present.
+                    if newLine.hasPrefix(" ") { newLine.removeFirst() }
                     newLines.append(newLine)
                 } else {
                     newLines.append(line)
                 }
             } else {
-                newLines.append("// " + line)
+                // Insert after the indentation, not before it.
+                let indent = line.prefix { $0 == " " || $0 == "\t" }
+                let rest = line.dropFirst(indent.count)
+                newLines.append("\(indent)\(prefix) \(rest)")
             }
         }
         
@@ -3731,15 +3802,19 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func toggleBlockComment() {
+        guard let delimiters = blockCommentDelimiters else {
+            showStatus("\(currentSyntaxName) has no block comment")
+            return
+        }
         let range = selectedRange
         let nsString = sourceCode as NSString
         let selectedText = nsString.substring(with: range)
         
-        if selectedText.hasPrefix("/*") && selectedText.hasSuffix("*/") {
-            let inner = String(selectedText.dropFirst(2).dropLast(2))
+        if selectedText.hasPrefix(delimiters.open) && selectedText.hasSuffix(delimiters.close) {
+            let inner = String(selectedText.dropFirst(delimiters.open.count).dropLast(delimiters.close.count))
             insertText(inner, replacementRange: range)
         } else {
-            insertText("/* \(selectedText) */", replacementRange: range)
+            insertText("\(delimiters.open) \(selectedText) \(delimiters.close)", replacementRange: range)
         }
     }
     
@@ -4645,18 +4720,28 @@ class EditorController: NSObject, ObservableObject {
 
         let pasteConvertItem = NSMenuItem(title: "Paste and Convert to Typst", action: #selector(contextMenuPasteForceTypst(_:)), keyEquivalent: "")
         pasteConvertItem.target = self
-        pasteConvertItem.isEnabled = NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
+        pasteConvertItem.isEnabled = isProseFile
+            && NSPasteboard.general.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.string.rawValue])
         baseMenu.addItem(pasteConvertItem)
 
         baseMenu.addItem(NSMenuItem.separator())
 
+        // Markup-only helpers. Heading promotion and Typst conversion write
+        // document syntax, so they are disabled in source files.
         let promoteHeadingItem = NSMenuItem(title: "Promote Heading", action: #selector(contextMenuPromoteHeading(_:)), keyEquivalent: "")
         promoteHeadingItem.target = self
+        promoteHeadingItem.isEnabled = isProseFile
         baseMenu.addItem(promoteHeadingItem)
 
         let demoteHeadingItem = NSMenuItem(title: "Demote Heading", action: #selector(contextMenuDemoteHeading(_:)), keyEquivalent: "")
         demoteHeadingItem.target = self
+        demoteHeadingItem.isEnabled = isProseFile
         baseMenu.addItem(demoteHeadingItem)
+
+        // Commenting works in any text file, with the language's own prefix.
+        let commentItem = NSMenuItem(title: "Toggle Line Comment", action: #selector(contextMenuToggleLineComment(_:)), keyEquivalent: "")
+        commentItem.target = self
+        baseMenu.addItem(commentItem)
 
         // Send to Calculator — offered when the right-click lands inside a
         // `$ … $` math region of a Typst-capable document.
@@ -4756,6 +4841,10 @@ class EditorController: NSObject, ObservableObject {
 
     @objc func contextMenuDemoteHeading(_ sender: NSMenuItem) {
         demoteHeadingSelection()
+    }
+
+    @objc func contextMenuToggleLineComment(_ sender: NSMenuItem) {
+        toggleLineComment()
     }
 
     @objc func contextMenuSendToCalculator(_ sender: NSMenuItem) {

@@ -159,6 +159,37 @@ extension TextView {
         updateAfterMove()
     }
 
+    /// Adds a cursor on the line above the topmost cursor (⌘⌥↑).
+    /// If the cursors were added downwards, removes the bottommost one instead.
+    @objc public func addCursorAbove(_ sender: Any?) {
+        addCursorVertically(up: true)
+    }
+
+    /// Adds a cursor on the line below the bottommost cursor (⌘⌥↓).
+    /// If the cursors were added upwards, removes the topmost one instead.
+    @objc public func addCursorBelow(_ sender: Any?) {
+        addCursorVertically(up: false)
+    }
+
+    private func addCursorVertically(up: Bool) {
+        unmarkTextIfNeeded()
+        guard let offset = selectionManager.addCursorVertically(up: up) else { return }
+        // Scroll the edge that changed into view. `scrollSelectionToVisible` always targets the lowest
+        // selection, which would jump the view away while adding cursors upwards.
+        guard let scrollView, let rect = layoutManager.rectForOffset(offset) else { return }
+        var target = rect
+        target.size.width = max(target.width, 2.0)
+        target.size.height = max(target.height, layoutManager.estimateLineHeight())
+        if !visibleRect.contains(target) {
+            scrollView.contentView.scrollToVisible(target)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            updateFrameIfNeeded()
+            layoutManager.layoutLines()
+        }
+        selectionManager.updateSelectionViews()
+        needsDisplay = true
+    }
+
     override public func pageUp(_ sender: Any?) {
         enclosingScrollView?.pageUp(sender)
     }

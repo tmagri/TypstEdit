@@ -40,6 +40,9 @@ struct HelpView: View {
                         ShortcutRow(keys: "⌘ /", description: "Toggle Line Comment")
                         ShortcutRow(keys: "⌘ ]", description: "Indent")
                         ShortcutRow(keys: "⌘ [", description: "Outdent")
+                        ShortcutRow(keys: "⌘ ⌥ ↑", description: "Add Cursor Above")
+                        ShortcutRow(keys: "⌘ ⌥ ↓", description: "Add Cursor Below")
+                        ShortcutRow(keys: "Esc", description: "Back to a Single Cursor")
                     }
                     
                     HelpSection(title: "Typst Basics") {

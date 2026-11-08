@@ -36,6 +36,9 @@ public struct EditorTheme: Equatable {
     public var types: Attribute
     public var attributes: Attribute
     public var variables: Attribute
+    /// Names being called. Separate from `variables` so a function call stands
+    /// out from the identifiers around it; defaults to the `variables` style.
+    public var functions: Attribute
     public var values: Attribute
     public var numbers: Attribute
     public var strings: Attribute
@@ -65,6 +68,7 @@ public struct EditorTheme: Equatable {
         types: Attribute,
         attributes: Attribute,
         variables: Attribute,
+        functions: Attribute? = nil,
         values: Attribute,
         numbers: Attribute,
         strings: Attribute,
@@ -91,6 +95,7 @@ public struct EditorTheme: Equatable {
         self.types = types
         self.attributes = attributes
         self.variables = variables
+        self.functions = functions ?? variables
         self.values = values
         self.numbers = numbers
         self.strings = strings
@@ -117,7 +122,7 @@ public struct EditorTheme: Equatable {
             return keywords
         case .comment: return comments
         case .variable, .property: return variables
-        case .function, .method: return variables
+        case .function, .method: return functions
         case .number, .float: return numbers
         case .string: return strings
         case .type: return types
@@ -133,7 +138,15 @@ public struct EditorTheme: Equatable {
         case .textStrike: return markupStrikethrough
         case .punctuationSpecial, .punctuationDelimiter: return punctuation
         case .`operator`: return operators
-        default: return text
+        // Code-only captures. Each has a distinct color so the structure of a
+        // document (a JSON key vs. its value, an HTML attribute vs. its tag)
+        // is readable at a glance instead of collapsing into plain text.
+        case .constant: return values
+        case .attribute, .field: return attributes
+        case .escape: return characters
+        case .annotation: return commands
+        case .embedded: return types
+        case nil: return text
         }
     }
 

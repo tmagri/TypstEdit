@@ -28,9 +28,16 @@
 (function_definition
   name: (identifier) @function)
 
+; Type annotations. This is written BEFORE `(identifier) @variable` because the
+; highlighter keeps the capture with the LOWEST query index when two patterns
+; cover the same range, so the specific pattern must come first to win over the
+; generic identifier fallback. Without this, `float` in `x: float` rendered as
+; a plain variable.
+(type (identifier) @type)
+(type (attribute attribute: (identifier) @type))
+
 (identifier) @variable
 (attribute attribute: (identifier) @property)
-(type (identifier) @type)
 
 ; Literals
 

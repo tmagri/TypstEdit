@@ -30,7 +30,15 @@ extension TextView {
             return super.performKeyEquivalent(with: event)
         }
 
+        let modifiers = event.modifierFlags.intersection([.command, .option, .shift, .control])
+
         switch Int(event.keyCode) {
+        case kVK_UpArrow where modifiers == [.command, .option]:
+            addCursorAbove(event)
+            return true
+        case kVK_DownArrow where modifiers == [.command, .option]:
+            addCursorBelow(event)
+            return true
         case kVK_PageUp:
             if !event.modifierFlags.contains(.shift) {
                 self.pageUp(event)

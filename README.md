@@ -27,6 +27,7 @@
 ### Core Editing
 * **⚡️ Save Preview:** Real-time compilation and preview of your document as you save the document.
 * **🎨 Advanced Syntax Highlighting:** Refined native syntax highlighting for Typst with accurate keyword, function, and markup styling.
+* **🧑‍💻 Code & Data Files:** A Typst project usually holds more than `.typ` files. TypstEdit opens `.py`, `.json`, `.xml`, `.yml`, `.toml`, `.html`, `.css`, `.js`/`.ts`, `.sh`, C/C++/C#, Java, Swift, Go, Rust, Ruby, PHP, SQL, and the rest of the bundled tree-sitter set as editable text with **full syntax highlighting** — plus plain text (`.txt`, `.log`, `.csv`, `.bib`, `.tex`) with none. These files have **no Typst ribbon**: the editing surface is the plain code editor, and the Typst-only formatting tools (bold, lists, headings, PDF preview) stay out of the way. Comment toggling follows the language (`#` in Python, `--` in SQL, `<!-- -->` in XML), indentation switches to four spaces, and the status bar names the active syntax.
 * **🔍 Find and Replace:** Powerful search functionality with editor scrolling to results.
 * **🔢 Line Numbers:** Helpful ruler for code navigation.
 * **📝 Rich Text Formatting:** Support for bold, italic, underline, strikethrough, highlight, subscript, and superscript.

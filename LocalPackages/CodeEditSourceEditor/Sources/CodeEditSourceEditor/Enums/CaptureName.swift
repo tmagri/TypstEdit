@@ -45,6 +45,22 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
     case punctuationSpecial
     case punctuationDelimiter
     case `operator`
+    /// Named values and constants (`true`, `false`, `null`, `NSNotFound`).
+    /// Python, JSON, YAML and C-family grammars all capture these.
+    case constant
+    /// Markup attributes: HTML/XML attribute names, CSS property names,
+    /// JSON object keys (`@attribute`, `@string.special.key`).
+    case attribute
+    /// Escape sequences inside strings (`@escape`, `@string.escape`).
+    case escape
+    /// Preprocessor and annotation markers: `@label`, `@namespace`,
+    /// `@media`, `@supports`, `@charset`, `@import`, `@keyframes`.
+    case annotation
+    /// Text embedded in another language (template interpolations).
+    case embedded
+    /// Struct/class/object members that are neither plain variables nor
+    /// methods (`@field`, `@module`, `@variable.member`).
+    case field
 
     var alternate: CaptureName {
         switch self {
@@ -124,10 +140,37 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
             return .textStrike
         case "punctuation.special":
             return .punctuationSpecial
-        case "punctuation.delimiter":
+        case "punctuation.delimiter", "punctuation.bracket":
             return .punctuationDelimiter
         case "operator":
             return .`operator`
+        // Names used by the bundled Python, JSON, YAML, CSS, HTML and shell
+        // queries. Previously they resolved to `nil` and rendered as plain
+        // text, which is why JSON keys and HTML attributes looked unstyled.
+        case "constant", "constant.macro", "constant.null", "constant.character",
+             "constant.builtin":
+            return .constant
+        case "attribute", "string.special.key", "property.definition", "field":
+            return .field
+        case "escape", "string.escape", "string.special", "string.regex",
+             "string.special.symbol", "character.special":
+            return .escape
+        case "label", "namespace", "media", "supports", "charset", "import",
+             "keyframes", "preproc", "storageclass", "defs", "module":
+            return .annotation
+        case "embedded":
+            return .embedded
+        case "variable.member":
+            return .property
+        case "variable.parameter":
+            return .parameter
+        case "function.builtin", "function.call", "function.macro",
+             "function.method.builtin", "function.special":
+            return .function
+        case "method.call":
+            return .method
+        case "type.builtin", "type.qualifier", "type.definition":
+            return .type
         default:
             return nil
         }
@@ -202,6 +245,18 @@ public enum CaptureName: Int8, CaseIterable, Sendable {
             return "punctuationDelimiter"
         case .`operator`:
             return "operator"
+        case .constant:
+            return "constant"
+        case .attribute:
+            return "attribute"
+        case .escape:
+            return "escape"
+        case .annotation:
+            return "annotation"
+        case .embedded:
+            return "embedded"
+        case .field:
+            return "field"
         }
     }
 }

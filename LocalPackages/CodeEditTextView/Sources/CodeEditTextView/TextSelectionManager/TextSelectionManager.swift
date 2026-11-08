@@ -46,6 +46,8 @@ public class TextSelectionManager: NSObject {
     }
 
     internal(set) public var textSelections: [TextSelection] = []
+    /// The selection the user started adding cursors from (see `addCursorVertically(up:)`).
+    weak var primaryTextSelection: TextSelection?
     weak var layoutManager: TextLayoutManager?
     weak var textStorage: NSTextStorage?
     weak var textView: TextView?
@@ -90,6 +92,13 @@ public class TextSelectionManager: NSObject {
     /// - Parameter range: The selected ranges to set.
     public func setSelectedRanges(_ ranges: [NSRange]) {
         let oldRanges = textSelections.map(\.range)
+        let oldXPositions = Dictionary(
+            textSelections.compactMap { selection in selection.suggestedXPos.map { (selection.range, $0) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let primaryRange = primaryTextSelection.flatMap { primary in
+            textSelections.contains(where: { $0 === primary }) ? primary.range : nil
+        }
 
         textSelections.forEach { $0.view?.removeFromSuperview() }
         // Remove duplicates, invalid ranges, update suggested X position.
@@ -101,9 +110,12 @@ public class TextSelectionManager: NSObject {
             .sorted(by: { $0.location < $1.location })
             .map {
                 let selection = TextSelection(range: $0)
-                selection.suggestedXPos = layoutManager?.rectForOffset($0.location)?.minX
+                // Keep the sticky column of cursors that did not move, so a round trip through
+                // `setSelectedRanges` (e.g. from the SwiftUI state binding) does not break column cursors.
+                selection.suggestedXPos = oldXPositions[$0] ?? layoutManager?.rectForOffset($0.location)?.minX
                 return selection
             }
+        primaryTextSelection = primaryRange.flatMap { range in textSelections.first(where: { $0.range == range }) }
         updateSelectionViews()
         delegate?.setNeedsDisplay()
 

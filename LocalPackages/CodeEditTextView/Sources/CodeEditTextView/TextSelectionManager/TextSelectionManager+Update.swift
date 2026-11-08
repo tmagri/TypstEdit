@@ -44,6 +44,11 @@ extension TextSelectionManager {
         var allRanges: Set<NSRange> = []
         for (idx, selection) in self.textSelections.enumerated().reversed() {
             if allRanges.contains(selection.range) {
+                selection.view?.removeFromSuperview()
+                selection.view = nil
+                if primaryTextSelection === selection {
+                    primaryTextSelection = textSelections.first(where: { $0 !== selection && $0.range == selection.range })
+                }
                 self.textSelections.remove(at: idx)
             } else {
                 allRanges.insert(selection.range)
@@ -52,6 +57,7 @@ extension TextSelectionManager {
     }
 
     public func notifyAfterEdit(force: Bool = false) {
+        mergeOverlappingSelections()
         updateSelectionViews(force: force)
         NotificationCenter.default.post(Notification(name: Self.selectionChangedNotification, object: self))
     }

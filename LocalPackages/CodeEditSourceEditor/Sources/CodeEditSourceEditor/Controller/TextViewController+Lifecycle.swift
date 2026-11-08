@@ -312,6 +312,10 @@ extension TextViewController {
                 self.findViewController?.hideFindPanel()
                 return nil
             }
+            // Collapse multiple cursors back to one, like VS Code.
+            if textView.selectionManager.collapseToPrimarySelection() {
+                return nil
+            }
             // Attempt to show completions otherwise
             return handleShowCompletions(event)
         case (controlKey, " "):

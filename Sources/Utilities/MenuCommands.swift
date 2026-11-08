@@ -236,7 +236,7 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "copyAsMarkdown")
             }
             .keyboardShortcut("c", modifiers: [.command, .option, .shift])
-            .disabled(!editorController.isTypstFile && !editorController.isMarkdownFile)
+            .disabled(!editorController.isProseFile)
             
             Button("Paste") { post("paste") }
             .keyboardShortcut("v", modifiers: .command)
@@ -246,6 +246,7 @@ struct AppMenuCommands: Commands {
 
             Button("Paste and Convert to Typst") { post("pasteForceTypst") }
             .keyboardShortcut("v", modifiers: [.command, .option])
+            .disabled(!editorController.isProseFile)
             
             Button("Delete") { post("delete") }
             .keyboardShortcut(.delete, modifiers: [])
@@ -280,23 +281,31 @@ struct AppMenuCommands: Commands {
             
             Divider()
             
-            Button("Bold") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleBold")
+            // Markup formatting. These write Typst/Markdown syntax (`*bold*`,
+            // `+ item`, `= Heading`), which would corrupt a source file, so they
+            // are disabled for code and plain text.
+            Group {
+                Button("Bold") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleBold")
+                }
+                .keyboardShortcut("b", modifiers: .command)
+                
+                Button("Italic") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleItalic")
+                }
+                .keyboardShortcut("i", modifiers: .command)
+                
+                Button("Underline") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleUnderline")
+                }
+                .keyboardShortcut("u", modifiers: .command)
             }
-            .keyboardShortcut("b", modifiers: .command)
-            
-            Button("Italic") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleItalic")
-            }
-            .keyboardShortcut("i", modifiers: .command)
-            
-            Button("Underline") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleUnderline")
-            }
-            .keyboardShortcut("u", modifiers: .command)
+            .disabled(!editorController.isProseFile)
             
             Divider()
             
+            // Commenting works in every text file; the prefix comes from the
+            // language (Python `#`, SQL `--`, HTML `<!-- -->`, …).
             Button("Toggle Line Comment") {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleLineComment")
             }
@@ -306,60 +315,64 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "toggleBlockComment")
             }
             .keyboardShortcut("/", modifiers: [.command, .option])
+            .disabled(EditorFileTypes.blockCommentDelimiters(for: editorController.currentFileURL) == nil)
             
             Divider()
             
-            Button("Toggle Highlight") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleHighlight")
-            }
-            .keyboardShortcut("h", modifiers: [.command, .shift])
-            
-            Button("Toggle Strikethrough") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleStrike")
-            }
-            .keyboardShortcut("s", modifiers: [.command, .shift])
+            Group {
+                Button("Toggle Highlight") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleHighlight")
+                }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
+                
+                Button("Toggle Strikethrough") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleStrike")
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
 
-            Button("Subscript") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleSubscript")
+                Button("Subscript") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleSubscript")
+                }
+                .keyboardShortcut("-", modifiers: [.command, .control])
+                
+                Button("Superscript") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleSuperscript")
+                }
+                .keyboardShortcut("+", modifiers: [.command, .control])
+                
+                Divider()
+                
+                Button("Bullet List") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleBulletList")
+                }
+                .keyboardShortcut("8", modifiers: [.command, .shift])
+                
+                Button("Numbered List") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleNumberList")
+                }
+                .keyboardShortcut("7", modifiers: [.command, .shift])
+                
+                Button("Description List") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleDescriptionList")
+                }
+                .keyboardShortcut("9", modifiers: [.command, .shift])
+                
+                Button("Inline Code") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleCode")
+                }
+                .keyboardShortcut("`", modifiers: .command)
+                
+                Button("Code Block") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
+                }
+                .keyboardShortcut("c", modifiers: [.command, .shift])
+                
+                Button("Block Quote") {
+                    NotificationCenter.default.post(name: .menuCommand, object: "toggleQuote")
+                }
+                .keyboardShortcut(".", modifiers: [.command, .shift])
             }
-            .keyboardShortcut("-", modifiers: [.command, .control])
-            
-            Button("Superscript") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleSuperscript")
-            }
-            .keyboardShortcut("+", modifiers: [.command, .control])
-            
-            Divider()
-            
-            Button("Bullet List") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleBulletList")
-            }
-            .keyboardShortcut("8", modifiers: [.command, .shift])
-            
-            Button("Numbered List") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleNumberList")
-            }
-            .keyboardShortcut("7", modifiers: [.command, .shift])
-            
-            Button("Description List") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleDescriptionList")
-            }
-            .keyboardShortcut("9", modifiers: [.command, .shift])
-            
-            Button("Inline Code") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleCode")
-            }
-            .keyboardShortcut("`", modifiers: .command)
-            
-            Button("Code Block") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleCodeBlock")
-            }
-            .keyboardShortcut("c", modifiers: [.command, .shift])
-            
-            Button("Block Quote") {
-                NotificationCenter.default.post(name: .menuCommand, object: "toggleQuote")
-            }
-            .keyboardShortcut(".", modifiers: [.command, .shift])
+            .disabled(!editorController.isProseFile)
         }
 
 

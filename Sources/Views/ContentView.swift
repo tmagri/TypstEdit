@@ -714,7 +714,7 @@ struct ContentView: View {
     
     private var statusBar: some View {
         Group {
-            if editorController.isTypstFile || editorController.isMarkdownFile {
+            if editorController.currentFileType.isTextual {
                 HStack {
                     // Toggle Sidebar Button
                     Button(action: {
@@ -750,74 +750,96 @@ struct ContentView: View {
 
                         Divider().frame(height: 12).padding(.horizontal, 4)
                     }
+
+                    // Working on code or plain text instead of a Typst document?
+                    // Name the syntax so it is obvious which grammar is coloring
+                    // the file, and keep the view-mode buttons below hidden — there
+                    // is no preview to split.
+                    if !editorController.isTypstFile && !editorController.isMarkdownFile {
+                        Text(editorController.currentSyntaxName)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(themeManager.textColor.opacity(0.8))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.08))
+                            .clipShape(Capsule())
+                            .help("Syntax highlighting: \(editorController.currentSyntaxName)")
+
+                        Divider().frame(height: 12).padding(.horizontal, 4)
+                    }
                     
-                    // View Mode Options
-                    HStack(spacing: 8) {
-                        Button(action: {
-                            editorController.viewMode = .editorOnly
-                        }) {
-                            Image(systemName: "doc.text")
-                                .font(.system(size: 11))
-                                .foregroundColor(editorController.viewMode == .editorOnly ? .accentColor : themeManager.textColor.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Only Show Editor")
-                        
-                        Button(action: {
-                            editorController.viewMode = .previewOnly
-                        }) {
-                            Image(systemName: "doc.richtext")
-                                .font(.system(size: 11))
-                                .foregroundColor(editorController.viewMode == .previewOnly ? .accentColor : themeManager.textColor.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Preview Only")
-                        
-                        Button(action: {
-                            editorController.viewMode = .both
-                            editorController.isVerticalSplit = true
-                        }) {
-                            Image(systemName: "square.split.2x1")
-                                .font(.system(size: 11))
-                                .foregroundColor(editorController.viewMode == .both && editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Split Vertically")
-                        
-                        Button(action: {
-                            editorController.viewMode = .both
-                            editorController.isVerticalSplit = false
-                        }) {
-                            Image(systemName: "square.split.1x2")
-                                .font(.system(size: 11))
-                                .foregroundColor(editorController.viewMode == .both && !editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Split Horizontally")
-
-                        if aiSettings.chatEnabled {
+                    // View Mode Options — Typst and Markdown documents only; a code
+                    // file has no PDF preview to show.
+                    if editorController.isTypstFile || editorController.isMarkdownFile {
+                        HStack(spacing: 8) {
                             Button(action: {
-                                withAnimation { editorController.toggleAIChatPanel() }
+                                editorController.viewMode = .editorOnly
                             }) {
-                                Image(systemName: "bubble.left.and.text.bubble.right")
+                                Image(systemName: "doc.text")
                                     .font(.system(size: 11))
-                                    .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? .accentColor : themeManager.textColor.opacity(0.7))
+                                    .foregroundColor(editorController.viewMode == .editorOnly ? .accentColor : themeManager.textColor.opacity(0.7))
                             }
                             .buttonStyle(.plain)
-                            .help("Toggle AI Chat")
-                        }
+                            .help("Only Show Editor")
 
-                        if generalSettings.showCalculator {
                             Button(action: {
-                                withAnimation { editorController.toggleCalculatorPanel() }
+                                editorController.viewMode = .previewOnly
                             }) {
-                                Image(systemName: "function")
+                                Image(systemName: "doc.richtext")
                                     .font(.system(size: 11))
-                                    .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? .accentColor : themeManager.textColor.opacity(0.7))
+                                    .foregroundColor(editorController.viewMode == .previewOnly ? .accentColor : themeManager.textColor.opacity(0.7))
                             }
                             .buttonStyle(.plain)
-                            .help("Toggle Calculator")
+                            .help("Preview Only")
+
+                            Button(action: {
+                                editorController.viewMode = .both
+                                editorController.isVerticalSplit = true
+                            }) {
+                                Image(systemName: "square.split.2x1")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(editorController.viewMode == .both && editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Split Vertically")
+
+                            Button(action: {
+                                editorController.viewMode = .both
+                                editorController.isVerticalSplit = false
+                            }) {
+                                Image(systemName: "square.split.1x2")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(editorController.viewMode == .both && !editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Split Horizontally")
                         }
+                    }
+
+                    // Available for every text file: AI Chat is scoped to the
+                    // whole project, code included.
+                    if aiSettings.chatEnabled {
+                        Button(action: {
+                            withAnimation { editorController.toggleAIChatPanel() }
+                        }) {
+                            Image(systemName: "bubble.left.and.text.bubble.right")
+                                .font(.system(size: 11))
+                                .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? .accentColor : themeManager.textColor.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Toggle AI Chat")
+                    }
+
+                    if generalSettings.showCalculator && (editorController.isTypstFile || editorController.isMarkdownFile) {
+                        Button(action: {
+                            withAnimation { editorController.toggleCalculatorPanel() }
+                        }) {
+                            Image(systemName: "function")
+                                .font(.system(size: 11))
+                                .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? .accentColor : themeManager.textColor.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Toggle Calculator")
                     }
                     
                     Divider().frame(height: 12).padding(.horizontal, 4)
@@ -1154,6 +1176,27 @@ struct ContentView: View {
                .contentShape(Rectangle()) 
                .onTapGesture(count: 2) { toggleWindowMaximize() }
                .overlay(Divider(), alignment: .top) 
+            } else if editorController.currentFileType.isTextual {
+                // Code and plain text files have no Typst ribbon — none of its
+                // actions apply. A slim header keeps the file's syntax visible
+                // and leaves the reload button reachable.
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 11))
+                        .foregroundColor(themeManager.textColor.opacity(0.7))
+                    Text(editorController.currentSyntaxName)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(themeManager.textColor.opacity(0.85))
+                    Spacer()
+                    reloadFromDiskButton
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Color(NSColor.controlBackgroundColor))
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { toggleWindowMaximize() }
+                .overlay(Divider(), alignment: .top)
+                .help("\(editorController.currentSyntaxName) — plain text editing with syntax highlighting")
             }
         }
     }
@@ -1180,10 +1223,10 @@ struct ContentView: View {
             if editorController.currentFileType.isTextual {
                 SourceEditor(
                     editorController.sourceCodeBinding,
-                    // Pick the highlighting language based on file extension.
-                    //  - .md   -> Markdown
-                    //  - .note -> Markdown grammar with a Typst overlay (Typst wins on overlap)
-                    //  - else  -> Typst
+                    // The grammar follows the file: Typst for `.typ`,
+                    // Markdown for `.md`, a Markdown+Typst hybrid for `.note`,
+                    // and the file's own language for code (Python, JSON, XML,
+                    // YAML, …). Plain text gets the no-grammar language.
                     language: editorController.highlightLanguage,
                     configuration: editorController.editorConfiguration,
                     state: editorController.editorStateBinding,
@@ -1517,9 +1560,12 @@ struct ContentView: View {
             return
         }
 
-        let isTextual = ["typ", "txt", "md", "json", "yml", "yaml", "toml", "css", "js", "ts", "html", "bib", "svg", "lyx", "note"].contains(ext)
+        // Anything that is not an editable text file, a PDF or a raster image is
+        // shown in a preview instead of the text editor. The decision lives in
+        // `EditorFileTypes` so the editor and the loader can never disagree.
+        let isTextual = EditorFileTypes.isEditableTextFile(url)
 
-        if !isTextual && ext != "pdf" && ext != "png" && ext != "jpg" { // Basic check
+        if !isTextual && ext != "pdf" && !EditorFileTypes.isImageFile(url) {
              // For non-text, update immediately as there is no content to read
              self.editorController.currentFileURL = url
              self.currentPDFURL = nil
@@ -1530,7 +1576,14 @@ struct ContentView: View {
         print("[DEBUG] loadFile: Dispatching background read")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let content = try LyxToTypstConverter.load(from: url)
+                // LyX files need conversion; every other text file is simply
+                // decoded (BOM-aware UTF-8/UTF-16, then Windows-1252/Latin-1).
+                let content: String
+                if ext == "lyx" {
+                    content = try LyxToTypstConverter.load(from: url)
+                } else {
+                    content = try TextFileEncoding.string(from: url).text
+                }
                 print("[DEBUG] loadFile: Read success (len: \(content.count)). Dispatching main update (id: \(loadID))")
                 DispatchQueue.main.async {
                     guard self.currentLoadID == loadID else { 
@@ -1687,7 +1740,11 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 if url == self.selectedFile || fileSystem.isNewUnsavedFile {
                     self.scheduleCompilation(with: self.editorController.sourceCode, force: true)
-                    self.exportPDF(from: url) // Update clean PDF on disk on save
+                    // Only Typst/Markdown documents have a PDF to export. Saving
+                    // a Python or JSON file must not invoke the Typst compiler.
+                    if self.editorController.isProseFile {
+                        self.exportPDF(from: url) // Update clean PDF on disk on save
+                    }
                     self.lastSaved = Date()
                     self.editorController.showStatus("File Saved")
                     withAnimation { self.showSavePopup = true }

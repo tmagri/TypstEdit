@@ -59,9 +59,14 @@ class AICompletionProvider: CodeSuggestionDelegate {
         let prefix = getWordPrefix(text: text, cursorIndex: index)
         
         var allItems: [any CodeSuggestionEntry] = []
-        
+
+        // The offline index is a Typst function catalogue. Offering it inside a
+        // Python or JSON file would suggest `#align(…)` next to real code, so
+        // it is limited to documents Typst can actually compile.
+        let isProseDocument = controller?.isProseFile ?? true
+
         // 1. Offline Intellisense (Immediate, 0ms latency)
-        if settings.intellisenseEnabled {
+        if settings.intellisenseEnabled && isProseDocument {
             let suggestions = OfflineCompletionService.shared.provideCompletion(
                 text: text,
                 cursorIndex: index,
@@ -105,11 +110,22 @@ class AICompletionProvider: CodeSuggestionDelegate {
                         scope: settings.completionContextScope
                     )
                     try Task.checkCancellation()
-                    
+
+                    // Name the language so the model continues Python as Python
+                    // rather than assuming Typst markup.
+                    let syntaxName = controller?.currentSyntaxName ?? "Typst"
+                    let systemPrompt = "You are a precise code completion engine for \(syntaxName). "
+                        + "Output ONLY the text to insert at the cursor. "
+                        + "Do NOT output any thinking, reasoning, explanations, or XML tags."
+
                     // Strict timeout on network request: abort if model is unresponsive
                     let completionCode = try await withThrowingTaskGroup(of: String.self) { group in
                         group.addTask {
-                            return try await AICompletionService.shared.fetchCompletion(prompt: context, purpose: .completion)
+                            return try await AICompletionService.shared.fetchCompletion(
+                                prompt: context,
+                                systemPrompt: systemPrompt,
+                                purpose: .completion
+                            )
                         }
                         group.addTask {
                             try await Task.sleep(nanoseconds: timeoutNanos)
@@ -186,7 +202,7 @@ class AICompletionProvider: CodeSuggestionDelegate {
         // Cancel previous pending AI query on cursor move
         debounceTask?.cancel()
 
-        if settings.intellisenseEnabled {
+        if settings.intellisenseEnabled && (controller?.isProseFile ?? true) {
             let suggestions = OfflineCompletionService.shared.provideCompletion(
                 text: text,
                 cursorIndex: index,

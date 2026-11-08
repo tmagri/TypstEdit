@@ -758,6 +758,32 @@ struct SidebarView: View {
                                     Label("New Markdown File", systemImage: "doc.text.fill") 
                                 }
 
+                                Divider()
+
+                                Button(action: {
+                                    if let newFile = model.createProjectFile(extension: "py") {
+                                        selectedFile = newFile
+                                    }
+                                }) {
+                                    Label("New Python File", systemImage: "chevron.left.forwardslash.chevron.right")
+                                }
+
+                                Button(action: {
+                                    if let newFile = model.createProjectFile(extension: "json") {
+                                        selectedFile = newFile
+                                    }
+                                }) {
+                                    Label("New JSON File", systemImage: "curlybraces")
+                                }
+
+                                Button(action: {
+                                    if let newFile = model.createProjectFile(extension: "txt") {
+                                        selectedFile = newFile
+                                    }
+                                }) {
+                                    Label("New Text File", systemImage: "doc.plaintext")
+                                }
+
                                 if generalSettings.showCalculator {
                                     Button(action: {
                                         if let newFile = model.createProjectFile(extension: "tcalc") {
@@ -1036,6 +1062,15 @@ struct SidebarRow: View {
                     Button("Markdown File (.md)") {
                         createFileHere("md")
                     }
+                    Button("Python File (.py)") {
+                        createFileHere("py")
+                    }
+                    Button("JSON File (.json)") {
+                        createFileHere("json")
+                    }
+                    Button("Text File (.txt)") {
+                        createFileHere("txt")
+                    }
                 } label: {
                     Label("New File Here", systemImage: "square.and.pencil")
                 }
@@ -1109,6 +1144,17 @@ struct SidebarRow: View {
         if node.name.hasSuffix(".pdf") {
             return "doc.text" // PDF icon? 
         }
+        if node.name.hasSuffix(".md") || node.name.hasSuffix(".markdown") {
+            return "doc.plaintext"
+        }
+        // Source code gets the code-chevron icon so it is distinguishable from
+        // a plain text file at a glance.
+        if EditorFileTypes.syntax(for: node.url) != nil {
+            return "chevron.left.forwardslash.chevron.right"
+        }
+        if EditorFileTypes.isImageFile(node.url) {
+            return "photo"
+        }
         return "doc"
     }
     
@@ -1122,6 +1168,22 @@ struct SidebarRow: View {
         // Indigo matches the notebook styling used for notes elsewhere.
         if node.name.hasSuffix(".note") {
             return .indigo
+        }
+        if node.name.hasSuffix(".md") || node.name.hasSuffix(".markdown") {
+            return .teal
+        }
+        // Each code language family gets a muted tint, like an editor's file
+        // icons, so a project tree stays scannable.
+        if let syntax = EditorFileTypes.syntax(for: node.url) {
+            switch syntax.language.id {
+            case .python: return .green
+            case .json, .yaml, .toml: return .yellow
+            case .html: return .orange
+            case .css: return .blue
+            case .javascript, .jsx, .typescript, .tsx: return .yellow
+            case .bash: return .mint
+            default: return .purple
+            }
         }
         return themeManager.textColor // Match text color for better visibility in light mode
     }
