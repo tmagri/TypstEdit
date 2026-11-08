@@ -333,6 +333,9 @@ class TypstCompiler: ObservableObject {
     /// it is released, so without this a compiler torn down with its window
     /// (no `cleanUp()` call) left the watch running until the app quit.
     private let watchOwner = WatchProcessOwner()
+
+    /// True while this compiler's `typst watch` is running.
+    var isWatching: Bool { currentProcess?.isRunning == true }
     
     // We keep track of the current shadow file being watched
     private var currentShadowSourceURL: URL?
@@ -803,7 +806,11 @@ class TypstCompiler: ObservableObject {
         self.currentProcess = process
         
         process.terminationHandler = { [weak self] terminated in
-            let exitCode = terminated.terminationStatus
+            // SIGTERM is what we send to stop or replace a watch; it is not a
+            // compiler failure and must not show as one.
+            let stoppedByUs = terminated.terminationReason == .uncaughtSignal
+                && terminated.terminationStatus == SIGTERM
+            let exitCode = stoppedByUs ? 0 : terminated.terminationStatus
             let processID = ObjectIdentifier(terminated)
             Task { @MainActor [weak self] in
                 // The pipe's last chunk can be delivered after termination;
@@ -835,7 +842,7 @@ class TypstCompiler: ObservableObject {
         
         do {
             try process.run()
-            watchOwner.adopt(process, pipe: pipe)
+            watchOwner.adopt(process, pipe: pipe, sourcePath: sourceURL.standardizedFileURL.path)
             self.isCompiling = true
             self.compilationStatus = "Watching..."
             
@@ -3015,28 +3022,75 @@ final class WatchProcessOwner: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var pipe: Pipe?
+    private var sourcePath: String?
 
-    /// Takes ownership of a started watch, stopping any previous one.
-    func adopt(_ process: Process, pipe: Pipe) {
+    /// Every live owner by the shadow file it watches. Two `typst watch`
+    /// processes on one file are never useful (they write the same PDF), so
+    /// adopting a watch evicts whichever owner held that file before —
+    /// whatever created the second compiler.
+    private static let registryLock = NSLock()
+    nonisolated(unsafe) private static var ownersByPath: [String: WeakOwner] = [:]
+    private final class WeakOwner {
+        weak var owner: WatchProcessOwner?
+        init(_ owner: WatchProcessOwner) { self.owner = owner }
+    }
+
+    /// Takes ownership of a started watch on `sourcePath`, stopping this
+    /// owner's previous watch and any other owner's watch on the same file.
+    func adopt(_ process: Process, pipe: Pipe, sourcePath: String) {
+        Self.registryLock.lock()
+        let rival = Self.ownersByPath[sourcePath]?.owner
+        Self.ownersByPath[sourcePath] = WeakOwner(self)
+        Self.registryLock.unlock()
+        if let rival, rival !== self {
+            AppDelegate.debugLog("typst watch: second watch on \((sourcePath as NSString).lastPathComponent); stopping the older one")
+            rival.stop()
+        }
+
         lock.lock()
-        let old = (self.process, self.pipe)
+        let old = (self.process, self.pipe, self.sourcePath)
         self.process = process
         self.pipe = pipe
+        self.sourcePath = sourcePath
         lock.unlock()
+        if let oldPath = old.2, oldPath != sourcePath { Self.unregister(self, path: oldPath) }
         Self.end(old.0, old.1)
+        AppDelegate.debugLog("typst watch: started pid \(process.processIdentifier) for \((sourcePath as NSString).lastPathComponent)")
     }
 
     func stop() {
         lock.lock()
-        let old = (process, pipe)
+        let old = (process, pipe, sourcePath)
         process = nil
         pipe = nil
+        sourcePath = nil
         lock.unlock()
+        if let path = old.2 { Self.unregister(self, path: path) }
         Self.end(old.0, old.1)
     }
 
     deinit {
+        if let sourcePath { Self.unregister(self, path: sourcePath) }
         Self.end(process, pipe)
+    }
+
+    /// Number of watches currently owned app-wide. For tests and diagnostics.
+    static var liveWatchCount: Int {
+        registryLock.lock(); defer { registryLock.unlock() }
+        return ownersByPath.values.filter { $0.owner?.isRunning == true }.count
+    }
+
+    private var isRunning: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return process?.isRunning == true
+    }
+
+    private static func unregister(_ owner: WatchProcessOwner, path: String) {
+        registryLock.lock()
+        if let entry = ownersByPath[path], entry.owner === owner || entry.owner == nil {
+            ownersByPath[path] = nil
+        }
+        registryLock.unlock()
     }
 
     /// Detaches the reader, then SIGTERMs the child; SIGKILL follows if it is
@@ -3044,8 +3098,9 @@ final class WatchProcessOwner: @unchecked Sendable {
     private static func end(_ process: Process?, _ pipe: Pipe?) {
         pipe?.fileHandleForReading.readabilityHandler = nil
         guard let process, process.isRunning else { return }
-        process.terminate()
         let pid = process.processIdentifier
+        AppDelegate.debugLog("typst watch: stopping pid \(pid)")
+        process.terminate()
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
             if process.isRunning { kill(pid, SIGKILL) }
         }

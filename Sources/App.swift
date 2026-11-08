@@ -500,10 +500,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// the group (from any path) is closed again, and the existing one comes
     /// forward: two views on one controller would both handle every
     /// notification sent to it.
+    /// Re-created main windows that `registerMainWindow` turned away. Weak,
+    /// so a window that SwiftUI finally frees drops out by itself.
+    private let rejectedMainWindows = NSHashTable<NSWindow>.weakObjects()
+
+    /// True for a duplicate main window. Its view must not compile, save or
+    /// otherwise act for the shared controller.
+    func isRejectedDuplicate(_ window: NSWindow) -> Bool {
+        rejectedMainWindows.contains(window)
+    }
+
     func registerMainWindow(_ window: NSWindow) {
         guard mainWindow !== window else { return }
         if isMainWindowOpen, let existing = mainWindow {
             Self.debugLog("registerMainWindow: duplicate main window closed")
+            // The duplicate shares the main window's EditorController, so its
+            // ContentView would compile the same document into the same
+            // shadow file: a second `typst watch` for every re-created window.
+            // Mark it so that view stays inert, before and after it appears.
+            rejectedMainWindows.add(window)
+            NotificationCenter.default.post(name: .duplicateMainWindowRejected, object: window)
             window.orderOut(nil)
             DispatchQueue.main.async { window.close() }
             // Only bring the existing window forward when it is on screen,
@@ -1179,6 +1195,11 @@ extension Notification.Name {
     /// A document window is closing: its preview compiler must stop.
     /// `object` is `["target": EditorController]`.
     static let stopPreviewCompiler = Notification.Name("stopPreviewCompiler")
+    /// `object` is the duplicate main `NSWindow` that was just turned away.
+    static let duplicateMainWindowRejected = Notification.Name("duplicateMainWindowRejected")
+    /// A duplicate window let go of the shared controller: the real window
+    /// re-attaches its compiler. `object` is `["target": EditorController]`.
+    static let reclaimPreviewCompiler = Notification.Name("reclaimPreviewCompiler")
 }
 
 /// Holds the SwiftUI `openWindow` action so AppKit-level entry points (a

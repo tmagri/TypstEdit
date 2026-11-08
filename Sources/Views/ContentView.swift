@@ -37,6 +37,16 @@ struct ContentView: View {
         var pendingIsForced = false
     }
     @State private var compileDebounce = CompileDebounce()
+
+    /// Which window this view is in, and whether that window is a duplicate
+    /// main window SwiftUI re-created (see `AppDelegate.registerMainWindow`).
+    /// A reference type so the debounced compile closure reads the current
+    /// value, not the one captured when it was scheduled.
+    private final class WindowRole {
+        weak var window: NSWindow?
+        var isDuplicate = false
+    }
+    @State private var windowRole = WindowRole()
     
     @State private var reloadToken: UUID = UUID()
     @State private var lastSaved: Date?
@@ -141,6 +151,21 @@ struct ContentView: View {
                 guard targetedPayload(notification) != nil else { return }
                 compiler.cleanUp()
             }
+            .background(WindowAccessor { window in adoptWindow(window) })
+            .onReceive(NotificationCenter.default.publisher(for: .duplicateMainWindowRejected)) { notification in
+                guard let window = notification.object as? NSWindow,
+                      window === windowRole.window else { return }
+                becomeDuplicate()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .reclaimPreviewCompiler)) { notification in
+                guard targetedPayload(notification) != nil, !windowRole.isDuplicate else { return }
+                // A duplicate's appearance pointed the shared controller's
+                // diagnostics at its own compiler; point them back here.
+                editorController.observeCompiler(compiler)
+                // If the duplicate got as far as starting a watch, it evicted
+                // this window's; bring the preview back.
+                if !compiler.isWatching { scheduleCompilation(force: true) }
+            }
     }
 
     /// Window-specific notifications carry `["target": EditorController, …]`.
@@ -196,6 +221,29 @@ struct ContentView: View {
             return "Warning: changing the extension from “.\(url.pathExtension)” to “.\(newExtension)” may change how TypstEdit opens this file."
         }
         return "Enter a new name, including the extension."
+    }
+
+    /// Records the window this view lives in. The window can be reported
+    /// before or after `AppDelegate` turns it away, so check here as well as
+    /// on the rejection notification.
+    private func adoptWindow(_ window: NSWindow) {
+        guard windowRole.window !== window else { return }
+        windowRole.window = window
+        if AppDelegate.shared?.isRejectedDuplicate(window) == true {
+            becomeDuplicate()
+        }
+    }
+
+    /// This view is in a duplicate main window: stop its `typst watch`, drop
+    /// any pending compile, and hand the shared controller back to the real
+    /// window. From now on `scheduleCompilation` does nothing here.
+    private func becomeDuplicate() {
+        guard !windowRole.isDuplicate else { return }
+        windowRole.isDuplicate = true
+        compileDebounce.workItem?.cancel()
+        compileDebounce.workItem = nil
+        compiler.cleanUp()
+        NotificationCenter.default.post(name: .reclaimPreviewCompiler, object: ["target": editorController])
     }
 
     /// Clears all document state so the welcome screen shows. Shared by the
@@ -2028,6 +2076,9 @@ struct ContentView: View {
     }
     
     func scheduleCompilation(with content: String? = nil, force: Bool = false) {
+        // A duplicate main window shares the controller but must never run a
+        // second compiler (or auto-save) for the same document.
+        guard !windowRole.isDuplicate else { return }
         let isUnsaved = fileSystem.isNewUnsavedFile && selectedFile == nil
         let isCompilable = editorController.isTypstFile || editorController.isMarkdownFile
         guard (selectedFile != nil || isUnsaved), isCompilable else {
@@ -2055,7 +2106,11 @@ struct ContentView: View {
         // and no badge to tap, so a freshly opened/pasted note would render an
         // empty preview pane forever.
         let shouldCompile = !isNote || effectiveForce || compiler.currentShadowPDFURL == nil
+        let role = windowRole
         let newWorkItem = DispatchWorkItem {
+            // The window may have been identified as a duplicate during the
+            // debounce delay.
+            guard !role.isDuplicate else { return }
             debounce.pendingIsForced = false
             // Auto-save is only needed when the buffer actually holds unsaved
             // edits; rewriting an unchanged file would pointlessly bump its

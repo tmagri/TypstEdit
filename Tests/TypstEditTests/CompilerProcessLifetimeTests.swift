@@ -2,11 +2,14 @@ import XCTest
 @testable import TypstEdit
 
 /// The preview compiler runs a long-lived `typst watch` child. These check it
-/// never outlives the compiler (window closed) or the document (welcome screen).
+/// never outlives its compiler, and that one document never gets two watches.
 @MainActor
 final class CompilerProcessLifetimeTests: XCTestCase {
 
     private var root: URL!
+    /// Every watch a test started. Killed in tearDown whatever the outcome, so
+    /// a failing assertion can never leave a `typst` process behind.
+    private var startedPIDs: Set<pid_t> = []
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -16,17 +19,19 @@ final class CompilerProcessLifetimeTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        for pid in startedPIDs { kill(pid, SIGKILL) }
+        startedPIDs = []
         if let root { try? FileManager.default.removeItem(at: root) }
         try super.tearDownWithError()
     }
 
-    /// `typst watch` children of this test process.
-    private func watchChildren() -> [pid_t] {
-        ChildProcessGuard.descendants(of: getpid()).filter { pid in
+    /// `typst` children of this test process.
+    private func watchChildren() -> Set<pid_t> {
+        Set(ChildProcessGuard.descendants(of: getpid()).filter { pid in
             var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
             guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return false }
             return URL(fileURLWithPath: String(cString: buffer)).lastPathComponent == "typst"
-        }
+        })
     }
 
     private func waitUntil(_ timeout: TimeInterval, _ condition: () -> Bool) {
@@ -36,14 +41,16 @@ final class CompilerProcessLifetimeTests: XCTestCase {
         }
     }
 
-    /// Starts a watch and returns the PIDs it added.
+    /// Starts a watch on `doc.typ` and returns the PIDs it added.
+    @discardableResult
     private func startWatch(_ compiler: TypstCompiler) async throws -> Set<pid_t> {
-        let before = Set(watchChildren())
+        let before = watchChildren()
         let file = root.appendingPathComponent("doc.typ")
         try "= Hello".write(to: file, atomically: true, encoding: .utf8)
         await compiler.updateContent(source: "= Hello", fileURL: file)
-        waitUntil(5) { !Set(watchChildren()).subtracting(before).isEmpty }
-        let started = Set(watchChildren()).subtracting(before)
+        waitUntil(5) { !watchChildren().subtracting(before).isEmpty }
+        let started = watchChildren().subtracting(before)
+        startedPIDs.formUnion(started)
         guard !started.isEmpty else { throw XCTSkip("typst binary not available") }
         return started
     }
@@ -66,5 +73,24 @@ final class CompilerProcessLifetimeTests: XCTestCase {
         compiler.cleanUp()
         waitUntil(3) { stillRunning(pids).isEmpty }
         XCTAssertTrue(stillRunning(pids).isEmpty, "cleanUp() left typst watch running")
+    }
+
+    /// Two compilers for the same window (what a re-created duplicate main
+    /// window produced) must not leave two watches on one shadow file.
+    func testTwoCompilersOnOneDocumentKeepOnlyOneWatch() async throws {
+        let first = TypstCompiler()
+        let second = TypstCompiler()
+        first.scratchNamespace = "samewindow"
+        second.scratchNamespace = "samewindow"
+
+        let firstPIDs = try await startWatch(first)
+        let secondPIDs = try await startWatch(second)
+
+        waitUntil(3) { stillRunning(firstPIDs).isEmpty }
+        XCTAssertTrue(stillRunning(firstPIDs).isEmpty, "the older watch on the same file kept running")
+        XCTAssertFalse(stillRunning(secondPIDs).isEmpty, "the newest watch must keep the preview alive")
+        XCTAssertFalse(first.isWatching)
+        XCTAssertTrue(second.isWatching)
+        withExtendedLifetime([first, second]) {}
     }
 }
