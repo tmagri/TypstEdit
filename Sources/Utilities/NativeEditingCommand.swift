@@ -60,6 +60,34 @@ enum NativeEditingCommand {
         return responder?.tryToPerform(selector, with: nil) ?? false
     }
 
+    /// True when `command` means something to a terminal and `responder` is one.
+    /// The Python pane's shell is an `NSView`, not an `NSTextView`, so without
+    /// this ⌘C/⌘V/⌘A in the pane posted a notification the document window
+    /// answered by acting on the *editor* — copying text the user could not
+    /// see, or pasting the clipboard into a Python file instead of the shell.
+    static func forward(_ command: String, to terminal: PythonTerminal) -> Bool {
+        let action: Selector?
+        switch command {
+        case "cut":
+            // A terminal has nothing to cut; swallow it so the document
+            // editor does not delete a selection the user cannot see.
+            return true
+        case "copy":             action = #selector(NSText.copy(_:))
+        case "paste":            action = #selector(NSText.paste(_:))
+        case "pasteAsPlainText": action = #selector(NSText.paste(_:))
+        case "delete":
+            // The Edit menu binds the Delete key, so AppKit asks the menu
+            // before the terminal's own key handling. Forward the key as the
+            // byte a terminal expects, or Backspace would do nothing.
+            terminal.send([0x7f])
+            return true
+        case "selectAll":        action = #selector(NSText.selectAll(_:))
+        default:                 action = nil
+        }
+        guard let action else { return false }
+        return terminal.tryToPerform(action, with: nil)
+    }
+
     /// The responder that currently has keyboard focus, following the same
     /// precedence AppKit uses for menu actions: the key window, then the main
     /// window. When neither is reported (a window that is still ordering in, a
@@ -79,7 +107,7 @@ enum NativeEditingCommand {
     /// window. `fallback` is only called when no field editor is focused, which
     /// is what stops a document window from copying text the user cannot see.
     static func route(_ command: String, fallback: (String) -> Void) {
-        route(command, to: activeResponder, fallback: fallback)
+        route(command, to: activeResponder, terminal: PythonTerminal.focused, fallback: fallback)
     }
 
     /// `route` against an explicit responder. The Edit menu always uses the
@@ -88,12 +116,16 @@ enum NativeEditingCommand {
     static func route(
         _ command: String,
         to responder: NSResponder?,
+        terminal: PythonTerminal? = nil,
         fallback: (String) -> Void
     ) {
-        guard isTextResponder(responder) else {
-            fallback(command)
+        if isTextResponder(responder) {
+            forward(command, to: responder)
             return
         }
-        forward(command, to: responder)
+        if let terminal, forward(command, to: terminal) {
+            return
+        }
+        fallback(command)
     }
 }

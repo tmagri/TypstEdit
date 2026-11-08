@@ -1121,6 +1121,13 @@ class EditorController: NSObject, ObservableObject {
         currentFileType == .markdown
     }
 
+    /// True for `.py` and friends. Those files have no compilable preview, so
+    /// the right pane is a terminal (the Python pane) instead of a PDF.
+    var isPythonFile: Bool {
+        guard let url = currentFileURL else { return false }
+        return EditorFileTypes.isPythonFile(url)
+    }
+
     /// `.note` files share the Typst compiler pipeline but are treated as notes:
     /// Markdown-with-Typst-overlay. Used to gate expensive auto-compile behavior.
     var isNoteFile: Bool {

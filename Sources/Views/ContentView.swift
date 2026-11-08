@@ -16,6 +16,11 @@ struct ContentView: View {
     @StateObject private var compiler = TypstCompiler()
     @StateObject private var fileSystem = FileSystemModel()
     @StateObject private var sourceControl = SourceControlManager()
+
+    /// This window's Python pane shell. One per window, so each window keeps
+    /// its own scrollback and working directory, and switching to another
+    /// document does not kill a running script.
+    @StateObject private var pythonTerminal = PythonTerminalModel()
     
     @Environment(\.colorScheme) var colorScheme
     
@@ -99,6 +104,13 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
                 guard let window = notification.object as? NSWindow, window === hostingWindow else { return }
                 ActiveProjectContext.shared.activate(editorController)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
+                // The pane's shell belongs to this window. Closing the window
+                // must end it here, not wait for the app to quit; twice-closed
+                // windows would otherwise leave shells running invisibly.
+                guard let window = notification.object as? NSWindow, window === hostingWindow else { return }
+                pythonTerminal.stop()
             }
             .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
                 guard shouldHandleMenuCommand() else { return }
@@ -689,7 +701,8 @@ struct ContentView: View {
                 
                 let isTypst = editorController.currentFileType == .typst
                 let isCompilable = isTypst || editorController.isMarkdownFile
-                
+                let isPython = editorController.isPythonFile
+
                 if isCompilable {
                     if editorController.viewMode == .editorOnly {
                         editorBox.padding(.horizontal, 12)
@@ -700,6 +713,20 @@ struct ContentView: View {
                             editorBox.padding(.leading, 12)
                         } right: {
                             pdfBox
+                        }
+                    }
+                } else if isPython {
+                    // A Python file has nothing to render, so the right pane is
+                    // a terminal that runs it instead of an empty PDF preview.
+                    if editorController.viewMode == .editorOnly {
+                        editorBox.padding(.horizontal, 12)
+                    } else if editorController.viewMode == .previewOnly {
+                        pythonTerminalBox.padding(.leading, 12)
+                    } else {
+                        ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                            editorBox.padding(.leading, 12)
+                        } right: {
+                            pythonTerminalBox
                         }
                     }
                 } else {
@@ -754,7 +781,8 @@ struct ContentView: View {
                     // Working on code or plain text instead of a Typst document?
                     // Name the syntax so it is obvious which grammar is coloring
                     // the file, and keep the view-mode buttons below hidden — there
-                    // is no preview to split.
+                    // is no preview to split (Python is the exception: its pane is
+                    // the terminal, so it does have a right-hand pane to show).
                     if !editorController.isTypstFile && !editorController.isMarkdownFile {
                         Text(editorController.currentSyntaxName)
                             .font(.caption2.weight(.semibold))
@@ -768,9 +796,10 @@ struct ContentView: View {
                         Divider().frame(height: 12).padding(.horizontal, 4)
                     }
                     
-                    // View Mode Options — Typst and Markdown documents only; a code
-                    // file has no PDF preview to show.
-                    if editorController.isTypstFile || editorController.isMarkdownFile {
+                    // View Mode Options — Typst and Markdown documents get the
+                    // PDF preview; Python files get the terminal in the same
+                    // right-hand slot, so the same three layouts apply to both.
+                    if editorController.isTypstFile || editorController.isMarkdownFile || editorController.isPythonFile {
                         HStack(spacing: 8) {
                             Button(action: {
                                 editorController.viewMode = .editorOnly
@@ -785,12 +814,12 @@ struct ContentView: View {
                             Button(action: {
                                 editorController.viewMode = .previewOnly
                             }) {
-                                Image(systemName: "doc.richtext")
+                                Image(systemName: editorController.isPythonFile ? "terminal" : "doc.richtext")
                                     .font(.system(size: 11))
                                     .foregroundColor(editorController.viewMode == .previewOnly ? .accentColor : themeManager.textColor.opacity(0.7))
                             }
                             .buttonStyle(.plain)
-                            .help("Preview Only")
+                            .help(editorController.isPythonFile ? "Only Show Terminal" : "Preview Only")
 
                             Button(action: {
                                 editorController.viewMode = .both
@@ -814,6 +843,22 @@ struct ContentView: View {
                             .buttonStyle(.plain)
                             .help("Split Horizontally")
                         }
+                    }
+
+                    // Python files: one-click Run. The pane header has the same
+                    // button; this one is where a user looks first.
+                    if editorController.isPythonFile {
+                        Button(action: runPythonFile) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 10))
+                                Text("Run")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundColor(themeManager.textColor.opacity(0.85))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Run this Python file in the terminal (Cmd+Option+R)")
                     }
 
                     // Available for every text file: AI Chat is scoped to the
@@ -1065,6 +1110,53 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help(icon == "minus" ? "Zoom Out (Cmd−)" : icon == "plus" ? "Zoom In (Cmd+)" : "Fit to Window")
+    }
+
+    // MARK: - Python pane
+
+    /// The right pane for a Python file: this window's terminal, started in the
+    /// file's folder. Everything else (Run, Ctrl-C, Restart) lives in the pane.
+    private var pythonTerminalBox: some View {
+        PythonTerminalPane(
+            model: pythonTerminal,
+            editorController: editorController,
+            directory: pythonWorkingDirectory,
+            onRun: runPythonFile,
+            hasUnsavedChanges: editorController.hasUnsavedChanges
+        )
+        .padding(.vertical, 12)
+        .padding(.trailing, 12)
+        .onAppear { pythonTerminal.adopt(directory: pythonWorkingDirectory) }
+        .onChange(of: pythonWorkingDirectory) { newDirectory in
+            pythonTerminal.adopt(directory: newDirectory)
+        }
+    }
+
+    /// Where a shell for the current Python file starts: the file's folder
+    /// when it has been saved, the project root otherwise.
+    private var pythonWorkingDirectory: URL {
+        if let url = editorController.currentFileURL {
+            return url.deletingLastPathComponent()
+        }
+        if let root = editorController.projectRootURL ?? fileSystem.currentFolder {
+            return root
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// Saves the unsaved buffer (so `python3 file.py` runs what is on screen),
+    /// then types the run command into the pane's shell.
+    private func runPythonFile() {
+        guard let url = editorController.currentFileURL,
+              EditorFileTypes.isPythonFile(url) else { return }
+
+        // Run reads the file from disk, so unsaved edits would be invisible.
+        if editorController.hasUnsavedChanges || fileSystem.isNewUnsavedFile {
+            guard performSave(to: url) else { return }
+        }
+
+        pythonTerminal.runPythonFile(url)
+        pythonTerminal.focusInput()
     }
 
     private var emptyStateView: some View {
@@ -2202,6 +2294,11 @@ struct ContentView: View {
         case "refreshPreview":
             scheduleCompilation(with: editorController.sourceCode, force: true)
             reloadToken = UUID()
+        case "runPython": runPythonFile()
+        case "clearPythonTerminal": pythonTerminal.clear()
+        case "restartPythonTerminal":
+            pythonTerminal.restart(directory: pythonWorkingDirectory)
+            pythonTerminal.focusInput()
         case "refreshNotebooks":
             NotebookManager.shared.loadNotebooks()
         case "restoreBackup": showRestoreBackupSheet()

@@ -1,0 +1,793 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.SwiftTerm-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "fileList" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/sources",
+      "importPath" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/AppleTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BlockElementRenderer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BoxDrawingRenderer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/CaretView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/Extensions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalProgressBarView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalViewDelegate.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Buffer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferLine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferSet.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharData.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharSets.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CircularList.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Colors.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequenceParser.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequences.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/ExtensionsTerminal.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/File.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/HeadlessTerminal.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyGraphics.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyPlaceholder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Line.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacAccessibilityService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacCaretView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacDebugView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacExtensions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacFindBarView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacLocalTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Position.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Pty.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchLineCache.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchOptions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SelectionService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SixelDcsHandler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Terminal.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalOptions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalViewSearch.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/UnicodeWidthData.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Utilities.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/SwiftUITerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSAccessoryView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSCaretView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSDoubleButton.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSExtensions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSKeyboardView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextInput.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextStorage.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "SwiftTerm",
+      "moduleOutputPath" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/Modules/SwiftTerm.swiftmodule",
+      "objects" : [
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/AppleTerminalView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/BlockElementRenderer.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/BoxDrawingRenderer.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/CaretView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Extensions.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/TerminalProgressBarView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/TerminalViewDelegate.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Buffer.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/BufferLine.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/BufferSet.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/CharData.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/CharSets.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/CircularList.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Colors.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/EscapeSequenceParser.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/EscapeSequences.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/ExtensionsTerminal.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/File.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/HeadlessTerminal.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/KittyGraphics.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/KittyPlaceholder.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Line.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/LocalProcess.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/MacAccessibilityService.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/MacCaretView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/MacDebugView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/MacExtensions.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/MacFindBarView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/MacLocalTerminalView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/MacTerminalView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Position.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Pty.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SearchEngine.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SearchLineCache.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SearchOptions.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SearchService.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SearchState.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SelectionService.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SixelDcsHandler.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Terminal.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/TerminalOptions.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/TerminalViewSearch.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/UnicodeWidthData.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/Utilities.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/SwiftUITerminalView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSAccessoryView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSCaretView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSDoubleButton.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSExtensions.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSKeyboardView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSTerminalView.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSTextInput.swift.o",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/iOSTextStorage.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-Onone",
+        "-enable-testing",
+        "-j18",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/include/SwiftTerm-Swift.h",
+        "-swift-version",
+        "5",
+        "-Xfrontend",
+        "-experimental-lazy-typecheck",
+        "-Xfrontend",
+        "-experimental-skip-all-function-bodies",
+        "-Xfrontend",
+        "-experimental-allow-module-with-compiler-errors",
+        "-Xfrontend",
+        "-empty-abi-descriptor",
+        "-I",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-L",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-plugin-path",
+        "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "swiftterm"
+      ],
+      "outputFileMapPath" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/Modules/SwiftTerm.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : true,
+      "sources" : [
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/AppleTerminalView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BlockElementRenderer.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BoxDrawingRenderer.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/CaretView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/Extensions.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalProgressBarView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalViewDelegate.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Buffer.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferLine.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferSet.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharData.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharSets.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CircularList.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Colors.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequenceParser.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequences.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/ExtensionsTerminal.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/File.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/HeadlessTerminal.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyGraphics.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyPlaceholder.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Line.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacAccessibilityService.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacCaretView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacDebugView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacExtensions.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacFindBarView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacLocalTerminalView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacTerminalView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Position.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Pty.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchEngine.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchLineCache.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchOptions.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchService.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchState.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SelectionService.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SixelDcsHandler.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Terminal.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalOptions.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalViewSearch.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/UnicodeWidthData.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Utilities.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/SwiftUITerminalView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSAccessoryView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSCaretView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSDoubleButton.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSExtensions.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSKeyboardView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTerminalView.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextInput.swift",
+        "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextStorage.swift"
+      ],
+      "tempsPath" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "SwiftTerm" : [
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "-module-name",
+      "SwiftTerm",
+      "-package-name",
+      "swiftterm",
+      "-c",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/AppleTerminalView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BlockElementRenderer.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BoxDrawingRenderer.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/CaretView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/Extensions.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalProgressBarView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalViewDelegate.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Buffer.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferLine.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferSet.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharData.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharSets.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CircularList.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Colors.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequenceParser.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequences.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/ExtensionsTerminal.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/File.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/HeadlessTerminal.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyGraphics.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyPlaceholder.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Line.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacAccessibilityService.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacCaretView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacDebugView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacExtensions.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacFindBarView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacLocalTerminalView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacTerminalView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Position.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Pty.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchEngine.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchLineCache.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchOptions.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchService.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchState.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SelectionService.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SixelDcsHandler.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Terminal.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalOptions.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalViewSearch.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/UnicodeWidthData.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Utilities.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/SwiftUITerminalView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSAccessoryView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSCaretView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSDoubleButton.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSExtensions.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSKeyboardView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTerminalView.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextInput.swift",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextStorage.swift",
+      "-I",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-Onone",
+      "-enable-testing",
+      "-j18",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/include/SwiftTerm-Swift.h",
+      "-swift-version",
+      "5",
+      "-Xfrontend",
+      "-experimental-lazy-typecheck",
+      "-Xfrontend",
+      "-experimental-skip-all-function-bodies",
+      "-Xfrontend",
+      "-experimental-allow-module-with-compiler-errors",
+      "-Xfrontend",
+      "-empty-abi-descriptor",
+      "-I",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-L",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-plugin-path",
+      "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "swiftterm",
+      "-driver-use-frontend-path",
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "SwiftTerm" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : [
+      {
+
+      }
+    ]
+  },
+  "writeCommands" : {
+    "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/AppleTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BlockElementRenderer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/BoxDrawingRenderer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/CaretView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/Extensions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalProgressBarView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Apple/TerminalViewDelegate.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Buffer.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferLine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/BufferSet.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharData.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CharSets.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/CircularList.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Colors.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequenceParser.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/EscapeSequences.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/ExtensionsTerminal.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/File.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/HeadlessTerminal.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyGraphics.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/KittyPlaceholder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Line.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacAccessibilityService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacCaretView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacDebugView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacExtensions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacFindBarView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacLocalTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Mac/MacTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Position.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Pty.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchEngine.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchLineCache.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchOptions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SearchState.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SelectionService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/SixelDcsHandler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Terminal.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalOptions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/TerminalViewSearch.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/UnicodeWidthData.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/Utilities.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/SwiftUITerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSAccessoryView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSCaretView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSDoubleButton.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSExtensions.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSKeyboardView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTerminalView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextInput.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/Sources/SwiftTerm/iOS/iOSTextStorage.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/SwiftTerm.build/sources"
+    },
+    "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/tmagri/Desktop/TypstEdit/LocalPackages/SwiftTerm/.build/index-build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+    }
+  }
+}

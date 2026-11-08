@@ -23,6 +23,7 @@ the license text itself (collected at the end of this file).
 | SQLite (`sqlite3.c` amalgamation) | Embedded database | Public domain |
 | sqlite-vector (`vector.framework`) | Vector search for RAG | Apache 2.0 |
 | swift-markdown / swift-cmark | Markdown parsing | Apache 2.0 |
+| SwiftTerm (vendored, v1.11.2) | Terminal emulator for the Python pane | MIT |
 | MathLive (`mathlive.min.js`) | Equation editor (vendored JS) | MIT |
 | tex2typst (`tex2typst.min.js`) | LaTeX↔Typst math conversion (vendored JS) | Apache 2.0 |
 | LLMLingua-2 model | Optional AI compression model | Apache 2.0 |
@@ -36,6 +37,14 @@ The bundled `typst` binary (`Contents/Resources/bin/typst`) is built from
 [typst/typst](https://github.com/typst/typst), © The Typst Authors,
 **Apache License 2.0** (full text at the end of this file). The in-app
 updater replaces it with official release builds of the same project.
+
+## SwiftTerm
+
+The Python pane's terminal is [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm),
+© Miguel de Icaza and the xterm.js authors, **MIT License**. A copy of the
+library at tag v1.11.2 is vendored in `LocalPackages/SwiftTerm`; only its
+`Package.swift` is reduced to the library target. The full licence text is in
+`LocalPackages/SwiftTerm/LICENSE`.
 
 ## CAS helper (Calculator mode)
 

@@ -265,7 +265,11 @@ struct AppMenuCommands: Commands {
             .keyboardShortcut("]", modifiers: [.command, .shift])
 
             Button("Search and Replace") {
-                editorController.showFindPanel()
+                if let terminal = PythonTerminal.focused {
+                    terminal.showFind()
+                } else {
+                    editorController.showFindPanel()
+                }
             }
             .keyboardShortcut("f", modifiers: .command)
             
@@ -648,6 +652,27 @@ struct AppMenuCommands: Commands {
                 NotificationCenter.default.post(name: .menuCommand, object: "refreshPreview")
             }
             .keyboardShortcut("r", modifiers: .command)
+
+            Divider()
+
+            // Python files show a terminal where the PDF preview would be.
+            // Cmd+Option+R (Cmd+R is Refresh Preview, Cmd+Shift+R is Refresh
+            // Notebooks) and it reads as "run".
+            Button("Run Python File") {
+                NotificationCenter.default.post(name: .menuCommand, object: "runPython")
+            }
+            .keyboardShortcut("r", modifiers: [.command, .option])
+            .disabled(!editorController.isPythonFile)
+
+            Button("Clear Terminal") {
+                NotificationCenter.default.post(name: .menuCommand, object: "clearPythonTerminal")
+            }
+            .disabled(!editorController.isPythonFile)
+
+            Button("Restart Terminal") {
+                NotificationCenter.default.post(name: .menuCommand, object: "restartPythonTerminal")
+            }
+            .disabled(!editorController.isPythonFile)
         }
         
         CommandGroup(replacing: .help) {

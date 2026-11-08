@@ -47,6 +47,11 @@ enum EditorFileTypes {
 
     // MARK: - Code
 
+    /// Extensions that the Python grammar claims. Kept as a set because the
+    /// Python pane (a terminal that runs scripts) needs the same answer the
+    /// highlighter does.
+    static let pythonExtensions: Set<String> = ["py", "pyw", "pyi", "pyx"]
+
     /// Extension → grammar. Registers every tree-sitter grammar the app ships
     /// that actually has a highlights query (a grammar without one would parse
     /// but never color anything, so it is not worth claiming).
@@ -58,7 +63,7 @@ enum EditorFileTypes {
             for ext in extensions { table[ext] = entry }
         }
 
-        add("python", "Python", ["py", "pyw", "pyi", "pyx"])
+        add("python", "Python", Array(pythonExtensions).sorted())
         add("json", "JSON", [
             "json", "jsonc", "json5", "jsonl", "ndjson", "geojson",
             "webmanifest", "ipynb",
@@ -161,6 +166,13 @@ enum EditorFileTypes {
     /// True for Markdown files, which TypstEdit compiles like Typst.
     static func isMarkdownFile(_ url: URL) -> Bool {
         markdownExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// True for Python source files. They get the Python pane (a terminal that
+    /// runs the script) instead of the PDF preview, because there is nothing
+    /// to render for a script.
+    static func isPythonFile(_ url: URL) -> Bool {
+        pythonExtensions.contains(url.pathExtension.lowercased())
     }
 
     /// The grammar used to highlight `url`, or `nil` when the file has no
