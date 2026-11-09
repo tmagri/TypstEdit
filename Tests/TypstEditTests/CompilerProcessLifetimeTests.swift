@@ -34,10 +34,12 @@ final class CompilerProcessLifetimeTests: XCTestCase {
         })
     }
 
-    private func waitUntil(_ timeout: TimeInterval, _ condition: () -> Bool) {
+    /// Polls with `Task.sleep`, so main-actor work (output handling, the idle
+    /// countdown) keeps running while the test waits.
+    private func waitUntil(_ timeout: TimeInterval, _ condition: () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }
 
@@ -48,7 +50,7 @@ final class CompilerProcessLifetimeTests: XCTestCase {
         let file = root.appendingPathComponent("doc.typ")
         try "= Hello".write(to: file, atomically: true, encoding: .utf8)
         await compiler.updateContent(source: "= Hello", fileURL: file)
-        waitUntil(5) { !watchChildren().subtracting(before).isEmpty }
+        await waitUntil(5) { !watchChildren().subtracting(before).isEmpty }
         let started = watchChildren().subtracting(before)
         startedPIDs.formUnion(started)
         guard !started.isEmpty else { throw XCTSkip("typst binary not available") }
@@ -63,7 +65,7 @@ final class CompilerProcessLifetimeTests: XCTestCase {
         var compiler: TypstCompiler? = TypstCompiler()
         let pids = try await startWatch(compiler!)
         compiler = nil
-        waitUntil(3) { stillRunning(pids).isEmpty }
+        await waitUntil(3) { stillRunning(pids).isEmpty }
         XCTAssertTrue(stillRunning(pids).isEmpty, "typst watch outlived its compiler")
     }
 
@@ -71,8 +73,42 @@ final class CompilerProcessLifetimeTests: XCTestCase {
         let compiler = TypstCompiler()
         let pids = try await startWatch(compiler)
         compiler.cleanUp()
-        waitUntil(3) { stillRunning(pids).isEmpty }
+        await waitUntil(3) { stillRunning(pids).isEmpty }
         XCTAssertTrue(stillRunning(pids).isEmpty, "cleanUp() left typst watch running")
+    }
+
+    /// An open but untouched document must not hold a `typst watch` forever:
+    /// after the idle delay the process goes, the preview stays, and the next
+    /// edit starts a fresh watch.
+    func testIdleWatchStopsAndRestartsOnTheNextEdit() async throws {
+        let compiler = TypstCompiler()
+        compiler.idleStopDelayOverride = 0.5
+        let firstPIDs = try await startWatch(compiler)
+
+        await waitUntil(10) { stillRunning(firstPIDs).isEmpty }
+        XCTAssertTrue(stillRunning(firstPIDs).isEmpty, "an idle watch kept running")
+        XCTAssertTrue(compiler.isIdleStopped)
+        XCTAssertFalse(compiler.isWatching)
+        XCTAssertNotNil(compiler.currentShadowPDFURL, "the preview must survive an idle stop")
+        XCTAssertEqual(compiler.compilationStatus, "Idle")
+
+        // Editing again brings the compiler back.
+        let secondPIDs = try await startWatch(compiler)
+        XCTAssertTrue(firstPIDs.isDisjoint(with: secondPIDs))
+        XCTAssertTrue(compiler.isWatching)
+        XCTAssertFalse(compiler.isIdleStopped)
+        compiler.cleanUp()
+    }
+
+    /// `0` ("Never") keeps the old behaviour: the watch stays while open.
+    func testIdleStopCanBeTurnedOff() async throws {
+        let compiler = TypstCompiler()
+        compiler.idleStopDelayOverride = 0
+        let pids = try await startWatch(compiler)
+        await waitUntil(1.5) { stillRunning(pids).isEmpty }
+        XCTAssertFalse(stillRunning(pids).isEmpty)
+        XCTAssertFalse(compiler.isIdleStopped)
+        compiler.cleanUp()
     }
 
     /// Two compilers for the same window (what a re-created duplicate main
@@ -86,7 +122,7 @@ final class CompilerProcessLifetimeTests: XCTestCase {
         let firstPIDs = try await startWatch(first)
         let secondPIDs = try await startWatch(second)
 
-        waitUntil(3) { stillRunning(firstPIDs).isEmpty }
+        await waitUntil(3) { stillRunning(firstPIDs).isEmpty }
         XCTAssertTrue(stillRunning(firstPIDs).isEmpty, "the older watch on the same file kept running")
         XCTAssertFalse(stillRunning(secondPIDs).isEmpty, "the newest watch must keep the preview alive")
         XCTAssertFalse(first.isWatching)

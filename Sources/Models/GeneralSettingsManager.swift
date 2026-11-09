@@ -41,6 +41,12 @@ class GeneralSettingsManager: ObservableObject {
     /// (`block.sticky`).
     @AppStorage("keepWithNextHeadings") var keepWithNextHeadings: Bool = true
 
+    /// Seconds without edits after which a window's live-preview compiler
+    /// (`typst watch`) is stopped to give its memory back. The PDF and the
+    /// issue list stay; the next edit starts it again (one full compile, then
+    /// fast incremental ones). `0` keeps it running while a document is open.
+    @AppStorage("previewIdleStopSeconds") var previewIdleStopSeconds: Int = 60
+
     @AppStorage("windowOpenBehavior") private var windowOpenBehaviorRaw: String = WindowOpenBehavior.ask.rawValue {
         willSet { objectWillChange.send() }
     }

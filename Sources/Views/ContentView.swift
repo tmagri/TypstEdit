@@ -502,9 +502,34 @@ struct ContentView: View {
     /// Handles a batch of changed paths from the project watcher. Only the
     /// document this window is showing matters here; the rest of the batch is
     /// the sidebar's business (and the index's).
+    /// Files a Typst document can pull in (`#import`/`#include`, `image`,
+    /// `bibliography`, data loaders). A change to one of these must refresh a
+    /// preview whose `typst watch` was stopped for being idle.
+    private static let compileDependencyExtensions: Set<String> = [
+        "typ", "bib", "yml", "yaml", "json", "toml", "csv", "xml", "txt", "md",
+        "png", "jpg", "jpeg", "gif", "svg", "webp", "pdf", "wasm", "otf", "ttf",
+    ]
+
+    /// While the watch runs it notices changed dependencies itself; once it
+    /// was stopped for idleness nothing does, so restart it here.
+    private func restartIdlePreviewIfDependencyChanged(_ urls: [URL], openPath: String) {
+        guard compiler.isIdleStopped, !windowRole.isDuplicate else { return }
+        let relevant = urls.contains { url in
+            let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard path != openPath else { return false }
+            // Our own scratch output must never wake the compiler, or the
+            // fresh PDF would trigger the next compile forever.
+            let components = Set(url.pathComponents)
+            guard components.isDisjoint(with: ["temp", "backups", "vectorcaches", ProjectSettingsManager.dotFolderName]) else { return false }
+            return Self.compileDependencyExtensions.contains(url.pathExtension.lowercased())
+        }
+        if relevant { scheduleCompilation(force: true) }
+    }
+
     private func handleProjectFileChanges(_ urls: [URL]) {
         guard let openURL = editorController.currentFileURL else { return }
         let openPath = openURL.resolvingSymlinksInPath().standardizedFileURL.path
+        restartIdlePreviewIfDependencyChanged(urls, openPath: openPath)
         // An atomic save writes a temp file and renames it over the target, so
         // the batch can name the file itself or its folder; comparing both
         // covers the rename form as well as an in-place rewrite.

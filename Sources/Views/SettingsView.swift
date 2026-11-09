@@ -2177,6 +2177,27 @@ struct TypstSettingsView: View {
 
     @ViewBuilder
     private var engineSection: some View {
+        SettingsCard(
+            title: "Live Preview Memory",
+            icon: "memorychip",
+            description: "While you edit, each window keeps a Typst compiler running so changes recompile in a fraction of a second. It holds the whole document in memory, which for a large document with many images can be hundreds of megabytes."
+        ) {
+            SettingsRow(
+                label: "Stop When Idle:",
+                caption: "After this long without edits the compiler is stopped and its memory is freed. The preview and the issue list stay. The next edit starts it again: that first compile takes as long as opening the document, the ones after are fast again. Changes to imported files and images in the project also restart it."
+            ) {
+                Picker("", selection: $settings.previewIdleStopSeconds) {
+                    Text("After 30 seconds").tag(30)
+                    Text("After 1 minute").tag(60)
+                    Text("After 5 minutes").tag(300)
+                    Text("After 15 minutes").tag(900)
+                    Text("Never (keep running)").tag(0)
+                }
+                .labelsHidden()
+                .frame(maxWidth: 220, alignment: .leading)
+            }
+        }
+
         // Installed version status
         SettingsCard(
             title: "Typst Engine",

@@ -336,6 +336,80 @@ class TypstCompiler: ObservableObject {
 
     /// True while this compiler's `typst watch` is running.
     var isWatching: Bool { currentProcess?.isRunning == true }
+
+    // MARK: Idle stop
+    //
+    // `typst watch` keeps the whole compiled document in memory (parsed
+    // sources, layout, fonts, decoded images) so the next edit recompiles
+    // incrementally. That is what makes typing fast, but for a large document
+    // it is hundreds of megabytes held while nobody types. After
+    // `previewIdleStopSeconds` without a compile, the watch is stopped; the PDF
+    // on disk and the issue list stay, and the next `updateContent` starts a
+    // new watch (one full compile, then incremental again).
+
+    /// True while the watch was stopped for being idle — the preview is still
+    /// valid, nothing is compiling, and the next change restarts it.
+    @Published private(set) var isIdleStopped = false
+    private var idleStopTask: Task<Void, Never>?
+    /// Overridable for tests; nil reads the user setting.
+    var idleStopDelayOverride: TimeInterval?
+    nonisolated(unsafe) private var memoryObserver: NSObjectProtocol?
+
+    private var idleStopDelay: TimeInterval {
+        idleStopDelayOverride ?? TimeInterval(GeneralSettingsManager.shared.previewIdleStopSeconds)
+    }
+
+    init() {
+        MemoryPressureMonitor.shared.start()
+        // Under memory pressure an idle watch is the cheapest thing to give
+        // back: it costs one cold compile on the next edit, nothing else.
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: MemoryPressureMonitor.willFreeMemory, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopWatchIfIdle(reason: "memory pressure") }
+        }
+    }
+
+    deinit {
+        if let memoryObserver { NotificationCenter.default.removeObserver(memoryObserver) }
+    }
+
+    /// Restarts the countdown. Called when a compile cycle finishes.
+    private func scheduleIdleStop() {
+        idleStopTask?.cancel()
+        idleStopTask = nil
+        let delay = idleStopDelay
+        guard delay > 0, isWatching else { return }
+        idleStopTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.idleStopTask = nil
+            self.stopWatchIfIdle(reason: "idle \(Int(delay))s")
+        }
+    }
+
+    private func cancelIdleStop() {
+        idleStopTask?.cancel()
+        idleStopTask = nil
+    }
+
+    /// Stops the watch, keeping the preview and the issues, unless a compile
+    /// (or a lenient-mode fix waiting for its recompile) is still in flight —
+    /// then it tries again after another delay.
+    private func stopWatchIfIdle(reason: String) {
+        guard isWatching else { return }
+        if isCompiling || pendingFallbackRewrite || !pendingFallbackRawLines.isEmpty {
+            scheduleIdleStop()
+            return
+        }
+        AppDelegate.debugLog("typst watch: stopping for \(reason)")
+        cancelIdleStop()
+        watchOwner.stop()
+        currentProcess = nil
+        processOutputPipe = nil
+        isIdleStopped = true
+        compilationStatus = "Idle"
+    }
     
     // We keep track of the current shadow file being watched
     private var currentShadowSourceURL: URL?
@@ -394,6 +468,8 @@ class TypstCompiler: ObservableObject {
     private var shadowToSourceLine: [Int: Int] = [:]
     
     func cleanUp() {
+        cancelIdleStop()
+        isIdleStopped = false
         watchOwner.stop()
         currentProcess = nil
         processOutputPipe = nil
@@ -561,6 +637,8 @@ class TypstCompiler: ObservableObject {
     
     // Writes content to the shadow file. If watch is not running, starts it.
     func updateContent(source: String, fileURL: URL) async {
+        // New work: the watch is needed again (or still), so no idle stop.
+        cancelIdleStop()
         await MainActor.run { self.isCompiling = true }
         
         let workingDirectory = fileURL.deletingLastPathComponent()
@@ -777,6 +855,7 @@ class TypstCompiler: ObservableObject {
         
         currentShadowSourceURL = sourceURL
         currentShadowPDFURL = outputURL
+        isIdleStopped = false
         // Clear compile diagnostics when (re)starting a watch; keep note warnings,
         // which describe the source and are recomputed on each `updateContent`.
         self.typstErrors = []
@@ -817,13 +896,13 @@ class TypstCompiler: ObservableObject {
                 // give it a moment so the final diagnostic is not cut off.
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard let self else { return }
-                self.isCompiling = false
-                // Only the active watch may touch the shared parser state; an
-                // older process terminated by `cleanUp()` must not.
+                // Only the active watch may touch compiler state. A process we
+                // stopped (replaced, idle, window closed) must not: a new
+                // watch may already be compiling, and "Idle" must stay "Idle".
                 guard let current = self.currentProcess, ObjectIdentifier(current) == processID else {
-                    self.compilationStatus = "Watch process ended."
                     return
                 }
+                self.isCompiling = false
                 // `typst watch` exits on fatal errors (e.g. "source file must be
                 // contained in project root"), sometimes without the blank line
                 // that ends a diagnostic block — publish whatever it printed.
@@ -903,6 +982,7 @@ class TypstCompiler: ObservableObject {
             publishTask?.cancel()
             publishTask = nil
             finalizeDiagnosticBatch()
+            cancelIdleStop()
             isCompiling = true
             compilationStatus = "Compiling..."
             pendingFallbackRewrite = false
@@ -936,6 +1016,7 @@ class TypstCompiler: ObservableObject {
             // fresh chase budget for the next broken cycle.
             fallbackCycleCount = 0
             publishIssues()
+            scheduleIdleStop()
             return
         }
 
@@ -951,6 +1032,9 @@ class TypstCompiler: ObservableObject {
             publishTask = nil
             diagnosticParser.reset()
             batchDiagnosticCount = 0
+            // A broken document is idle too; `stopWatchIfIdle` waits for any
+            // lenient-mode fix this batch queues.
+            scheduleIdleStop()
             return
         }
 
