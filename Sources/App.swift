@@ -71,6 +71,7 @@ class ExternalWindowDelegate: NSObject, NSWindowDelegate {
     
     func windowWillClose(_ notification: Notification) {
         if let window = notification.object as? NSWindow {
+            AppDelegate.debugLog("external document window closed: '\(window.title)'")
             AppDelegate.shared?.externalDelegates.removeValue(forKey: window)
         }
     }
@@ -133,11 +134,32 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var forwardingTarget: NSRunningApplication?
 
     private var titleBarDoubleClickMonitor: Any?
+
+    /// The document window the user worked in last (main or extra, never a
+    /// rejected duplicate). A duplicate main window takes key status when
+    /// SwiftUI creates it; focus goes back here when it is turned away.
+    private weak var lastKeyDocumentWindow: NSWindow?
+    private var keyWindowObserver: NSObjectProtocol?
     
     override init() {
         super.init()
         AppDelegate.shared = self
         print("[DEBUG] AppDelegate: init")
+        keyWindowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { notification in
+            guard let window = notification.object as? NSWindow else { return }
+            MainActor.assumeIsolated {
+                AppDelegate.shared?.noteKeyWindow(window)
+            }
+        }
+    }
+
+    private func noteKeyWindow(_ window: NSWindow) {
+        guard !rejectedMainWindows.contains(window) else { return }
+        if window === mainWindow || externalDelegates[window] != nil {
+            lastKeyDocumentWindow = window
+        }
     }
 
     // MARK: - Opening files from Finder
@@ -520,9 +542,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Mark it so that view stays inert, before and after it appears.
             rejectedMainWindows.add(window)
             NotificationCenter.default.post(name: .duplicateMainWindowRejected, object: window)
+            // Read before `orderOut`, which hands key status to another window.
+            let focusLost = NSApp.keyWindow == nil || NSApp.keyWindow === window
             window.orderOut(nil)
             DispatchQueue.main.async { window.close() }
-            // Only bring the existing window forward when it is on screen,
+            // Only give focus back when the window is on screen,
             // not on its way into the Dock, and the app is already active.
             // A minimized window sits there on purpose, and SwiftUI
             // re-creates the group's window the moment the minimize starts:
@@ -532,8 +556,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // enough, and activating here would steal their focus (the chat
             // completing a reply re-renders the document, which re-creates
             // this window; that must never bring TypstEdit forward).
-            if existing.isVisible, !isMainMiniaturizing, NSApp.isActive {
-                bringToFront(existing)
+            //
+            // The duplicate takes key status from whatever window the user is
+            // in, often another document window (a New Window opened next to
+            // a window whose chat is running). Give focus back to that window,
+            // not to the main window: raising the main window stole focus and
+            // covered the new window, so File ▸ New Window seemed to do nothing.
+            if focusLost, existing.isVisible, !isMainMiniaturizing, NSApp.isActive {
+                let previous = lastKeyDocumentWindow.flatMap { candidate -> NSWindow? in
+                    guard candidate !== window, candidate.isVisible, !candidate.isMiniaturized else { return nil }
+                    return candidate
+                }
+                let target = previous ?? existing
+                if !target.isKeyWindow { target.makeKeyAndOrderFront(nil) }
             } else {
                 Self.debugLog("registerMainWindow: duplicate closed without activating")
             }
@@ -541,6 +576,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         mainWindow = window
         window.tabbingMode = .disallowed
+        if window.isKeyWindow { lastKeyDocumentWindow = window }
     }
 
     /// While the app is hidden (⌘H) no window is visible, yet the main
