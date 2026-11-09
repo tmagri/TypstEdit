@@ -84,6 +84,10 @@ enum AIError: LocalizedError {
     /// a stuck response rather than a hard failure, so the agentic loop can
     /// auto-continue (see `fetchCompletionWithTools`).
     case stalledResponse(idleSeconds: Int, timeoutSeconds: Int)
+    /// The stream was stopped because the model kept emitting the same
+    /// passage (see `RepetitionDetector`). `keptText` is the answer up to the
+    /// loop plus one copy of it — empty when the loop was in the reasoning.
+    case repetitionLoop(inReasoning: Bool, unit: String, repeats: Int, keptText: String)
 
     var errorDescription: String? {
         switch self {
@@ -93,6 +97,8 @@ enum AIError: LocalizedError {
         case .apiError(let msg): return msg
         case .stalledResponse(let idleSeconds, let timeoutSeconds):
             return "The model stopped sending output for \(idleSeconds)s (stall limit: \(timeoutSeconds)s) and the attempt was abandoned."
+        case .repetitionLoop(let inReasoning, let unit, let repeats, _):
+            return "The model got stuck repeating the same \(inReasoning ? "thought" : "passage") (“\(RepetitionDetector.preview(unit))”, \(repeats)× in a row) and the reply was stopped."
         }
     }
 }
@@ -293,6 +299,31 @@ private final class StreamActivity: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return Date().timeIntervalSince(lastTouch)
+    }
+}
+
+/// Watches one streamed reply for a repetition loop, separately in the
+/// answer and in the reasoning, and throws `.repetitionLoop` to end the
+/// stream once one is found. Lives for one request attempt.
+@MainActor
+private final class StreamLoopGuard {
+    private var text = RepetitionDetector()
+    private var reasoning = RepetitionDetector()
+
+    /// `accumulated` is the whole answer so far, including `piece`.
+    func checkText(_ piece: String, accumulated: String) throws {
+        guard let loop = text.feed(piece) else { return }
+        throw AIError.repetitionLoop(
+            inReasoning: false,
+            unit: loop.unit,
+            repeats: loop.repeats,
+            keptText: RepetitionDetector.keptPrefix(of: accumulated, before: loop)
+        )
+    }
+
+    func checkReasoning(_ piece: String) throws {
+        guard let loop = reasoning.feed(piece) else { return }
+        throw AIError.repetitionLoop(inReasoning: true, unit: loop.unit, repeats: loop.repeats, keptText: "")
     }
 }
 
@@ -836,6 +867,28 @@ class AICompletionService: ObservableObject {
                         }
                     }
                     messages.append(.user(continueMessage))
+                } catch AIError.repetitionLoop(let inReasoning, let unit, let repeats, let keptText) {
+                    AgentTrace.log("repetition_loop", [
+                        "turn": turn, "inReasoning": inReasoning, "repeats": repeats,
+                        "unitChars": unit.count, "attempt": autoContinues + 1
+                    ])
+                    let kept = keptText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let maxAutoContinues, autoContinues >= maxAutoContinues {
+                        // Out of retries: an answer that was going well until
+                        // it looped is still worth showing, cut at the loop.
+                        guard kept.isEmpty else {
+                            if !collectedReasoning.isEmpty {
+                                onReasoning(collectedReasoning.joined(separator: "\n\n"))
+                            }
+                            return kept + Self.repetitionStoppedNote
+                        }
+                        throw AIError.apiError(Self.repetitionFailureMessage(attempts: autoContinues, inReasoning: inReasoning, unit: unit))
+                    }
+                    autoContinues += 1
+                    onStatus?(Self.repetitionStatusLine(attempt: autoContinues, maxAttempts: maxAutoContinues, inReasoning: inReasoning))
+                    onReasoningDelta?(Self.repetitionStatusNote(attempt: autoContinues, maxAttempts: maxAutoContinues, inReasoning: inReasoning, unit: unit))
+                    messages.append(.assistantText(kept.isEmpty ? Self.interruptedReplyPlaceholder : kept))
+                    messages.append(.user(Self.repetitionContinueMessage(inReasoning: inReasoning, unit: unit, hasKeptText: !kept.isEmpty)))
                 }
             }
 
@@ -1694,6 +1747,41 @@ class AICompletionService: ObservableObject {
         return "\n\n[\(cause) — the interrupted attempt was abandoned and automatically continued (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
     }
 
+    // MARK: Repetition loops
+
+    nonisolated static func repetitionStatusLine(attempt: Int, maxAttempts: Int?, inReasoning: Bool) -> String {
+        "Model was repeating itself\(inReasoning ? " while thinking" : "") — stopped it and asked again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
+    }
+
+    /// Pushed into the live thinking box, like the stall note. Never persisted.
+    nonisolated static func repetitionStatusNote(attempt: Int, maxAttempts: Int?, inReasoning: Bool, unit: String) -> String {
+        "\n\n[Stuck in a loop — the \(inReasoning ? "thinking" : "reply") kept repeating “\(RepetitionDetector.preview(unit))”. Stopped and asked again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
+    }
+
+    /// Sent after a looping attempt. The model sees its own reply up to the
+    /// loop (one copy kept) and is asked for the full answer again, so the
+    /// answer that lands is complete on its own.
+    nonisolated static func repetitionContinueMessage(inReasoning: Bool, unit: String, hasKeptText: Bool) -> String {
+        let quoted = RepetitionDetector.preview(unit, limit: 200)
+        if inReasoning {
+            return "Your thinking got stuck in a loop, repeating the same passage over and over (“\(quoted)”), and was stopped. Don't go over that again. Decide now: make the tool call you need, or write your final answer."
+        }
+        let context = hasKeptText
+            ? "Your reply above was cut where it started repeating"
+            : "Your reply was stopped"
+        return "\(context): it kept emitting the same passage (“\(quoted)”) over and over. Write your complete answer again from the start, and don't repeat any passage. If you were about to call a tool, call it now instead."
+    }
+
+    nonisolated static let repetitionStoppedNote = "\n\n*[Stopped here: the model began repeating the same passage over and over.]*"
+
+    nonisolated static func repetitionFailureMessage(attempts: Int, inReasoning: Bool, unit: String) -> String {
+        var message = "The model got stuck repeating the same \(inReasoning ? "thought" : "passage") (“\(RepetitionDetector.preview(unit))”)"
+        if attempts > 0 {
+            message += " and looped again on \(attempts) automatic retr\(attempts == 1 ? "y" : "ies")"
+        }
+        return message + ". Try rephrasing the request, starting a new chat, or a different model — small local models loop most often."
+    }
+
     // MARK: Thinking Re-Seeding (interrupted/empty replies)
 
     /// Keep-rate for compressed thinking notes. Deliberately much higher
@@ -2274,6 +2362,7 @@ class AICompletionService: ObservableObject {
         let pollNanoseconds: UInt64 = 1_000_000_000
         let isAnthropic = ctx.isAnthropic
         let activity = StreamActivity()
+        let loopGuard = settings.chatRepetitionGuardEnabled ? StreamLoopGuard() : nil
         return try await withThrowingTaskGroup(of: (AIChatStep, AIChatStepMeta).self) { group in
             group.addTask {
                 while !Task.isCancelled {
@@ -2295,8 +2384,8 @@ class AICompletionService: ObservableObject {
             }
             group.addTask {
                 try await isAnthropic
-                    ? parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() })
-                    : parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() })
+                    ? parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() }, loopGuard: loopGuard)
+                    : parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() }, loopGuard: loopGuard)
             }
             guard let first = try await group.next() else { throw AIError.noData }
             group.cancelAll()
@@ -2604,7 +2693,7 @@ class AICompletionService: ObservableObject {
     // accumulates fragments across the whole response and returns the same
     // `AIChatStep` shape its non-streaming counterpart does.
 
-    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}) async throws -> (AIChatStep, AIChatStepMeta) {
+    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}, loopGuard: StreamLoopGuard? = nil) async throws -> (AIChatStep, AIChatStepMeta) {
         var text = ""
         var reasoning = ""
         var meta = AIChatStepMeta()
@@ -2635,10 +2724,12 @@ class AICompletionService: ObservableObject {
             if let piece = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String), !piece.isEmpty {
                 reasoning += piece
                 onReasoningDelta?(piece)
+                try loopGuard?.checkReasoning(piece)
             }
             if let piece = delta["content"] as? String, !piece.isEmpty {
                 text += piece
                 onTextDelta?(piece)
+                try loopGuard?.checkText(piece, accumulated: text)
             }
             if let deltas = delta["tool_calls"] as? [[String: Any]] {
                 for fragment in deltas {
@@ -2663,7 +2754,7 @@ class AICompletionService: ObservableObject {
         return (.finalText(text, reasoning: stepReasoning), meta)
     }
 
-    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}) async throws -> (AIChatStep, AIChatStepMeta) {
+    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}, loopGuard: StreamLoopGuard? = nil) async throws -> (AIChatStep, AIChatStepMeta) {
         var text = ""
         var reasoning = ""
         var meta = AIChatStepMeta()
@@ -2691,11 +2782,13 @@ class AICompletionService: ObservableObject {
                     if let piece = delta["thinking"] as? String, !piece.isEmpty {
                         reasoning += piece
                         onReasoningDelta?(piece)
+                        try loopGuard?.checkReasoning(piece)
                     }
                 case "text_delta":
                     if let piece = delta["text"] as? String, !piece.isEmpty {
                         text += piece
                         onTextDelta?(piece)
+                        try loopGuard?.checkText(piece, accumulated: text)
                     }
                 case "input_json_delta":
                     if let piece = delta["partial_json"] as? String, let index = json["index"] as? Int {

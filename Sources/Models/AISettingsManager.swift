@@ -536,6 +536,13 @@ class AISettingsManager: ObservableObject {
     /// emitting tokens mid-reply without closing the stream, which would
     /// otherwise leave "Thinking…" on screen forever.
     @AppStorage("aiChatStallTimeoutSeconds") var chatStallTimeoutSeconds: Double = 150.0
+    /// Stop a streamed reply once the model is caught emitting the same
+    /// passage over and over (`RepetitionDetector`), and re-ask it within the
+    /// auto-continue budget below instead of letting the loop run to the
+    /// reply limit.
+    @AppStorage("aiChatRepetitionGuardEnabled") var chatRepetitionGuardEnabled: Bool = true {
+        willSet { objectWillChange.send() }
+    }
     /// How many times a request that failed *before any output arrived* is
     /// re-sent — a rate limit (429), an overloaded endpoint (503/529), a
     /// request timeout (408), or a dropped connection. Each retry waits a

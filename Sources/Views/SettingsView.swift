@@ -1395,6 +1395,18 @@ struct AISettingsView: View {
                 Divider()
 
                 VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Stop replies stuck in a repetition loop", isOn: $settings.chatRepetitionGuardEnabled)
+                        .font(.body.weight(.medium))
+                    Text("Some models fall into a loop and stream the same passage again and again until the reply limit runs out. When the reply or the thinking repeats the same text at least \(RepetitionDetector.minRepeats) times in a row (\(RepetitionDetector.minCoverage)+ characters), the stream is stopped and the model is asked again, using the auto-continue attempts above. With no attempts left, the answer is kept up to where the loop started. Only exact repeats count, so similar-sounding text is never cut.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 4) {
                     Toggle("Re-seed interrupted replies with compressed thinking", isOn: $settings.chatThinkingReseedEnabled)
                         .font(.body.weight(.medium))
                     if settings.chatThinkingReseedEnabled {
