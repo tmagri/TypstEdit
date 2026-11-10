@@ -546,9 +546,25 @@ struct AIChatView: View {
                         generatingRow.id("generating-indicator")
                     }
                     if let error = chat.errorMessage {
+                        // Dismissible: the banner reports what went wrong but
+                        // does not itself stop the conversation — a failed
+                        // compaction, for one, leaves the turn running with
+                        // the transcript intact — so the user must be able to
+                        // clear it without sending a new message to do it.
                         HStack(alignment: .top, spacing: 6) {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
-                            Text(error).font(.caption).foregroundColor(.red)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button { chat.errorMessage = nil } label: {
+                                Image(systemName: "xmark").font(.caption2)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.secondary)
+                            .help("Dismiss this error")
+                            .accessibilityLabel("Dismiss error")
                         }
                         .padding(8)
                         .background(Color.red.opacity(0.08))
