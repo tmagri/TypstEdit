@@ -1,15 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Explorer-style abbreviation shared by the sidebar rows: keep the head of
-/// the name but always leave the file extension visible ("IT Team Meet….note")
-/// so long names stay scannable in the narrow sidebar. The full name stays
-/// available through the hover tooltip.
-func explorerAbbreviatedName(_ name: String, pathExtension: String = "") -> String {
-    guard name.count > 24 else { return name }
-    return "\(name.prefix(12))…\(pathExtension.isEmpty ? "" : ".\(pathExtension)")"
-}
-
 @MainActor
 class FileSystemModel: ObservableObject {
     @Published var rootNodes: [FileNode] = []
@@ -1023,13 +1014,12 @@ struct SidebarRow: View {
                 .foregroundColor(iconColor(for: node))
                 .font(.system(size: 12))
 
-            Text("\(explorerAbbreviatedName(node.name, pathExtension: node.url.pathExtension))\(isSelected && editorController.hasUnsavedChanges ? "*" : "")")
-                .font(.system(size: 12))
-                .foregroundColor(isSelected ? .white : themeManager.textColor)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer()
+            ExplorerFilename(
+                name: node.name,
+                pathExtension: node.isDirectory ? "" : node.url.pathExtension,
+                trailingMark: isSelected && editorController.hasUnsavedChanges ? "*" : ""
+            )
+            .foregroundColor(isSelected ? .white : themeManager.textColor)
         }
         .help(node.name)
         .padding(.vertical, 2)

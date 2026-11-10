@@ -254,11 +254,8 @@ struct NotebookRow: View {
             Image(systemName: "book.closed.fill")
                 .foregroundColor(.indigo)
                 .font(.system(size: 12))
-            Text(explorerAbbreviatedName(notebook.name))
-                .font(.system(size: 12, weight: .medium))
+            ExplorerFilename(name: notebook.name, fontWeight: .medium)
                 .foregroundColor(themeManager.textColor)
-                .lineLimit(1)
-            Spacer()
 
             Menu {
                 Button(action: { onAddPage("note") }) {
@@ -360,11 +357,11 @@ struct NotebookPageRow: View {
             Image(systemName: page.isTypst ? "doc.text.fill" : "note.text")
                 .foregroundColor(page.isTypst ? .blue : .orange)
                 .font(.system(size: 12))
-            Text(explorerAbbreviatedName("\(page.name).\(page.fileExtension)", pathExtension: page.fileExtension))
-                .font(.system(size: 12))
-                .foregroundColor(isSelected ? .white : themeManager.textColor)
-                .lineLimit(1)
-            Spacer()
+            ExplorerFilename(
+                name: "\(page.name).\(page.fileExtension)",
+                pathExtension: page.fileExtension
+            )
+            .foregroundColor(isSelected ? .white : themeManager.textColor)
         }
         .help("\(page.name).\(page.fileExtension)")
         .padding(.vertical, 2)
