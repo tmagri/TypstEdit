@@ -234,7 +234,11 @@ struct ToolCallRepeatGuard {
 /// shared JSON shape isn't worth forcing).
 enum AIChatMessage {
     case system(String)
-    case user(String)
+    /// A user turn, optionally carrying images the user attached to it. Images
+    /// are sent as provider-specific content blocks (`image_url` for
+    /// OpenAI-compatible APIs, a base64 `image` block for Anthropic) on the
+    /// opening turn; the folded history stays text-only.
+    case user(String, images: [ChatImage] = [])
     case assistantText(String)
     case assistantToolCalls([AIToolCallRequest])
     case toolResult(AIToolResult)
@@ -601,6 +605,11 @@ class AICompletionService: ObservableObject {
     func fetchCompletionWithTools(
         prompt: String,
         systemPrompt: String,
+        /// Images the user attached to this request's message. They ride on
+        /// the opening user turn only — every later request in the loop is the
+        /// model's own continuation, and re-sending the pixels would bill them
+        /// again on each round.
+        images: [ChatImage] = [],
         maxTokens: Int,
         /// When set, a reply cut off by `max_tokens` (no text, a half-written
         /// tool call, or a truncated answer) is retried with a doubled cap, up
@@ -666,7 +675,10 @@ class AICompletionService: ObservableObject {
         executeParallel: (@MainActor (_ calls: [(index: Int, qualifiedName: String, argumentsJSON: String)]) async -> [Int: String])? = nil,
         executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
     ) async throws -> String {
-        guard !tools.isEmpty else {
+        // The one-shot path can't carry images (it takes a single prompt
+        // string), so a request with attachments always goes through the
+        // message-list loop, even when there are no tools to offer.
+        guard !tools.isEmpty || !images.isEmpty else {
             return try await fetchCompletion(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, purpose: .chat, model: model, onReasoning: onReasoning, sanitize: sanitize)
         }
 
@@ -685,7 +697,7 @@ class AICompletionService: ObservableObject {
             throw AIError.apiError("Tool calling (MCP) isn't supported yet for Google Gemini. Choose a different Chat source, or disable MCP tools for this request.")
         }
 
-        var messages: [AIChatMessage] = [.system(systemPrompt), .user(prompt)]
+        var messages: [AIChatMessage] = [.system(systemPrompt), .user(prompt, images: images)]
         // Reasoning collected across every turn (including turns that only
         // made tool calls), so the whole exchange's thinking is available
         // once a final answer lands — not just whatever the last turn said.
@@ -1221,10 +1233,15 @@ class AICompletionService: ObservableObject {
     // MARK: Tracing
 
     /// Characters in a conversation, for trace records and budget checks.
+    /// Attachments count as their token estimate (×4, the same chars-per-token
+    /// approximation used elsewhere), so a prompt full of screenshots still
+    /// registers as expensive even though it carries little text.
     nonisolated static func totalChars(_ messages: [AIChatMessage]) -> Int {
         messages.reduce(0) { total, message in
             switch message {
-            case .system(let t), .user(let t), .assistantText(let t): return total + t.count
+            case .system(let t), .assistantText(let t): return total + t.count
+            case .user(let t, let images):
+                return total + t.count + images.reduce(0) { $0 + $1.budgetChars }
             case .assistantToolCalls(let calls): return total + calls.reduce(0) { $0 + $1.argumentsJSON.count + $1.name.count }
             case .toolResult(let r): return total + r.output.count
             }
@@ -1906,7 +1923,10 @@ class AICompletionService: ObservableObject {
     ) async {
         func charCount(_ message: AIChatMessage) -> Int {
             switch message {
-            case .system(let t), .user(let t), .assistantText(let t): return t.count
+            case .system(let t), .assistantText(let t): return t.count
+            // Images are intent, not something elision can shrink; count them
+            // so a screenshot-heavy prompt still registers as over budget.
+            case .user(let t, let images): return t.count + images.reduce(0) { $0 + $1.budgetChars }
             case .assistantToolCalls(let calls): return calls.reduce(0) { $0 + $1.argumentsJSON.count + $1.name.count }
             case .toolResult(let r): return r.output.count
             }
@@ -2336,7 +2356,29 @@ class AICompletionService: ObservableObject {
                 message = msg
             }
         }
-        return "API Error (\(status)): \(message)"
+        var result = "API Error (\(status)): \(message)"
+        // The usual cause of a rejected request after attaching images: the
+        // model can't read them. Say so in terms the user can act on, instead
+        // of leaving a raw provider message about "content parts".
+        if Self.looksLikeAnImageRejection(message) {
+            result += "\n\nThis model may not accept images. Remove the attachment, or switch to an image-capable model from the chat panel's model menu."
+        }
+        return result
+    }
+
+    /// Whether a provider's error text reads like a rejected image payload.
+    /// Deliberately narrow: only a message that mentions images/content parts
+    /// *and* a rejection word gets the extra hint.
+    nonisolated static func looksLikeAnImageRejection(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        let mentionsImage = lower.contains("image") || lower.contains("vision") || lower.contains("modalit")
+        let mentionsRejection = lower.contains("not support")
+            || lower.contains("unsupported")
+            || lower.contains("invalid")
+            || lower.contains("cannot")
+            || lower.contains("does not")
+            || lower.contains("content part")
+        return mentionsImage && mentionsRejection
     }
 
     /// Parses a 200 response's SSE stream, under the stall watchdog. Split
@@ -2489,8 +2531,22 @@ class AICompletionService: ObservableObject {
             switch message {
             case .system(let text):
                 wireMessages.append(["role": "system", "content": text])
-            case .user(let text):
-                wireMessages.append(["role": "user", "content": text])
+            case .user(let text, let images):
+                if images.isEmpty {
+                    wireMessages.append(["role": "user", "content": text])
+                } else {
+                    var parts: [[String: Any]] = []
+                    if !text.isEmpty {
+                        parts.append(["type": "text", "text": text])
+                    }
+                    for image in images {
+                        parts.append([
+                            "type": "image_url",
+                            "image_url": ["url": image.dataURL]
+                        ])
+                    }
+                    wireMessages.append(["role": "user", "content": parts])
+                }
             case .assistantText(let text):
                 wireMessages.append(["role": "assistant", "content": text])
             case .assistantToolCalls(let calls):
@@ -2594,8 +2650,29 @@ class AICompletionService: ObservableObject {
             switch message {
             case .system(let text):
                 systemText = text
-            case .user(let text):
-                wireMessages.append(["role": "user", "content": [["type": "text", "text": text]]])
+            case .user(let text, let images):
+                var blocks: [[String: Any]] = []
+                // Anthropic reads images placed before the text, and a text
+                // block must be non-empty.
+                for image in images {
+                    blocks.append([
+                        "type": "image",
+                        "source": [
+                            "type": "base64",
+                            "media_type": image.mediaType,
+                            "data": image.base64
+                        ]
+                    ])
+                }
+                if !text.isEmpty {
+                    blocks.append(["type": "text", "text": text])
+                }
+                // An empty user turn (images only, or nothing at all) would be
+                // rejected; keep a placeholder rather than sending zero blocks.
+                if blocks.isEmpty {
+                    blocks.append(["type": "text", "text": "(no text)"])
+                }
+                wireMessages.append(["role": "user", "content": blocks])
             case .assistantText(let text):
                 wireMessages.append(["role": "assistant", "content": [["type": "text", "text": text]]])
             case .assistantToolCalls(let calls):

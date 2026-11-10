@@ -51,6 +51,14 @@ struct AIChatView: View {
     /// header still closes it, and each new turn opens it again.
     @State private var liveThinkingExpanded = true
 
+    /// Shown when a paste, drop or pick left something out (too many images,
+    /// too large, unreadable), so a silently dropped photo doesn't become a
+    /// mystery. Cleared by the next successful attach.
+    @State private var attachmentNotice: String?
+    /// True while an image is dragged over the composer, so the drop target is
+    /// visible before the user lets go.
+    @State private var composerDropTargeted = false
+
     /// Guards the one-pending follow-up scroll, so a burst of streaming
     /// updates schedules at most one extra `scrollTo` instead of one per token.
     /// Deliberately *not* `@State`: flagging every schedule as UI state would
@@ -861,12 +869,20 @@ struct AIChatView: View {
             case .user:
                 HStack {
                     Spacer(minLength: 30)
-                    Text(message.text)
-                        .font(.callout)
-                        .padding(8)
-                        .background(Color.accentColor.opacity(0.85))
-                        .foregroundColor(.white)
-                        .cornerRadius(10)
+                    VStack(alignment: .trailing, spacing: 6) {
+                        if message.hasImages {
+                            ChatImageGridView(images: message.attachments)
+                        }
+                        if !message.text.isEmpty {
+                            Text(message.text)
+                                .font(.callout)
+                                .padding(8)
+                                .background(Color.accentColor.opacity(0.85))
+                                .foregroundColor(.white)
+                                .cornerRadius(10)
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
             case .assistant:
                 if message.isSummary {
@@ -1648,7 +1664,13 @@ struct AIChatView: View {
         VStack(alignment: .leading, spacing: 6) {
             pickersRow
 
+            if !chat.draftImages.isEmpty {
+                attachmentStrip
+            }
+
             HStack(alignment: .bottom, spacing: 8) {
+                attachButton
+
                 TextEditor(text: $chat.draft)
                     .focused($inputFocused)
                     .font(.callout)
@@ -1662,7 +1684,16 @@ struct AIChatView: View {
                     .disabled(chat.pendingApproval != nil)
                     .help(chat.isGenerating
                           ? "The AI is working. Return steers the current task (it reads this at its next step); ⌘⇧Return queues it for after."
-                          : "Ask anything. Return sends.")
+                          : "Ask anything. Return sends. Drop or paste an image to attach it.")
+                    // Anything dropped here attaches to the draft; the whole
+                    // composer accepts images, not just a small corner.
+                    .onDrop(of: [.fileURL, .image], isTargeted: $composerDropTargeted) { providers in
+                        loadDroppedImages(providers)
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.accentColor, lineWidth: composerDropTargeted ? 2 : 0)
+                    )
 
                 if chat.isGenerating {
                     // A sibling of the (still enabled) TextEditor, so it stays
@@ -1677,7 +1708,9 @@ struct AIChatView: View {
                             Image(systemName: "arrow.up.circle").font(.system(size: 24))
                         }
                         .buttonStyle(.plain)
-                        .help("Steer — send this into the running task. The AI adjusts course at its next step.")
+                        .help(chat.draftImages.isEmpty
+                              ? "Steer — send this into the running task. The AI adjusts course at its next step."
+                              : "Queue — images need a turn of their own, so this waits for the current task to finish.")
 
                         Button {
                             enqueue()
@@ -1705,6 +1738,12 @@ struct AIChatView: View {
                 }
             }
 
+            if let notice = attachmentNotice {
+                Text(notice)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
             if chat.isGenerating && !chat.pendingQueued.isEmpty {
                 queuedStrip
             }
@@ -1712,8 +1751,197 @@ struct AIChatView: View {
         .padding(10)
     }
 
+    /// A photo picker button for the composer. Disabled while AI Chat is off
+    /// (the whole bar is hidden then) and once a message already carries the
+    /// maximum, with the reason in its tooltip.
+    private var attachButton: some View {
+        Button {
+            pickImages()
+        } label: {
+            Image(systemName: "photo.badge.plus")
+                .font(.system(size: 18))
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(chat.draftImages.isEmpty ? .secondary : .accentColor)
+        .disabled(chat.draftImages.count >= ChatImageLoader.maxPerMessage || chat.pendingApproval != nil)
+        .help(chat.draftImages.count >= ChatImageLoader.maxPerMessage
+              ? "This message already has the maximum of \(ChatImageLoader.maxPerMessage) images."
+              : "Attach an image for the AI to look at (or drop/paste one). Only models that accept images can use it.")
+    }
+
+    /// Thumbnails of what the next message will carry. Images are part of the
+    /// message, not of the draft text, so they need to be visible before it is
+    /// sent — and removable without retyping anything.
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(chat.draftImages) { image in
+                    ChatAttachmentThumbnail(image: image) {
+                        chat.draftImages.removeAll { $0.id == image.id }
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Attaching Images
+
+    private func pickImages() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ChatImageLoader.supportedTypes
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.title = "Attach Images"
+        panel.message = "Choose images for the AI to use as reference. They are shrunk to a size providers accept."
+        guard panel.runModal() == .OK else { return }
+        attach(urls: panel.urls)
+    }
+
+    /// Loads images off the main thread (decoding and re-encoding a photo can
+    /// take a moment) and folds them into the draft.
+    private func attach(urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let remaining = max(0, ChatImageLoader.maxPerMessage - chat.draftImages.count)
+        guard remaining > 0 else {
+            attachmentNotice = "This message already has \(ChatImageLoader.maxPerMessage) images."
+            return
+        }
+        let overflow = max(0, urls.count - remaining)
+        let toLoad = Array(urls.prefix(remaining))
+        Task.detached(priority: .userInitiated) {
+            var loaded: [ChatImage] = []
+            var failures = 0
+            var tooLarge = 0
+            for url in toLoad {
+                do {
+                    loaded.append(try ChatImageLoader.load(from: url))
+                } catch ChatImageError.tooLarge {
+                    tooLarge += 1
+                } catch {
+                    failures += 1
+                }
+            }
+            let images = loaded
+            let failed = failures
+            let oversized = tooLarge
+            await MainActor.run {
+                self.applyAttachments(images, failures: failed, tooLarge: oversized, overflow: overflow)
+            }
+        }
+    }
+
+    /// Reports what was left out of an attach attempt, using the loader's own
+    /// wording so the picker, the drop and the paste all say the same thing.
+    private func attachmentProblemNotice(failures: Int, tooLarge: Int) -> String? {
+        var parts: [String] = []
+        if tooLarge > 0 {
+            parts.append(tooLarge == 1
+                ? ChatImageError.tooLarge.localizedDescription
+                : "\(tooLarge) images were too large, even after shrinking.")
+        }
+        if failures > 0 {
+            parts.append(failures == 1
+                ? ChatImageError.unsupportedFormat.localizedDescription
+                : "\(failures) files couldn't be read as images.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    /// Publishes newly loaded images into the draft and reports what was left
+    /// out. Kept in one place so the picker, the drop and the paste agree.
+    private func applyAttachments(
+        _ images: [ChatImage],
+        failures: Int = 0,
+        tooLarge: Int = 0,
+        overflow: Int = 0
+    ) {
+        guard !images.isEmpty else {
+            attachmentNotice = attachmentProblemNotice(failures: failures, tooLarge: tooLarge)
+            return
+        }
+        let fit = ChatImageLoader.fit(chat.draftImages + images)
+        chat.draftImages = fit.accepted
+        let droppedForCount = fit.droppedForCount + overflow
+        var parts: [String] = []
+        if droppedForCount > 0 {
+            parts.append("\(droppedForCount) left out — a message can carry \(ChatImageLoader.maxPerMessage).")
+        }
+        if fit.droppedForSize > 0 {
+            parts.append("\(fit.droppedForSize) left out — too large for one message.")
+        }
+        if let problem = attachmentProblemNotice(failures: failures, tooLarge: tooLarge) {
+            parts.append(problem)
+        }
+        attachmentNotice = parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    /// Accepts images dragged onto the composer. Folders and non-image files
+    /// are ignored rather than raising an error.
+    private func loadDroppedImages(_ providers: [NSItemProvider]) -> Bool {
+        let imageProviders = providers.filter {
+            $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+                || $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+        }
+        guard !imageProviders.isEmpty else { return false }
+        for provider in imageProviders {
+            // A file from Finder: load its URL and go through the same path as
+            // the picker (which re-encodes whatever format it is).
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    guard let data = item as? Data,
+                          let url = URL(dataRepresentation: data, relativeTo: nil),
+                          ChatImageLoader.isImageFile(url) else { return }
+                    DispatchQueue.main.async { self.attach(urls: [url]) }
+                }
+                continue
+            }
+            // Image data dragged from another app (a browser, Preview): there
+            // is no file path, so decode the image bytes directly.
+            if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    guard let data else { return }
+                    Task.detached(priority: .userInitiated) {
+                        do {
+                            let image = try ChatImageLoader.make(from: data)
+                            await MainActor.run { self.applyAttachments([image]) }
+                        } catch ChatImageError.tooLarge {
+                            await MainActor.run {
+                                self.attachmentNotice = ChatImageError.tooLarge.localizedDescription
+                            }
+                        } catch {
+                            await MainActor.run {
+                                self.attachmentNotice = ChatImageError.unsupportedFormat.localizedDescription
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    /// Handles ⌘V in the composer when the clipboard holds an image: the image
+    /// is attached instead of pasted as inline text the model can't see. Text
+    /// on the clipboard always wins, so copying a table from a web page still
+    /// pastes the table.
+    private func attachClipboardImageIfPresent() -> Bool {
+        let pasteboard = NSPasteboard.general
+        if pasteboard.string(forType: .string)?.isEmpty == false { return false }
+        let types: [NSPasteboard.PasteboardType] = [.tiff, NSPasteboard.PasteboardType("public.png"), NSPasteboard.PasteboardType("public.jpeg")]
+        // Read the bytes eagerly on the main thread: NSImage(pasteboard:) uses
+        // a lazy provider that can IPC back to the source app and deadlock.
+        guard let data = types.compactMap({ pasteboard.data(forType: $0) }).first else { return false }
+        guard let image = try? ChatImageLoader.make(from: data) else { return false }
+        applyAttachments([image])
+        return true
+    }
+
     private var hasDraft: Bool {
-        !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !chat.draftImages.isEmpty
     }
 
     /// The messages waiting for the running turn to finish. Each row can jump
@@ -1734,7 +1962,14 @@ struct AIChatView: View {
 
             ForEach(chat.pendingQueued) { item in
                 HStack(spacing: 6) {
-                    Text(item.text)
+                    if !item.images.isEmpty {
+                        Label("\(item.images.count)", systemImage: "photo")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .help(item.images.count == 1 ? "1 attached image" : "\(item.images.count) attached images")
+                    }
+                    Text(item.text.isEmpty ? "Image" : item.text)
                         .font(.caption)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -1742,7 +1977,10 @@ struct AIChatView: View {
                     Button("Steer") { chat.steerQueued(item.id) }
                         .buttonStyle(.plain)
                         .font(.caption)
-                        .help("Send this into the running task instead of waiting")
+                        .disabled(!item.images.isEmpty)
+                        .help(item.images.isEmpty
+                              ? "Send this into the running task instead of waiting"
+                              : "Attachments need their own turn, so this waits for the current task to finish")
                     Button {
                         chat.dropQueued(item.id)
                     } label: {
@@ -2028,11 +2266,14 @@ struct AIChatView: View {
 
     private func send() {
         let text = chat.draft
+        let images = chat.draftImages
         chat.draft = ""
+        chat.draftImages = []
+        attachmentNotice = nil
         // A send is an explicit "take me to the newest exchange" — it ends
         // manual mode, so the reply that follows is followed live again.
         scrollToLatestRequest += 1
-        Task { await chat.sendMessage(text) }
+        Task { await chat.sendMessage(text, images: images) }
     }
 
     /// Sends the draft to the queue instead of into the running turn. A send
@@ -2040,10 +2281,13 @@ struct AIChatView: View {
     /// falls through to a normal send — the same rule opencode applies.
     private func enqueue() {
         let text = chat.draft
+        let images = chat.draftImages
         guard chat.isGenerating else { return send() }
         chat.draft = ""
+        chat.draftImages = []
+        attachmentNotice = nil
         scrollToLatestRequest += 1
-        Task { await chat.sendMessage(text, as: .queue) }
+        Task { await chat.sendMessage(text, images: images, as: .queue) }
     }
 
     // Shift+Enter submits the draft, like the send button; ⌘Shift+Enter
@@ -2056,13 +2300,23 @@ struct AIChatView: View {
         shiftEnterMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak chat = self.chat] event in
             let isReturn = event.charactersIgnoringModifiers == "\r"
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // ⌘V with an image on the clipboard attaches it instead of pasting
+            // text/nothing: a screenshot dropped into the text view would
+            // otherwise leave the model with nothing to look at.
+            if event.charactersIgnoringModifiers?.lowercased() == "v",
+               flags == [.command],
+               self.inputFocused,
+               chat?.pendingApproval == nil,
+               self.attachClipboardImageIfPresent() {
+                return nil
+            }
             let isShiftEnter = isReturn && flags == [.shift]
             let isQueueEnter = isReturn && flags == [.shift, .command]
             guard isShiftEnter || isQueueEnter,
                   let chat,
                   chat.pendingApproval == nil,
                   self.inputFocused,
-                  !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  !chat.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !chat.draftImages.isEmpty
             else { return event }
             if isQueueEnter {
                 self.enqueue()
@@ -2391,3 +2645,97 @@ struct AIChatPanel: View {
         )
     }
 }
+
+// MARK: - Attachments
+
+/// Thumbnails of the images a sent message carried. Clicking opens the full
+/// image, so a small preview isn't the only thing the user ever sees.
+struct ChatImageGridView: View {
+    let images: [ChatImage]
+
+    var body: some View {
+        // A plain `HStack` in a horizontal `ScrollView` rather than a `LazyVGrid`:
+        // the transcript stack above is eager, and a lazy container inside it
+        // would claim no height until it scrolled into view.
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                ForEach(images) { image in
+                    ChatAttachmentThumbnail(image: image, onRemove: nil)
+                }
+            }
+        }
+        .frame(maxWidth: 340, alignment: .trailing)
+    }
+}
+
+/// One attachment: a decoded thumbnail with its file name in the tooltip.
+/// `onRemove` non-nil makes it an editable chip in the composer's strip.
+struct ChatAttachmentThumbnail: View {
+    let image: ChatImage
+    var onRemove: (() -> Void)? = nil
+
+    @State private var showPreview = false
+
+    private var side: CGFloat { onRemove == nil ? 92 : 56 }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button {
+                showPreview = true
+            } label: {
+                thumbnail
+            }
+            .buttonStyle(.plain)
+            .help(image.fileName ?? "Attached image")
+
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(.white)
+                        .shadow(radius: 1)
+                }
+                .buttonStyle(.plain)
+                .offset(x: 4, y: -4)
+                .help("Remove this image")
+            }
+        }
+        .popover(isPresented: $showPreview, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let nsImage = ChatImageCache.image(for: image) {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 560, maxHeight: 560)
+                } else {
+                    Text("Couldn't decode this image.").font(.caption)
+                }
+                Text("\(image.width) × \(image.height)\(image.fileName.map { " · \($0)" } ?? "")")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Text(ByteCountFormatter.string(fromByteCount: Int64(image.byteCount), countStyle: .file))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(10)
+        }
+    }
+
+    @ViewBuilder
+    private var thumbnail: some View {
+        if let nsImage = ChatImageCache.image(for: image) {
+            Image(nsImage: nsImage)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: side, height: side)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.25), lineWidth: 1))
+        } else {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.15))
+                .frame(width: side, height: side)
+                .overlay(Image(systemName: "photo").foregroundColor(.secondary))
+        }
+    }
+}
+

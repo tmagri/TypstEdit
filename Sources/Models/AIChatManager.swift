@@ -140,6 +140,11 @@ final class AIChatManager: ObservableObject {
     /// YOLO mode.
     @Published var draft: String = ""
 
+    /// Images attached to the message being written, sent with it. Same
+    /// lifetime rules as `draft`: kept per conversation for the app run, and
+    /// cleared when the message goes out.
+    @Published var draftImages: [ChatImage] = []
+
     /// The armed goal loop (opencode's `/goal` plugin): an objective the
     /// chat keeps working toward. While it is `active`, every finished reply
     /// is reviewed — continue (a continuation is injected and the turn goes
@@ -252,10 +257,17 @@ final class AIChatManager: ObservableObject {
     @Published private(set) var pendingQueued: [QueuedMessage] = []
 
     /// One message waiting for the running turn to finish. Carries an id so
-    /// the pending strip can offer "steer now" and "drop" per row.
+    /// the pending strip can offer "steer now" and "drop" per row, and any
+    /// images the message was sent with so they open the turn it becomes.
     struct QueuedMessage: Identifiable, Equatable {
         let id = UUID()
         let text: String
+        var images: [ChatImage] = []
+
+        /// Only the id: like `ChatImage`, the strip doesn't diff pixels.
+        static func == (lhs: QueuedMessage, rhs: QueuedMessage) -> Bool {
+            lhs.id == rhs.id
+        }
     }
 
     /// Set by `stop()` and cleared when the next busy period starts, so the
@@ -264,8 +276,8 @@ final class AIChatManager: ObservableObject {
 
     /// Adds a message to the queue. Internal so the delivery rules are
     /// directly testable without a running model request.
-    func enqueue(_ text: String) {
-        pendingQueued.append(QueuedMessage(text: text))
+    func enqueue(_ text: String, images: [ChatImage] = []) {
+        pendingQueued.append(QueuedMessage(text: text, images: images))
     }
     /// Input schemas of the tools offered this turn, keyed by qualified
     /// name — used to repair malformed arguments before execution (see
@@ -505,7 +517,7 @@ final class AIChatManager: ObservableObject {
         let prompt = """
         Write a title of 3-6 words for this conversation. Reply with the title only: no quotes, no trailing punctuation, no explanation. Name the concrete subject — a file name or the task — not generic words like "Conversation" or "Help".
 
-        User: \(clip(firstUser.text))
+        User: \(clip(Self.foldedText(for: firstUser)))
         Assistant: \(clip(lastAssistant.text))
         """
 
@@ -538,6 +550,8 @@ final class AIChatManager: ObservableObject {
         messages = []
         plan = []
         goal = nil
+        // Attachments belong to the transcript being thrown away.
+        draftImages = []
         // The measured anchor described a transcript that no longer exists.
         resetContextAnchor()
         title = ""
@@ -699,13 +713,31 @@ final class AIChatManager: ObservableObject {
         case queue
     }
 
+    /// What a send carries: the words, and anything attached to them.
+    struct OutgoingMessage {
+        var text: String
+        var images: [ChatImage] = []
+    }
+
     func sendMessage(_ text: String, as delivery: Delivery) async {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        await sendMessage(OutgoingMessage(text: text), as: delivery)
+    }
+
+    /// Sends a message with images attached (see `ChatImage`). An image-only
+    /// message is allowed: the words are optional when there is something to
+    /// look at.
+    func sendMessage(_ text: String, images: [ChatImage], as delivery: Delivery = .steer) async {
+        await sendMessage(OutgoingMessage(text: text, images: images), as: delivery)
+    }
+
+    func sendMessage(_ outgoing: OutgoingMessage, as delivery: Delivery) async {
+        let trimmed = outgoing.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let images = outgoing.images
+        guard !trimmed.isEmpty || !images.isEmpty else { return }
 
         if isGenerating {
             switch delivery {
-            case .steer:
+            case .steer where images.isEmpty:
                 // Steering: a turn is already running, so this message can't
                 // start a new one. It lands in the transcript immediately —
                 // visible and persisted — and reaches the model at the next
@@ -720,12 +752,18 @@ final class AIChatManager: ObservableObject {
                 refreshTitleAfterTurnActivity()
                 persist()
                 return
-            case .queue:
+            case .steer, .queue:
                 // Queued: the running turn finishes untouched, then this opens
                 // its own turn. Nothing enters the transcript yet — the model
                 // has not seen it, and an exchange it never received must not
                 // sit in the history as if it had. `runTurnSequence` promotes it.
-                enqueue(trimmed)
+                //
+                // Images always take this path, even when sent as a steer: a
+                // steer is delivered as a note on a tool result mid-request,
+                // and an image cannot ride along with it — the request carrying
+                // it is already in flight. Queuing it gives the attachments a
+                // turn of their own, where the model actually receives them.
+                enqueue(trimmed, images: images)
                 cancelAutoProceed()
                 return
             }
@@ -735,7 +773,7 @@ final class AIChatManager: ObservableObject {
         // round budget begins again from here.
         autoProceedRound = 0
         stopRequested = false
-        messages.append(ChatMessage(role: .user, text: trimmed))
+        messages.append(ChatMessage(role: .user, text: trimmed, images: images.isEmpty ? nil : images))
         // Names the chat from this message (if it's the first) and asks the
         // model for a proper title once there's a reply to summarize.
         refreshTitleAfterTurnActivity()
@@ -753,7 +791,7 @@ final class AIChatManager: ObservableObject {
         // you're currently running in. The child inherits the main actor, so
         // everything stays serialized exactly as before; `await turn.value`
         // simply waits for it to finish or unwind.
-        let turn = Task { await self.runTurnSequence(trimmed) }
+        let turn = Task { await self.runTurnSequence(trimmed, images: images) }
         generationTask = turn
         defer {
             // `isGenerating` (set above, cleared here) blocks any other
@@ -789,10 +827,15 @@ final class AIChatManager: ObservableObject {
     /// One busy period, not one turn: a queued message opens the next turn of
     /// this same run, so `isGenerating` stays true across it and the panel
     /// keeps showing work in progress (opencode's coalesced drain).
-    private func runTurnSequence(_ firstText: String) async {
+    private func runTurnSequence(_ firstText: String, images: [ChatImage] = []) async {
         var text = firstText
+        var turnImages = images
         while !Task.isCancelled {
-            let failure = await runTurn(text)
+            let failure = await runTurn(text, images: turnImages)
+            // Images belong to the exchange that carried them: every
+            // continuation after this point (a steer, a queued message, an
+            // auto-proceed, the goal loop) is its own turn.
+            turnImages = []
             // Steers first: a message sent mid-turn was already in the
             // transcript and is the next exchange of *this* turn.
             if let steer = dequeueSteers(joining: true) {
@@ -804,10 +847,11 @@ final class AIChatManager: ObservableObject {
             // message opens its own turn. It preempts Auto-proceed — an
             // explicit message outranks an automatic continuation, the same
             // way a steer does.
-            if !stopRequested, let next = promoteQueued() {
+            if !stopRequested, let next = promoteQueuedMessage() {
                 autoProceedStoppedReason = nil
                 autoProceedRound = 0
-                text = next
+                text = next.text
+                turnImages = next.images
                 continue
             }
             guard let failure else { return }
@@ -825,16 +869,22 @@ final class AIChatManager: ObservableObject {
         }
     }
 
-    /// Moves the oldest queued message into the transcript and returns its
-    /// text, or nil when nothing is waiting. Kept off the queue *before* the
-    /// turn runs so a Stop mid-turn cannot replay it. Internal for the tests.
-    func promoteQueued() -> String? {
+    /// Moves the oldest queued message into the transcript and returns it, or
+    /// nil when nothing is waiting. Kept off the queue *before* the turn runs
+    /// so a Stop mid-turn cannot replay it.
+    func promoteQueuedMessage() -> QueuedMessage? {
         guard !pendingQueued.isEmpty else { return nil }
         let next = pendingQueued.removeFirst()
-        messages.append(ChatMessage(role: .user, text: next.text))
+        messages.append(ChatMessage(role: .user, text: next.text, images: next.images.isEmpty ? nil : next.images))
         refreshTitleAfterTurnActivity()
         persist()
-        return next.text
+        return next
+    }
+
+    /// Text-only form of `promoteQueuedMessage`, kept for callers (and tests)
+    /// that only need the words. Internal for the tests.
+    func promoteQueued() -> String? {
+        promoteQueuedMessage()?.text
     }
 
     /// Re-routes a waiting message to the running turn: it becomes steering
@@ -849,7 +899,14 @@ final class AIChatManager: ObservableObject {
             // also re-arms the drain, so anything still queued behind it runs
             // after — the same as picking it from the strip.
             stopRequested = false
-            Task { await sendMessage(message.text) }
+            Task { await sendMessage(message.text, images: message.images) }
+            return
+        }
+        guard message.images.isEmpty else {
+            // Attachments can't join the request already in flight — a steer is
+            // a note on a tool result, not a new turn. Keep it waiting (at the
+            // front, so its order is preserved) until the current turn ends.
+            pendingQueued.insert(message, at: 0)
             return
         }
         messages.append(ChatMessage(role: .user, text: message.text))
@@ -866,6 +923,12 @@ final class AIChatManager: ObservableObject {
         let message = pendingQueued.remove(at: index)
         let current = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         draft = current.isEmpty ? message.text : message.text + "\n\n" + draft
+        // Attachments go back too — dropping a message must not lose its
+        // images, which can't be retyped.
+        if !message.images.isEmpty {
+            let fit = ChatImageLoader.fit(draftImages + message.images)
+            draftImages = fit.accepted
+        }
     }
 
     /// True when the configured per-request continuation budget is used up.
@@ -895,6 +958,38 @@ final class AIChatManager: ObservableObject {
         return guidance
     }
 
+    /// Images worth re-sending on a text-only turn: those from the most recent
+    /// turns that carried any. A follow-up question about a screenshot still
+    /// has the screenshot to look at, while a long conversation doesn't
+    /// re-bill every image it ever saw.
+    ///
+    /// The newest user turn is always the one being sent — `runTurn` appends it
+    /// just before this runs, and a joined steer's text doesn't match the row
+    /// it came from — so it is skipped outright. Internal and static so the
+    /// bound is unit-testable.
+    nonisolated static func retainedImages(
+        in messages: [ChatMessage],
+        maxTurns: Int = 2
+    ) -> [ChatImage] {
+        var collected: [ChatImage] = []
+        var turns = 0
+        var skippedCurrent = false
+        for message in messages.reversed() where message.role == .user {
+            // The current turn is skipped first, so a compacted older row can't
+            // consume that slot.
+            guard skippedCurrent else {
+                skippedCurrent = true
+                continue
+            }
+            guard !message.isCompacted, message.hasImages else { continue }
+            collected.append(contentsOf: message.attachments)
+            turns += 1
+            if turns >= maxTurns { break }
+        }
+        // Newest first, so the most likely referent wins the size budget.
+        return ChatImageLoader.fit(collected).accepted
+    }
+
     /// One generation turn: tool setup, the model/tool loop, and the
     /// cancellation-aware cleanup. Runs in the child task that
     /// `sendMessage` stores in `generationTask`, so `stop()`'s cancellation
@@ -905,7 +1000,7 @@ final class AIChatManager: ObservableObject {
     /// or was stopped): `runTurnSequence` uses it to decide whether
     /// Auto-proceed should try again.
     @discardableResult
-    private func runTurn(_ trimmed: String) async -> String? {
+    private func runTurn(_ trimmed: String, images: [ChatImage] = []) async -> String? {
         // A new turn means a fresh context: the model must look at a file
         // again before changing it, and subagent nesting restarts at zero.
         localTools.beginRequest()
@@ -1054,10 +1149,13 @@ final class AIChatManager: ObservableObject {
             baseSystemPrompt += "\n\n" + instructionsBlock
         }
 
-        // fetchCompletionWithTools only takes a single prompt string, so prior
-        // turns are folded into it as plain transcript text rather than a
-        // structured message array — simplest way to give the chat real
-        // multi-turn memory without changing that method's signature again.
+        // fetchCompletionWithTools runs the tool loop over a provider-neutral
+        // message list, but prior turns are folded into the opening prompt as
+        // plain transcript text rather than a structured message array —
+        // simplest way to give the chat real multi-turn memory without
+        // changing that method's signature again. Images are the exception:
+        // they ride on the opening user turn (see `pendingImages`), because a
+        // provider only accepts them as content blocks, not as folded text.
         // `dropLast()` because the current question was just appended and is
         // passed as `userText`; leaving it in would duplicate it. The window
         // follows the model's context budget, so raising it (globally or per
@@ -1072,6 +1170,36 @@ final class AIChatManager: ObservableObject {
         // That keeps the system prompt — and the cached prefix behind it —
         // unchanged, and the passages don't linger in later turns.
         var userText = rehydration.map { "\($0)\n\n\(trimmed)" } ?? trimmed
+        // An image-only message has no words to send; the request still needs a
+        // non-empty user turn for the providers that reject blank content, and
+        // a later tool round has no images left to carry. A neutral
+        // instruction is used rather than inventing a question.
+        if userText.isEmpty && !images.isEmpty {
+            userText = "Use the attached image as a reference."
+        }
+        // Images ride on the opening request only: every later iteration of
+        // this loop is the model continuing its own work (a steer, a goal
+        // round, an auto-proceed), not the user sending new pictures, and
+        // re-sending the pixels would bill them again each round.
+        //
+        // Images from the last couple of turns ride along too, so a follow-up
+        // ("now the second table in that screenshot") still has something to
+        // look at — the folded history is text-only, so without this the model
+        // would be asked about a picture it can no longer see. Bounded so a
+        // long chat doesn't re-bill every screenshot.
+        var pendingImages = images.isEmpty
+            ? Self.retainedImages(in: messages)
+            : images
+        // The guidance only goes out when the turn actually carries images, so
+        // an ordinary text turn's prompt (and the cached prefix behind it) is
+        // unchanged.
+        if !pendingImages.isEmpty {
+            baseSystemPrompt += """
+
+
+            The user attached \(pendingImages.count == 1 ? "an image" : "\(pendingImages.count) images"). Read them as reference material for what they asked: describe or use what you see, quote any text in them exactly, and say plainly when something is unreadable rather than guessing. Do not claim to have edited or inserted an image unless a tool actually did.
+            """
+        }
         do {
             while !Task.isCancelled {
                 // The goal reminder is composed per iteration (not folded
@@ -1089,6 +1217,7 @@ final class AIChatManager: ObservableObject {
                         charBudget: contextBudgetTokens * Self.charsPerToken
                     ),
                     systemPrompt: turnSystemPrompt,
+                    images: pendingImages,
                     maxTokens: AISettingsManager.shared.effectiveChatMaxTokens,
                     maxTokensCeiling: AISettingsManager.shared.chatMaxTokensCeiling,
                     hasActivePlan: plan.contains { $0.status != .completed },
@@ -1118,6 +1247,8 @@ final class AIChatManager: ObservableObject {
                         return try await self.trackedToolCall(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON)
                     }
                 )
+                // Images belong to the request that carried them.
+                pendingImages = []
                 messages.append(ChatMessage(role: .assistant, text: result, reasoning: capturedReasoning))
                 // The turn ended with a written answer, so it's over: close out
                 // any plan item the model left in progress or pending. It doesn't
@@ -1415,7 +1546,7 @@ final class AIChatManager: ObservableObject {
             var remaining = charBudget - summaries.reduce(0) { $0 + $1.text.count }
             var kept: [ChatMessage] = []
             for message in turns.reversed() {
-                let cost = message.text.count + 2 // the "\n\n" separator
+                let cost = message.text.count + message.attachments.reduce(0) { $0 + $1.budgetChars } + 2 // the "\n\n" separator
                 // Always keep the newest turn, even if it alone is over budget.
                 if !kept.isEmpty, cost > remaining { break }
                 remaining -= cost
@@ -1428,9 +1559,20 @@ final class AIChatManager: ObservableObject {
         var transcript = ""
         for message in recent {
             let speaker = message.role == .user ? "User" : "Assistant"
-            transcript += "\(speaker): \(message.text)\n\n"
+            transcript += "\(speaker): \(Self.foldedText(for: message))\n\n"
         }
         return transcript.isEmpty ? userText : "\(transcript)User: \(userText)"
+    }
+
+    /// How a past turn appears in the folded transcript. Attachment rows keep
+    /// a marker so an image-only message doesn't fold into a bare "User:" and
+    /// the model still knows something was shown earlier in the conversation.
+    nonisolated static func foldedText(for message: ChatMessage) -> String {
+        guard message.hasImages else { return message.text }
+        let marker = message.attachments.count == 1
+            ? "[image attached]"
+            : "[\(message.attachments.count) images attached]"
+        return message.text.isEmpty ? marker : "\(marker)\n\(message.text)"
     }
 
     // MARK: - Context Budget & Compaction
@@ -1520,7 +1662,9 @@ final class AIChatManager: ObservableObject {
 
     /// Total characters the estimate is computed from. Tool calls are counted
     /// through their recorded output, which is what the model actually reads
-    /// back, rather than through their arguments.
+    /// back, rather than through their arguments. Attachments are counted
+    /// through their token estimate (`ChatImage.budgetChars`), since their
+    /// base64 length says nothing about what a provider bills for them.
     private nonisolated static func estimatedChars(in messages: [ChatMessage]) -> Int {
         messages.reduce(0) { total, message in
             guard !message.isCompacted else { return total }
@@ -1529,6 +1673,7 @@ final class AIChatManager: ObservableObject {
                 return total + (message.toolOutput?.utf8.count ?? 0)
             case .user, .assistant:
                 return total + message.text.utf8.count
+                    + message.attachments.reduce(0) { $0 + $1.budgetChars }
             }
         }
     }
@@ -1682,7 +1827,7 @@ final class AIChatManager: ObservableObject {
                 }
                 let speaker = message.role == .user ? "User" : "Assistant"
                 let body = message.text.count > 2_000 ? String(message.text.prefix(2_000)) + "…" : message.text
-                turns.append("\(speaker): \(body)")
+                turns.append("\(speaker): \(Self.foldedText(for: ChatMessage(role: message.role, text: body, images: message.images)))")
             }
         }
         return CompactionSource(

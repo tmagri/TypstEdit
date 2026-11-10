@@ -98,7 +98,9 @@ final class ConversationRecall {
             case .user, .assistant:
                 guard message.isCompacted, !message.isSummary else { continue }
                 label = "\(message.role == .user ? "User" : "Assistant"), turn \(max(turn, 1))"
-                text = message.text
+                // An image can't be recalled as text, but the row it came from
+                // should still be findable — the marker says what was shown.
+                text = AIChatManager.foldedText(for: message)
             case .toolCall:
                 guard isRecallableToolRow(message) else { continue }
                 var call = AgentHarnessTools.workLogLine(message)

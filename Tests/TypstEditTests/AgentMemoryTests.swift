@@ -348,7 +348,7 @@ final class AgentWorkingMemoryTests: XCTestCase {
         // Nothing to attach to: no-op.
         var none: [AIChatMessage] = [.user("u")]
         AICompletionService.appendHarnessNote("x", to: &none)
-        guard case .user(let text) = none[0] else { return XCTFail() }
+        guard case .user(let text, _) = none[0] else { return XCTFail() }
         XCTAssertEqual(text, "u")
     }
 }

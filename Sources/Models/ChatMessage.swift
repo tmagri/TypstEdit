@@ -36,6 +36,18 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var text: String = ""
     var timestamp: Date = Date()
 
+    /// Images the user attached to this message (user rows only), sent to the
+    /// model with the turn they belong to. Optional so conversations saved
+    /// before images existed still decode — a missing key reads as "none".
+    var images: [ChatImage]? = nil
+
+    /// The attachments, without the optional. Read-only convenience for the
+    /// places that don't care whether the field was ever written.
+    var attachments: [ChatImage] { images ?? [] }
+
+    /// True when this row carries anything an image-capable model will read.
+    var hasImages: Bool { !(images?.isEmpty ?? true) }
+
     /// Captured reasoning/"thinking" content, when the model and provider
     /// expose it (OpenAI-compatible `reasoning_content`/`reasoning` fields,
     /// or inline `<think>`/`<thought>` tags some local/open models emit).
