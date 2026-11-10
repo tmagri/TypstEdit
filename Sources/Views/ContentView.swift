@@ -677,49 +677,83 @@ struct ContentView: View {
     // MARK: - Subviews
     
     private var mainLayout: some View {
-        Group {
-           if fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile && selectedFile == nil {
-                WelcomeView(model: fileSystem, onOpen: { file in
-                    AppDelegate.shared?.openRecent(file, preferring: editorController)
-                })
-                .background(themeManager.mainBackground)
-            } else {
-                VStack(spacing: 0) {
-                    // Sidebar defaults to a narrow, explorer-style fixed width
-                    // (like VS Code's side bar); the editor + preview fill the
-                    // rest and split it evenly. Still drag-resizable.
-                    FractionalSplitView(
-                        // No visible feature means no empty sidebar pane.
-                        showLeft: editorController.isSidebarVisible && !sidebarVisibility.panels.isEmpty,
-                        initialLeftWidth: 252
-                    ) {
-                        sidebarPanel
-                    } right: {
-                        Group {
-                            if selectedFile != nil || fileSystem.isNewUnsavedFile {
-                                editorPreviewArea
-                            } else {
-                                emptyStateView
-                            }
-                        }
+        VStack(spacing: 0) {
+            Group {
+               if isWelcomeScreen {
+                    WelcomeView(model: fileSystem, onOpen: { file in
+                        AppDelegate.shared?.openRecent(file, preferring: editorController)
+                    })
+                    .background(themeManager.mainBackground)
+                } else {
+                    documentLayout
+                }
+            }
+            // The content takes every pixel the status bar does not, so the
+            // bar stays pinned to the bottom edge instead of floating mid-window.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .layoutPriority(1)
+
+            statusBar
+        }
+    }
+
+    /// Everything below the window's status bar: sidebar, editor and preview.
+    /// Kept separate from `mainLayout` so the status bar can sit outside the
+    /// sidebar (full window width) and stay put across every layout.
+    private var documentLayout: some View {
+        VStack(spacing: 0) {
+            // Sidebar defaults to a narrow, explorer-style fixed width
+            // (like VS Code's side bar); the editor + preview fill the
+            // rest and split it evenly. Still drag-resizable.
+            FractionalSplitView(
+                // No visible feature means no empty sidebar pane.
+                showLeft: editorController.isSidebarVisible && !sidebarVisibility.panels.isEmpty,
+                initialLeftWidth: 252
+            ) {
+                sidebarPanel
+            } right: {
+                Group {
+                    if selectedFile != nil || fileSystem.isNewUnsavedFile {
+                        editorPreviewArea
+                    } else {
+                        emptyStateView
                     }
-                }
-                .onChange(of: editorController.isPreviewDarkMode) { newValue in
-                    compiler.isDarkMode = newValue
-                    scheduleCompilation()
-                }
-                .onChange(of: generalSettings.keepWithNextHeadings) { _ in
-                    // The preamble injected into the shadow source changes,
-                    // so the preview must be recompiled to match.
-                    scheduleCompilation()
-                }
-                .toolbar { appToolbar }
-                .onChange(of: compiler.errors) { newErrors in
-                    editorController.errors = newErrors
-                    editorController.needsRedraw()
                 }
             }
         }
+        .onChange(of: editorController.isPreviewDarkMode) { newValue in
+            compiler.isDarkMode = newValue
+            scheduleCompilation()
+        }
+        .onChange(of: generalSettings.keepWithNextHeadings) { _ in
+            // The preamble injected into the shadow source changes,
+            // so the preview must be recompiled to match.
+            scheduleCompilation()
+        }
+        .toolbar { appToolbar }
+        .onChange(of: compiler.errors) { newErrors in
+            editorController.errors = newErrors
+            editorController.needsRedraw()
+        }
+    }
+
+    /// The welcome screen is the one window state with no document, no project
+    /// and no sidebar — the status bar hides its document readouts there but
+    /// still spans the window.
+    private var isWelcomeScreen: Bool {
+        fileSystem.currentFolder == nil && !fileSystem.isNewUnsavedFile && selectedFile == nil
+    }
+
+    /// A document (saved or unsaved) is open in the editor/preview area.
+    private var hasOpenDocument: Bool {
+        selectedFile != nil || fileSystem.isNewUnsavedFile
+    }
+
+    /// View-mode buttons only mean something when there are two panes to
+    /// arrange: the PDF preview for Typst/Markdown, the terminal for Python.
+    private var showsViewModeControls: Bool {
+        hasOpenDocument
+            && (editorController.isTypstFile || editorController.isMarkdownFile || editorController.isPythonFile)
     }
     
     private var sidebarVisibility: SidebarVisibility {
@@ -774,295 +808,322 @@ struct ContentView: View {
     }
 
     private var editorPreviewArea: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                themeManager.contentOverlay.ignoresSafeArea()
-                themeManager.mainBackground.ignoresSafeArea()
-                
-                let isTypst = editorController.currentFileType == .typst
-                let isCompilable = isTypst || editorController.isMarkdownFile
-                let isPython = editorController.isPythonFile
+        ZStack {
+            themeManager.contentOverlay.ignoresSafeArea()
+            themeManager.mainBackground.ignoresSafeArea()
 
-                if isCompilable {
-                    if editorController.viewMode == .editorOnly {
-                        editorBox.padding(.horizontal, 12)
-                    } else if editorController.viewMode == .previewOnly {
-                        pdfBox.padding(.leading, 12)
-                    } else {
-                        ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
-                            editorBox.padding(.leading, 12)
-                        } right: {
-                            pdfBox
-                        }
-                    }
-                } else if isPython {
-                    // A Python file has nothing to render, so the right pane is
-                    // a terminal that runs it instead of an empty PDF preview.
-                    if editorController.viewMode == .editorOnly {
-                        editorBox.padding(.horizontal, 12)
-                    } else if editorController.viewMode == .previewOnly {
-                        pythonTerminalBox.padding(.leading, 12)
-                    } else {
-                        ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
-                            editorBox.padding(.leading, 12)
-                        } right: {
-                            pythonTerminalBox
-                        }
-                    }
-                } else {
+            let isTypst = editorController.currentFileType == .typst
+            let isCompilable = isTypst || editorController.isMarkdownFile
+            let isPython = editorController.isPythonFile
+
+            if isCompilable {
+                if editorController.viewMode == .editorOnly {
                     editorBox.padding(.horizontal, 12)
+                } else if editorController.viewMode == .previewOnly {
+                    pdfBox.padding(.leading, 12)
+                } else {
+                    ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                        editorBox.padding(.leading, 12)
+                    } right: {
+                        pdfBox
+                    }
                 }
+            } else if isPython {
+                // A Python file has nothing to render, so the right pane is
+                // a terminal that runs it instead of an empty PDF preview.
+                if editorController.viewMode == .editorOnly {
+                    editorBox.padding(.horizontal, 12)
+                } else if editorController.viewMode == .previewOnly {
+                    pythonTerminalBox.padding(.leading, 12)
+                } else {
+                    ResizableSplitView(initialWidth: 500, isVertical: editorController.isVerticalSplit) {
+                        editorBox.padding(.leading, 12)
+                    } right: {
+                        pythonTerminalBox
+                    }
+                }
+            } else {
+                editorBox.padding(.horizontal, 12)
             }
-            .layoutPriority(1)
-            
-            statusBar
         }
+        .layoutPriority(1)
     }
     
+    /// The window's status bar. It sits below every layout — the welcome
+    /// screen, "Select a file", all three editor layouts, image/PDF previews
+    /// and the calculator panel — so the sidebar, panels and layout controls
+    /// are always reachable, even when no document can give the editor focus.
+    ///
+    /// Document readouts (word count, syntax, view-mode buttons, Run) appear
+    /// only when there is a document whose values mean something; the window
+    /// and panel controls are always here.
     private var statusBar: some View {
-        Group {
-            if editorController.currentFileType.isTextual {
-                HStack {
-                    // Toggle Sidebar Button
+        HStack(spacing: 8) {
+            // Sidebar and its panels belong to the document workspace, which
+            // the welcome screen replaces with recent files. Hide them there
+            // rather than show toggles that would have nothing to reveal.
+            if !isWelcomeScreen {
+                Button(action: {
+                    withAnimation {
+                        editorController.isSidebarVisible.toggle()
+                    }
+                }) {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 11))
+                        .foregroundColor(editorController.isSidebarVisible ? .accentColor : themeManager.textColor.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .disabled(sidebarVisibility.panels.isEmpty)
+                .help(sidebarVisibility.panels.isEmpty
+                      ? "All sidebar features are hidden. Show them in View → Sidebar Features."
+                      : "Toggle Sidebar")
+
+                Divider().frame(height: 12).padding(.horizontal, 4)
+            }
+
+            // Active Typst compiler version
+            if let typstVersion = typstUpdater.currentVersion {
+                Text("Typst \(typstVersion)")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .foregroundColor(themeManager.textColor)
+                    .help("Typst compiler version")
+
+                Divider().frame(height: 12).padding(.horizontal, 4)
+            }
+
+            // Word count is a property of a Typst document's rendered text, so
+            // there is nothing to show on the welcome screen or for non-Typst
+            // files (whose count would be the previous document's).
+            if hasOpenDocument && editorController.isTypstFile {
+                Text("Words: \(editorController.wordCount.formatted())")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .foregroundColor(themeManager.textColor)
+
+                Divider().frame(height: 12).padding(.horizontal, 4)
+            }
+
+            // Working on code or plain text instead of a Typst document?
+            // Name the syntax so it is obvious which grammar is coloring
+            // the file, and keep the view-mode buttons below hidden — there
+            // is no preview to split (Python is the exception: its pane is
+            // the terminal, so it does have a right-hand pane to show).
+            if hasOpenDocument && editorController.currentFileType.isTextual
+                && !editorController.isTypstFile && !editorController.isMarkdownFile {
+                Text(editorController.currentSyntaxName)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .foregroundColor(themeManager.textColor.opacity(0.8))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.08))
+                    .clipShape(Capsule())
+                    .help("Syntax highlighting: \(editorController.currentSyntaxName)")
+
+                Divider().frame(height: 12).padding(.horizontal, 4)
+            }
+
+            // View Mode Options — Typst and Markdown documents get the
+            // PDF preview; Python files get the terminal in the same
+            // right-hand slot, so the same three layouts apply to both.
+            if showsViewModeControls {
+                viewModeControls
+            }
+
+            // Python files: one-click Run. The pane header has the same
+            // button; this one is where a user looks first.
+            if hasOpenDocument && editorController.isPythonFile {
+                Button(action: runPythonFile) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 10))
+                        Text("Run")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundColor(themeManager.textColor.opacity(0.85))
+                }
+                .buttonStyle(.plain)
+                .help("Run this Python file in the terminal (Cmd+Option+R)")
+            }
+
+            // AI Chat and Calculator are sidebar panels, not document views:
+            // they stay reachable whatever the editor is showing.
+            if !isWelcomeScreen {
+                if aiSettings.chatEnabled {
                     Button(action: {
-                        withAnimation {
-                            editorController.isSidebarVisible.toggle()
-                        }
+                        withAnimation { editorController.toggleAIChatPanel() }
                     }) {
-                        Image(systemName: "sidebar.left")
+                        Image(systemName: "bubble.left.and.text.bubble.right")
                             .font(.system(size: 11))
-                            .foregroundColor(editorController.isSidebarVisible ? .accentColor : themeManager.textColor.opacity(0.7))
+                            .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? .accentColor : themeManager.textColor.opacity(0.7))
                     }
                     .buttonStyle(.plain)
-                    .disabled(sidebarVisibility.panels.isEmpty)
-                    .help(sidebarVisibility.panels.isEmpty
-                          ? "All sidebar features are hidden. Show them in View → Sidebar Features."
-                          : "Toggle Sidebar")
-                    
-                    Divider().frame(height: 12).padding(.horizontal, 4)
+                    .help("Toggle AI Chat")
+                }
 
-                    // Active Typst compiler version
-                    if let typstVersion = typstUpdater.currentVersion {
-                        Text("Typst \(typstVersion)")
-                            .font(.caption)
-                            .monospacedDigit()
-                            .foregroundColor(themeManager.textColor)
-                            .help("Typst compiler version")
-
-                        Divider().frame(height: 12).padding(.horizontal, 4)
-                    }
-
-                    if editorController.isTypstFile {
-                        Text("Words: \(editorController.wordCount)").font(.caption).monospacedDigit().foregroundColor(themeManager.textColor)
-
-                        Divider().frame(height: 12).padding(.horizontal, 4)
-                    }
-
-                    // Working on code or plain text instead of a Typst document?
-                    // Name the syntax so it is obvious which grammar is coloring
-                    // the file, and keep the view-mode buttons below hidden — there
-                    // is no preview to split (Python is the exception: its pane is
-                    // the terminal, so it does have a right-hand pane to show).
-                    if !editorController.isTypstFile && !editorController.isMarkdownFile {
-                        Text(editorController.currentSyntaxName)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(themeManager.textColor.opacity(0.8))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.08))
-                            .clipShape(Capsule())
-                            .help("Syntax highlighting: \(editorController.currentSyntaxName)")
-
-                        Divider().frame(height: 12).padding(.horizontal, 4)
-                    }
-                    
-                    // View Mode Options — Typst and Markdown documents get the
-                    // PDF preview; Python files get the terminal in the same
-                    // right-hand slot, so the same three layouts apply to both.
-                    if editorController.isTypstFile || editorController.isMarkdownFile || editorController.isPythonFile {
-                        HStack(spacing: 8) {
-                            Button(action: {
-                                editorController.viewMode = .editorOnly
-                            }) {
-                                Image(systemName: "doc.text")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(editorController.viewMode == .editorOnly ? .accentColor : themeManager.textColor.opacity(0.7))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Only Show Editor")
-
-                            Button(action: {
-                                editorController.viewMode = .previewOnly
-                            }) {
-                                Image(systemName: editorController.isPythonFile ? "terminal" : "doc.richtext")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(editorController.viewMode == .previewOnly ? .accentColor : themeManager.textColor.opacity(0.7))
-                            }
-                            .buttonStyle(.plain)
-                            .help(editorController.isPythonFile ? "Only Show Terminal" : "Preview Only")
-
-                            Button(action: {
-                                editorController.viewMode = .both
-                                editorController.isVerticalSplit = true
-                            }) {
-                                Image(systemName: "square.split.2x1")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(editorController.viewMode == .both && editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Split Vertically")
-
-                            Button(action: {
-                                editorController.viewMode = .both
-                                editorController.isVerticalSplit = false
-                            }) {
-                                Image(systemName: "square.split.1x2")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(editorController.viewMode == .both && !editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Split Horizontally")
-                        }
-                    }
-
-                    // Python files: one-click Run. The pane header has the same
-                    // button; this one is where a user looks first.
-                    if editorController.isPythonFile {
-                        Button(action: runPythonFile) {
-                            HStack(spacing: 3) {
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 10))
-                                Text("Run")
-                                    .font(.system(size: 11, weight: .semibold))
-                            }
-                            .foregroundColor(themeManager.textColor.opacity(0.85))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Run this Python file in the terminal (Cmd+Option+R)")
-                    }
-
-                    // Available for every text file: AI Chat is scoped to the
-                    // whole project, code included.
-                    if aiSettings.chatEnabled {
-                        Button(action: {
-                            withAnimation { editorController.toggleAIChatPanel() }
-                        }) {
-                            Image(systemName: "bubble.left.and.text.bubble.right")
-                                .font(.system(size: 11))
-                                .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .aiChat ? .accentColor : themeManager.textColor.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Toggle AI Chat")
-                    }
-
-                    if generalSettings.showCalculator && (editorController.isTypstFile || editorController.isMarkdownFile) {
-                        Button(action: {
-                            withAnimation { editorController.toggleCalculatorPanel() }
-                        }) {
-                            Image(systemName: "function")
-                                .font(.system(size: 11))
-                                .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? .accentColor : themeManager.textColor.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Toggle Calculator")
-                    }
-                    
-                    Divider().frame(height: 12).padding(.horizontal, 4)
-                    
+                if generalSettings.showCalculator {
                     Button(action: {
-                        toggleWindowMaximize()
+                        withAnimation { editorController.toggleCalculatorPanel() }
                     }) {
-                        Image(systemName: "macwindow")
+                        Image(systemName: "function")
                             .font(.system(size: 11))
-                            .foregroundColor(themeManager.textColor.opacity(0.7))
+                            .foregroundColor(editorController.isSidebarVisible && editorController.sidebarContent == .calculator ? .accentColor : themeManager.textColor.opacity(0.7))
                     }
                     .buttonStyle(.plain)
-                    .help("Toggle Maximize / Window")
-                    
-                    Spacer()
-                    HStack(spacing: 8) {
-                        // AI / Intellisense Status Indicator
-                        if aiService.isFetching || aiSettings.intellisenseEnabled || aiSettings.isEnabled {
-                            HStack(spacing: 4) {
-                                if aiService.isFetching {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                        .scaleEffect(0.6)
-                                    Text("AI")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(.blue)
-                                } else if aiSettings.intellisenseEnabled {
-                                    Text("Intellisense")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(.green)
-                                } else if aiSettings.isEnabled {
-                                    Text("AI")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(.blue.opacity(0.7))
-                                }
-                            }
-                        }
-                        
-                        // Typst Update Status Indicator
-                        if typstUpdater.isUpdating {
-                            HStack(spacing: 6) {
-                                ProgressView(value: typstUpdater.progress)
-                                    .progressViewStyle(.linear)
-                                    .frame(width: 50)
-                                Text(typstUpdater.status)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                        } else if typstUpdater.showResult {
-                            // Lingers after the update ends so the outcome is visible
-                            HStack(spacing: 4) {
-                                Image(systemName: typstUpdater.resultIsSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(typstUpdater.resultIsSuccess ? .green : .orange)
-                                Text(typstUpdater.status)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            .transition(.opacity)
-                            .help(typstUpdater.lastError ?? typstUpdater.status)
-                        }
+                    .help("Toggle Calculator")
+                }
 
-                        // Editor Status Message (e.g., "File Saved")
-                        if editorController.showStatusMessage {
-                            Text(editorController.statusMessage)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .transition(.opacity)
-                        }
+                Divider().frame(height: 12).padding(.horizontal, 4)
+            }
 
-                        // Non-portable Typst badge: shown while the document uses
-                        // TypstEdit calculator features (#calc, calc-param, plot,
-                        // BesselJ …). Notes are exempt — they are TypstEdit-native.
-                        if compiler.usesNonPortableCalcFeatures {
-                            HStack(spacing: 4) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 10))
-                                Text("Non-portable Typst")
-                                    .font(.system(size: 10, weight: .semibold))
-                            }
-                            .foregroundColor(.orange)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.12))
-                            .clipShape(Capsule())
-                            .help(compiler.calcFeatureSummaryText.map {
-                                "Uses TypstEdit calculator features (\($0)). This document will not compile in standard Typst. Notes are exempt."
-                            } ?? "Uses TypstEdit calculator features that standard Typst does not have.")
+            Button(action: {
+                toggleWindowMaximize()
+            }) {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 11))
+                    .foregroundColor(themeManager.textColor.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help("Toggle Maximize / Window")
+
+            Spacer(minLength: 8)
+
+            HStack(spacing: 8) {
+                // AI / Intellisense Status Indicator
+                if aiService.isFetching || aiSettings.intellisenseEnabled || aiSettings.isEnabled {
+                    HStack(spacing: 4) {
+                        if aiService.isFetching {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.6)
+                            Text("AI")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.blue)
+                        } else if aiSettings.intellisenseEnabled {
+                            Text("Intellisense")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.green)
+                        } else if aiSettings.isEnabled {
+                            Text("AI")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.blue.opacity(0.7))
                         }
                     }
                 }
-                .padding(.horizontal, 12).padding(.vertical, 4)
-                .background(Color.primary.opacity(0.3))
-                .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
+
+                // Typst Update Status Indicator
+                if typstUpdater.isUpdating {
+                    HStack(spacing: 6) {
+                        ProgressView(value: typstUpdater.progress)
+                            .progressViewStyle(.linear)
+                            .frame(width: 50)
+                        Text(typstUpdater.status)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundColor(.secondary)
+                    }
+                } else if typstUpdater.showResult {
+                    // Lingers after the update ends so the outcome is visible
+                    HStack(spacing: 4) {
+                        Image(systemName: typstUpdater.resultIsSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(typstUpdater.resultIsSuccess ? .green : .orange)
+                        Text(typstUpdater.status)
+                            .font(.caption2)
+                            .lineLimit(1)
+                            .foregroundColor(.secondary)
+                    }
+                    .transition(.opacity)
+                    .help(typstUpdater.lastError ?? typstUpdater.status)
+                }
+
+                // Editor Status Message (e.g., "File Saved")
+                if editorController.showStatusMessage {
+                    Text(editorController.statusMessage)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .foregroundColor(.secondary)
+                        .transition(.opacity)
+                }
+
+                // Non-portable Typst badge: shown while the document uses
+                // TypstEdit calculator features (#calc, calc-param, plot,
+                // BesselJ …). Notes are exempt — they are TypstEdit-native.
+                if compiler.usesNonPortableCalcFeatures {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                        Text("Non-portable Typst")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.orange.opacity(0.12))
+                    .clipShape(Capsule())
+                    .help(compiler.calcFeatureSummaryText.map {
+                        "Uses TypstEdit calculator features (\($0)). This document will not compile in standard Typst. Notes are exempt."
+                    } ?? "Uses TypstEdit calculator features that standard Typst does not have.")
+                }
             }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.3))
+        .overlay(Rectangle().fill(Color.gray.opacity(0.2)).frame(height: 1), alignment: .top)
     }
-    
+
+    /// The four layout buttons. Kept in one place so the status bar stays
+    /// readable and the active layout is highlighted the same way everywhere.
+    private var viewModeControls: some View {
+        HStack(spacing: 8) {
+            Button(action: {
+                editorController.viewMode = .editorOnly
+            }) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 11))
+                    .foregroundColor(editorController.viewMode == .editorOnly ? .accentColor : themeManager.textColor.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help("Only Show Editor")
+
+            Button(action: {
+                editorController.viewMode = .previewOnly
+            }) {
+                Image(systemName: editorController.isPythonFile ? "terminal" : "doc.richtext")
+                    .font(.system(size: 11))
+                    .foregroundColor(editorController.viewMode == .previewOnly ? .accentColor : themeManager.textColor.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help(editorController.isPythonFile ? "Only Show Terminal" : "Preview Only")
+
+            Button(action: {
+                editorController.viewMode = .both
+                editorController.isVerticalSplit = true
+            }) {
+                Image(systemName: "square.split.2x1")
+                    .font(.system(size: 11))
+                    .foregroundColor(editorController.viewMode == .both && editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help("Split Vertically")
+
+            Button(action: {
+                editorController.viewMode = .both
+                editorController.isVerticalSplit = false
+            }) {
+                Image(systemName: "square.split.1x2")
+                    .font(.system(size: 11))
+                    .foregroundColor(editorController.viewMode == .both && !editorController.isVerticalSplit ? .accentColor : themeManager.textColor.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help("Split Horizontally")
+        }
+    }
+
     private var pdfBox: some View {
         ZStack {
             themeManager.pdfBackground

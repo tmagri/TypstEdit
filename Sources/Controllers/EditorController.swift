@@ -795,6 +795,9 @@ class EditorController: NSObject, ObservableObject {
         hasUnsavedChanges = false
         sourceCode = ""
         editorState = .init()
+        // The count describes the document that was just closed; leaving it
+        // would show it against the next window state in the status bar.
+        wordCount = 0
         noteDiskState(for: nil)
     }
     @Published var targetLineNumber: String = ""
