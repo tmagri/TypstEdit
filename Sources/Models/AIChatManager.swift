@@ -422,6 +422,7 @@ final class AIChatManager: ObservableObject {
     func refreshToolSettings() {
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
+        localTools.pythonSudoEnabled = AISettingsManager.shared.chatPythonSudoEnabled
         localTools.autoValidateTypstEdits = AISettingsManager.shared.chatAutoValidateTypstEdits
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
         localTools.allowedWebFetchDomains = AISettingsManager.shared.chatWebFetchAllowedDomains
@@ -1021,6 +1022,7 @@ final class AIChatManager: ObservableObject {
         localTools.ragToolEnabled = ragToolEnabled
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
+        localTools.pythonSudoEnabled = AISettingsManager.shared.chatPythonSudoEnabled
         localTools.autoValidateTypstEdits = AISettingsManager.shared.chatAutoValidateTypstEdits
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
         localTools.allowedWebFetchDomains = AISettingsManager.shared.chatWebFetchAllowedDomains

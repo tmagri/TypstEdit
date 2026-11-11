@@ -902,4 +902,124 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path),
                        "the script must not get to finish its work after Stop")
     }
+
+    // MARK: - Sudo / elevated runs
+
+    func testElevationDetectorCatchesSudoAndOsascriptButNotOrdinaryCode() {
+        XCTAssertTrue(LocalToolExecutor.codeWantsElevation("subprocess.run(['sudo', 'id'])"))
+        XCTAssertTrue(LocalToolExecutor.codeWantsElevation("os.system('sudo -A rm /tmp/x')"))
+        XCTAssertTrue(LocalToolExecutor.codeWantsElevation("os.system('/usr/bin/sudo apt install frotz')"))
+        XCTAssertTrue(LocalToolExecutor.codeWantsElevation("subprocess.run(['osascript', '-e', 'do shell script \"id\" with administrator privileges'])"))
+        XCTAssertTrue(LocalToolExecutor.codeWantsElevation("os.system('SUDO_ASKPASS=/x sudo whoami')"))
+        // "pseudo" contains no word-boundary `sudo` (s-e-u-d-o), so a plain
+        // script mentioning it must not trip the gate.
+        XCTAssertFalse(LocalToolExecutor.codeWantsElevation("print('pseudo filesystem')"))
+        XCTAssertFalse(LocalToolExecutor.codeWantsElevation("import subprocess\nprint(subprocess.run(['id']))"))
+    }
+
+    /// With the sudo opt-in off, an elevated script is refused *before*
+    /// approval — the user never sees an approval card to mis-click.
+    func testElevatedScriptIsRefusedWhileSudoIsOff() async {
+        executor.pythonToolEnabled = true
+        executor.pythonSudoEnabled = false
+        executor.pythonSandboxEnabled = false
+
+        var askedForApproval = false
+        do {
+            _ = try await executor.execute(toolName: "run", arguments: ["code": "os.system('sudo id')"]) { _ in
+                askedForApproval = true
+                return true
+            }
+            XCTFail("expected a refusal, not a run")
+        } catch let error as LocalToolError {
+            if case .elevationDisabled = error {} else {
+                XCTFail("expected elevationDisabled, got: \(error)")
+            }
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("sudo"), message)
+            XCTAssertTrue(message.contains("Settings"), message)
+        } catch {
+            XCTFail("unexpected error type: \(error)")
+        }
+        XCTAssertFalse(askedForApproval, "the gate fires before the approval card")
+    }
+
+    /// Sudo opted in but the sandbox on: sandbox-exec cannot run setuid
+    /// binaries, so the run is refused with an explanation rather than a
+    /// confusing Seatbelt error.
+    func testElevatedScriptIsRefusedWhileSandboxed() async {
+        executor.pythonToolEnabled = true
+        executor.pythonSudoEnabled = true
+        executor.pythonSandboxEnabled = true
+
+        do {
+            _ = try await executor.execute(toolName: "run", arguments: ["code": "os.system('sudo id')"]) { _ in true }
+            XCTFail("expected a refusal, not a run")
+        } catch let error as LocalToolError {
+            if case .elevationBlockedBySandbox = error {} else {
+                XCTFail("expected elevationBlockedBySandbox, got: \(error)")
+            }
+        } catch {
+            XCTFail("unexpected error type: \(error)")
+        }
+    }
+
+    /// The elevated approval never auto-approves — YOLO mode included —
+    /// while an ordinary script keeps today's behavior.
+    func testElevatedApprovalIsNeverAutoApproved() {
+        let elevated = PendingApprovalKind.runPython(code: "os.system('sudo id')", wantsElevation: true)
+        let ordinary = PendingApprovalKind.runPython(code: "print('hello')", wantsElevation: false)
+        XCTAssertFalse(elevated.canAutoApprove(yoloMode: true), "sudo must always meet a human")
+        XCTAssertFalse(elevated.canAutoApprove(yoloMode: false))
+        XCTAssertTrue(ordinary.canAutoApprove(yoloMode: true))
+        XCTAssertFalse(ordinary.canAutoApprove(yoloMode: false))
+    }
+
+    /// The helper must be private (0700, only this user) and executable, and
+    /// must actually be an askpass script — and nothing may linger afterwards.
+    func testAskpassHelperIsPrivateAndExecutable() throws {
+        let dir = try LocalToolExecutor.writeAskpassHelper()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let script = dir.appendingPathComponent("askpass")
+        let attributes = try FileManager.default.attributesOfItem(atPath: script.path)
+        XCTAssertEqual(attributes[.posixPermissions] as? Int, 0o700, "the helper must be owner-only")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: script.path))
+
+        let contents = try String(contentsOf: script, encoding: .utf8)
+        XCTAssertTrue(contents.contains("osascript"), contents)
+        XCTAssertTrue(contents.contains("with hidden answer"), contents)
+        XCTAssertTrue(contents.contains("default button \"Cancel\""), "Cancel must be the default so a stray Return dismisses the dialog")
+
+        let dirAttributes = try FileManager.default.attributesOfItem(atPath: dir.path)
+        XCTAssertEqual(dirAttributes[.posixPermissions] as? Int, 0o700)
+    }
+
+    /// The full plumbing, without touching sudo: a script the detector flags
+    /// (a dormant `if False:` branch mentioning sudo) gets SUDO_ASKPASS
+    /// pointing at a fresh helper, which is what lets an approved `sudo -A`
+    /// find the dialog. The branch never runs, so no dialog can appear — and
+    /// an unflagged script gets no helper at all, which is the second layer of
+    /// the gate: even detector-evading `sudo -A` has nothing to ask with.
+    func testElevatedOptInHandsAskpassHelperToTheScript() async throws {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") else {
+            throw XCTSkip("python3 unavailable")
+        }
+        executor.pythonToolEnabled = true
+        executor.pythonSudoEnabled = true
+        executor.pythonSandboxEnabled = false
+
+        let flagged = """
+        import os
+        if False:
+            os.system("sudo id")
+        print(os.environ.get("SUDO_ASKPASS", "NONE"))
+        """
+        let flaggedOut = try await run("run", ["code": flagged])
+        XCTAssertTrue(flaggedOut.contains("typstedit-askpass-"), flaggedOut)
+        XCTAssertFalse(flaggedOut.contains("NONE"), flaggedOut)
+
+        let plainOut = try await run("run", ["code": #"import os; print(os.environ.get("SUDO_ASKPASS", "NONE"))"#])
+        XCTAssertTrue(plainOut.contains("NONE"), "an ordinary script must not receive the askpass helper: \(plainOut)")
+    }
 }

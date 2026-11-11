@@ -90,7 +90,12 @@ enum PendingApprovalKind {
     /// A precise `edit_file` replacement: the snippets that matched, not the
     /// whole file, so the diff preview stays readable on a huge document.
     case fileEdit(relativePath: String, oldSnippet: String, newSnippet: String, occurrences: Int)
-    case runPython(code: String)
+    /// A Python tool run. `wantsElevation` is the executor's detection of
+    /// sudo / administrator-privilege use in the code — it drives the red
+    /// elevated-privileges warning on the approval card, and it keeps these
+    /// runs out of YOLO auto-approval: typing the password in the dialog is
+    /// a human decision, and so is approving the code that asks for it.
+    case runPython(code: String, wantsElevation: Bool)
     /// A `web_fetch` request. The full URL is shown for approval — worth
     /// glancing at the query string, since a fetch is also a request the
     /// destination server sees (a compromised page could try to exfiltrate
@@ -126,12 +131,18 @@ enum PendingApprovalKind {
 
     /// Publishing always requires a human review. YOLO can automate local
     /// commits or permitted pulls, but it must never auto-approve a push.
+    /// The same holds for an elevated Python run: YOLO may auto-approve an
+    /// ordinary script, but never one the user will have to authorize with
+    /// their administrator password.
     func canAutoApprove(yoloMode: Bool) -> Bool {
         if case .gitNetwork(let operation, _, _) = self {
             switch operation {
             case .push: return false
             case .fetch, .pull: return yoloMode
             }
+        }
+        if case .runPython(_, let wantsElevation) = self, wantsElevation {
+            return false
         }
         return yoloMode
     }

@@ -446,6 +446,15 @@ class AISettingsManager: ObservableObject {
     /// limited to a scratch folder). On by default — turning it off is the
     /// "full user permissions" behavior the tool used to have.
     @AppStorage("aiChatPythonSandboxEnabled") var chatPythonSandboxEnabled: Bool = true
+    /// Extra opt-in on top of the Python tool: allow scripts to ask for
+    /// elevated privileges (`sudo -A`, osascript's `with administrator
+    /// privileges`). Off by default — this is the highest-risk tier the tool
+    /// offers: an approved script pops a macOS password dialog, and typing
+    /// the password hands it root. Even when on, elevated runs are never
+    /// auto-approved (YOLO included), and they cannot run under the sandbox
+    /// (sandbox-exec refuses setuid binaries), so the sandbox toggle must be
+    /// off too before anything elevates.
+    @AppStorage("aiChatPythonSudoEnabled") var chatPythonSudoEnabled: Bool = false
     /// Whether edit_file/write_file automatically compile the `.typ` file
     /// they just touched and report the result inline. On by default — it's
     /// read-only (compiles to a throwaway temp file) and is the main defense

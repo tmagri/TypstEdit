@@ -1480,12 +1480,24 @@ struct AIChatView: View {
                     Text("Create folder '\(path)'?").font(.subheadline.bold())
                 }
 
-            case .runPython(let code):
+            case .runPython(let code, let wantsElevation):
                 HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
-                    Text("Run this Python script?").font(.subheadline.bold())
+                    Image(systemName: wantsElevation ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(wantsElevation ? "Run this Python script with sudo?" : "Run this Python script?")
+                        .font(.subheadline.bold())
                 }
-                Text("Runs with your full user permissions, no sandbox or network isolation. Review the code carefully.")
+                if wantsElevation {
+                    // The elevated gate (executor) refuses these unless the
+                    // sudo opt-in is on and the sandbox is off, so this
+                    // warning only ever appears for a run that can actually
+                    // pop the password dialog.
+                    Text("Elevated run: sudo will pop a macOS password dialog. Typing your password gives this script full root access — approve only if you understand every line.")
+                        .font(.caption2).foregroundColor(.red)
+                }
+                Text(aiSettings.chatPythonSandboxEnabled
+                     ? "Runs under macOS sandbox-exec: no network access, writes limited to a scratch folder. Review the code carefully."
+                     : "Runs with your full user permissions, no sandbox or network isolation. Review the code carefully.")
                     .font(.caption2).foregroundColor(.secondary)
                 ScrollView {
                     Text(code)

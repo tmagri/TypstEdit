@@ -180,4 +180,30 @@ final class NoteTypstRegionHighlightTests: XCTestCase {
         // Markup after the region is still Typst markup.
         XCTAssertTrue(captures(result, covering: "*bold*", in: showSource).contains(.textStrong))
     }
+
+    /// Code-block braces in a `.note` must be captured as punctuation, not left
+    /// plain: the Typst overlay query had no rules for `{ }`, `[ ]`, `=>` or
+    /// bare identifiers, so a `#show … { … }` block read as if it never closed.
+    @MainActor
+    func test_braceBlocksGetBracketAndOperatorCaptures() {
+        let source = """
+        #show heading.where(level: 1): it => {
+          pagebreak(weak: true)
+          it
+        }
+
+        Prose after the rule.
+        """
+        let result = highlights(for: source)
+        XCTAssertTrue(captures(result, covering: "{", in: source).contains(.punctuationDelimiter),
+                      "{{ must render as punctuation.bracket")
+        XCTAssertTrue(captures(result, covering: "}", in: source).contains(.punctuationDelimiter),
+                      "} must render as punctuation.bracket")
+        XCTAssertTrue(captures(result, covering: "=>", in: source).contains(.operator),
+                      "the lambda arrow must render as an operator")
+        // Plain idents stay unstyled by design (they used to capture @variable,
+        // which turned whole lines purple).
+        XCTAssertFalse(captures(result, covering: "weak", in: source).contains(.variable),
+                       "a plain parameter ident must not render as a variable")
+    }
 }

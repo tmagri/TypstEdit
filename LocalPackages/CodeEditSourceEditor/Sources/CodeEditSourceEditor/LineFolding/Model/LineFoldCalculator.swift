@@ -145,6 +145,10 @@ actor LineFoldCalculator {
     struct ChunkedLineIterator: AsyncSequence, AsyncIteratorProtocol {
         var controller: TextViewController
         var foldProvider: LineFoldProvider
+        /// The previous line's depth, carried ACROSS chunks. Don't shadow this
+        /// with a local in `next()`: a fold whose dedent lands on a chunk's
+        /// first line (every 50 lines) would never see the depth drop and
+        /// would run on to the document end.
         private var previousDepth: Int = 0
         var textIterator: TextLineStorage<TextLine>.TextLineStorageIterator
 
@@ -165,7 +169,6 @@ actor LineFoldCalculator {
         mutating func next() -> [LineFoldProviderLineInfo]? {
             var results: [LineFoldProviderLineInfo] = []
             var count = 0
-            var previousDepth: Int = previousDepth
             while count < 50, let linePosition = textIterator.next() {
                 let foldInfo = foldProvider.foldLevelAtLine(
                     lineNumber: linePosition.index,

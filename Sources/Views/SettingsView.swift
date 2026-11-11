@@ -1744,6 +1744,19 @@ struct AISettingsView: View {
                         .font(.caption)
                         .foregroundColor(settings.chatPythonSandboxEnabled ? .secondary : .orange)
                         .padding(.leading, 38)
+
+                    Divider()
+
+                    Toggle("Allow sudo in Python scripts (administrator password)", isOn: $settings.chatPythonSudoEnabled)
+                        .font(.body.weight(.regular))
+                        .padding(.leading, 18)
+
+                    Text(settings.chatPythonSudoEnabled
+                         ? "ON — risky: an approved script that runs sudo -A pops a macOS password dialog, and typing your password gives that script full root access. Elevated scripts are never auto-approved, even in YOLO mode, and sudo only works while the sandbox is off (macOS refuses to run setuid binaries inside it). Only approve elevated scripts whose code you fully understand."
+                         : "Off (recommended): scripts that try to use sudo or administrator privileges are refused outright — no approval card, no execution.")
+                        .font(.caption)
+                        .foregroundColor(settings.chatPythonSudoEnabled ? .orange : .secondary)
+                        .padding(.leading, 38)
                 }
             }
         }

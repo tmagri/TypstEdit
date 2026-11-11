@@ -17,6 +17,13 @@ enum LocalToolError: LocalizedError {
     case editNoMatch(String, tool: String, hints: [String] = [])
     case editAmbiguous(String, count: Int)
     case sandboxUnavailable
+    /// The script asks for elevated privileges (sudo / administrator
+    /// privileges) while the sudo opt-in is off — refused before approval, so
+    /// the user never even sees an approval card for it.
+    case elevationDisabled
+    /// Sudo is opted in, but the run would be sandboxed — and `sandbox-exec`
+    /// refuses to execute setuid binaries, so sudo could only fail confusingly.
+    case elevationBlockedBySandbox
 
     var errorDescription: String? {
         switch self {
@@ -42,6 +49,10 @@ enum LocalToolError: LocalizedError {
             return "old_string matches \(count) places in '\(path)'. Include more surrounding context so it identifies exactly one spot, or pass replace_all: true if you really mean every occurrence."
         case .sandboxUnavailable:
             return "The Python sandbox (sandbox-exec) isn't available on this system, and sandboxing is enabled for this tool. Turn it off in Settings → AI Chat if you really want unsandboxed execution."
+        case .elevationDisabled:
+            return "This script asks for elevated privileges (sudo), but sudo is disabled for the Python tool. Ask the user to enable \"Allow sudo in Python scripts\" in Settings → AI Chat if they really want this — elevated runs pop a macOS password dialog and must be approved every time, even in YOLO mode."
+        case .elevationBlockedBySandbox:
+            return "This script asks for elevated privileges (sudo), but the Python sandbox is on — macOS sandbox-exec refuses to run setuid binaries, so sudo cannot work inside the sandbox. Ask the user to turn off \"Sandbox Python runs\" in Settings → AI Chat as well, or to run the elevated command themselves in a real terminal."
         }
     }
 }
@@ -179,6 +190,16 @@ final class LocalToolExecutor {
     /// Settings toggle. Off means "runs with your full user permissions",
     /// exactly as the old behavior.
     var pythonSandboxEnabled: Bool = true
+
+    /// Whether scripts may ask for elevated privileges (`sudo`, osascript's
+    /// `with administrator privileges`) — off by default, mirroring the
+    /// Settings toggle. When on, an approved script that runs `sudo -A` gets
+    /// its password prompt answered through a secure macOS dialog the user
+    /// must type into (`SUDO_ASKPASS`); nothing elevates silently. Elevated
+    /// runs additionally refuse to work under the sandbox: `sandbox-exec`
+    /// cannot execute setuid binaries at all, so sudo inside the sandbox is
+    /// impossible, and refusal beats a confusing Seatbelt error.
+    var pythonSudoEnabled: Bool = false
 
     /// Whether `edit_file`/`write_file` automatically compile the `.typ`
     /// file they just changed and report the result alongside their own
@@ -545,10 +566,21 @@ final class LocalToolExecutor {
             let sandboxNote = pythonSandboxEnabled
                 ? "Runs under macOS sandbox-exec: no network access, and writes are limited to a per-run scratch folder whose path is returned in the result ($TMPDIR points at it). Reading project files is allowed."
                 : "Runs with your macOS user's permissions, working directory set to the current \(scope.noun) root, with no sandboxing or network isolation."
+            // Advertise sudo only in the combination where it can actually
+            // work: the sandbox blocks setuid binaries, so an elevated run
+            // under sandbox-exec is refused before approval.
+            let sudoNote: String
+            if pythonSudoEnabled, !pythonSandboxEnabled {
+                sudoNote = " Elevated runs are allowed: to use sudo, write `sudo -A <command>` (plain `sudo` has no TTY and always fails; -A pops a macOS password dialog the user must type into). Only use sudo when the user explicitly asked for an elevated/admin action — never to work around a permission error. Elevated scripts always need the user's approval, even in YOLO mode."
+            } else if pythonSudoEnabled {
+                sudoNote = " sudo is enabled in Settings but unusable while the sandbox is on (sandbox-exec blocks setuid binaries); scripts that ask for sudo are refused."
+            } else {
+                sudoNote = ""
+            }
             tools.append(MCPTool(
                 serverName: Self.pythonNamespace,
                 name: "run",
-                description: "Run a short Python 3 script and return its stdout/stderr. \(sandboxNote) The exact code is always shown to you for approval — every call — before anything runs.",
+                description: "Run a short Python 3 script and return its stdout/stderr. \(sandboxNote)\(sudoNote) The exact code is always shown to you for approval — every call — before anything runs.",
                 inputSchema: [
                     "type": "object",
                     "properties": ["code": ["type": "string"]],
@@ -2357,7 +2389,18 @@ final class LocalToolExecutor {
             throw LocalToolError.invalidArguments("code is required")
         }
 
-        let approved = await requestApproval(.runPython(code: code))
+        // Elevated runs are gated before approval: with the opt-in off (or the
+        // sandbox on, where setuid binaries cannot run) the call is refused
+        // outright, so no approval card even appears. With the opt-in on, the
+        // elevation flag rides along on the approval kind — the card shows a
+        // red warning, and the run is never auto-approved in YOLO mode.
+        let wantsElevation = Self.codeWantsElevation(code)
+        if wantsElevation {
+            guard pythonSudoEnabled else { throw LocalToolError.elevationDisabled }
+            guard !pythonSandboxEnabled else { throw LocalToolError.elevationBlockedBySandbox }
+        }
+
+        let approved = await requestApproval(.runPython(code: code, wantsElevation: wantsElevation))
         guard approved else { throw LocalToolError.approvalDenied }
 
         guard let pythonPath = Self.resolvePython() else { throw LocalToolError.pythonNotFound }
@@ -2390,6 +2433,24 @@ final class LocalToolExecutor {
         var environment = ProcessInfo.processInfo.environment
         environment["TMPDIR"] = scratchDir.resolvingSymlinksInPath().path
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        // Elevated runs: hand `sudo -A` its askpass helper. The helper pops a
+        // secure macOS dialog; the password never touches the script, stdout
+        // or the chat transcript. Written per-run into a fresh 0700 folder and
+        // deleted with it — the script itself could replace a reusable one,
+        // but that crosses no boundary: the dialog, not the file, is what
+        // guards the password. `sudo` scrubs its environment before running
+        // the command, so the variable does not leak into the elevated child.
+        var askpassDir: URL?
+        if wantsElevation {
+            let dir = try Self.writeAskpassHelper()
+            askpassDir = dir
+            environment["SUDO_ASKPASS"] = dir.appendingPathComponent("askpass").path
+        }
+        defer {
+            if let askpassDir {
+                try? FileManager.default.removeItem(at: askpassDir)
+            }
+        }
         process.environment = environment
 
         let stdout = Pipe()
@@ -2403,8 +2464,13 @@ final class LocalToolExecutor {
             throw LocalToolError.invalidArguments("Failed to launch Python: \(error.localizedDescription)")
         }
 
-        // Hard timeout so a hanging/runaway script can never block the chat forever.
-        let timedOut = await Self.waitWithTimeout(process: process, seconds: 20)
+        // Hard timeout so a hanging/runaway script can never block the chat
+        // forever. An elevated run waits far longer on purpose: a password
+        // dialog can sit unanswered for a while, and killing Python under it
+        // would orphan the sudo prompt. The dialog itself stays up if that
+        // ever happens — the user can always cancel it.
+        let timeoutSeconds: Double = wantsElevation ? 180 : 20
+        let timedOut = await Self.waitWithTimeout(process: process, seconds: timeoutSeconds)
 
         let outText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let errText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -2422,12 +2488,15 @@ final class LocalToolExecutor {
                 scope: scope,
                 toolName: "python-run-timeout"
             )
-            return "Python script timed out after 20 seconds and was terminated.\nPartial stdout:\n\(partial)"
+            return "Python script timed out after \(Int(timeoutSeconds)) seconds and was terminated.\nPartial stdout:\n\(partial)"
         }
 
         var result = outText
         if !errText.isEmpty {
             result += (result.isEmpty ? "" : "\n") + "stderr:\n\(errText)"
+        }
+        if wantsElevation {
+            result += (result.isEmpty ? "" : "\n") + "Elevated run: sudo was allowed; the user was prompted for their administrator password via a dialog."
         }
         if pythonSandboxEnabled {
             result += (result.isEmpty ? "" : "\n") + "Sandboxed run: network denied; writable scratch folder was \(scratchDir.path)."
@@ -2467,6 +2536,63 @@ final class LocalToolExecutor {
         (deny file-write*)
         (allow file-write* \(writeRules) (subpath "/dev"))
         """
+    }
+
+    /// Heuristic detection of elevated-privilege use in a script: a
+    /// word-boundary `sudo` (shell line, `subprocess`, `/usr/bin/sudo`) and
+    /// osascript's `administrator privileges`. Not a security boundary — the
+    /// approval card, the password dialog and (when on) the sandbox are the
+    /// real boundaries — it only decides whether the sudo gate applies, so a
+    /// false positive merely refuses a harmless script with an error that
+    /// says how the user can allow it, and the model can rewrite the script.
+    static func codeWantsElevation(_ code: String) -> Bool {
+        let range = NSRange(code.startIndex..., in: code)
+        return elevationSignal.firstMatch(in: code, options: [], range: range) != nil
+    }
+    /// `\b` between `SUDO` and `_ASKPASS` never matches (underscore continues
+    /// the word), so `SUDO_ASKPASS` alone is not an elevation signal; a bare
+    /// `sudo` command is.
+    private static let elevationSignal = try! NSRegularExpression(
+        pattern: #"\bsudo\b|administrator\s+privileges"#,
+        options: .caseInsensitive
+    )
+
+    /// The askpass helper handed to `sudo -A` through `SUDO_ASKPASS`.
+    ///
+    /// Plain `sudo` without a TTY always fails ("a terminal is required…"),
+    /// which is what keeps elevation impossible while this feature is off.
+    /// With the feature on, `sudo -A` runs this helper, and osascript shows
+    /// the standard macOS dialog with a secure (hidden) text field; the
+    /// password travels over sudo's own pipe and never appears in the
+    /// script's output or the chat transcript. Cancel — deliberately the
+    /// default button, so a stray Return dismisses it — makes osascript exit
+    /// non-zero and sudo fail like a declined approval.
+    static func askpassScript() -> String {
+        #"""
+        #!/bin/sh
+        # TypstEdit AI Chat askpass helper (SUDO_ASKPASS for `sudo -A`).
+        exec /usr/bin/osascript \
+          -e 'display dialog ("TypstEdit AI Chat wants to run a command with sudo." & return & return & "Only enter your password if you understand why the approved script needs it. This gives the script full administrator (root) access.") default answer "" with hidden answer with title "TypstEdit — AI Chat sudo request" with icon caution buttons {"Cancel", "Allow"} default button "Cancel"' \
+          -e 'text returned of result'
+        """#
+    }
+
+    /// Writes the askpass helper into a fresh private temp folder — folder
+    /// and script both 0700 — and returns the folder. The caller deletes it
+    /// when the run finishes, so no reusable helper lingers on disk.
+    static func writeAskpassHelper() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("typstedit-askpass-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let script = dir.appendingPathComponent("askpass")
+        try askpassScript().write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: script.path
+        )
+        return dir
     }
 
     private static func resolvePython() -> String? {

@@ -34,6 +34,38 @@
 (string) @string
 (bool) @boolean
 
+; BRACKETS & PUNCTUATION
+; Code-mode bracket pairs: `{ … }` code blocks, `[ … ]` content blocks and
+; `( … )` groups. Without these the braces carry no capture at all and render
+; as plain text, which reads as if a block never closes. Declared before the
+; math section so a code group never falls through to the math @number rules
+; (same anonymous tokens, earlier pattern wins).
+(block ["{" "}"] @punctuation.bracket)
+(content ["[" "]"] @punctuation.bracket)
+(group ["(" ")"] @punctuation.bracket)
+["," ";"] @punctuation.delimiter
+":" @punctuation.delimiter
+(field "." @punctuation.delimiter)
+
+; OPERATORS
+; Assignment, the lambda arrow, arithmetic and logic. `=` is the bare
+; let-binding token (`#let x = 1`); named assignment nodes are aliased
+; "assign" and matched separately.
+"=" @operator
+(lambda "=>" @operator)
+(add "+" @operator)
+(sub "-" @operator)
+(mul "*" @operator)
+(div "/" @operator)
+(sign ["+" "-"] @operator)
+(cmp ["==" "<=" ">=" "!=" "<" ">"] @operator)
+(fraction "/" @operator)
+(and "and" @operator)
+(or "or" @operator)
+(not "not" @operator)
+(in ["in" "not"] @operator)
+(as "as" @operator)
+
 ; COMMENTS
 (comment) @comment
 
