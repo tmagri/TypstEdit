@@ -3240,7 +3240,20 @@ class AICompletionService: ObservableObject {
                     }
                     pos = lineText.index(after: pos)
                 }
-                if depth <= 0 || end + 1 >= min(lines.count, index + regionLineCap) {
+                let capped = end + 1 >= min(lines.count, index + regionLineCap)
+                if depth <= 0 || capped {
+                    // A trailing construct opener (`it =>`) whose block brace
+                    // sits on the NEXT line continues the region: Typst itself
+                    // rejects the split (a newline ends the statement) and
+                    // `autoFixBrokenNoteSyntax` joins the two lines before
+                    // compiling, so the region must cover the brace body too.
+                    // Mirrored in `NoteTypstRegions`.
+                    if depth <= 0, !capped, end + 1 < lines.count,
+                       TypstCompiler.isBlockOpenerLine(lines[end].trimmingCharacters(in: .whitespaces)),
+                       lines[end + 1].trimmingCharacters(in: .whitespaces).hasPrefix("{") {
+                        end += 1
+                        continue
+                    }
                     break
                 }
                 end += 1

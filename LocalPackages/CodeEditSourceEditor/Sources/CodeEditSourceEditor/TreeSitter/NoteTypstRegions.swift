@@ -110,7 +110,19 @@ enum NoteTypstRegions {
                     }
                     if pos < lineText.endIndex { pos = lineText.index(after: pos) }
                 }
-                if depth <= 0 || end + 1 >= min(lines.count, index + regionLineCap) {
+                let capped = end + 1 >= min(lines.count, index + regionLineCap)
+                if depth <= 0 || capped {
+                    // A trailing construct opener (`it =>`) whose block brace
+                    // sits on the NEXT line continues the region: the compiler
+                    // (`autoFixBrokenNoteSyntax`) joins the two lines before
+                    // compiling, so the highlight overlay must cover the brace
+                    // body too. Mirrors `AICompletionService.typstRegionLineSpans`.
+                    if depth <= 0, !capped, end + 1 < lines.count,
+                       Self.isBlockOpenerLine(lines[end].trimmingCharacters(in: .whitespaces)),
+                       lines[end + 1].trimmingCharacters(in: .whitespaces).hasPrefix("{") {
+                        end += 1
+                        continue
+                    }
                     break
                 }
                 end += 1
@@ -148,6 +160,26 @@ enum NoteTypstRegions {
             return true
         }
         return true
+    }
+
+    /// True when `trimmed` ends with a construct opener whose block brace may
+    /// sit on the next line: a closure arrow (`it =>`) or a bare assignment
+    /// after a value (`#let x =`). The value head keeps a `===` setext
+    /// underline, a `==` comparison tail and empty lines from joining.
+    /// Mirrors `TypstCompiler.isBlockOpenerLine` in the app target.
+    static func isBlockOpenerLine(_ trimmed: String) -> Bool {
+        if trimmed.hasSuffix("=>") {
+            let head = trimmed.dropLast(2)
+            return head.contains { $0.isLetter || $0.isNumber }
+        }
+        if trimmed.hasSuffix("=") {
+            var head = trimmed.dropLast()
+            while let last = head.last, last == " " || last == "\t" { head = head.dropLast() }
+            guard let last = head.last else { return false }
+            return last.isLetter || last.isNumber
+                || last == ")" || last == "]" || last == "\"" || last == "}"
+        }
+        return false
     }
 
     /// Unions `paragraphs` with `regions`: every paragraph that overlaps a

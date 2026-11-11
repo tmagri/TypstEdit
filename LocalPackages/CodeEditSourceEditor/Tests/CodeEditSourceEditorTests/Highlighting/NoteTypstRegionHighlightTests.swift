@@ -78,6 +78,41 @@ final class NoteTypstRegionHighlightTests: XCTestCase {
         XCTAssertEqual(texts, ["#link(\"https://x.com\")[a]"])
     }
 
+    /// Revelation.note's style: the block brace opens on the line AFTER
+    /// `it =>`. Typst rejects the split (a newline ends the statement) and the
+    /// compiler's auto-fix joins the lines before compiling — so the region
+    /// must cover the brace body, from the opener's `#` through the `}` line.
+    func test_regionCoversBraceOnNextLineConstruct() {
+        let source = """
+        // comment
+        #show heading.where(level: 1): it =>
+        {
+          pagebreak(weak: true)
+          it
+        }
+
+        After the rule *bold* text.
+        """
+        let ns = source as NSString
+        let texts = NoteTypstRegions.regions(in: source).map { ns.substring(with: $0) }
+        XCTAssertEqual(texts.count, 1, "\(texts)")
+        XCTAssertTrue(texts[0].hasPrefix("#show heading.where(level: 1): it =>\n{"), texts[0])
+        XCTAssertTrue(texts[0].hasSuffix("pagebreak(weak: true)\n  it\n}"), texts[0])
+        XCTAssertFalse(texts[0].contains("After the rule"), "the region must stop at the `}` line")
+    }
+
+    /// The joinable-opener test mirrors `TypstCompiler.isBlockOpenerLine`: a
+    /// value head is required, so setext underlines and comparison tails
+    /// never continue a region.
+    func test_blockOpenerLineRules() {
+        XCTAssertTrue(NoteTypstRegions.isBlockOpenerLine("#show heading.where(level: 1): it =>"))
+        XCTAssertTrue(NoteTypstRegions.isBlockOpenerLine("#let x ="))
+        XCTAssertTrue(NoteTypstRegions.isBlockOpenerLine("#let f = (n) ="))
+        XCTAssertFalse(NoteTypstRegions.isBlockOpenerLine("==="))
+        XCTAssertFalse(NoteTypstRegions.isBlockOpenerLine("#let done = (a =="))
+        XCTAssertFalse(NoteTypstRegions.isBlockOpenerLine("plain prose"))
+    }
+
     func test_mergeWidensOnlyOverlappingParagraphs() {
         let merged = NoteTypstRegions.merge(
             paragraphs: [NSRange(location: 0, length: 5), NSRange(location: 10, length: 5), NSRange(location: 30, length: 5)],

@@ -1305,11 +1305,15 @@ class TypstCompiler: ObservableObject {
             print("[FallbackFix] Fix chase budget exhausted (\(fallbackCycleCount) recompile cycles) — skipping repair until the source changes or compiles.")
             return
         }
-        attemptFallbackFix(rawErrorLines: rawLines)
-        // If the fallback modified the shadow file, typst watch will recompile.
-        // Mark that we're mid-fix so the error panel doesn't flash transient errors.
-        if currentShadowSourceURL != nil,
-           fallbackAttempts.values.contains(where: { $0 > 0 }) {
+        // If (and only if) the fallback actually rewrote the shadow file, typst
+        // watch will recompile — mark that we're mid-fix so the error panel
+        // doesn't flash transient errors. A skipped repair (protected
+        // directives, live Typst regions, maxed-out lines) rewrites nothing, so
+        // no recompile is coming: setting the flag anyway would gate every
+        // later publish off forever — the Issues panel reads "No issues" while
+        // the preview shows nothing, exactly the unfixable-error deadlock this
+        // flag existed to avoid.
+        if attemptFallbackFix(rawErrorLines: rawLines) {
             pendingFallbackRewrite = true
             fallbackCycleCount += 1
         }
@@ -1603,12 +1607,17 @@ class TypstCompiler: ObservableObject {
         return false
     }
 
-    private func attemptFallbackFix(rawErrorLines: [Int]) {
-        guard let shadowURL = currentShadowSourceURL else { return }
+    /// Applies the lenient fallback repair to the shadow file. Returns whether
+    /// the file was actually rewritten — the caller keys `pendingFallbackRewrite`
+    /// (and the fix-chase budget) off a real rewrite, not an attempted one.
+    @discardableResult
+    private func attemptFallbackFix(rawErrorLines: [Int]) -> Bool {
+        guard let shadowURL = currentShadowSourceURL else { return false }
         let modified = applyFallbackFix(to: shadowURL, rawErrorLines: rawErrorLines, attempts: &fallbackAttempts, isHybrid: currentFileExtension == "note")
         if modified {
             print("[FallbackFix] Shadow file updated — typst watch will recompile.")
         }
+        return modified
     }
 
     /// Returns true if `line` is intentional Typst code that should never be touched by
@@ -1897,7 +1906,40 @@ class TypstCompiler: ObservableObject {
         if inCodeBlock {
             lines.append("```")
         }
-        
+
+        // 1b. Join a construct opener whose block brace lands on the next line
+        // (`#show heading…: it =>` ⏎ `{`). Typst ends a statement at a newline
+        // — only an unclosed bracket continues one — so a trailing `=>` or `=`
+        // is a hard "expected expression" error even though the intent is
+        // obvious. Rejoin opener + brace into the one-line form Typst accepts;
+        // everything between the braces keeps its lines and indentation.
+        var joined: [String] = []
+        var joinFence = false
+        var joinIndex = 0
+        while joinIndex < lines.count {
+            let line = lines[joinIndex]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                joinFence.toggle()
+                joined.append(line)
+                joinIndex += 1
+                continue
+            }
+            if !joinFence, joinIndex + 1 < lines.count,
+               Self.isBlockOpenerLine(trimmed),
+               lines[joinIndex + 1].trimmingCharacters(in: .whitespaces).hasPrefix("{") {
+                // Keep the brace line's full content: `{ x * 2 }` on one line
+                // must come up whole, not lose its body.
+                let braceLine = lines[joinIndex + 1].trimmingCharacters(in: .whitespaces)
+                joined.append("\(trimmed) \(braceLine)")
+                joinIndex += 2  // the brace line has moved up into the opener
+                continue
+            }
+            joined.append(line)
+            joinIndex += 1
+        }
+        lines = joined
+
         // 2. Process line by line for inline math and syntax fixes outside code blocks
         var currentlyInCode = false
         for i in 0..<lines.count {
@@ -2041,6 +2083,26 @@ class TypstCompiler: ObservableObject {
         let next = s.character(at: k)
         let isAlnum = (0x30...0x39).contains(next) || (0x41...0x5A).contains(next) || (0x61...0x7A).contains(next)
         return !isAlnum
+    }
+
+    /// True when `trimmed` is a construct opener whose block brace may sit on
+    /// the next line: a closure arrow (`it =>`) or a bare assignment `=`
+    /// directly after a value (`#let x =`, `#let f = (n) =`). A value head is
+    /// required so a `===` setext underline, a `==` comparison tail or an
+    /// empty line never joins.
+    nonisolated static func isBlockOpenerLine(_ trimmed: String) -> Bool {
+        if trimmed.hasSuffix("=>") {
+            let head = trimmed.dropLast(2)
+            return head.contains { $0.isLetter || $0.isNumber }
+        }
+        if trimmed.hasSuffix("=") {
+            var head = trimmed.dropLast()
+            while let last = head.last, last == " " || last == "\t" { head = head.dropLast() }
+            guard let last = head.last else { return false }
+            return last.isLetter || last.isNumber
+                || last == ")" || last == "]" || last == "\"" || last == "}"
+        }
+        return false
     }
 
     /// Ranges of inline code spans (`` `…` ``) in a single line, using the same
