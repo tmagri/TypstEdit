@@ -113,6 +113,19 @@ final class NoteTypstRegionHighlightTests: XCTestCase {
         XCTAssertFalse(NoteTypstRegions.isBlockOpenerLine("plain prose"))
     }
 
+    /// A commented arrow is not an opener: the compiler will not join a brace
+    /// onto it, so the region must not pull the `{` line in either.
+    func test_commentedOpenerDoesNotExtendRegion() {
+        let source = "#let x = 1 // note =>\n{\n  a\n}\n"
+        let ns = source as NSString
+        let texts = NoteTypstRegions.regions(in: source).map { ns.substring(with: $0) }
+        XCTAssertEqual(texts, ["#let x = 1 // note =>"])
+        XCTAssertFalse(NoteTypstRegions.isBlockOpenerLine("// usage: it =>"))
+        XCTAssertTrue(NoteTypstRegions.isBlockOpenerLine("#let u = \"https://x\" ="))
+        XCTAssertFalse(NoteTypstRegions.hasLineComment("#link(\"https://x.com\")[a] ="))
+        XCTAssertFalse(NoteTypstRegions.hasLineComment("#let s = \"a // b\" ="))
+    }
+
     func test_mergeWidensOnlyOverlappingParagraphs() {
         let merged = NoteTypstRegions.merge(
             paragraphs: [NSRange(location: 0, length: 5), NSRange(location: 10, length: 5), NSRange(location: 30, length: 5)],

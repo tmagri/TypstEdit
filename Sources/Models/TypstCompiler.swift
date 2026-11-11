@@ -1911,34 +1911,35 @@ class TypstCompiler: ObservableObject {
         // (`#show heading…: it =>` ⏎ `{`). Typst ends a statement at a newline
         // — only an unclosed bracket continues one — so a trailing `=>` or `=`
         // is a hard "expected expression" error even though the intent is
-        // obvious. Rejoin opener + brace into the one-line form Typst accepts;
-        // everything between the braces keeps its lines and indentation.
-        var joined: [String] = []
+        // obvious. Only the `{` moves up onto the opener; whatever followed it
+        // stays on its own line. That keeps the line count — and so every
+        // diagnostic and operator-warning line number — exactly as the user
+        // wrote it, and a newline right after `{` is insignificant in code.
+        // The rewritten brace line is examined again, so a chain
+        // (`(x) =>` ⏎ `{ (y) =>` ⏎ `{`) joins all the way down.
         var joinFence = false
-        var joinIndex = 0
-        while joinIndex < lines.count {
+        for joinIndex in lines.indices {
             let line = lines[joinIndex]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("```") {
                 joinFence.toggle()
-                joined.append(line)
-                joinIndex += 1
                 continue
             }
-            if !joinFence, joinIndex + 1 < lines.count,
-               Self.isBlockOpenerLine(trimmed),
-               lines[joinIndex + 1].trimmingCharacters(in: .whitespaces).hasPrefix("{") {
-                // Keep the brace line's full content: `{ x * 2 }` on one line
-                // must come up whole, not lose its body.
-                let braceLine = lines[joinIndex + 1].trimmingCharacters(in: .whitespaces)
-                joined.append("\(trimmed) \(braceLine)")
-                joinIndex += 2  // the brace line has moved up into the opener
-                continue
-            }
-            joined.append(line)
-            joinIndex += 1
+            guard !joinFence, joinIndex + 1 < lines.count,
+                  Self.isBlockOpenerLine(trimmed) else { continue }
+            let braceLine = lines[joinIndex + 1]
+            let braceTrimmed = braceLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard braceTrimmed.hasPrefix("{") else { continue }
+
+            let openerCR = line.hasSuffix("\r") ? "\r" : ""
+            let openerIndent = String(line.prefix { $0 == " " || $0 == "\t" })
+            lines[joinIndex] = openerIndent + trimmed + " {" + openerCR
+
+            let braceCR = braceLine.hasSuffix("\r") ? "\r" : ""
+            let braceIndent = String(braceLine.prefix { $0 == " " || $0 == "\t" })
+            let rest = braceTrimmed.dropFirst().drop { $0 == " " || $0 == "\t" }
+            lines[joinIndex + 1] = rest.isEmpty ? braceCR : braceIndent + rest + braceCR
         }
-        lines = joined
 
         // 2. Process line by line for inline math and syntax fixes outside code blocks
         var currentlyInCode = false
@@ -2089,8 +2090,10 @@ class TypstCompiler: ObservableObject {
     /// the next line: a closure arrow (`it =>`) or a bare assignment `=`
     /// directly after a value (`#let x =`, `#let f = (n) =`). A value head is
     /// required so a `===` setext underline, a `==` comparison tail or an
-    /// empty line never joins.
+    /// empty line never joins. A line carrying a `//` comment never qualifies:
+    /// joining the brace onto it would comment the brace out.
     nonisolated static func isBlockOpenerLine(_ trimmed: String) -> Bool {
+        if hasLineComment(trimmed) { return false }
         if trimmed.hasSuffix("=>") {
             let head = trimmed.dropLast(2)
             return head.contains { $0.isLetter || $0.isNumber }
@@ -2101,6 +2104,35 @@ class TypstCompiler: ObservableObject {
             guard let last = head.last else { return false }
             return last.isLetter || last.isNumber
                 || last == ")" || last == "]" || last == "\"" || last == "}"
+        }
+        return false
+    }
+
+    /// True when `line` contains a `//` line comment outside a string — at
+    /// line start or after whitespace, the region scanners' rule, so the
+    /// `//` of `https://` does not count.
+    nonisolated static func hasLineComment(_ line: String) -> Bool {
+        var inString = false
+        var previous: Character?
+        var iterator = line.makeIterator()
+        var current = iterator.next()
+        while let ch = current {
+            let next = iterator.next()
+            if inString {
+                if ch == "\\" {
+                    previous = next
+                    current = iterator.next()
+                    continue
+                }
+                if ch == "\"" { inString = false }
+            } else if ch == "\"" {
+                inString = true
+            } else if ch == "/", next == "/",
+                      previous == nil || previous == " " || previous == "\t" {
+                return true
+            }
+            previous = ch
+            current = next
         }
         return false
     }

@@ -2440,6 +2440,9 @@ final class LocalToolExecutor {
         // but that crosses no boundary: the dialog, not the file, is what
         // guards the password. `sudo` scrubs its environment before running
         // the command, so the variable does not leak into the elevated child.
+        // An askpass the app inherited from the user's launch environment is
+        // dropped: only a run that passed the elevation gate gets one.
+        environment.removeValue(forKey: "SUDO_ASKPASS")
         var askpassDir: URL?
         if wantsElevation {
             let dir = try Self.writeAskpassHelper()

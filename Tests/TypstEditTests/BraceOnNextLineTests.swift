@@ -48,11 +48,11 @@ final class BraceOnNextLineTests: XCTestCase {
         XCTAssertFalse(output.contains("=\n{"), "no trailing assignment may remain: \(output)")
     }
 
-    /// A `{`-line with trailing content joins whole: `it =>` + `{ x }`
-    /// becomes `it => { x }`.
+    /// A `{`-line with trailing content: only the `{` moves up; the rest stays
+    /// on its line, so the line count (and every line number) is unchanged.
     func testAutoFixJoinsBraceLineWithTrailingContent() {
         let output = TypstCompiler.autoFixBrokenNoteSyntax("#let f = (x) =>\n{ x * 2 }\n")
-        XCTAssertEqual(output, "#let f = (x) => { x * 2 }\n")
+        XCTAssertEqual(output, "#let f = (x) => {\nx * 2 }\n")
     }
 
     /// A `===` run is a Markdown setext underline, not an assignment opener —

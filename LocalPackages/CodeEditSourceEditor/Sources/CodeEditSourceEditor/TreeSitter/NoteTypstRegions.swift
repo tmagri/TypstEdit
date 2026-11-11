@@ -166,8 +166,11 @@ enum NoteTypstRegions {
     /// sit on the next line: a closure arrow (`it =>`) or a bare assignment
     /// after a value (`#let x =`). The value head keeps a `===` setext
     /// underline, a `==` comparison tail and empty lines from joining.
+    /// A line carrying a `//` comment never qualifies: the compiler will not
+    /// join a brace onto it (that would comment the brace out).
     /// Mirrors `TypstCompiler.isBlockOpenerLine` in the app target.
     static func isBlockOpenerLine(_ trimmed: String) -> Bool {
+        if hasLineComment(trimmed) { return false }
         if trimmed.hasSuffix("=>") {
             let head = trimmed.dropLast(2)
             return head.contains { $0.isLetter || $0.isNumber }
@@ -178,6 +181,35 @@ enum NoteTypstRegions {
             guard let last = head.last else { return false }
             return last.isLetter || last.isNumber
                 || last == ")" || last == "]" || last == "\"" || last == "}"
+        }
+        return false
+    }
+
+    /// True when `line` contains a `//` line comment outside a string — at
+    /// line start or after whitespace, so `https://` does not count.
+    /// Mirrors `TypstCompiler.hasLineComment` in the app target.
+    static func hasLineComment(_ line: String) -> Bool {
+        var inString = false
+        var previous: Character?
+        var iterator = line.makeIterator()
+        var current = iterator.next()
+        while let ch = current {
+            let next = iterator.next()
+            if inString {
+                if ch == "\\" {
+                    previous = next
+                    current = iterator.next()
+                    continue
+                }
+                if ch == "\"" { inString = false }
+            } else if ch == "\"" {
+                inString = true
+            } else if ch == "/", next == "/",
+                      previous == nil || previous == " " || previous == "\t" {
+                return true
+            }
+            previous = ch
+            current = next
         }
         return false
     }
