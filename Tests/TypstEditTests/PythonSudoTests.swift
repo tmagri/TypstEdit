@@ -23,6 +23,8 @@ final class PythonSudoTests: XCTestCase {
         executor = LocalToolExecutor()
         executor.scope = .project(root: workDir)
         executor.pythonToolEnabled = true
+        // Never touch the real sudo from the suite.
+        executor.sudoAuthenticationProbe = { .passwordDialog }
     }
 
     override func tearDown() async throws {
@@ -52,7 +54,7 @@ final class PythonSudoTests: XCTestCase {
     }
 
     private func elevationFlag(_ kind: PendingApprovalKind?) -> Bool? {
-        if case .runPython(_, let wantsElevation)? = kind { return wantsElevation }
+        if case .runPython(_, let wantsElevation, _)? = kind { return wantsElevation }
         return nil
     }
 
@@ -313,6 +315,194 @@ final class PythonSudoTests: XCTestCase {
         XCTAssertTrue(description(sudo: true, sandbox: true).contains("unusable while the sandbox is on"))
         XCTAssertFalse(description(sudo: false, sandbox: false).contains("sudo"))
         XCTAssertFalse(description(sudo: false, sandbox: true).contains("sudo"))
+    }
+
+    // MARK: - Lock for runs nobody reviewed (YOLO)
+
+    /// A script that hides `sudo` from the detector. Each probe prints
+    /// `name: <exit code>` or `name: <exception>`.
+    private static let disguisedEscalation = """
+    import subprocess
+    tool = 'su' + 'do'
+    probes = {
+        'elevate': ['/usr/bin/' + tool, '-n', 'true'],
+        'su': ['/usr/bin/su', '-c', 'true'],
+        'ps': ['/bin/ps', '-p', '1'],
+        'osascript': ['/usr/bin/osa' + 'script', '-e', '1'],
+        'open': ['/usr/bin/open', '-g', '/tmp'],
+        'ls': ['/bin/ls', '/'],
+    }
+    for name, cmd in probes.items():
+        try:
+            r = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
+            print(name + ':', r.returncode)
+        except Exception as e:
+            print(name + ':', type(e).__name__)
+    """
+
+    private func probeResults(_ output: String) -> [String: String] {
+        var results: [String: String] = [:]
+        for line in output.components(separatedBy: "\n") {
+            let parts = line.components(separatedBy: ": ")
+            if parts.count == 2 { results[parts[0]] = parts[1] }
+        }
+        return results
+    }
+
+    func testDisguisedSudoEvadesTheDetector() {
+        // The premise of the lock: text detection alone can be fooled.
+        XCTAssertFalse(LocalToolExecutor.codeWantsElevation(Self.disguisedEscalation))
+    }
+
+    /// Auto-approved and unsandboxed: no escalation route works, whatever the
+    /// spelling, but ordinary commands and project writes still do.
+    func testAutoApprovedRunCannotEscalateEvenWhenDisguised() async throws {
+        try requirePython()
+        executor.pythonSudoEnabled = true
+        executor.pythonSandboxEnabled = false
+        executor.willAutoApprove = { $0.canAutoApprove(yoloMode: true) }
+
+        let code = Self.disguisedEscalation + "\n" + """
+        open('written-by-script.txt', 'w').write('ok')
+        print('write: ok')
+        """
+        let (output, kinds) = try await run(code)
+        let results = probeResults(output)
+
+        XCTAssertEqual(elevationFlag(kinds.first), false)
+        for blocked in ["elevate", "su", "ps", "osascript"] {
+            XCTAssertEqual(results[blocked], "PermissionError", "\(blocked) must not run: \(output)")
+        }
+        XCTAssertNotEqual(results["open"], "0", "LaunchServices must be closed: \(output)")
+        XCTAssertEqual(results["ls"], "0", "ordinary commands must still run: \(output)")
+        XCTAssertEqual(results["write"], "ok", output)
+        XCTAssertEqual(try String(contentsOf: workDir.appendingPathComponent("written-by-script.txt"), encoding: .utf8), "ok",
+                       "the lock must keep full write access")
+        XCTAssertTrue(output.contains("Auto-approved run: privilege escalation was blocked"), output)
+    }
+
+    /// The sandboxed profile gains the same lock when nobody reviews the run:
+    /// plain sandbox-exec would still let `osascript` ask Terminal for sudo.
+    func testAutoApprovedSandboxedRunIsLockedToo() async throws {
+        try requirePython()
+        executor.pythonSandboxEnabled = true
+        executor.willAutoApprove = { $0.canAutoApprove(yoloMode: true) }
+        let results = probeResults(try await run(Self.disguisedEscalation).output)
+        XCTAssertEqual(results["osascript"], "PermissionError")
+        XCTAssertEqual(results["elevate"], "PermissionError")
+        XCTAssertEqual(results["ls"], "0")
+    }
+
+    func testLockRulesAreInBothProfiles() {
+        let locked = LocalToolExecutor.sandboxProfile(writable: ["/tmp/x"], lockElevation: true)
+        let unlocked = LocalToolExecutor.sandboxProfile(writable: ["/tmp/x"])
+        XCTAssertTrue(locked.contains("com.apple.authd"))
+        XCTAssertTrue(locked.contains("(deny lsopen)"))
+        XCTAssertFalse(unlocked.contains("com.apple.authd"))
+        XCTAssertTrue(LocalToolExecutor.elevationLockProfile.contains("(allow default)"))
+        XCTAssertFalse(LocalToolExecutor.elevationLockProfile.contains("deny network"),
+                       "the lock alone must keep the network")
+    }
+
+    /// A run a person approved keeps today's behavior: no lock, so setuid
+    /// tools such as `ps` still work.
+    func testHumanApprovedRunIsNotLocked() async throws {
+        try requirePython()
+        executor.pythonSandboxEnabled = false
+        executor.willAutoApprove = { _ in false }
+        let (output, _) = try await run("import subprocess\nprint('ps:', subprocess.run(['/bin/ps', '-p', '1'], capture_output=True).returncode)")
+        XCTAssertEqual(probeResults(output)["ps"], "0", output)
+        XCTAssertFalse(output.contains("Auto-approved run"), output)
+    }
+
+    /// Elevated runs are never auto-approved, so they are never locked —
+    /// even with YOLO on.
+    func testElevatedRunIsNeverLocked() async throws {
+        try requirePython()
+        executor.pythonSudoEnabled = true
+        executor.pythonSandboxEnabled = false
+        executor.willAutoApprove = { $0.canAutoApprove(yoloMode: true) }
+        let fake = try makeFakeSudo()
+        let (output, _) = try await run("import subprocess\nprint(subprocess.run([\(String(reflecting: fake.path)), '-A', 'id'], capture_output=True, text=True).stdout)")
+        XCTAssertTrue(output.contains("FAKE_SUDO ok"), output)
+        XCTAssertFalse(output.contains("Auto-approved run"), output)
+    }
+
+    // MARK: - How sudo authenticates
+
+    func testProbedAuthenticationReachesTheCardAndTheResult() async throws {
+        try requirePython()
+        executor.pythonSudoEnabled = true
+        executor.pythonSandboxEnabled = false
+        let expectations: [(SudoAuthentication, String)] = [
+            (.passwordDialog, "password through a macOS dialog"),
+            (.biometric, "Touch ID"),
+            (.noPassword, "needs no password"),
+        ]
+        for (auth, phrase) in expectations {
+            executor.sudoAuthenticationProbe = { auth }
+            let (output, kinds) = try await run("if False:\n    import os; os.system('sudo id')\nprint('x')")
+            guard case .runPython(_, true, let carried)? = kinds.first else {
+                return XCTFail("expected an elevated runPython approval")
+            }
+            XCTAssertEqual(carried, auth)
+            XCTAssertTrue(output.contains(phrase), "\(auth): \(output)")
+        }
+    }
+
+    /// Plain runs never invoke the probe (it runs `sudo -k` / `sudo -n`).
+    func testProbeRunsOnlyForElevatedRuns() async throws {
+        try requirePython()
+        executor.pythonSudoEnabled = true
+        executor.pythonSandboxEnabled = false
+        var probed = 0
+        executor.sudoAuthenticationProbe = { probed += 1; return .passwordDialog }
+        _ = try await run("print('plain')")
+        XCTAssertEqual(probed, 0)
+        _ = try await run("if False:\n    import os; os.system('sudo id')")
+        XCTAssertEqual(probed, 1)
+    }
+
+    /// Refused runs (opt-in off) must not probe sudo either.
+    func testProbeDoesNotRunForRefusedElevation() async {
+        executor.pythonSudoEnabled = false
+        var probed = false
+        executor.sudoAuthenticationProbe = { probed = true; return .passwordDialog }
+        _ = try? await run("os.system('sudo id')")
+        XCTAssertFalse(probed)
+    }
+
+    func testNoPasswordElevationIsStillNeverAutoApproved() {
+        for auth in [SudoAuthentication.passwordDialog, .biometric, .noPassword] {
+            let kind = PendingApprovalKind.runPython(code: "sudo", wantsElevation: true, sudoAuthentication: auth)
+            XCTAssertFalse(kind.canAutoApprove(yoloMode: true), "\(auth)")
+        }
+    }
+
+    func testApprovalWarningsMatchTheSetup() {
+        XCTAssertTrue(SudoAuthentication.passwordDialog.approvalWarning.contains("password dialog"))
+        XCTAssertTrue(SudoAuthentication.biometric.approvalWarning.contains("Touch ID"))
+        XCTAssertTrue(SudoAuthentication.noPassword.approvalWarning.contains("NO password"))
+        XCTAssertFalse(SudoAuthentication.noPassword.approvalWarning.contains("will pop"),
+                       "a NOPASSWD setup must not promise a dialog")
+    }
+
+    func testPamBiometricDetection() {
+        XCTAssertTrue(LocalToolExecutor.pamConfigUsesBiometrics("auth       sufficient     pam_tid.so\n"))
+        XCTAssertTrue(LocalToolExecutor.pamConfigUsesBiometrics("auth optional /opt/homebrew/lib/pam/pam_reattach.so\nauth sufficient pam_tid.so"))
+        XCTAssertTrue(LocalToolExecutor.pamConfigUsesBiometrics("auth sufficient pam_watchid.so"))
+        XCTAssertFalse(LocalToolExecutor.pamConfigUsesBiometrics("#auth       sufficient     pam_tid.so\n"))
+        XCTAssertFalse(LocalToolExecutor.pamConfigUsesBiometrics("  # auth sufficient pam_tid.so"))
+        XCTAssertFalse(LocalToolExecutor.pamConfigUsesBiometrics("auth required pam_opendirectory.so # not pam_tid.so"))
+        XCTAssertFalse(LocalToolExecutor.pamConfigUsesBiometrics("auth include sudo_local\nauth required pam_opendirectory.so"))
+    }
+
+    /// The real probe never prompts (`-k` and `-n` are non-interactive), so it
+    /// must finish quickly on any machine.
+    func testRealProbeFinishesWithoutPrompting() async {
+        let start = Date()
+        _ = await LocalToolExecutor.probeSudoAuthentication()
+        XCTAssertLessThan(Date().timeIntervalSince(start), 12)
     }
 
     // MARK: - Real sudo (manual)

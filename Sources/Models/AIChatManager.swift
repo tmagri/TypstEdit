@@ -423,6 +423,9 @@ final class AIChatManager: ObservableObject {
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
         localTools.pythonSudoEnabled = AISettingsManager.shared.chatPythonSudoEnabled
+        localTools.willAutoApprove = { [weak self] kind in
+            kind.canAutoApprove(yoloMode: self?.yoloMode ?? false)
+        }
         localTools.autoValidateTypstEdits = AISettingsManager.shared.chatAutoValidateTypstEdits
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
         localTools.allowedWebFetchDomains = AISettingsManager.shared.chatWebFetchAllowedDomains
@@ -1023,6 +1026,9 @@ final class AIChatManager: ObservableObject {
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
         localTools.pythonSudoEnabled = AISettingsManager.shared.chatPythonSudoEnabled
+        localTools.willAutoApprove = { [weak self] kind in
+            kind.canAutoApprove(yoloMode: self?.yoloMode ?? false)
+        }
         localTools.autoValidateTypstEdits = AISettingsManager.shared.chatAutoValidateTypstEdits
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
         localTools.allowedWebFetchDomains = AISettingsManager.shared.chatWebFetchAllowedDomains

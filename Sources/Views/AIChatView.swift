@@ -1480,7 +1480,7 @@ struct AIChatView: View {
                     Text("Create folder '\(path)'?").font(.subheadline.bold())
                 }
 
-            case .runPython(let code, let wantsElevation):
+            case .runPython(let code, let wantsElevation, let sudoAuthentication):
                 HStack(spacing: 6) {
                     Image(systemName: wantsElevation ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
                         .foregroundColor(.red)
@@ -1491,8 +1491,9 @@ struct AIChatView: View {
                     // The elevated gate (executor) refuses these unless the
                     // sudo opt-in is on and the sandbox is off, so this
                     // warning only ever appears for a run that can actually
-                    // pop the password dialog.
-                    Text("Elevated run: sudo will pop a macOS password dialog. Typing your password gives this script full root access — approve only if you understand every line.")
+                    // elevate. The text follows the probed sudo setup, so it
+                    // never promises a dialog that won't appear.
+                    Text(sudoAuthentication.approvalWarning)
                         .font(.caption2).foregroundColor(.red)
                 }
                 Text(aiSettings.chatPythonSandboxEnabled

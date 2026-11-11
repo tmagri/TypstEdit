@@ -1740,7 +1740,7 @@ struct AISettingsView: View {
 
                     Text(settings.chatPythonSandboxEnabled
                          ? "Runs under macOS sandbox-exec. Scripts can read project files but cannot reach the network or modify anything outside a temporary folder."
-                         : "Sandbox is OFF: scripts run with your full user permissions, no network isolation, and can write anywhere you can.")
+                         : "Sandbox is OFF: scripts run with your full user permissions, no network isolation, and can write anywhere you can. Runs that YOLO mode auto-approves still cannot escalate: sudo, su, ps and other setuid tools, osascript and `open` are blocked for them.")
                         .font(.caption)
                         .foregroundColor(settings.chatPythonSandboxEnabled ? .secondary : .orange)
                         .padding(.leading, 38)

@@ -201,6 +201,20 @@ final class LocalToolExecutor {
     /// impossible, and refusal beats a confusing Seatbelt error.
     var pythonSudoEnabled: Bool = false
 
+    /// Whether the approval gate will approve `kind` without showing it to
+    /// anyone (YOLO mode). Set by the chat; the default — always a human —
+    /// is what a bare executor in tests gets. A run nobody reviewed is
+    /// locked against privilege escalation (see `elevationLockRules`), so
+    /// the elevation detector is no longer the only thing between a
+    /// disguised `sudo` and YOLO auto-approval.
+    var willAutoApprove: (PendingApprovalKind) -> Bool = { _ in false }
+
+    /// How sudo will authenticate an elevated run; probed before the approval
+    /// card is shown. Replaceable so tests never invoke the real sudo.
+    var sudoAuthenticationProbe: () async -> SudoAuthentication = {
+        await LocalToolExecutor.probeSudoAuthentication()
+    }
+
     /// Whether `edit_file`/`write_file` automatically compile the `.typ`
     /// file they just changed and report the result alongside their own
     /// output. On by default — catching a mismatched delimiter or bad
@@ -2400,7 +2414,15 @@ final class LocalToolExecutor {
             guard !pythonSandboxEnabled else { throw LocalToolError.elevationBlockedBySandbox }
         }
 
-        let approved = await requestApproval(.runPython(code: code, wantsElevation: wantsElevation))
+        let sudoAuthentication: SudoAuthentication = wantsElevation
+            ? await sudoAuthenticationProbe()
+            : .passwordDialog
+        let kind = PendingApprovalKind.runPython(
+            code: code, wantsElevation: wantsElevation, sudoAuthentication: sudoAuthentication)
+        // Decided before the request: the gate auto-approves synchronously on
+        // the main actor, so the answer cannot change in between.
+        let lockElevation = willAutoApprove(kind)
+        let approved = await requestApproval(kind)
         guard approved else { throw LocalToolError.approvalDenied }
 
         guard let pythonPath = Self.resolvePython() else { throw LocalToolError.pythonNotFound }
@@ -2421,7 +2443,14 @@ final class LocalToolExecutor {
             // The writable path must be fully canonical: `resolvingSymlinksInPath`
             // leaves `/var` alone on macOS, but sandbox rules are matched
             // against the real `/private/var` path.
-            process.arguments = ["-p", Self.sandboxProfile(writable: [Self.canonicalPath(scratchDir)]), pythonPath, scriptURL.path]
+            process.arguments = ["-p", Self.sandboxProfile(writable: [Self.canonicalPath(scratchDir)], lockElevation: lockElevation), pythonPath, scriptURL.path]
+        } else if lockElevation {
+            // Unsandboxed but unreviewed: full user permissions, minus every
+            // route to root. Elevated runs never get here — they are never
+            // auto-approved.
+            guard let sandboxExec = Self.sandboxExecPath else { throw LocalToolError.sandboxUnavailable }
+            process.executableURL = URL(fileURLWithPath: sandboxExec)
+            process.arguments = ["-p", Self.elevationLockProfile, pythonPath, scriptURL.path]
         } else {
             process.executableURL = URL(fileURLWithPath: pythonPath)
             process.arguments = [scriptURL.path]
@@ -2499,7 +2528,15 @@ final class LocalToolExecutor {
             result += (result.isEmpty ? "" : "\n") + "stderr:\n\(errText)"
         }
         if wantsElevation {
-            result += (result.isEmpty ? "" : "\n") + "Elevated run: sudo was allowed; the user was prompted for their administrator password via a dialog."
+            let how: String
+            switch sudoAuthentication {
+            case .passwordDialog: how = "sudo asks for the administrator password through a macOS dialog"
+            case .biometric: how = "sudo asks for Touch ID (or the administrator password through a macOS dialog)"
+            case .noPassword: how = "this Mac's sudo needs no password, so sudo commands ran as root without a prompt"
+            }
+            result += (result.isEmpty ? "" : "\n") + "Elevated run: sudo was allowed; \(how)."
+        } else if lockElevation {
+            result += (result.isEmpty ? "" : "\n") + "Auto-approved run: privilege escalation was blocked (setuid programs such as sudo, su and ps cannot run, and osascript, `open` and the authorization service are unavailable)."
         }
         if pythonSandboxEnabled {
             result += (result.isEmpty ? "" : "\n") + "Sandboxed run: network denied; writable scratch folder was \(scratchDir.path)."
@@ -2527,7 +2564,7 @@ final class LocalToolExecutor {
     /// Deny-by-default profile that still allows normal reads and process
     /// setup, but blocks all networking and every write outside `writable`
     /// (plus `/dev`, which stdout/stderr need).
-    private static func sandboxProfile(writable: [String]) -> String {
+    static func sandboxProfile(writable: [String], lockElevation: Bool = false) -> String {
         let writeRules = writable
             .map { $0.replacingOccurrences(of: "\"", with: "\\\"") }
             .map { "(subpath \"\($0)\")" }
@@ -2538,7 +2575,76 @@ final class LocalToolExecutor {
         (deny network*)
         (deny file-write*)
         (allow file-write* \(writeRules) (subpath "/dev"))
+        """ + (lockElevation ? "\n" + elevationLockRules : "")
+    }
+
+    /// Rules that close the routes to root for a run nobody reviewed. Any
+    /// `sandbox-exec` profile already stops setuid programs (`sudo`, `su`,
+    /// `security_authtrampoline`) from running, however the script spells or
+    /// hides the call. On top of that:
+    /// - the authorization service is unreachable, so nothing can pop an
+    ///   administrator dialog (`with administrator privileges`, or
+    ///   `AuthorizationExecuteWithPrivileges` through ctypes);
+    /// - `osascript` and LaunchServices (`open`) are denied, so the script
+    ///   cannot ask Terminal to run `sudo` in a real terminal outside the
+    ///   sandbox.
+    static let elevationLockRules = """
+        (deny mach-lookup (global-name "com.apple.authd"))
+        (deny lsopen)
+        (deny process-exec (literal "/usr/bin/osascript"))
         """
+
+    /// Full user permissions (reads, writes, network) with only the
+    /// escalation routes closed.
+    static let elevationLockProfile = "(version 1)\n(allow default)\n" + elevationLockRules
+
+    /// How sudo would authenticate a run right now. First drops any cached
+    /// sudo ticket for this context (`sudo -k`, which never prompts), so a
+    /// ticket from an earlier `sudo` cannot skip the dialog. Then
+    /// `sudo -n true` — non-interactive, it fails instead of prompting —
+    /// succeeds only when sudoers grants `NOPASSWD`. Otherwise the PAM
+    /// config says whether Touch ID / Apple Watch comes first.
+    nonisolated static func probeSudoAuthentication() async -> SudoAuthentication {
+        await Task.detached {
+            _ = runQuietly("/usr/bin/sudo", ["-k"])
+            if runQuietly("/usr/bin/sudo", ["-n", "true"]) == 0 {
+                return .noPassword
+            }
+            let pam = ["/etc/pam.d/sudo_local", "/etc/pam.d/sudo"]
+                .compactMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+            return pam.contains(where: pamConfigUsesBiometrics) ? .biometric : .passwordDialog
+        }.value
+    }
+
+    /// True when a PAM config enables a biometric module on a live
+    /// (uncommented) line: `pam_tid.so` (Touch ID) or `pam_watchid.so`.
+    nonisolated static func pamConfigUsesBiometrics(_ contents: String) -> Bool {
+        contents.components(separatedBy: "\n").contains { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.hasPrefix("#") else { return false }
+            let code = trimmed.components(separatedBy: "#").first ?? trimmed
+            return code.contains("pam_tid.so") || code.contains("pam_watchid.so")
+        }
+    }
+
+    /// Runs a short command with no input or output and returns its exit
+    /// status, or nil when it could not run or took over five seconds.
+    private nonisolated static func runQuietly(_ path: String, _ arguments: [String]) -> Int32? {
+        guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning, Date() < deadline { usleep(20_000) }
+        guard !process.isRunning else {
+            process.terminate()
+            return nil
+        }
+        return process.terminationStatus
     }
 
     /// Heuristic detection of elevated-privilege use in a script: a
