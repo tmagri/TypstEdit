@@ -182,7 +182,7 @@ final class ProjectFileTreeTests: XCTestCase {
     func testOnlyIndexableExtensionsTriggerIndexMaintenance() {
         XCTAssertTrue(RAGManager.isIndexableFile(root.appendingPathComponent("a.typ")))
         XCTAssertTrue(RAGManager.isIndexableFile(root.appendingPathComponent("a.NOTE")))
-        XCTAssertFalse(RAGManager.isIndexableFile(root.appendingPathComponent("a.pdf")))
+        XCTAssertTrue(RAGManager.isIndexableFile(root.appendingPathComponent("a.pdf")))
         XCTAssertFalse(RAGManager.isIndexableFile(root.appendingPathComponent("a.png")))
     }
 }

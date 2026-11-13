@@ -603,14 +603,14 @@ class RAGManager: ObservableObject {
     }
 
     /// Extensions `gatherFiles` indexes. Shared with the file watcher so a
-    /// change to a file the index doesn't read (an image, the exported PDF)
-    /// never schedules an indexing pass.
+    /// A change to a file the index doesn't read, such as an image, never
+    /// schedules an indexing pass.
     ///
     /// Source code is included: AI Chat searches the whole project, and the
     /// question "where is this parsed?" is as likely to point at a `.py` or
-    /// `.ts` file as at the document. Binary media stays out.
+    /// `.ts` file as at the document. Other binary media stays out.
     nonisolated static let indexedFileExtensions: Set<String> = [
-        "typ", "md", "markdown", "note", "json", "bib", "txt", "csv", "yaml",
+        "typ", "md", "markdown", "note", "json", "bib", "txt", "csv", "pdf", "yaml",
         "yml", "toml", "html", "css", "xml",
         "py", "js", "jsx", "ts", "tsx", "sh", "bash", "zsh",
         "c", "h", "cc", "cpp", "hpp", "cs", "java", "kt", "swift", "go",
@@ -1044,7 +1044,27 @@ class RAGManager: ObservableObject {
             // Content actually changed (or new file) — fall through to re-index.
 
             let passages: [TextChunk]
-            if ext == "json" {
+            if ext == "pdf" {
+                self.indexStatus = "Reading PDF \(fileURL.lastPathComponent)..."
+                var importer = PDFImporter(
+                    sourceURL: fileURL,
+                    outputDirectory: fileURL.deletingLastPathComponent(),
+                    baseName: fileURL.deletingPathExtension().lastPathComponent
+                )
+                importer.options.extractFigures = false
+                importer.options.writeAssets = false
+                importer.options.removeRunningHeaders = false
+                importer.options.useAI = false
+                importer.aiTarget = nil
+                do {
+                    let converted = try await importer.run()
+                    passages = DocumentChunker.chunks(in: converted.markdown, fileExtension: "md")
+                } catch {
+                    print("[RAG Error] \(fileURL.lastPathComponent): PDF conversion failed; "
+                        + "the file will be retried next pass. \(error.localizedDescription)")
+                    continue
+                }
+            } else if ext == "json" {
                 let json = try? JSONSerialization.jsonObject(with: fileData)
                 passages = json.map {
                     DocumentChunker.unlinedChunks(extractSemanticChunks(from: $0, fileName: fileURL.lastPathComponent))

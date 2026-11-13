@@ -73,6 +73,20 @@ final class RAGIndexIntegrationTests: XCTestCase {
         XCTAssertFalse(excluded.contains { $0.relativePath == "chapters/results.typ" })
     }
 
+    func testPDFTextIsConvertedAndIndexedWithoutWritingAssets() async throws {
+        let pdfURL = project.appendingPathComponent("report.pdf")
+        try PDFTestFixtures.draw(to: pdfURL)
+
+        let rag = RAGManager()
+        rag.embeddingProviderOverride = HashingEmbeddingProvider()
+        await rag.indexProject(at: project)
+
+        let outcome = await rag.searchOutcome(query: "quarterly report revenue region", topK: 5)
+        let pdfHit = try XCTUnwrap(hits(outcome).first { $0.relativePath == "report.pdf" })
+        XCTAssertTrue(pdfHit.text.contains("Revenue grew in every region this quarter."))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: project.appendingPathComponent("report-assets").path))
+    }
+
     func testAnEditReEmbedsOnlyTheChangedPassages() async throws {
         let provider = HashingEmbeddingProvider()
         let rag = RAGManager()
