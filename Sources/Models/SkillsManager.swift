@@ -100,6 +100,10 @@ final class SkillsManager: ObservableObject {
         NotificationCenter.default.post(name: .globalAIConfigurationDidChange, object: self)
     }
 
+    func skillsDidChange() {
+        didChangeSkills()
+    }
+
     var allSkills: [AISkill] { builtinSkills + globalSkills + projectSkills }
 
     func skill(withID id: String) -> AISkill? {

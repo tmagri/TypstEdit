@@ -97,6 +97,7 @@ struct AIChatView: View {
     @State private var showRename = false
     @State private var renameDraft: String = ""
     @State private var actionError: String?
+    @State private var showChatHistory = false
     @State private var showGoalSet = false
     @State private var goalDraft: String = ""
 
@@ -201,6 +202,9 @@ struct AIChatView: View {
         } message: {
             Text(actionError ?? "")
         }
+        .sheet(isPresented: $showChatHistory) {
+            ChatHistorySheet(store: store, activeSessionID: chat.id)
+        }
     }
 
     // MARK: - Header
@@ -246,6 +250,13 @@ struct AIChatView: View {
                 .disabled(chat.isGenerating || chat.isCompacting || chat.messages.isEmpty)
                 .help("Summarize older turns now to free up context")
                 sessionsMenu
+                Button {
+                    showChatHistory = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.plain)
+                .help("Search and label conversations")
                 Button {
                     // Starts a fresh conversation; the current one stays
                     // saved in the chat menu.

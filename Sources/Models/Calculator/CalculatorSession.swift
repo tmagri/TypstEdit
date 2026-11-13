@@ -60,6 +60,28 @@ final class CalculatorSession: ObservableObject {
         guard !trimmed.isEmpty else { return }
         guard !busy else { return }
 
+        if let request = UnitConversion.parse(trimmed) {
+            busy = true
+            lastStatus = nil
+            let outcome = await UnitConversion.evaluate(
+                request,
+                approx: forceApprox || exactMode == .approx,
+                angle: angle,
+                digits: displayDigits,
+                timeout: GeneralSettingsManager.shared.calcTimeout)
+            entries.append(CalculatorEntry(
+                input: trimmed,
+                approx: forceApprox || exactMode == .approx,
+                resultTypst: outcome.ok ? UnitConversion.typst(from: outcome.text) : "",
+                resultPlain: outcome.text,
+                isError: !outcome.ok,
+                errorMessage: outcome.ok ? "" : outcome.text))
+            hasUnsavedChanges = true
+            recallIndex = nil
+            busy = false
+            return
+        }
+
         do {
             var prepared = TISyntax.preprocess(trimmed)
             prepared = try TISyntax.substituteRecalls(in: prepared, history: entries)

@@ -14,7 +14,7 @@ enum CalculatorTool {
             name: name,
             description: """
             Evaluate arithmetic, algebra, calculus, and matrices with the bundled Giac CAS. No Python or project is required.
-            Use calculator syntax, not Typst markup. Examples: solve(x^2-4=0,x), d(x^3,x), ∫(x^2,x,0,1), det([[1,2][3,4]]).
+            Use calculator syntax, not Typst markup. Examples: solve(x^2-4=0,x), d(x^3,x), ∫(x^2,x,0,1), det([[1,2][3,4]]), or `5 kg to lb`.
             Each call has a fresh context. Use single-letter variables, optional numeric suffixes, or named math constants.
             Stored variables, ans, entry, strings, assignments, programs, file access, and network access are not supported.
             Returns JSON with ok, result (plain text), typst (math without dollar delimiters), and input_typst.
@@ -23,7 +23,7 @@ enum CalculatorTool {
             inputSchema: [
                 "type": "object",
                 "properties": [
-                    "expression": ["type": "string", "description": "One math expression, up to 4096 bytes."],
+                    "expression": ["type": "string", "description": "One math expression or unit conversion, up to 4096 bytes."],
                     "approx": ["type": "boolean", "description": "Return a decimal approximation. Default false (exact)."],
                     "angle": ["type": "string", "enum": ["rad", "deg"], "description": "Trigonometric angle unit. Default rad."],
                     "digits": ["type": "integer", "minimum": 1, "maximum": 15, "description": "Significant digits for approximate results. Default 12."]
@@ -39,9 +39,9 @@ enum CalculatorTool {
               let expression = arguments["expression"] as? String else {
             throw LocalToolError.invalidArguments("expression is required. Permitted options: approx, angle, digits.")
         }
-        let prepared: String
-        do { prepared = try CalculatorMathPolicy.prepare(expression) }
-        catch { throw LocalToolError.invalidArguments(error.localizedDescription) }
+        guard expression.utf8.count <= CalculatorMathPolicy.maximumInputBytes else {
+            throw LocalToolError.invalidArguments("The expression exceeds the 4096-byte limit.")
+        }
 
         var approx = false
         if let raw = arguments["approx"] {
@@ -65,6 +65,39 @@ enum CalculatorTool {
             }
             digits = number.intValue
         }
+
+        if let request = UnitConversion.parse(expression) {
+            let engine = CASEngine(sandboxed: true)
+            let outcome = await UnitConversion.evaluate(
+                request,
+                engine: engine,
+                approx: approx,
+                angle: angleString == "deg" ? .degrees : .radians,
+                digits: digits,
+                timeout: 10)
+            await engine.shutdown()
+            guard outcome.ok else {
+                return try json(["ok": false, "error": outcome.text])
+            }
+            let typst = UnitConversion.typst(from: outcome.text)
+            let outputBytes = outcome.text.utf8.count + typst.utf8.count
+            guard outputBytes <= CalculatorMathPolicy.maximumOutputBytes else {
+                return try json(["ok": false, "error": "The result exceeds the output limit. Use a smaller expression."])
+            }
+            return try json([
+                "ok": true,
+                "result": outcome.text,
+                "typst": typst,
+                "input_typst": "",
+                "approx": approx,
+                "angle": angleString,
+                "digits": digits
+            ])
+        }
+
+        let prepared: String
+        do { prepared = try CalculatorMathPolicy.prepare(expression) }
+        catch { throw LocalToolError.invalidArguments(error.localizedDescription) }
 
         let engine = CASEngine(sandboxed: true)
         let result = await engine.eval(input: prepared, approx: approx,
@@ -95,4 +128,5 @@ enum CalculatorTool {
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         return String(decoding: data, as: UTF8.self)
     }
+
 }

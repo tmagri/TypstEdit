@@ -11,7 +11,9 @@ struct AISkillsSettingsView: View {
     @ObservedObject private var aiSettings = AISettingsManager.shared
     @State private var editingSkill: AISkill?
     @State private var isCreatingNew = false
+    @State private var isImportingSkill = false
     @State private var newSkillScope: ConfigScope = .global
+    @State private var importSkillScope: ConfigScope = .global
 
     var body: some View {
         ScrollView {
@@ -48,6 +50,9 @@ struct AISkillsSettingsView: View {
         .sheet(isPresented: $isCreatingNew) {
             SkillEditorSheet(mode: .create(scope: newSkillScope), skillsManager: skillsManager)
         }
+        .sheet(isPresented: $isImportingSkill) {
+            SkillImportSheet(scope: importSkillScope, skillsManager: skillsManager)
+        }
     }
 
     @ViewBuilder
@@ -79,6 +84,13 @@ struct AISkillsSettingsView: View {
                         Label("Add Skill…", systemImage: "plus.circle")
                     }
                     .padding(.top, 4)
+
+                    Button {
+                        importSkillScope = scope
+                        isImportingSkill = true
+                    } label: {
+                        Label("Install from URL or Folder…", systemImage: "square.and.arrow.down")
+                    }
                 } else {
                     Text("Built into TypstEdit — enable them from the Skills menu in the AI panel. They update with the app.")
                         .font(.caption2)
@@ -143,6 +155,93 @@ struct AISkillsSettingsView: View {
                 aiSettings.chatDefaultSkillIDs = ids
             }
         )
+    }
+}
+
+private struct SkillImportSheet: View {
+    let scope: ConfigScope
+    @ObservedObject var skillsManager: SkillsManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var source = ""
+    @State private var progress = ""
+    @State private var error: String?
+    @State private var isInstalling = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Install Skills")
+                .font(.headline)
+            Text("Paste a GitHub repository or Skill folder URL, a direct .zip URL, a local folder path, or an `npx skills add` command. All discovered Skills are installed into the \(scope.label.lowercased()) scope. Downloaded code is never run.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("owner/repo or https://github.com/owner/repo/tree/main/skills/name", text: $source)
+                .textFieldStyle(.roundedBorder)
+                .disabled(isInstalling)
+                .onSubmit(install)
+            HStack {
+                Button("Choose Local Folder or ZIP…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = true
+                    panel.canChooseDirectories = true
+                    panel.allowsMultipleSelection = false
+                    panel.prompt = "Choose"
+                    guard panel.runModal() == .OK, let url = panel.url else { return }
+                    source = url.path
+                }
+                .disabled(isInstalling)
+                Spacer()
+            }
+            if isInstalling {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(progress.isEmpty ? "Reading source…" : progress)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .disabled(isInstalling)
+                Spacer()
+                Button("Install") { install() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isInstalling || source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+    }
+
+    private func install() {
+        guard !isInstalling else { return }
+        isInstalling = true
+        error = nil
+        progress = ""
+        Task {
+            do {
+                let skills = try await SkillInstaller.install(
+                    from: source,
+                    scope: scope,
+                    projectRoot: skillsManager.projectRoot,
+                    manager: skillsManager
+                ) { message in
+                    progress = message
+                }
+                progress = "Installed \(skills.count) Skill\(skills.count == 1 ? "" : "s")."
+                isInstalling = false
+                dismiss()
+            } catch {
+                self.error = error.localizedDescription
+                isInstalling = false
+            }
+        }
     }
 }
 

@@ -471,7 +471,8 @@ struct AISettingsView: View {
     @State private var selectedSection: AISettingsSection = .autocomplete
     
     @State private var testingTask: ModelTask?
-    @State private var testResults: [ModelTask: (success: Bool, message: String)] = [:]
+    @State private var testResults: [ModelTask: (success: Bool, warning: Bool, message: String)] = [:]
+    @State private var embeddingTestDetails: [String] = []
     @State private var testingProfileID: UUID?
     @State private var profileTestResults: [UUID: (success: Bool, message: String)] = [:]
 
@@ -2080,31 +2081,30 @@ struct AISettingsView: View {
     private func testConnection(for task: ModelTask) {
         testingTask = task
         testResults[task] = nil
+        if task == .embedding {
+            embeddingTestDetails = []
+        }
 
         Task {
             do {
                 if task == .embedding {
-                    let ctx = settings.modelContext(for: .embedding)
-                    if ctx.isLocal || ctx.source == .openAI {
-                        let provider = GenericAPIEmbeddingProvider(
-                            dimensions: 768,
-                            endpointURL: URL(string: ctx.embeddingEndpoint),
-                            apiKey: ctx.apiKey,
-                            modelName: ctx.model
-                        )
-                        _ = try await provider.getEmbedding(for: "test")
-                    }
-                    testResults[task] = (true, "Success: Embedding endpoint reachable")
+                    let result = await EmbeddingSelfTest.run()
+                    testResults[task] = (
+                        result.status != .failed,
+                        result.status == .warning,
+                        result.headline
+                    )
+                    embeddingTestDetails = result.details
                 } else {
                     let purpose: AIRequestPurpose = (task == .completion) ? .completion : .chat
                     let response = try await AICompletionService.shared.fetchCompletion(
                         prompt: "Hello. Respond with exactly the word 'OK'.",
                         purpose: purpose
                     )
-                    testResults[task] = (true, "Success: '\(response)'")
+                    testResults[task] = (true, false, "Success: '\(response)'")
                 }
             } catch {
-                testResults[task] = (false, error.localizedDescription)
+                testResults[task] = (false, false, error.localizedDescription)
             }
             testingTask = nil
         }
@@ -2112,28 +2112,39 @@ struct AISettingsView: View {
 
     @ViewBuilder
     private func testButton(for task: ModelTask) -> some View {
-        HStack(spacing: 12) {
-            Button(action: { testConnection(for: task) }) {
-                HStack(spacing: 6) {
-                    if testingTask == task {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "bolt.fill")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Button(action: { testConnection(for: task) }) {
+                    HStack(spacing: 6) {
+                        if testingTask == task {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "bolt.fill")
+                        }
+                        Text(task == .embedding ? "Test Embeddings" : "Test Connection")
                     }
-                    Text("Test Connection")
+                }
+                .disabled(testingTask != nil)
+
+                if let result = testResults[task] {
+                    let color: Color = result.success ? (result.warning ? .orange : .green) : .red
+                    HStack(spacing: 4) {
+                        Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundColor(color)
+                        Text(result.message)
+                            .font(.caption)
+                            .foregroundColor(color)
+                            .lineLimit(1)
+                    }
                 }
             }
-            .disabled(testingTask != nil)
-
-            if let result = testResults[task] {
-                HStack(spacing: 4) {
-                    Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundColor(result.success ? .green : .red)
-                    Text(result.message)
-                        .font(.caption)
-                        .foregroundColor(result.success ? .green : .red)
-                        .lineLimit(1)
+            if task == .embedding {
+                ForEach(embeddingTestDetails, id: \.self) { detail in
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

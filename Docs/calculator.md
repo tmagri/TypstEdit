@@ -49,6 +49,24 @@ plot(sin(x), x, -5, 5)  chart (up to 4 curves)
 
 `approx(...)` / `exact(...)` force one-off precision like the TI's MATH menu.
 
+## Unit conversions
+
+Enter common unit conversions in plain language. The calculator recognizes
+length, mass, volume, time, speed, area, pressure, energy, power, and force
+units. Use `to`, `in`, `into`, or an arrow between the value and target unit:
+
+```
+5 kg to lb
+100 km/h to mph
+212 mm x 174 mm x 90 mm in cubic metres
+9.8 m/s^2 to ft/s^2
+```
+
+The conversion runs through the bundled CAS. Results show the converted
+number and unit; incompatible dimensions, such as kilograms to metres, show
+an error instead of a numeric result. This also works through AI Chat's
+`evaluate_math` tool.
+
 ## Charting a function
 
 `plot(expr, …, var, x-min, x-max)` draws one to four curves in the history,
@@ -142,6 +160,7 @@ Example asks:
 Solve 3x^2 - 5x + 2 = 0 and insert the roots as an equation.
 Plot a sinc function between -10 and 10.
 Compute ∫ x^2 sin(x) dx from 0 to pi, then check it numerically.
+Convert 100 km/h to mph.
 ```
 
 ## AI fallback for questions
