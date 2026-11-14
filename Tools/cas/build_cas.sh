@@ -88,20 +88,67 @@ mkdir -p "$DEPS" "$SRC" "$CAS_ROOT"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
+# ----------------------------------------------------------------- helpers
+# Downloads `$2` to `$1`, retrying transient failures.
+#
+# `curl --retry` alone does not cover HTTP/2 framing errors (curl exit 16),
+# which are common on flaky networks and previously aborted the CAS build with
+# no retry at all. `--retry-all-errors` plus a partial-file cleanup keeps the
+# build resumable instead of failing the whole DMG step.
+download() {
+    local dest="$1" url="$2"
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if curl -fL --retry 3 --retry-all-errors --retry-delay 2 \
+                --connect-timeout 20 --max-time 600 \
+                -o "$dest.part" "$url"; then
+            mv "$dest.part" "$dest"
+            return 0
+        fi
+        rm -f "$dest.part"
+        printf 'retrying %s (attempt %d/5)\n' "$url" "$attempt"
+        sleep $((attempt * 2))
+    done
+    printf 'error: could not download %s\n' "$url" >&2
+    return 1
+}
+
+# Extracts an already-downloaded tarball, reusing it when it is still valid.
+# Returns non-zero when the cached archive is missing or corrupt so the caller
+# can re-download.
+extract_cached() {
+    local archive="$1" target="$2" dir="$3"
+    [[ -f "$archive" ]] || return 1
+    rm -rf "$dir"
+    if tar -xJf "$archive" -C "$target" 2>/dev/null && [[ -f "$dir/configure" ]]; then
+        return 0
+    fi
+    rm -rf "$dir"
+    return 1
+}
+
 # ---------------------------------------------------------------- fetching
 fetch_sources() {
     log "Fetching GMP $GMP_VERSION"
-    if [[ ! -d "$SRC/gmp-${GMP_VERSION}" ]]; then
-        curl -fL --retry 3 -o "$DEPS/gmp.tar.xz" "$GMP_URL"
-        tar -xJf "$DEPS/gmp.tar.xz" -C "$SRC"
+    # Check for a file inside the tree, not just the directory: an interrupted
+    # `tar` can leave the directory behind with its contents missing or partial,
+    # and a bare `-d` test would then skip the re-extract forever.
+    if [[ ! -f "$SRC/gmp-${GMP_VERSION}/configure" ]]; then
+        if ! extract_cached "$DEPS/gmp.tar.xz" "$SRC" "$SRC/gmp-${GMP_VERSION}"; then
+            download "$DEPS/gmp.tar.xz" "$GMP_URL"
+            tar -xJf "$DEPS/gmp.tar.xz" -C "$SRC"
+        fi
     fi
     log "Fetching MPFR $MPFR_VERSION"
-    if [[ ! -d "$SRC/mpfr-${MPFR_VERSION}" ]]; then
-        curl -fL --retry 3 -o "$DEPS/mpfr.tar.xz" "$MPFR_URL"
-        tar -xJf "$DEPS/mpfr.tar.xz" -C "$SRC"
+    if [[ ! -f "$SRC/mpfr-${MPFR_VERSION}/configure" ]]; then
+        if ! extract_cached "$DEPS/mpfr.tar.xz" "$SRC" "$SRC/mpfr-${MPFR_VERSION}"; then
+            download "$DEPS/mpfr.tar.xz" "$MPFR_URL"
+            tar -xJf "$DEPS/mpfr.tar.xz" -C "$SRC"
+        fi
     fi
     log "Fetching giac at $GIAC_COMMIT"
     if [[ ! -d "$SRC/giac/.git" ]]; then
+        rm -rf "$SRC/giac"
         git clone --no-checkout --depth 1 "$GIAC_REPO" "$SRC/giac"
     fi
     # Fetch the pinned revision itself: the latest 50 commits may no longer
@@ -113,12 +160,25 @@ fetch_sources() {
     log "Sources ready"
 }
 
+# Returns 0 when every pinned source tree is present on disk.
+#
+# GMP and MPFR are only used to build per-arch static libraries, while the giac
+# checkout is also the marker attached to `build/cas/src`. Checking only for the
+# giac directory meant a tree missing gmp/mpfr (eg after a partial clean, or when
+# `build/cas/src` was preserved but its tarball contents were not) skipped the
+# fetch and failed later with a bare `cp: ... No such file or directory`.
+have_all_sources() {
+    [[ -f "$SRC/gmp-${GMP_VERSION}/configure" ]] \
+        && [[ -f "$SRC/mpfr-${MPFR_VERSION}/configure" ]] \
+        && [[ -d "$SRC/giac/.git" ]]
+}
+
 if [[ $FETCH_ONLY -eq 1 ]]; then
     fetch_sources
     exit 0
 fi
 
-[[ -d "$SRC/giac" ]] || fetch_sources
+have_all_sources || fetch_sources
 
 # ------------------------------------------------------------ per-arch build
 build_arch() {
