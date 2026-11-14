@@ -326,6 +326,18 @@ final class TextViewControllerTests: XCTestCase {
             idx == nil,
             "Walking backwards with missing pair failed. Expected `nil`, found: `\(String(describing: idx))`"
         )
+
+        // Test inverted / out-of-bounds limits do not crash (regression test for NSString enumerateSubstringsInRange)
+        XCTAssertNil(controller.findClosingPair("{", "}", from: 10, limit: 5, reverse: false))
+        XCTAssertNil(controller.findClosingPair("}", "{", from: 5, limit: 10, reverse: true))
+        XCTAssertNil(controller.findClosingPair("{", "}", from: 50, limit: 60, reverse: false))
+        XCTAssertNil(controller.findClosingPair("}", "{", from: -1, limit: 0, reverse: true))
+        XCTAssertNil(controller.findClosingPair("{", "}", from: 0, limit: 0, reverse: false))
+
+        // Test emphasizeSelectionPairs does not throw when cursor is far past visible range
+        controller.textView.string = String(repeating: "a", count: 5000) + "{\nhello\n}"
+        controller.textView.selectionManager.setSelectedRange(NSRange(location: 5001, length: 0))
+        controller.emphasizeSelectionPairs()
     }
 
     // MARK: Set Text

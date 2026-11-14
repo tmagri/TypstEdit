@@ -13,9 +13,13 @@ extension TextViewController {
     internal func emphasizeSelectionPairs() {
         guard let bracketPairEmphasis = configuration.appearance.bracketPairEmphasis else { return }
         textView.emphasisManager?.removeEmphases(for: EmphasisGroup.brackets)
+        let docLen = textView.textStorage.length
+        guard docLen > 0 else { return }
+
         for range in textView.selectionManager.textSelections.map({ $0.range }) {
             if range.isEmpty,
                range.location > 0, // Range is not the beginning of the document
+               range.location <= docLen,
                let precedingCharacter = textView.textStorage.substring(
                 from: NSRange(location: range.location - 1, length: 1) // The preceding character exists
                ) {
@@ -33,11 +37,18 @@ extension TextViewController {
     }
 
     private func emphasizeForwards(_ pair: (String, String), range: NSRange, emphasisType: BracketPairEmphasis) {
+        let docMax = textView.documentRange.max
+        guard range.location < docMax else { return }
+        // Ensure search window starts at or beyond the current location, not behind it
+        let visibleMax = max(range.location, textView.visibleTextRange?.max ?? range.location)
+        let limit = min(visibleMax + 4096, docMax)
+        guard limit > range.location else { return }
+
         if let characterIndex = findClosingPair(
             pair.0,
             pair.1,
             from: range.location,
-            limit: min((textView.visibleTextRange ?? .zero).max + 4096, textView.documentRange.max),
+            limit: limit,
             reverse: false
         ) {
             emphasizeCharacter(characterIndex)
@@ -48,11 +59,19 @@ extension TextViewController {
     }
 
     private func emphasizeBackwards(_ pair: (String, String), range: NSRange, emphasisType: BracketPairEmphasis) {
+        let fromIndex = range.location - 1
+        guard fromIndex > 0 else { return }
+        let docMin = textView.documentRange.location
+        // Ensure search window starts at or before the current location, not ahead of it
+        let visibleMin = min(fromIndex, textView.visibleTextRange?.location ?? fromIndex)
+        let limit = max(visibleMin - 4096, docMin)
+        guard limit < fromIndex else { return }
+
         if let characterIndex = findClosingPair(
             pair.1,
             pair.0,
-            from: range.location - 1,
-            limit: max((textView.visibleTextRange?.location ?? 0) - 4096, textView.documentRange.location),
+            from: fromIndex,
+            limit: limit,
             reverse: true
         ) {
             emphasizeCharacter(characterIndex)
@@ -86,6 +105,24 @@ extension TextViewController {
     ///   - reverse: Set to `true` to walk backwards from `from`.
     /// - Returns: The index of the found closing pair, if any.
     internal func findClosingPair(_ close: String, _ open: String, from: Int, limit: Int, reverse: Bool) -> Int? {
+        let docLen = textView.textStorage.length
+        guard docLen > 0 else { return nil }
+
+        let searchRange: NSRange
+        if reverse {
+            guard limit < from, limit >= 0, from <= docLen else { return nil }
+            searchRange = NSRange(location: limit, length: from - limit)
+        } else {
+            guard from < limit, from >= 0, limit <= docLen else { return nil }
+            searchRange = NSRange(location: from, length: limit - from)
+        }
+
+        guard searchRange.location >= 0,
+              searchRange.length > 0,
+              searchRange.max <= docLen else {
+            return nil
+        }
+
         // Walk the text, counting each close. When we find an open that makes closeCount < 0, return that index.
         var options: NSString.EnumerationOptions = .byCaretPositions
         if reverse {
@@ -94,9 +131,7 @@ extension TextViewController {
         var closeCount = 0
         var index: Int?
         textView.textStorage.mutableString.enumerateSubstrings(
-            in: reverse ?
-                NSRange(location: limit, length: from - limit) :
-                NSRange(location: from, length: limit - from),
+            in: searchRange,
             options: options,
             using: { substring, range, _, stop in
                 if substring == close {
@@ -122,6 +157,7 @@ extension TextViewController {
         guard let bracketPairEmphasis = configuration.appearance.bracketPairEmphasis else {
             return
         }
+        guard location >= 0, location < textView.textStorage.length else { return }
 
         let range = NSRange(location: location, length: 1)
 
