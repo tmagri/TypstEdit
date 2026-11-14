@@ -280,11 +280,6 @@ class EditorController: NSObject, ObservableObject {
              tvc.textView.updateFrameIfNeeded()
              tvc.textView.layoutManager.layoutLines()
              tvc.textView.needsDisplay = true
-
-              // Safety net: make sure the view's text now matches the model. This should
-              // be a no-op in practice, but keeps any unforeseen edge case from leaving
-              // the view stale.
-              reconcileTextViewIfNeeded()
          } else {
              print("[EditorController] WARNING: No TextViewController available for sync")
          }
@@ -4020,6 +4015,7 @@ class EditorController: NSObject, ObservableObject {
     /// Detects Markdown syntax on the current line in a `.typ` file and
     /// auto-replaces it with the equivalent Typst syntax in real-time.
     func handleMarkdownAutoformat() {
+        guard !isApplyingProgrammaticChange else { return }
         // Only auto-translate when editing a Typst file
         guard currentFileType == .typst else { return }
         
@@ -4954,11 +4950,6 @@ class SourceEditorBridge: TextViewCoordinator {
     nonisolated func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
         MainActor.assumeIsolated {
             guard let ctrl = self.controller else { return }
-            // Don't fight the layout while applying a programmatic change.
-            if !ctrl.isApplyingProgrammaticChange {
-                // Aggressively re-apply wrapping settings
-                ctrl.updateTextViewWrapping()
-            }
             // Update formatting state (bold/italic detection). Debounced so rapid
             // cursor movement doesn't re-scan the document on every selection change.
             ctrl.scheduleFormattingUpdate()

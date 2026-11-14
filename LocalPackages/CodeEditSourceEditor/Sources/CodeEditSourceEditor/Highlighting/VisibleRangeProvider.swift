@@ -26,13 +26,12 @@ class VisibleRangeProvider {
     }
 
     /// The set of visible indexes in the text view
-    lazy var visibleSet: IndexSet = {
-        return IndexSet(integersIn: textView?.visibleTextRange ?? NSRange())
-    }()
+    var visibleSet: IndexSet = IndexSet()
 
     init(textView: TextView, minimapView: MinimapView?) {
         self.textView = textView
         self.minimapView = minimapView
+        updateVisibleSet()
 
         if let scrollView = textView.enclosingScrollView {
             NotificationCenter.default.addObserver(
@@ -58,16 +57,21 @@ class VisibleRangeProvider {
         )
     }
 
-    /// Updates the view to highlight newly visible text when the textview is scrolled or bounds change.
-    @objc func visibleTextChanged() {
+    /// Updates `visibleSet` from the text view and minimap without notifying the delegate.
+    func updateVisibleSet() {
         guard let textViewVisibleRange = textView?.visibleTextRange else {
             return
         }
-        var visibleSet = IndexSet(integersIn: textViewVisibleRange)
+        var set = IndexSet(integersIn: textViewVisibleRange)
         if !(minimapView?.isHidden ?? true), let minimapVisibleRange = minimapView?.visibleTextRange {
-            visibleSet.formUnion(IndexSet(integersIn: minimapVisibleRange))
+            set.formUnion(IndexSet(integersIn: minimapVisibleRange))
         }
-        self.visibleSet = visibleSet
+        self.visibleSet = set
+    }
+
+    /// Updates the view to highlight newly visible text when the textview is scrolled or bounds change.
+    @objc func visibleTextChanged() {
+        updateVisibleSet()
         delegate?.visibleSetDidUpdate(visibleSet)
     }
 

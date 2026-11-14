@@ -1,6 +1,7 @@
 import XCTest
 import PDFKit
 import CoreText
+import ObjCExceptionCatcher
 @testable import TypstEdit
 
 /// PDF import: layout rules on synthetic runs, ruled tables from synthetic
@@ -307,6 +308,26 @@ final class PDFImportTests: XCTestCase {
         XCTAssertEqual(table.rows.count, 3, result.typst)
         XCTAssertEqual(table.rows[1], ["North", "120"], result.typst)
         XCTAssertEqual(table.spans.first?.columnSpan, 2, result.typst)
+    }
+
+    // MARK: - Safe PDFKit exception handling
+
+    func testSafeAttributedStringCatchesException() {
+        var thrown = false
+        do {
+            _ = try ObjCExceptionCatcher.tryExecute {
+                NSException(name: NSExceptionName("TestException"), reason: "Testing exception catch", userInfo: nil).raise()
+                return nil
+            }
+        } catch {
+            thrown = true
+        }
+        XCTAssertTrue(thrown, "ObjCExceptionCatcher should catch NSException and translate to Swift error")
+    }
+
+    func testSafeAttributedStringForPageHandlesNil() {
+        let page: PDFPage? = nil
+        XCTAssertNil(ObjCExceptionCatcher.safeAttributedString(for: page))
     }
 
 }

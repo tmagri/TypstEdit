@@ -136,7 +136,8 @@ public struct SourceEditor: NSViewControllerRepresentable {
         context.coordinator.updateHighlightProviders(highlightProviders)
 
         // Prevent infinite loop of update notifications
-        if context.coordinator.isUpdateFromTextView {
+        let isFromTextView = context.coordinator.isUpdateFromTextView
+        if isFromTextView {
             context.coordinator.isUpdateFromTextView = false
         } else {
             context.coordinator.isUpdatingFromRepresentable = true
@@ -149,7 +150,11 @@ public struct SourceEditor: NSViewControllerRepresentable {
         // downward (binding -> text view) only happens at init. Programmatic changes to the binding
         // (paste, formatting actions, restoreContent) therefore need to be pushed back down here,
         // otherwise the editor can display stale/blank text while the model is correct.
-        syncTextIfNeeded(controller: controller)
+        // Skip downward sync if this update originated from the text view itself to prevent
+        // overwriting active user typing with a stale binding snapshot.
+        if !isFromTextView {
+            syncTextIfNeeded(controller: controller)
+        }
 
         // Do manual diffing to reduce the amount of reloads.
         // This helps a lot in view performance, as it otherwise gets triggered on each environment change.

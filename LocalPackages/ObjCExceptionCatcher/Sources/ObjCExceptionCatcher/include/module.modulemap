@@ -1,0 +1,4 @@
+module ObjCExceptionCatcher {
+    header "ObjCExceptionCatcher.h"
+    export *
+}

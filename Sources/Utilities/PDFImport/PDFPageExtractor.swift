@@ -4,6 +4,7 @@ import PDFKit
 import Vision
 import ImageIO
 import UniformTypeIdentifiers
+import ObjCExceptionCatcher
 
 /// Pulls positioned text, tables and figure regions out of PDF pages using
 /// only Apple frameworks.
@@ -59,10 +60,11 @@ enum PDFPageExtractor {
     /// `barriers` are vertical rules (table borders): no run crosses one, so
     /// text in neighbouring cells stays apart even when the gap is narrow.
     static func textLayerRuns(for page: PDFPage, barriers: [PDFLatticeTables.Line] = []) -> [PDFTextRun]? {
-        guard let attributed = page.attributedString, attributed.length > 0,
+        let attributed = ObjCExceptionCatcher.safeAttributedString(for: page)
+        let rawString = (attributed?.string ?? page.string) as NSString?
+        guard let string = rawString, string.length > 0,
               let lines = page.selection(for: page.bounds(for: .mediaBox))?.selectionsByLine(), !lines.isEmpty
         else { return nil }
-        let string = attributed.string as NSString
         let transform = displayTransform(for: page)
 
         // and other legacy fonts map Hebrew and Greek onto ASCII
@@ -105,7 +107,7 @@ enum PDFPageExtractor {
                         ? box
                         : CGRect(x: box.minX, y: lineRect.minY, width: box.width, height: lineRect.height)
 
-                    let fonts = fontsUsed(in: attributed, range: wordRange)
+                    let fonts = attributed.map { fontsUsed(in: $0, range: wordRange) } ?? []
                     let primary = fonts.max { $0.count < $1.count }?.font
                     let traits = fontTraits(primary)
                     let mathFontChars = fonts.filter { PDFLayoutAnalyzer.isMathFont($0.font.fontName) }.reduce(0) { $0 + $1.count }

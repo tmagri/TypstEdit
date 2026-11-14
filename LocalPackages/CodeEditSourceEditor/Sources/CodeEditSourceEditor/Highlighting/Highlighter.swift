@@ -231,11 +231,8 @@ extension Highlighter: @preconcurrency NSTextStorageDelegate {
 
         styleContainer.storageUpdated(editedRange: editedRange, changeInLength: delta)
 
-        if delta > 0 {
-            visibleRangeProvider.visibleSet.insert(range: editedRange)
-        }
-
-        visibleRangeProvider.visibleTextChanged()
+        // Keep visible range in sync with the text edit before triggering providers
+        visibleRangeProvider.updateVisibleSet()
 
         let providerRange = NSRange(location: editedRange.location, length: editedRange.length - delta)
         highlightProviders.forEach { $0.storageDidUpdate(range: providerRange, delta: delta) }
