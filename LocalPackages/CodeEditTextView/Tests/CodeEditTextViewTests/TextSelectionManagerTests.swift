@@ -223,4 +223,66 @@ final class TextSelectionManagerTests: XCTestCase {
         selectionManager.setSelectedRange(NSRange(location: 6, length: 0)) // Beyond text.length, end of doc
         XCTAssertNotNil(selectionManager.textSelections.first?.suggestedXPos)
     }
+
+    // MARK: - Out-of-bounds offsets
+
+    /// A stale caret (left behind after the document shrank) must never make Foundation raise
+    /// `NSRangeException`. These used to abort the app inside `enumerateSubstrings(in:options:)`.
+    func test_outOfBoundsOffsetsNeverThrowAndStayInBounds() {
+        let text = "abc\ndef\nghi"
+        let documentLength = (text as NSString).length
+        let destinations: [TextSelectionManager.Destination] = [
+            .character, .word, .line, .visualLine, .document, .page
+        ]
+        let directions: [TextSelectionManager.Direction] = [.forward, .backward, .up, .down]
+
+        // Past EOF, far past EOF, and the boundary case one past the last character.
+        for offset in [documentLength - 1, documentLength, documentLength + 1, documentLength + 5000] {
+            let selectionManager = selectionManager(text)
+            for destination in destinations {
+                for direction in directions {
+                    let range = selectionManager.rangeOfSelection(
+                        from: offset,
+                        direction: direction,
+                        destination: destination
+                    )
+                    XCTAssertGreaterThanOrEqual(
+                        range.location, 0,
+                        "Negative location for \(direction)/\(destination) at \(offset)"
+                    )
+                    XCTAssertGreaterThanOrEqual(
+                        range.length, 0,
+                        "Negative length for \(direction)/\(destination) at \(offset)"
+                    )
+                    XCTAssertLessThanOrEqual(
+                        range.max, documentLength,
+                        "Range \(range) exceeds document for \(direction)/\(destination) at \(offset)"
+                    )
+                }
+            }
+        }
+    }
+
+    func test_wordSelectionPastEofDoesNotThrow() {
+        let selectionManager = selectionManager("abc\ndef\nghi")
+        // Forward and backward both build an enumeration range from `offset`.
+        XCTAssertNoThrow(
+            _ = selectionManager.rangeOfSelection(from: 5000, direction: .forward, destination: .word)
+        )
+        XCTAssertNoThrow(
+            _ = selectionManager.rangeOfSelection(from: 5000, direction: .backward, destination: .word)
+        )
+    }
+
+    func test_lineSelectionBackwardUsesLineLocationNotIndex() {
+        // Second line starts at offset 12 in "first line\nsecond line".
+        let selectionManager = selectionManager("first line\nsecond line")
+        let range = selectionManager.rangeOfSelection(
+            from: 17, // inside the second line
+            direction: .backward,
+            destination: .line
+        )
+        XCTAssertEqual(range.location, 11, "Backwards line selection should stop at the second line's location")
+        XCTAssertEqual(range.length, 6, "Backwards line selection should cover the text before the caret")
+    }
 }

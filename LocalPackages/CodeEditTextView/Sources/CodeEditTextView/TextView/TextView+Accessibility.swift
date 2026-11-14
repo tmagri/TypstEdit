@@ -62,8 +62,11 @@ extension TextView {
             return nil
         }
 
+        // `rangeOfComposedCharacterSequences` raises `NSInvalidArgumentException` for a location past
+        // the end of the string, so clamp before asking Foundation to expand the range.
+        let clamped = range.clampedToDocument(textStorage.length)
         return textStorage.substring(
-            from: textStorage.mutableString.rangeOfComposedCharacterSequences(for: range)
+            from: textStorage.mutableString.rangeOfComposedCharacterSequences(for: clamped)
         )
     }
 
@@ -77,7 +80,8 @@ extension TextView {
         if selectedRange.isEmpty {
             return ""
         }
-        let range = (textStorage.string as NSString).rangeOfComposedCharacterSequences(for: selectedRange)
+        let clamped = selectedRange.clampedToDocument(textStorage.length)
+        let range = (textStorage.string as NSString).rangeOfComposedCharacterSequences(for: clamped)
         return textStorage.substring(from: range)
     }
 
@@ -91,12 +95,16 @@ extension TextView {
         if selection.range.isEmpty {
             return selection.range
         }
-        return textStorage.mutableString.rangeOfComposedCharacterSequences(for: selection.range)
+        let clamped = selection.range.clampedToDocument(textStorage.length)
+        return textStorage.mutableString.rangeOfComposedCharacterSequences(for: clamped)
     }
 
     override open func accessibilitySelectedTextRanges() -> [NSValue]? {
-        selectionManager.textSelections.map { selection in
-            textStorage.mutableString.rangeOfComposedCharacterSequences(for: selection.range) as NSValue
+        let documentLength = textStorage.length
+        return selectionManager.textSelections.map { selection in
+            textStorage.mutableString.rangeOfComposedCharacterSequences(
+                for: selection.range.clampedToDocument(documentLength)
+            ) as NSValue
         }
     }
 

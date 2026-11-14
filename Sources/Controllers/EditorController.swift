@@ -3206,13 +3206,15 @@ class EditorController: NSObject, ObservableObject {
         guard range.length > 0 else { return }
 
         let nsText = sourceCode as NSString
-        guard range.location + range.length <= nsText.length else { return }
+        guard range.isValid(inDocumentOfLength: nsText.length) else { return }
 
         var expandedRange = range
 
         let searchRangeStart = max(0, range.location - 100)
         let searchRangeEnd = min(nsText.length, NSMaxRange(range) + 100)
         let searchRange = NSRange(location: searchRangeStart, length: searchRangeEnd - searchRangeStart)
+            .clampedToDocument(nsText.length)
+        guard searchRange.length > 0 else { return }
 
         nsText.enumerateSubstrings(in: searchRange, options: .byWords) { _, wordRange, _, _ in
             if NSIntersectionRange(range, wordRange).length > 0 {

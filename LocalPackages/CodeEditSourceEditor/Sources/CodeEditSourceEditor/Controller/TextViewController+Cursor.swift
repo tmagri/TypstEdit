@@ -25,15 +25,19 @@ extension TextViewController {
                     // If the file is blank, automatically place the cursor in the first index.
                     newSelectedRanges.append(NSRange(location: 0, length: 0))
                 } else if let linePosition = textView.layoutManager.textLineForIndex(position.start.line - 1) {
-                    // If this is a valid line, set the new position
-                    let startCharacter = linePosition.range.lowerBound + min(
-                        linePosition.range.upperBound,
-                        position.start.column - 1
+                    // If this is a valid line, set the new position.
+                    // Columns are 1-indexed and relative to the line, so the offset within the line
+                    // must be clamped against the line's *length*. Clamping against `range.upperBound`
+                    // (an absolute document offset) let large column numbers escape past the line and
+                    // produce ranges outside the document.
+                    let startCharacter = linePosition.range.location + min(
+                        linePosition.range.length,
+                        max(0, position.start.column - 1)
                     )
                     if let end = position.end, let endLine = textView.layoutManager.textLineForIndex(end.line - 1) {
-                        let endCharacter = endLine.range.lowerBound + min(
-                            endLine.range.upperBound,
-                            end.column - 1
+                        let endCharacter = endLine.range.location + min(
+                            endLine.range.length,
+                            max(0, end.column - 1)
                         )
                         newSelectedRanges.append(NSRange(start: startCharacter, end: endCharacter))
                     } else {

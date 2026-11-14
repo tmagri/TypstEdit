@@ -333,14 +333,100 @@ final class TextViewControllerTests: XCTestCase {
         XCTAssertNil(controller.findClosingPair("{", "}", from: 50, limit: 60, reverse: false))
         XCTAssertNil(controller.findClosingPair("}", "{", from: -1, limit: 0, reverse: true))
         XCTAssertNil(controller.findClosingPair("{", "}", from: 0, limit: 0, reverse: false))
+    }
 
-        // Test emphasizeSelectionPairs does not throw when cursor is far past visible range
-        controller.textView.string = String(repeating: "a", count: 5000) + "{\nhello\n}"
-        controller.textView.selectionManager.setSelectedRange(NSRange(location: 5001, length: 0))
+    /// Reproduces the shipped 1.8.6 crash: a caret scrolled far away from the viewport made the
+    /// emphasis search window start *behind* the caret, and the inverted `NSRange` aborted the app
+    /// inside `enumerateSubstrings(in:options:)`.
+    func test_emphasizePairsWithCaretFarFromViewportDoesNotCrash() throws {
+        let emphasisManager = try XCTUnwrap(controller.textView.emphasisManager)
+        controller.scrollView.setFrameSize(NSSize(width: 500, height: 500))
+        controller.viewDidLoad()
+        _ = controller.textView.becomeFirstResponder()
+        controller.configuration.appearance.bracketPairEmphasis = .bordered(color: .black)
+
+        // Long document so the caret can sit far below the visible viewport.
+        let lines = (0..<4000).map { "line \($0) {" }
+        controller.setText(lines.joined(separator: "\n"))
+        controller.textView.updateFrameIfNeeded()
+        controller.textView.layoutManager.layoutLines()
+        controller.scrollView.contentView.scroll(to: .zero)
+        controller.scrollView.reflectScrolledClipView(controller.scrollView.contentView)
+
+        let end = (controller.textView.string as NSString).length
+        controller.textView.selectionManager.setSelectedRange(NSRange(location: end, length: 0))
         controller.emphasizeSelectionPairs()
+
+        XCTAssertEqual(
+            controller.textView.textStorage.length,
+            end,
+            "Document must be unchanged after emphasizing brackets with an off-screen caret"
+        )
+    }
+
+    /// Forwards and backwards emphasis must still find a pair inside the visible window.
+    func test_emphasizePairsFindsPairWhenCursorIsInView() throws {
+        let emphasisManager = try XCTUnwrap(controller.textView.emphasisManager)
+        controller.scrollView.setFrameSize(NSSize(width: 500, height: 500))
+        controller.viewDidLoad()
+        _ = controller.textView.becomeFirstResponder()
+        controller.configuration.appearance.bracketPairEmphasis = .bordered(color: .black)
+
+        controller.setText("{ Lorem Ipsum {} }")
+        controller.setCursorPositions([CursorPosition(line: 1, column: 2)]) // After first opening {
+        XCTAssertEqual(
+            emphasisManager.getEmphases(for: EmphasisGroup.brackets).count,
+            2,
+            "Forwards emphasis should highlight both the source and the matching bracket"
+        )
+
+        controller.setCursorPositions([CursorPosition(line: 1, column: 19)]) // After final closing }
+        XCTAssertEqual(
+            emphasisManager.getEmphases(for: EmphasisGroup.brackets).count,
+            2,
+            "Backwards emphasis should highlight both the source and the matching bracket"
+        )
     }
 
     // MARK: Set Text
+
+    /// A column past the end of a line must clamp to that line's own end.
+    ///
+    /// The previous implementation clamped against `range.upperBound`, an absolute document offset, so
+    /// any line after the first produced an out-of-document range. `setSelectedRanges` then filtered the
+    /// invalid range out and the caret disappeared entirely instead of clamping.
+    func test_setCursorPositionsClampsColumnToLineLength() throws {
+        _ = controller.textView.becomeFirstResponder()
+        controller.setText("short\nsecond line here")
+        let documentLength = (controller.textView.string as NSString).length
+
+        // Column 3 on line 2 is well inside the line and must behave normally.
+        controller.setCursorPositions([CursorPosition(start: .init(line: 2, column: 3), end: nil)])
+        XCTAssertEqual(
+            controller.textView.selectionManager.textSelections.first?.range,
+            NSRange(location: 8, length: 0),
+            "A valid column on the second line should resolve to its absolute offset"
+        )
+
+        // Column 500 is far past the end of line 2; it must clamp, not vanish.
+        controller.setCursorPositions([CursorPosition(start: .init(line: 2, column: 500), end: nil)])
+        let selections = controller.textView.selectionManager.textSelections
+        let range = try XCTUnwrap(
+            selections.first?.range,
+            "The caret must not be dropped when the column exceeds the line length"
+        )
+        XCTAssertEqual(selections.count, 1, "Exactly one caret should remain")
+        XCTAssertLessThanOrEqual(
+            range.max,
+            documentLength,
+            "Clamped caret must stay inside the document"
+        )
+        XCTAssertEqual(
+            range.location,
+            documentLength,
+            "Column overflow on the last line should clamp to the end of the document"
+        )
+    }
 
     func test_setText() {
         _ = controller.textView.becomeFirstResponder()

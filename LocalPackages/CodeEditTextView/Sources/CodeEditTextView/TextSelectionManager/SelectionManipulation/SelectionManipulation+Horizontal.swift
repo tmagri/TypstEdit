@@ -25,6 +25,11 @@ package extension TextSelectionManager {
         decomposeCharacters: Bool = false
     ) -> NSRange {
         guard let string = textStorage?.string as NSString? else { return NSRange(location: offset, length: 0) }
+        // Every branch below builds an `NSRange` from `offset`. A stale offset (eg a caret left behind
+        // after the document shrank) produces a negative length or an out-of-bounds range, which makes
+        // Foundation raise `NSRangeException`. Clamp once here so no branch can overflow.
+        let length = string.length
+        let offset = max(0, min(offset, length))
 
         switch destination {
         case .character:
@@ -42,7 +47,7 @@ package extension TextSelectionManager {
             return extendSelectionVisualLine(string: string, from: offset, delta: delta)
         case .document:
             if delta > 0 {
-                return NSRange(start: offset, end: string.length)
+                return NSRange(start: offset, end: length)
             } else {
                 return NSRange(location: 0, length: offset)
             }
@@ -97,9 +102,14 @@ package extension TextSelectionManager {
         }
         var rangeToDelete = NSRange(location: offset, length: 0)
 
+        // `offset` is clamped by the caller, but `string.length - offset` and `offset` still have to be
+        // non-negative for `enumerateSubstrings` to accept the range.
+        let searchRange = NSRange(location: delta > 0 ? offset : 0, length: delta > 0 ? string.length - offset : offset)
+        guard searchRange.isValid(inDocumentOfLength: string.length) else { return rangeToDelete }
+
         var hasFoundValidWordChar = false
         string.enumerateSubstrings(
-            in: NSRange(location: delta > 0 ? offset : 0, length: delta > 0 ? string.length - offset : offset),
+            in: searchRange,
             options: enumerationOptions
         ) { substring, _, _, stop in
             guard let substring = substring else {
@@ -215,6 +225,8 @@ package extension TextSelectionManager {
     /// - Returns: A new range to replace the given range for the line.
     private func findBeginningOfLineText(string: NSString, initialRange: NSRange) -> NSRange {
         var foundRange = initialRange
+        // `initialRange` is derived from layout state and can exceed the document after an edit.
+        guard foundRange.isValid(inDocumentOfLength: string.length) else { return initialRange }
         string.enumerateSubstrings(in: foundRange, options: .byCaretPositions) { substring, _, _, stop in
             if let substring = substring as String? {
                 if CharacterSet

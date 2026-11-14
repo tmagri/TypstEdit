@@ -207,7 +207,10 @@ extension TextView: NSTextInputClient {
         forProposedRange range: NSRange,
         actualRange: NSRangePointer?
     ) -> NSAttributedString? {
-        let realRange = (textStorage.string as NSString).rangeOfComposedCharacterSequences(for: range)
+        // `rangeOfComposedCharacterSequences` and `attributedSubstring(from:)` both raise when handed a
+        // range that overruns the storage, which is reachable from a stale selection during undo/redo.
+        let clamped = range.fittingInDocument(textStorage.length)
+        let realRange = (textStorage.string as NSString).rangeOfComposedCharacterSequences(for: clamped)
         actualRange?.pointee = realRange
         return textStorage.attributedSubstring(from: realRange)
     }
@@ -229,7 +232,9 @@ extension TextView: NSTextInputClient {
     ///            The rectangle’s size value can be negative if the text flows to the left.
     @objc public func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
         if actualRange != nil {
-            let realRange = (textStorage.string as NSString).rangeOfComposedCharacterSequences(for: range)
+            let realRange = (textStorage.string as NSString).rangeOfComposedCharacterSequences(
+                for: range.fittingInDocument(textStorage.length)
+            )
             if realRange != range {
                 actualRange?.pointee = realRange
             }

@@ -23,12 +23,15 @@ package extension TextSelectionManager {
         up: Bool,
         suggestedXPos: CGFloat?
     ) -> NSRange {
+        let documentLength = textStorage?.length ?? 0
+        let offset = max(0, min(offset, documentLength))
+
         // If moving up and on first line, jump to beginning of the line
         // If moving down and on last line, jump to end of document.
         if up && layoutManager?.lineStorage.first?.range.contains(offset) ?? false {
             return NSRange(location: 0, length: offset)
         } else if !up && layoutManager?.lineStorage.last?.range.contains(offset) ?? false {
-            return NSRange(start: offset, end: (textStorage?.length ?? offset))
+            return NSRange(start: offset, end: documentLength)
         }
 
         switch destination {
@@ -42,7 +45,7 @@ package extension TextSelectionManager {
             if up {
                 return NSRange(location: 0, length: offset)
             } else {
-                return NSRange(start: offset, end: (textStorage?.length ?? offset))
+                return NSRange(start: offset, end: documentLength)
             }
         }
     }
@@ -68,10 +71,11 @@ package extension TextSelectionManager {
             return NSRange(location: offset, length: 0)
         }
 
-        return NSRange(
-            location: up ? newOffset : offset,
-            length: up ? offset - newOffset : newOffset - offset
-        )
+        // `start..<end` keeps the range valid even if layout reports an offset on the wrong side of
+        // the cursor; the previous `offset - newOffset` form could produce a negative length.
+        return up
+            ? NSRange(start: min(newOffset, offset), end: offset)
+            : NSRange(start: offset, end: max(newOffset, offset))
     }
 
     /// Extends the selection to the nearest line vertically.
@@ -94,22 +98,24 @@ package extension TextSelectionManager {
         guard let line = layoutManager?.textLineForOffset(offset) else {
             return NSRange(location: offset, length: 0)
         }
+        let lineEndingLength = layoutManager?.detectedLineEnding.length ?? 0
         if up && line.range.location != offset {
-            return NSRange(location: line.range.location, length: offset - line.index)
-        } else if !up && line.range.max - (layoutManager?.detectedLineEnding.length ?? 0) != offset {
+            // Length must be measured from the line's *location*, not its index. Using `line.index`
+            // produced a range that ended in the wrong place on every line after the first.
+            return NSRange(location: line.range.location, length: max(0, offset - line.range.location))
+        } else if !up && max(0, line.range.max - lineEndingLength) != offset {
             return NSRange(
                 location: offset,
-                length: line.range.max - offset - (layoutManager?.detectedLineEnding.length ?? 0)
+                length: max(0, line.range.max - offset - lineEndingLength)
             )
         } else {
             let nextQueryIndex = up ? max(line.range.location - 1, 0) : min(line.range.max, (textStorage?.length ?? 0))
             guard let nextLine = layoutManager?.textLineForOffset(nextQueryIndex) else {
                 return NSRange(location: offset, length: 0)
             }
-            return NSRange(
-                start: up ? nextLine.range.location : offset,
-                end: up ? offset : nextLine.range.max - (layoutManager?.detectedLineEnding.length ?? 0)
-            )
+            return up
+                ? NSRange(start: min(nextLine.range.location, offset), end: offset)
+                : NSRange(start: offset, end: max(nextLine.range.max - lineEndingLength, offset))
         }
     }
 
@@ -140,9 +146,9 @@ package extension TextSelectionManager {
         }
 
         if delta > 0 {
-            return NSRange(start: nextPageOffset, end: offset)
+            return NSRange(start: min(nextPageOffset, offset), end: offset)
         } else {
-            return NSRange(location: offset, length: nextPageOffset - offset)
+            return NSRange(start: offset, end: max(nextPageOffset, offset))
         }
     }
 }

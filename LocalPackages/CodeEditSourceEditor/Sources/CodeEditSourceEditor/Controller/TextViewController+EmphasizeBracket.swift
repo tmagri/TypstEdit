@@ -37,19 +37,41 @@ extension TextViewController {
     }
 
     private func emphasizeForwards(_ pair: (String, String), range: NSRange, emphasisType: BracketPairEmphasis) {
-        let docMax = textView.documentRange.max
-        guard range.location < docMax else { return }
-        // Ensure search window starts at or beyond the current location, not behind it
-        let visibleMax = max(range.location, textView.visibleTextRange?.max ?? range.location)
-        let limit = min(visibleMax + 4096, docMax)
-        guard limit > range.location else { return }
+        let documentLength = textView.textStorage.length
+        guard let searchWindow = bracketSearchWindow(
+            from: range.location,
+            direction: .forwards,
+            documentLength: documentLength
+        ) else { return }
 
         if let characterIndex = findClosingPair(
             pair.0,
             pair.1,
-            from: range.location,
-            limit: limit,
+            from: searchWindow.lowerBound,
+            limit: searchWindow.upperBound,
             reverse: false
+        ) {
+            emphasizeCharacter(characterIndex)
+            if emphasisType.emphasizesSourceBracket {
+                emphasizeCharacter(searchWindow.lowerBound - 1)
+            }
+        }
+    }
+
+    private func emphasizeBackwards(_ pair: (String, String), range: NSRange, emphasisType: BracketPairEmphasis) {
+        let documentLength = textView.textStorage.length
+        guard let searchWindow = bracketSearchWindow(
+            from: range.location - 1,
+            direction: .backwards,
+            documentLength: documentLength
+        ) else { return }
+
+        if let characterIndex = findClosingPair(
+            pair.1,
+            pair.0,
+            from: searchWindow.upperBound,
+            limit: searchWindow.lowerBound,
+            reverse: true
         ) {
             emphasizeCharacter(characterIndex)
             if emphasisType.emphasizesSourceBracket {
@@ -58,26 +80,48 @@ extension TextViewController {
         }
     }
 
-    private func emphasizeBackwards(_ pair: (String, String), range: NSRange, emphasisType: BracketPairEmphasis) {
-        let fromIndex = range.location - 1
-        guard fromIndex > 0 else { return }
-        let docMin = textView.documentRange.location
-        // Ensure search window starts at or before the current location, not ahead of it
-        let visibleMin = min(fromIndex, textView.visibleTextRange?.location ?? fromIndex)
-        let limit = max(visibleMin - 4096, docMin)
-        guard limit < fromIndex else { return }
+    private enum BracketSearchDirection {
+        case forwards
+        case backwards
+    }
 
-        if let characterIndex = findClosingPair(
-            pair.1,
-            pair.0,
-            from: fromIndex,
-            limit: limit,
-            reverse: true
-        ) {
-            emphasizeCharacter(characterIndex)
-            if emphasisType.emphasizesSourceBracket {
-                emphasizeCharacter(range.location - 1)
-            }
+    /// Maximum number of characters to scan beyond the viewport when looking for a matching bracket.
+    private static let bracketSearchPadding = 4096
+
+    /// Computes the half-open range of document indices to scan for a matching bracket.
+    ///
+    /// The window is anchored at the caret and extends beyond the visible viewport so pairs just
+    /// off-screen are still found. Anchoring at the caret is essential: deriving the window only
+    /// from `visibleTextRange` produced a window *behind* the caret whenever the caret was scrolled
+    /// off-screen (eg after a large edit), and the resulting inverted `NSRange` raised
+    /// `NSRangeException` inside `enumerateSubstrings(in:options:)`.
+    ///
+    /// - Parameters:
+    ///   - index: The caret index the search is anchored to.
+    ///   - direction: Which way the search walks.
+    ///   - documentLength: The current length of the document, in UTF-16 units.
+    /// - Returns: A valid half-open window, or `nil` when there is nothing to scan.
+    private func bracketSearchWindow(
+        from index: Int,
+        direction: BracketSearchDirection,
+        documentLength: Int
+    ) -> Range<Int>? {
+        guard documentLength > 0, index >= 0, index <= documentLength else { return nil }
+        let visible = textView.visibleTextRange ?? NSRange(location: index, length: 0)
+
+        switch direction {
+        case .forwards:
+            guard index < documentLength else { return nil }
+            let visibleMax = max(index, visible.max)
+            let upperBound = min(visibleMax + Self.bracketSearchPadding, documentLength)
+            guard upperBound > index else { return nil }
+            return index..<upperBound
+        case .backwards:
+            guard index > 0 else { return nil }
+            let visibleMin = min(index, max(visible.location, 0))
+            let lowerBound = max(visibleMin - Self.bracketSearchPadding, 0)
+            guard lowerBound < index else { return nil }
+            return lowerBound..<index
         }
     }
 
@@ -105,21 +149,23 @@ extension TextViewController {
     ///   - reverse: Set to `true` to walk backwards from `from`.
     /// - Returns: The index of the found closing pair, if any.
     internal func findClosingPair(_ close: String, _ open: String, from: Int, limit: Int, reverse: Bool) -> Int? {
-        let docLen = textView.textStorage.length
-        guard docLen > 0 else { return nil }
+        let documentLength = textView.textStorage.length
+        guard documentLength > 0 else { return nil }
 
+        // Build the scan range defensively. Callers have historically derived `from`/`limit` from
+        // layout state that can lag behind the document, which previously produced an inverted or
+        // out-of-bounds `NSRange` and crashed Foundation. A non-positive window means "nothing to
+        // scan" rather than an error.
         let searchRange: NSRange
         if reverse {
-            guard limit < from, limit >= 0, from <= docLen else { return nil }
+            guard from <= documentLength, limit >= 0, limit < from else { return nil }
             searchRange = NSRange(location: limit, length: from - limit)
         } else {
-            guard from < limit, from >= 0, limit <= docLen else { return nil }
+            guard from >= 0, limit <= documentLength, from < limit else { return nil }
             searchRange = NSRange(location: from, length: limit - from)
         }
 
-        guard searchRange.location >= 0,
-              searchRange.length > 0,
-              searchRange.max <= docLen else {
+        guard searchRange.isValid(inDocumentOfLength: documentLength), searchRange.length > 0 else {
             return nil
         }
 
