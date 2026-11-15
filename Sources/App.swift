@@ -121,6 +121,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// EditorController (i.e. the app was launched by opening a file).
     private var pendingExternalOpens: [URL] = []
 
+    /// Project folders an open has been routed to but no window reports as
+    /// its `projectRootURL` yet. The window's root lands asynchronously
+    /// (a save-warning sheet, the external window's 0.1 s action delay,
+    /// SwiftUI's next update cycle), so a second open of the same folder
+    /// in that gap used to see "no window has it" and opened another
+    /// window — the duplicate-project bug. Claims expire when the folder
+    /// is actually open (`isProjectOpen`) or after a timeout, so a user
+    /// who cancels the save warning can still open the folder again.
+    private var pendingProjectClaims: [URL: Date] = [:]
+    /// How long an unlanded project claim stays valid.
+    private static let projectClaimTimeout: TimeInterval = 30
+
     /// The SwiftUI `WindowGroup(id: "main")` window. Weak: SwiftUI owns it
     /// and destroys it on close.
     private weak var mainWindow: NSWindow?
@@ -896,6 +908,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pendingExternalOpens.append(file ?? root)
             return
         }
+        pruneExpiredProjectClaims()
         let windows = documentWindows()
         let slots = windows.map {
             ProjectWindowRouter.Slot(
@@ -906,7 +919,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 isPreferred: $0.controller === preferred
             )
         }
-        switch ProjectWindowRouter.destination(for: root, file: file, in: slots, forceNewWindow: forceNewWindow, ignoringOwner: ignoredOwner) {
+        switch ProjectWindowRouter.destination(
+            for: root,
+            file: file,
+            in: slots,
+            forceNewWindow: forceNewWindow,
+            ignoringOwner: ignoredOwner,
+            pendingOpens: Set(pendingProjectClaims.keys)
+        ) {
+        case .inFlight:
+            // Another open of this folder is on its way into a window; the
+            // window's root has not landed yet. Doing nothing here is what
+            // keeps one project in one window.
+            Self.debugLog("openProject: '\(root.lastPathComponent)' is already being opened; ignoring the duplicate request")
+            return
         case .focus(let index):
             let target = windows[index]
             Self.debugLog("openProject: '\(root.lastPathComponent)' is already open, focusing its window")
@@ -922,8 +948,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         case .load(let index):
             let target = windows[index]
             bringToFront(target.window)
-            showSaveWarningAsync(for: target.controller) { proceed in
-                if proceed { open(target.controller) }
+            claimProject(root)
+            showSaveWarningAsync(for: target.controller) { [weak self] proceed in
+                if proceed {
+                    open(target.controller)
+                } else {
+                    // The user chose to keep this window's edits: the folder
+                    // never opens, so release it for a later attempt.
+                    self?.releaseProjectClaim(root)
+                }
             }
         case .newWindow:
             let openInNewWindow = { [weak self] in
@@ -936,19 +969,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
             guard !forceNewWindow else {
+                claimProject(root)
                 openInNewWindow()
                 return
             }
             chooseWindow(forOpening: root.lastPathComponent, in: windows) { [weak self] choice in
+                guard let self else { return }
                 switch choice {
                 case .newWindow:
+                    self.claimProject(root)
                     openInNewWindow()
                 case .replace(let target):
-                    self?.replaceContent(of: target) { open(target.controller) }
+                    self.claimProject(root)
+                    self.replaceContent(of: target) { open(target.controller) }
                 case .cancel:
                     break
                 }
             }
+        }
+    }
+
+    // MARK: - Project open claims
+
+    /// Marks `root` as being opened now, so a second request for the same
+    /// folder in the same instant cannot open a second window.
+    private func claimProject(_ root: URL) {
+        pendingProjectClaims[root] = Date()
+    }
+
+    /// Releases the claim when the open was cancelled (save warning kept
+    /// the window, "This Window"/"New Window" dialog cancelled).
+    private func releaseProjectClaim(_ root: URL) {
+        pendingProjectClaims.removeValue(forKey: root)
+    }
+
+    /// Drops claims that expired without their folder ever landing in a
+    /// window (a crash, a lost window), so the folder can be opened again.
+    /// Also drops claims whose folder *is* open now — the window has taken
+    /// over the job of noticing it.
+    private func pruneExpiredProjectClaims() {
+        let cutoff = Date().addingTimeInterval(-Self.projectClaimTimeout)
+        pendingProjectClaims = pendingProjectClaims.filter { claimed, at in
+            if isProjectOpen(claimed) { return false }
+            return at > cutoff
         }
     }
 

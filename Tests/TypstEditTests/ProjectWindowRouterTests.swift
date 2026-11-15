@@ -32,6 +32,44 @@ final class ProjectWindowRouterTests: XCTestCase {
         XCTAssertFalse(ProjectWindowRouter.isSameFolder(folder("/work/a"), folder("/work/a/sub")))
     }
 
+    func testPendingOpenSuppressesADuplicateWindow() {
+        // Nothing reports the folder yet — the window's project root has not
+        // landed (save-warning sheet / SwiftUI update cycle). A second request
+        // in that gap must not open another window.
+        let slots = [
+            Slot(projectRoot: nil, isIdle: true, isKey: true, isMain: true),
+        ]
+        XCTAssertEqual(
+            ProjectWindowRouter.destination(for: folder("/work/a"), in: slots, pendingOpens: [folder("/work/a")]),
+            .inFlight
+        )
+        // The same folder spelled differently is still the same claim.
+        XCTAssertEqual(
+            ProjectWindowRouter.destination(
+                for: URL(fileURLWithPath: "/work/x/../a", isDirectory: true),
+                in: slots, pendingOpens: [folder("/work/a")]
+            ),
+            .inFlight
+        )
+        // A different folder is unaffected by the claim.
+        XCTAssertEqual(
+            ProjectWindowRouter.destination(for: folder("/work/b"), in: slots, pendingOpens: [folder("/work/a")]),
+            .load(0)
+        )
+    }
+
+    func testPendingOpenYieldsToAWindowThatDidLand() {
+        // The claim is stale (the folder did land in a window): focusing the
+        // real window wins over the in-flight suppression.
+        let slots = [
+            Slot(projectRoot: folder("/work/a"), isIdle: false, isKey: true, isMain: true),
+        ]
+        XCTAssertEqual(
+            ProjectWindowRouter.destination(for: folder("/work/a"), in: slots, pendingOpens: [folder("/work/a")]),
+            .focus(0)
+        )
+    }
+
     func testBusyWindowsGetANewWindow() {
         let slots = [
             Slot(projectRoot: folder("/work/a"), isIdle: false, isKey: true, isMain: true),

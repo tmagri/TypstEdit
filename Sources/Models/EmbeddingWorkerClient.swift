@@ -161,6 +161,11 @@ final class EmbeddingWorkerClient: @unchecked Sendable {
     /// Replaces the spawned process for tests: given the texts, returns
     /// the vectors.
     var protocolOverride: (@Sendable ([String]) async -> [[Float]?])?
+    /// The executable to spawn for the helper. Defaults to the current
+    /// process's own binary (the app or the CLI helper); tests point it at
+    /// the built `TypstEdit` binary, since a test runner's own executable
+    /// (xctest) must never be spawned with a subcommand.
+    var spawnOverride: URL?
 
     init() {}
 
@@ -212,12 +217,32 @@ final class EmbeddingWorkerClient: @unchecked Sendable {
         }
         lock.unlock()
 
-        guard let executable = Bundle.main.executablePath ?? CommandLine.arguments.first,
-              Self.canSpawnHelper else { return false }
+        let executable: String?
+        if let spawnOverride {
+            executable = spawnOverride.path
+        } else {
+            executable = Bundle.main.executablePath ?? CommandLine.arguments.first
+            guard Self.canSpawnHelper else { return false }
+        }
+        guard let executable else { return false }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = [executable, "embed-worker"]
+        // NOTE: Foundation prepends `executableURL` as the child's argv[0]
+        // itself, so the subcommand must be the *first* element here.
+        // Passing the executable path too made argv
+        // [bin, bin, "embed-worker"], the subcommand check saw the path in
+        // arguments[1], and the child launched as the full GUI app — a
+        // second Dock icon and a duplicate project window with its own
+        // embedding pass. This was the "opens an additional screen of the
+        // same project" bug.
+        process.arguments = ["embed-worker"]
+        // Background scheduling priority: indexing embeddings must never
+        // compete with the user's foreground work for CPU. Dock invisibility
+        // needs no option at all — the correct argv takes the CLI path, which
+        // never starts the SwiftUI app, so the process registers with
+        // LaunchServices as nothing.
+        process.qualityOfService = .background
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -271,7 +296,23 @@ final class EmbeddingWorkerClient: @unchecked Sendable {
         let handle = takeStdinHandle()
         guard let handle else { return nil }
         do {
-            try handle.write(contentsOf: Data(line.utf8))
+            // Raw `write(2)` on the pipe's fd, not `FileHandle.write`:
+            // Foundation's handle write is scheduled through internal
+            // dispatch machinery that can silently swallow a first small
+            // write to a fresh child (the write-side twin of the bug that
+            // made the worker read fd 0 directly). A plain syscall write
+            // is synchronous and cannot be reordered or dropped.
+            let payload = Data(line.utf8)
+            try payload.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                var written = 0
+                while written < payload.count {
+                    let n = write(handle.fileDescriptor, raw.baseAddress!.advanced(by: written), payload.count - written)
+                    if n <= 0 {
+                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                    written += n
+                }
+            }
         } catch {
             recordDiagnostics("Could not write to the embedding helper: \(error.localizedDescription)")
             return nil
@@ -293,7 +334,9 @@ final class EmbeddingWorkerClient: @unchecked Sendable {
     }
 
     /// Kills the helper, if any. Safe any time; the next request starts a
-    /// fresh one.
+    /// fresh one. Sends SIGTERM first; if the child still exists a moment
+    /// later (a test-runner parent can leave SIGTERM ignored in the child),
+    /// SIGKILL ends it for certain.
     func stop() {
         lock.lock()
         let process = self.process
@@ -309,7 +352,16 @@ final class EmbeddingWorkerClient: @unchecked Sendable {
         readerTask = nil
         stderrTask?.cancel()
         stderrTask = nil
-        process?.terminate()
+        if let process, process.isRunning {
+            process.terminate()
+            // Escalate after a short grace period, off the caller's thread.
+            let pid = process.processIdentifier
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+                if kill(pid, 0) == 0 {
+                    kill(pid, SIGKILL)
+                }
+            }
+        }
         for (_, continuation) in pending {
             continuation.resume(throwing: EmbeddingWorkerError.died("the helper was stopped"))
         }
@@ -355,21 +407,22 @@ final class EmbeddingWorkerClient: @unchecked Sendable {
 
     /// Spawns the stdout/stderr readers. Each stdout line is one reply; EOF
     /// means the helper exited, and anything still waiting fails rather
-    /// than hangs.
+    /// than hangs. Both readers use raw `read(2)` on the pipe's file
+    /// descriptor, for the same reason the worker reads fd 0 directly:
+    /// Foundation's handle read path runs through internal dispatch
+    /// machinery that can lose bytes that were buffered before the read
+    /// call was set up — exactly what happens to the first reply of a
+    /// freshly spawned helper.
     private func startReader(stdoutPipe: Pipe, stderrPipe: Pipe) {
-        let stdout = stdoutPipe.fileHandleForReading
-        let stderr = stderrPipe.fileHandleForReading
+        let stdoutFD = stdoutPipe.fileHandleForReading.fileDescriptor
+        let stderrFD = stderrPipe.fileHandleForReading.fileDescriptor
         readerTask = Task.detached(priority: .utility) { [weak self] in
             var buffer = Data()
+            var chunk = [UInt8](repeating: 0, count: 64 * 1024)
             while !Task.isCancelled {
-                let chunk: Data
-                do {
-                    chunk = try stdout.read(upToCount: 64 * 1024) ?? Data()
-                } catch {
-                    break
-                }
-                guard !chunk.isEmpty else { break }
-                buffer.append(chunk)
+                let n = read(stdoutFD, &chunk, chunk.count)
+                if n <= 0 { break }
+                buffer.append(contentsOf: chunk[0..<n])
                 while let newline = buffer.firstIndex(of: 0x0A) {
                     let lineData = Data(buffer[buffer.startIndex..<newline])
                     buffer.removeSubrange(buffer.startIndex...newline)
@@ -381,20 +434,16 @@ final class EmbeddingWorkerClient: @unchecked Sendable {
             self?.helperExited()
         }
         stderrTask = Task.detached(priority: .utility) { [weak self] in
-            var buffer = Data()
+            var buffer = [UInt8]()
+            var chunk = [UInt8](repeating: 0, count: 64 * 1024)
             while !Task.isCancelled {
-                let chunk: Data
-                do {
-                    chunk = try stderr.read(upToCount: 64 * 1024) ?? Data()
-                } catch {
-                    break
-                }
-                guard !chunk.isEmpty else { break }
-                buffer.append(chunk)
+                let n = read(stderrFD, &chunk, chunk.count)
+                if n <= 0 { break }
+                buffer.append(contentsOf: chunk[0..<n])
                 if buffer.count > 16 * 1024 {
                     buffer.removeFirst(buffer.count - 16 * 1024)
                 }
-                if let text = String(data: buffer, encoding: .utf8) {
+                if let text = String(bytes: buffer, encoding: .utf8) {
                     self?.recordDiagnostics(text)
                 }
             }

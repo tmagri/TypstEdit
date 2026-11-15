@@ -81,6 +81,10 @@ enum ProjectWindowRouter {
         case load(Int)
         /// Open the folder in a new window.
         case newWindow
+        /// An open of this folder is already in flight but has not landed in
+        /// any window yet. Do nothing — a second window would duplicate the
+        /// project (a second index, a second embedding pass).
+        case inFlight
     }
 
     /// Where `root` goes. With `forceNewWindow`, an idle window is not
@@ -91,13 +95,26 @@ enum ProjectWindowRouter {
     /// the window of the folder it belongs to. A window whose project is
     /// `ignoredOwner` is never focused that way (the Notes window must not
     /// take over a notebook that is opened as a project of its own).
+    ///
+    /// `pendingOpens` names folders an open has been routed to but no window
+    /// reports as its project root yet. The window's root lands
+    /// asynchronously (a save-warning sheet, SwiftUI's next update cycle),
+    /// so a second request in that gap used to open a duplicate window —
+    /// with a second index and a second embedding pass. A folder that is
+    /// claimed but not yet open answers `.inFlight`: "do nothing; the open
+    /// already on its way will bring its window forward."
     static func destination(
         for root: URL,
         file: URL? = nil,
         in slots: [Slot],
         forceNewWindow: Bool = false,
-        ignoringOwner ignoredOwner: URL? = nil
+        ignoringOwner ignoredOwner: URL? = nil,
+        pendingOpens: Set<URL> = []
     ) -> Destination {
+        let isOpen = slots.contains { $0.projectRoot.map { isSameFolder($0, root) } ?? false }
+        if !isOpen, pendingOpens.contains(where: { isSameFolder($0, root) }) {
+            return .inFlight
+        }
         if let index = slots.firstIndex(where: { $0.projectRoot.map { isSameFolder($0, root) } ?? false }) {
             return .focus(index)
         }
