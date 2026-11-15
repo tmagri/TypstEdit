@@ -23,7 +23,10 @@ enum ReadOnlyToolPlan: Sendable {
         outline: Bool,
         maxBytes: Int,
         defaultLineLimit: Int,
-        maxLineLimit: Int
+        maxLineLimit: Int,
+        /// A heading name; when set it replaces offset/limit with that
+        /// section's range, resolved against the text as read.
+        section: String? = nil
     )
     /// `get_outline`. `url` is already resolved and checked against the scope.
     case getOutline(
@@ -31,7 +34,8 @@ enum ReadOnlyToolPlan: Sendable {
         label: String,
         startLine: Int?,
         endLine: Int?,
-        maxBytes: Int
+        maxBytes: Int,
+        section: String? = nil
     )
     /// `grep_project`. The pattern is carried as a string and recompiled in
     /// the runner, because `NSRegularExpression` is a non-`Sendable` class;
@@ -105,8 +109,10 @@ enum ReadOnlyToolResult: Sendable {
 enum ParallelToolCalls {
 
     /// Tool names (without the `server__` prefix) that may overlap.
+    /// `skim_outline` is not here: it runs the main-actor compressor.
     static let safeToolNames: Set<String> = [
         "read_file",
+        "get_outline",
         "grep_project",
         "read_skill_file"
     ]

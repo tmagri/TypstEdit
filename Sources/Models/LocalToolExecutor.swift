@@ -281,13 +281,14 @@ final class LocalToolExecutor {
             tools.append(MCPTool(
                 serverName: Self.namespace,
                 name: "read_file",
-                description: "Read a text file's contents, by path relative to the \(scope.noun) root. Files over \(defaultReadLineLimit) lines are returned in a window instead of all at once — the result tells you the total line count and, if truncated, which `offset` to pass next to keep reading. Prefer requesting a smaller `limit` for a quick look before pulling in the rest of a large file. To learn how a long document is organized, pass `outline: true` first or call `get_outline`: it returns only the headings, with the line range each section covers, and #include lines — one small call instead of paging through the whole file. A file must be read in the current request before you can edit or overwrite it (an outline doesn't count for edit_file).",
+                description: "Read a text file's contents, by path relative to the \(scope.noun) root. Files over \(defaultReadLineLimit) lines are returned in a window instead of all at once — the result tells you the total line count and, if truncated, which `offset` to pass next to keep reading. Prefer requesting a smaller `limit` for a quick look before pulling in the rest of a large file. To learn how a long document is organized, pass `outline: true` first or call `get_outline`: it returns only the headings, with the line range each section covers, and #include lines — one small call instead of paging through the whole file. Call `skim_outline` to also get a short preview of what each section says. A file must be read in the current request before you can edit or overwrite it (an outline doesn't count for edit_file).",
                 inputSchema: [
                     "type": "object",
                     "properties": [
                         "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
                         "offset": ["type": "integer", "description": "1-based line number to start reading from. Omit to start at the top of the file."],
                         "limit": ["type": "integer", "description": "Maximum number of lines to return (default \(defaultReadLineLimit), capped at \(maxReadLineLimit))."],
+                        "section": Self.sectionArgumentSchema("Read only this section (replaces offset/limit)."),
                         "outline": ["type": "boolean", "description": "Return the document's structure (headings with line ranges, #include lines) instead of its text. offset/limit filter the range. Default false."]
                     ],
                     "required": ["path"]
@@ -304,7 +305,8 @@ final class LocalToolExecutor {
                         "start_line": ["type": "integer", "description": "1-based line number to start inspecting outline from. Omit to start from the top of the file."],
                         "end_line": ["type": "integer", "description": "Last line number (inclusive) of the range to inspect outline. Omit to inspect through the end of the file."],
                         "offset": ["type": "integer", "description": "Alternative to start_line (1-based line number)."],
-                        "limit": ["type": "integer", "description": "Number of lines from start_line/offset to inspect outline."]
+                        "limit": ["type": "integer", "description": "Number of lines from start_line/offset to inspect outline."],
+                        "section": Self.sectionArgumentSchema("Outline only this section and its subsections (replaces start_line/end_line).")
                     ],
                     "required": ["path"]
                 ]
@@ -312,7 +314,7 @@ final class LocalToolExecutor {
             tools.append(MCPTool(
                 serverName: Self.namespace,
                 name: "skim_outline",
-                description: "Skim a document's sections and outline: returns each section's exact line range, heading, and a condensed semantic preview of its contents (compressed using local LLMLingua-2 when available). Use this to quickly understand what each section discusses before reading in full or moving sections with move_lines.",
+                description: "Skim a long document: returns each section's exact line range and heading (like get_outline) plus a short preview of what the section says, taken from its opening text. Long openings are condensed locally (LLMLingua-2 when installed) into keyword-style text — key terms kept verbatim, filler dropped. Use it to learn what each section covers before you decide what to read in full, reorganize, or move with move_lines. Previews are not exact text: read_file the range before edit_file.",
                 inputSchema: [
                     "type": "object",
                     "properties": [
@@ -321,9 +323,35 @@ final class LocalToolExecutor {
                         "end_line": ["type": "integer", "description": "Last line number (inclusive) of the range to skim. Omit to skim through the end of the file."],
                         "offset": ["type": "integer", "description": "Alternative to start_line (1-based line number)."],
                         "limit": ["type": "integer", "description": "Number of lines from start_line/offset to skim."],
-                        "max_words_per_section": ["type": "integer", "description": "Maximum preview words per section (default 50)."]
+                        "section": Self.sectionArgumentSchema("Skim only this section and its subsections (replaces start_line/end_line)."),
+                        "max_words_per_section": ["type": "integer", "description": "Maximum preview words per section (default 40, 5–200)."]
                     ],
                     "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "find_section",
+                description: "Find which section is about something: ranks whole sections (heading + opening text) of one file or the whole \(scope.noun) against a description in plain words, by keywords and meaning (with the embedding model set for the project index). Returns each match's path, line range and heading — pass that heading as section: to read_file or move_lines. Use it for \"where does it discuss X\" when you don't know the heading; use grep_project for an exact word.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "query": ["type": "string", "description": "What the section is about, in plain words, e.g. \"how error bars are computed\"."],
+                        "path": ["type": "string", "description": "Optional: search only this file. Omit to search every .typ and .md file."],
+                        "max_results": ["type": "integer", "description": "Most sections to return (default 8, max 20)."]
+                    ],
+                    "required": ["query"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "check_references",
+                description: "Check a Typst document's cross-references and citations in one call: lists @references with no matching <label> or bibliography entry (with a did-you-mean), duplicate labels, missing bibliography files, labels never referenced, and bibliography entries never cited — each with file:line. Exact and free; much more reliable than reading the document to check by eye. Run it after renaming labels or moving sections.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Optional: the main .typ file; it and the files it #includes are checked together. Omit to check every .typ file in the \(scope.noun)."]
+                    ]
                 ]
             ))
             tools.append(MCPTool(
@@ -360,17 +388,20 @@ final class LocalToolExecutor {
             tools.append(MCPTool(
                 serverName: Self.namespace,
                 name: "move_lines",
-                description: "Move a block of lines to another place in the same file without retyping it — the cheap, exact way to restructure a document, such as moving a section into an appendix. Lines are numbered the way read_file and its outline show them. The file must have been read in this request, and start_text must be the exact text of start_line, as a check that the numbers still match the file. The user reviews a diff and approves before anything is written.",
+                description: "Move a block of lines to another place in the same file without retyping it — the cheap, exact way to restructure a document, such as moving a section into an appendix. Easiest: name the headings — section: \"Results\", after_section: \"Discussion\" — and the tool finds the lines itself, so the call stays right even after earlier edits shifted the line numbers. Or give start_line, end_line and start_text (the exact text of start_line, as a check) with before_line, numbered the way read_file and its outline show them. The file must have been read (an outline or skim is enough) in this request. The user reviews a diff and approves before anything is written.",
                 inputSchema: [
                     "type": "object",
                     "properties": [
                         "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
-                        "start_line": ["type": "integer", "description": "First line of the block (1-based)."],
-                        "end_line": ["type": "integer", "description": "Last line of the block (inclusive)."],
-                        "before_line": ["type": "integer", "description": "The block is inserted immediately before this line, numbered as the file is now. Use the file's last line number + 1 to move the block to the end."],
-                        "start_text": ["type": "string", "description": "The exact text of start_line (leading/trailing spaces ignored)."]
+                        "section": Self.sectionArgumentSchema("The whole section to move, with its subsections. Replaces start_line, end_line and start_text."),
+                        "before_section": Self.sectionArgumentSchema("Insert the block just before this heading."),
+                        "after_section": Self.sectionArgumentSchema("Insert the block right after this section ends (after its subsections)."),
+                        "start_line": ["type": "integer", "description": "First line of the block (1-based). Not needed with section."],
+                        "end_line": ["type": "integer", "description": "Last line of the block (inclusive). Not needed with section."],
+                        "before_line": ["type": "integer", "description": "The block is inserted immediately before this line, numbered as the file is now. Use the file's last line number + 1 (or \"end\") to move the block to the end. Not needed with before_section/after_section."],
+                        "start_text": ["type": "string", "description": "The exact text of start_line (leading/trailing spaces ignored). Not needed with section."]
                     ],
-                    "required": ["path", "start_line", "end_line", "before_line", "start_text"]
+                    "required": ["path"]
                 ]
             ))
             if ragToolEnabled {
@@ -656,6 +687,8 @@ final class LocalToolExecutor {
         case "read_file": return try readFile(arguments)
         case "get_outline": return try getOutline(arguments)
         case "skim_outline": return try await skimOutline(arguments)
+        case "find_section": return try await findSection(arguments)
+        case "check_references": return try await checkReferences(arguments)
         case "read_skill_file": return try readSkillFile(arguments)
         case "read_skill": return try readSkill(arguments)
         case "grep_project": return try await grepProject(arguments)
@@ -734,7 +767,8 @@ final class LocalToolExecutor {
                 outline: Self.boolValue(arguments["outline"]) == true,
                 maxBytes: maxScannableBytes,
                 defaultLineLimit: defaultReadLineLimit,
-                maxLineLimit: maxReadLineLimit
+                maxLineLimit: maxReadLineLimit,
+                section: arguments["section"] as? String
             )
 
         case "get_outline":
@@ -754,7 +788,8 @@ final class LocalToolExecutor {
                 label: path,
                 startLine: startLine,
                 endLine: endLine,
-                maxBytes: maxScannableBytes
+                maxBytes: maxScannableBytes,
+                section: arguments["section"] as? String
             )
 
         case "grep_project":
@@ -815,14 +850,20 @@ final class LocalToolExecutor {
     /// actually overlaps instead of queueing on the main actor.
     nonisolated static func runReadOnly(_ plan: ReadOnlyToolPlan) throws -> ReadOnlyToolOutcome {
         switch plan {
-        case .readFile(let url, let label, let offset, let limit, let outline,
-                       let maxBytes, let defaultLineLimit, let maxLineLimit):
+        case .readFile(let url, let label, var offset, var limit, let outline,
+                       let maxBytes, let defaultLineLimit, let maxLineLimit, let section):
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw LocalToolError.fileNotFound(label)
             }
             let data = try Data(contentsOf: url)
             guard data.count <= maxBytes else { throw LocalToolError.fileTooLarge(label) }
             let fullText = TextFileEncoding.decode(data).text
+            var sectionNote = ""
+            if let entry = try sectionEntry(section, in: fullText, path: label), let end = entry.endLine {
+                offset = entry.line
+                limit = end - entry.line + 1
+                sectionNote = Self.sectionNote(entry)
+            }
             // An outline shows structure, but records read time so move_lines can operate.
             if outline {
                 let endLine = limit != nil ? (offset ?? 1) + max(1, limit!) - 1 : nil
@@ -834,7 +875,7 @@ final class LocalToolExecutor {
                 )
             }
             return ReadOnlyToolOutcome(
-                output: windowed(
+                output: sectionNote + windowed(
                     fullText,
                     label: label,
                     offset: offset,
@@ -846,13 +887,17 @@ final class LocalToolExecutor {
                 readFileDate: modificationDate(of: url)
             )
 
-        case .getOutline(let url, let label, let startLine, let endLine, let maxBytes):
+        case .getOutline(let url, let label, var startLine, var endLine, let maxBytes, let section):
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw LocalToolError.fileNotFound(label)
             }
             let data = try Data(contentsOf: url)
             guard data.count <= maxBytes else { throw LocalToolError.fileTooLarge(label) }
             let fullText = TextFileEncoding.decode(data).text
+            if let entry = try sectionEntry(section, in: fullText, path: label) {
+                startLine = entry.line
+                endLine = entry.endLine
+            }
             return ReadOnlyToolOutcome(
                 output: DocumentOutline.render(fullText, label: label, startLine: startLine, endLine: endLine),
                 readFilePath: url.standardizedFileURL.path,
@@ -1041,6 +1086,13 @@ final class LocalToolExecutor {
             throw LocalToolError.fileTooLarge(path)
         }
         let fullText = TextFileEncoding.decode(data).text
+        var arguments = arguments
+        var sectionNote = ""
+        if let entry = try Self.sectionEntry(arguments["section"], in: fullText, path: path), let end = entry.endLine {
+            arguments["offset"] = entry.line
+            arguments["limit"] = end - entry.line + 1
+            sectionNote = Self.sectionNote(entry)
+        }
         // An outline shows structure, but records read time so move_lines can operate.
         if Self.boolValue(arguments["outline"]) == true {
             let offset = Self.intValue(arguments["offset"])
@@ -1050,7 +1102,51 @@ final class LocalToolExecutor {
             return DocumentOutline.render(fullText, label: path, startLine: offset, endLine: endLine)
         }
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
-        return Self.windowed(fullText, label: path, arguments: arguments, defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+        return sectionNote + Self.windowed(fullText, label: path, arguments: arguments, defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+    }
+
+    // MARK: - Section Addressing
+
+    /// Schema for every `section`-style argument, so the tools describe the
+    /// accepted forms the same way.
+    nonisolated static func sectionArgumentSchema(_ purpose: String) -> [String: String] {
+        [
+            "type": "string",
+            "description": "\(purpose) A heading name as the outline shows it — \"Introduction\", \"== Introduction\", a label \"<intro>\", or \"Methods > Data\" when two sections share a name."
+        ]
+    }
+
+    /// The section a `section` argument names, or `nil` when the argument is
+    /// absent. Throws a model-readable error listing the candidates when the
+    /// name is ambiguous or unknown.
+    nonisolated static func sectionEntry(_ argument: Any?, in text: String, path: String) throws -> DocumentOutline.Entry? {
+        guard let query = (argument as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+            return nil
+        }
+        switch DocumentOutline.resolveSection(query, in: text, path: path) {
+        case .success(let entry): return entry
+        case .failure(let error): throw LocalToolError.invalidArguments(error.message)
+        }
+    }
+
+    /// Which section a section-addressed read returned, ahead of the text.
+    nonisolated static func sectionNote(_ entry: DocumentOutline.Entry) -> String {
+        "[section \(entry.text) — lines \(entry.line)-\(entry.endLine ?? entry.line)]\n"
+    }
+
+    /// `start_line`/`end_line` (or `offset`/`limit`) for the outline tools,
+    /// with `section` taking precedence when given.
+    private static func outlineRange(_ arguments: [String: Any], text: String, path: String) throws -> (start: Int?, end: Int?) {
+        if let entry = try sectionEntry(arguments["section"], in: text, path: path) {
+            return (entry.line, entry.endLine)
+        }
+        let startLine = intValue(arguments["start_line"]) ?? intValue(arguments["offset"])
+        var endLine = intValue(arguments["end_line"])
+        if let limit = intValue(arguments["limit"]) {
+            let computedEnd = (startLine ?? 1) + max(1, limit) - 1
+            endLine = min(endLine ?? computedEnd, computedEnd)
+        }
+        return (startLine, endLine)
     }
 
     private func getOutline(_ arguments: [String: Any]) throws -> String {
@@ -1066,16 +1162,8 @@ final class LocalToolExecutor {
             throw LocalToolError.fileTooLarge(path)
         }
         let fullText = TextFileEncoding.decode(data).text
+        let (startLine, endLine) = try Self.outlineRange(arguments, text: fullText, path: path)
         outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
-
-        let startLine = Self.intValue(arguments["start_line"]) ?? Self.intValue(arguments["offset"])
-        var endLine = Self.intValue(arguments["end_line"])
-        if let limit = Self.intValue(arguments["limit"]) {
-            let start = startLine ?? 1
-            let computedEnd = start + max(1, limit) - 1
-            endLine = min(endLine ?? computedEnd, computedEnd)
-        }
-
         return DocumentOutline.render(fullText, label: path, startLine: startLine, endLine: endLine)
     }
 
@@ -1092,27 +1180,245 @@ final class LocalToolExecutor {
             throw LocalToolError.fileTooLarge(path)
         }
         let fullText = TextFileEncoding.decode(data).text
+        let (startLine, endLine) = try Self.outlineRange(arguments, text: fullText, path: path)
         outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+        let maxWords = Self.intValue(arguments["max_words_per_section"]) ?? 40
 
-        let startLine = Self.intValue(arguments["start_line"]) ?? Self.intValue(arguments["offset"])
-        var endLine = Self.intValue(arguments["end_line"])
-        if let limit = Self.intValue(arguments["limit"]) {
-            let start = startLine ?? 1
-            let computedEnd = start + max(1, limit) - 1
-            endLine = min(endLine ?? computedEnd, computedEnd)
-        }
-        let maxWords = Self.intValue(arguments["max_words_per_section"]) ?? 50
-
+        // LLMLingua-2 when the optional Core ML model is installed, the
+        // heuristic keyword filter otherwise — both keep words verbatim.
         let compressor = await ChatCompressor.bestAvailable()
+        let compressorName = compressor is LLMLingua2Compressor ? "LLMLingua-2" : "a keyword filter"
         return await DocumentOutline.renderSkim(
             fullText,
             label: path,
             startLine: startLine,
             endLine: endLine,
-            maxWordsPerSection: maxWords
-        ) { @Sendable rawBody in
-            await compressor.compress(rawBody, keepRate: 0.35, forceTokens: [], isCode: false)
+            maxWordsPerSection: maxWords,
+            compressorName: compressorName
+        ) { @Sendable lead, keepRate in
+            await compressor.compress(
+                lead,
+                keepRate: keepRate,
+                forceTokens: Self.skimForceTokens,
+                isCode: PromptCompression.codeRatio(lead) > 0.3
+            )
         }
+    }
+
+    /// Words a skim preview must never drop: losing one inverts what the
+    /// section says ("none of the samples passed" → "samples passed").
+    /// Contractions are listed with both the ASCII and the typographic
+    /// apostrophe, since force matching is exact and prose uses either.
+    nonisolated static let skimForceTokens: [String] = {
+        let contractions = [
+            "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't", "won't", "can't",
+            "couldn't", "shouldn't", "wouldn't", "hasn't", "haven't", "hadn't",
+        ]
+        return ["not", "no", "never", "cannot", "without", "none", "nor", "neither", "nothing", "nobody"]
+            + contractions
+            + contractions.map { $0.replacingOccurrences(of: "'", with: "\u{2019}") }
+    }()
+
+    // MARK: - find_section
+
+    /// Most sections one `find_section` call scores.
+    private nonisolated static let maxSectionCandidates = 3_000
+    /// Embeddings of section texts already seen, keyed by the embedded
+    /// text, so a repeat search over an unchanged project embeds only the
+    /// query. Cleared wholesale when it grows past `maxSectionVectorCache`.
+    private var sectionVectorCache: [String: [Float]] = [:]
+    private static let maxSectionVectorCache = 6_000
+    /// New section texts embedded per call. With an API or local-server
+    /// model, a first search over a big project would otherwise wait on
+    /// thousands of requests; the rest are embedded on later calls.
+    private static let maxSectionsEmbeddedPerCall = 800
+    /// Replaces the Settings embedding model. For tests only.
+    var embeddingProviderOverride: EmbeddingProvider?
+
+    private func findSection(_ arguments: [String: Any]) async throws -> String {
+        guard let root = scope.root else { throw LocalToolError.noScope }
+        guard let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+            throw LocalToolError.invalidArguments("query is required — describe the section in plain words.")
+        }
+        let limit = min(max(Self.intValue(arguments["max_results"]) ?? 8, 1), 20)
+
+        let files: [(relative: String, text: String)]
+        if let path = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            let url = try resolvePath(path)
+            guard FileManager.default.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
+            let data = try Data(contentsOf: url)
+            guard data.count <= maxScannableBytes else { throw LocalToolError.fileTooLarge(path) }
+            files = [(path, TextFileEncoding.decode(data).text)]
+        } else {
+            let excluded = Self.excludedDirectories
+            files = await Task.detached(priority: .userInitiated) {
+                Self.projectTextFiles(root: root, extensions: ["typ", "md", "markdown"], excluded: excluded)
+            }.value
+        }
+
+        let candidates = Array(files.flatMap { SectionFinder.candidates(in: $0.text, path: $0.relative) }
+            .prefix(Self.maxSectionCandidates))
+
+        // The embedding model the project index uses (Settings → embedding):
+        // a configured model separates meaning far better than Apple's
+        // built-in one. Vectors are cached per model, so a repeat search
+        // over an unchanged project embeds only the query.
+        let provider = embeddingProviderOverride ?? RAGManager.makeActiveProvider()
+        let fingerprint = RAGManager.activeFingerprint(dimensions: provider.dimensions)
+        let isAppleBuiltIn = provider is LocalEmbeddingProvider
+        let modelKey = embeddingProviderOverride == nil ? "\(fingerprint.source)|\(fingerprint.model)|\(fingerprint.endpoint)" : "override"
+        func cacheKey(_ text: String) -> String { modelKey + "\n" + text }
+
+        let cache = sectionVectorCache
+        let unseen = Array(Set(candidates.map(\.embeddingText)).filter { cache[cacheKey($0)] == nil })
+        let missing = Array(unseen.prefix(Self.maxSectionsEmbeddedPerCall))
+        let embedded = await Task.detached(priority: .userInitiated) {
+            await EmbeddingBatcher.embed([query] + missing, with: provider)
+        }.value
+        let queryVector = embedded.first ?? nil
+
+        if queryVector != nil {
+            if sectionVectorCache.count + missing.count > Self.maxSectionVectorCache {
+                sectionVectorCache.removeAll()
+            }
+            for (text, vector) in zip(missing, embedded.dropFirst()) {
+                if let vector { sectionVectorCache[cacheKey(text)] = vector }
+            }
+        }
+        let vectors = candidates.map { sectionVectorCache[cacheKey($0.embeddingText)] }
+        let hits = SectionFinder.rank(
+            query: query,
+            candidates: candidates,
+            queryVector: queryVector,
+            vectors: vectors,
+            meaningWeight: isAppleBuiltIn ? SectionFinder.weakMeaningWeight : SectionFinder.strongMeaningWeight,
+            limit: limit
+        )
+        let method: SectionFinder.Method = queryVector == nil
+            ? .keywordsOnly
+            : (isAppleBuiltIn ? .weakMeaning : .meaning(model: fingerprint.model.isEmpty ? fingerprint.source : fingerprint.model))
+        let note = unseen.count > missing.count
+            ? "\(unseen.count - missing.count) sections not embedded yet were ranked on keywords only; search again (or pass path) to include them"
+            : nil
+
+        // The results give exact line ranges, so they count like an outline
+        // for move_lines.
+        for path in Set(hits.map(\.candidate.path)) {
+            if let url = try? resolvePath(path) {
+                outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+            }
+        }
+        return SectionFinder.render(
+            hits,
+            query: query,
+            sectionCount: candidates.count,
+            fileCount: files.count,
+            method: method,
+            note: note
+        )
+    }
+
+    // MARK: - check_references
+
+    private func checkReferences(_ arguments: [String: Any]) async throws -> String {
+        guard let root = scope.root else { throw LocalToolError.noScope }
+        let excluded = Self.excludedDirectories
+        let mainPath = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let mainPath, !mainPath.isEmpty {
+            let url = try resolvePath(mainPath)
+            guard FileManager.default.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(mainPath) }
+        }
+        let report = await Task.detached(priority: .userInitiated) { () -> ReferenceChecker.Report in
+            let files: [(relative: String, text: String)]
+            if let mainPath, !mainPath.isEmpty {
+                files = Self.includeClosure(of: mainPath, root: root)
+            } else {
+                files = Self.projectTextFiles(root: root, extensions: ["typ"], excluded: excluded)
+            }
+            var report = ReferenceChecker.Report()
+            for file in files {
+                ReferenceChecker.scanTypst(file.text, path: file.relative, into: &report)
+            }
+            var seen = Set<String>()
+            for bibliography in report.bibliographyFiles where seen.insert(bibliography.path).inserted {
+                guard let url = try? Self.resolve(bibliography.path, within: root),
+                      let data = try? Data(contentsOf: url) else {
+                    report.missingBibliographies.append(bibliography)
+                    continue
+                }
+                let ext = url.pathExtension.lowercased()
+                report.bibliographyKeys.formUnion(ReferenceChecker.bibliographyKeys(
+                    in: TextFileEncoding.decode(data).text,
+                    isYAML: ext == "yml" || ext == "yaml"
+                ))
+            }
+            return report
+        }.value
+
+        let scopeLabel = (mainPath?.isEmpty == false) ? "'\(mainPath!)' and its #includes" : "the \(scope.noun)"
+        return ReferenceChecker.render(report, scopeLabel: scopeLabel)
+    }
+
+    /// `path` and every file it pulls in with `#include`, recursively,
+    /// each read once. Includes that leave the scope or don't exist are
+    /// skipped (the compiler reports those).
+    private nonisolated static func includeClosure(of path: String, root: URL) -> [(relative: String, text: String)] {
+        guard let includeRegex = try? NSRegularExpression(pattern: "#include\\s*\\(?\\s*\"([^\"]+)\"") else { return [] }
+        var result: [(relative: String, text: String)] = []
+        var queue = [(path as NSString).standardizingPath]
+        var seen = Set<String>()
+        while let next = queue.first, result.count < maxGrepFileCount {
+            queue.removeFirst()
+            guard seen.insert(next).inserted,
+                  let url = try? resolve(next, within: root),
+                  let data = try? Data(contentsOf: url), data.count <= maxGrepFileBytes else { continue }
+            let text = TextFileEncoding.decode(data).text
+            result.append((next, text))
+            let directory = (next as NSString).deletingLastPathComponent
+            let range = NSRange(location: 0, length: (text as NSString).length)
+            for match in includeRegex.matches(in: text, range: range) {
+                guard let nameRange = Range(match.range(at: 1), in: text) else { continue }
+                let name = String(text[nameRange])
+                let resolved = name.hasPrefix("/")
+                    ? String(name.dropFirst())
+                    : (directory.isEmpty ? name : (directory as NSString).appendingPathComponent(name))
+                queue.append((resolved as NSString).standardizingPath)
+            }
+        }
+        return result
+    }
+
+    /// Text files under `root` with one of `extensions`, as scope-relative
+    /// paths with their decoded text, skipping excluded folders, binary
+    /// files and anything over the grep size cap. Synchronous: call it from
+    /// a detached task.
+    private nonisolated static func projectTextFiles(
+        root: URL,
+        extensions: Set<String>,
+        excluded: Set<String>
+    ) -> [(relative: String, text: String)] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let rootPath = root.standardizedFileURL.path
+        var files: [(relative: String, text: String)] = []
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            if values?.isDirectory == true {
+                if excluded.contains(url.lastPathComponent) { enumerator.skipDescendants() }
+                continue
+            }
+            guard extensions.contains(url.pathExtension.lowercased()),
+                  (values?.fileSize ?? 0) <= maxGrepFileBytes,
+                  let data = try? Data(contentsOf: url), !data.contains(0) else { continue }
+            let relative = url.standardizedFileURL.path.replacingOccurrences(of: rootPath + "/", with: "")
+            files.append((relative, TextFileEncoding.decode(data).text))
+            if files.count >= maxGrepFileCount { break }
+        }
+        return files.sorted { $0.relative < $1.relative }
     }
 
     private nonisolated static func boolValue(_ any: Any?) -> Bool? {
@@ -1599,12 +1905,8 @@ final class LocalToolExecutor {
     }
 
     private func moveLines(_ arguments: [String: Any], requestApproval: @escaping (PendingApprovalKind) async -> Bool) async throws -> String {
-        guard let path = arguments["path"] as? String,
-              let start = Self.intValue(arguments["start_line"]),
-              let end = Self.intValue(arguments["end_line"]),
-              let before = Self.intValue(arguments["before_line"]),
-              let startText = arguments["start_text"] as? String else {
-            throw LocalToolError.invalidArguments("path, start_line, end_line, before_line and start_text are required")
+        guard let path = arguments["path"] as? String else {
+            throw LocalToolError.invalidArguments("path is required")
         }
         let url = try resolvePath(path)
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -1617,6 +1919,7 @@ final class LocalToolExecutor {
         let decoded = TextFileEncoding.decode(data)
         let usesCRLF = decoded.text.contains("\r\n")
         let normalized = decoded.text.replacingOccurrences(of: "\r\n", with: "\n")
+        let (start, end, before, startText, movedSection) = try Self.moveLinesTarget(arguments, in: normalized, path: path)
         let moved = try Self.movingLines(in: normalized, start: start, end: end, before: before, startText: startText)
 
         var lines = normalized.components(separatedBy: "\n")
@@ -1643,8 +1946,53 @@ final class LocalToolExecutor {
         Self.notifyFileChangedOnDisk(url)
 
         let count = end - start + 1
-        let summary = "Moved lines \(start)-\(end) (\(count) line\(count == 1 ? "" : "s")) of '\(path)'; they now start at line \(moved.newStart). Line numbers between the old and new place have shifted — use these, or read the file again, before moving anything else."
+        let what = movedSection.map { "section \($0.text) (lines \(start)-\(end), \(count) line\(count == 1 ? "" : "s"))" }
+            ?? "lines \(start)-\(end) (\(count) line\(count == 1 ? "" : "s"))"
+        let summary = "Moved \(what) of '\(path)'; they now start at line \(moved.newStart). Line numbers between the old and new place have shifted — use these, or read the file again, before moving anything else (section names stay valid)."
         return summary + (await validationNote(for: url, path: path))
+    }
+
+    /// The block and destination of a `move_lines` call, from either line
+    /// numbers or heading names. `section` replaces start_line/end_line/
+    /// start_text; `before_section` / `after_section` replace before_line.
+    /// Names are resolved against the file as it is now, so they can't go
+    /// stale the way remembered line numbers do.
+    static func moveLinesTarget(
+        _ arguments: [String: Any],
+        in text: String,
+        path: String
+    ) throws -> (start: Int, end: Int, before: Int, startText: String, section: DocumentOutline.Entry?) {
+        let lines = text.components(separatedBy: "\n")
+        let start: Int
+        let end: Int
+        let startText: String
+        let section = try sectionEntry(arguments["section"], in: text, path: path)
+        if let section, let sectionEnd = section.endLine {
+            start = section.line
+            end = sectionEnd
+            startText = lines[section.line - 1]
+        } else {
+            guard let s = intValue(arguments["start_line"]),
+                  let e = intValue(arguments["end_line"]),
+                  let t = arguments["start_text"] as? String else {
+                throw LocalToolError.invalidArguments("Give the block to move: either section (a heading name, e.g. \"Introduction\") or start_line, end_line and start_text.")
+            }
+            (start, end, startText) = (s, e, t)
+        }
+
+        let before: Int
+        if let target = try sectionEntry(arguments["before_section"], in: text, path: path) {
+            before = target.line
+        } else if let target = try sectionEntry(arguments["after_section"], in: text, path: path), let targetEnd = target.endLine {
+            before = targetEnd + 1
+        } else if let line = intValue(arguments["before_line"]) {
+            before = line
+        } else if let word = (arguments["before_line"] as? String)?.lowercased(), ["end", "eof", "end_of_file"].contains(word) {
+            before = lines.count + 1
+        } else {
+            throw LocalToolError.invalidArguments("Give the destination: before_section or after_section (a heading name), or before_line (a line number, or \"end\").")
+        }
+        return (start, end, before, startText, section)
     }
 
     /// The pure part of `move_lines`: `text` with lines `start...end`

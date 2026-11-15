@@ -359,6 +359,92 @@ final class LLMLingua2EngineTests: XCTestCase {
         XCTAssertLessThanOrEqual(Double(keptCount), Double(originalCount) * 0.6 + 1)
     }
 
+    /// The model must actually run and discriminate. Uniform (failed)
+    /// scores still shrink text and stay verbatim — they just keep the
+    /// first N words — so the test above can't catch a broken model.
+    func testEngineProducesDiscriminatingScoresWhenInstalled() async throws {
+        guard let engine = await LLMLingua2Manager.shared.loadEngineIfNeeded() else {
+            throw XCTSkip("LLMLingua-2 model not installed — download it in Settings → Typst → Updates")
+        }
+        let words = "The supplier A ink averaged a colour error of 2.1 , which is below the threshold of 3.0 .".split(separator: " ").map(String.init)
+        let scores = try XCTUnwrap(engine.scoreWords(words), "the Core ML prediction failed")
+        XCTAssertEqual(scores.count, words.count)
+        XCTAssertGreaterThan(Set(scores.map { ($0 * 1000).rounded() }).count, words.count / 2, "scores are (nearly) uniform: \(scores)")
+
+        func score(_ word: String) -> Double { scores[words.firstIndex(of: word)!] }
+        XCTAssertGreaterThan(score("2.1"), score("The"))
+        XCTAssertGreaterThan(score("threshold"), score("the"))
+        XCTAssertGreaterThan(score("supplier"), score("a"))
+    }
+
+    /// More words than one 512-token window: chunking must score them all.
+    func testEngineScoresTextLongerThanOneWindowWhenInstalled() async throws {
+        guard let engine = await LLMLingua2Manager.shared.loadEngineIfNeeded() else {
+            throw XCTSkip("LLMLingua-2 model not installed — download it in Settings → Typst → Updates")
+        }
+        let words = (0..<900).map { $0 % 3 == 0 ? "measurement\($0)" : "the" }
+        let scores = try XCTUnwrap(engine.scoreWords(words))
+        XCTAssertEqual(scores.count, words.count)
+        // The tail (second chunk) is scored too, not left at zero.
+        XCTAssertGreaterThan(scores[897], scores[898])
+    }
+
+    /// The compressed text keeps content from the whole input, not a prefix.
+    func testEngineCompressionIsNotAPrefixWhenInstalled() async throws {
+        guard let engine = await LLMLingua2Manager.shared.loadEngineIfNeeded() else {
+            throw XCTSkip("LLMLingua-2 model not installed — download it in Settings → Typst → Updates")
+        }
+        let text = "Well, so, as it turns out, after a great deal of back and forth, the final measured threshold was 3.0 for supplier B."
+        let compressed = await LLMLingua2Compressor(engine: engine).compress(text, keepRate: 0.4, forceTokens: [], isCode: false)
+        XCTAssertFalse(text.hasPrefix(compressed.trimmingCharacters(in: .whitespaces)), compressed)
+        XCTAssertTrue(compressed.contains("3.0"), compressed)
+    }
+
+    /// `skim_outline` end to end through the real model: previews are
+    /// condensed by LLMLingua-2, stay verbatim, draw on the whole section
+    /// (not its first words), respect the word cap, and keep negations.
+    func testSkimOutlineCondensesWithLLMLinguaWhenInstalled() async throws {
+        guard await LLMLingua2Manager.shared.loadEngineIfNeeded() != nil else {
+            throw XCTSkip("LLMLingua-2 model not installed — download it in Settings → Typst → Updates")
+        }
+        let background = "Sublimation printing transfers dye from a specially coated paper onto a polymer-coated ceramic mug under heat and pressure. The dye turns directly from a solid into a gas and bonds with the polymer coating, which is why the print does not peel or crack the way a vinyl decal would. In this report we summarise the results of the trial run carried out in March, covering 1,240 mugs across four product lines."
+        let durability = "We did observe some fading after 50 dishwasher cycles for Supplier A. Supplier B mugs reached the 50-cycle mark with visible fading on the handle side, and none of the samples passed the scratch test without marks."
+        let document = "= Report\n== Background\n\(background)\n== Durability\n\(durability)\n"
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SkimLLMLingua-\(UUID().uuidString)").resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try document.write(to: root.appendingPathComponent("report.typ"), atomically: true, encoding: .utf8)
+        let executor = LocalToolExecutor()
+        executor.scope = .project(root: root)
+
+        let maxWords = 15
+        let output = try await executor.execute(
+            toolName: "skim_outline",
+            arguments: ["path": "report.typ", "max_words_per_section": maxWords]
+        ) { _ in true }
+        XCTAssertTrue(output.contains("long previews condensed with LLMLingua-2"), output)
+
+        let previews = output.components(separatedBy: "\n")
+            .filter { $0.hasPrefix("  Preview: ") }
+            .map { String($0.dropFirst("  Preview: ".count)) }
+        XCTAssertEqual(previews.count, 2, output)
+        for (preview, source) in zip(previews, [background, durability]) {
+            let words = preview.split(separator: " ").map(String.init).filter { $0 != "…" }
+            let sourceWords = Set(source.split(separator: " ").map(String.init))
+            for word in words {
+                XCTAssertTrue(sourceWords.contains(word), "non-verbatim word '\(word)' in: \(preview)")
+            }
+            // Forced negations may push a little past the cap, never far.
+            XCTAssertLessThanOrEqual(words.count, maxWords, preview)
+            let prefix = source.split(separator: " ").prefix(words.count).joined(separator: " ")
+            XCTAssertNotEqual(words.joined(separator: " "), prefix, "preview is just the opening words: \(preview)")
+        }
+        XCTAssertTrue(previews[0].contains("1,240"), previews[0])
+        XCTAssertTrue(previews[1].split(separator: " ").contains("none"), "negation lost: \(previews[1])")
+    }
+
     /// Code safety must hold with the real model too: the 0.8 rate floor and
     /// forced structural words protect Typst syntax regardless of what the
     /// classifier thinks.

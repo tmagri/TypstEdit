@@ -61,6 +61,14 @@ enum ToolAliases {
         "skim_file": "skim_outline",
         "skim_document": "skim_outline",
         "skim_sections": "skim_outline",
+        // Section search and reference checks.
+        "locate_section": "find_section",
+        "search_sections": "find_section",
+        "find_heading": "find_section",
+        "check_refs": "check_references",
+        "validate_references": "check_references",
+        "check_labels": "check_references",
+        "find_broken_references": "check_references",
         // Task lists.
         "todo_write": "update_plan",
         "todowrite": "update_plan",

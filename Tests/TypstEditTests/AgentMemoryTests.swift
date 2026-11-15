@@ -191,6 +191,15 @@ final class AgentWorkingMemoryTests: XCTestCase {
         XCTAssertTrue(digest.contains("… 20 more"))
     }
 
+    func testSkimDigestKeepsRangesAndDropsPreviews() {
+        let output = "[skim of 'Mugs.typ' — 40 lines, 2 headings]\n1-20: = Design\n  Preview: mug design colour palette\n21-40: = Process\n  Preview: transfer steps heat press"
+        let digest = AICompletionService.elisionDigest(for: AIToolResult(callID: "1", name: "project__skim_outline", output: output))
+        XCTAssertTrue(digest.contains("[skim of 'Mugs.typ'"), digest)
+        XCTAssertTrue(digest.contains("1-20: = Design"), digest)
+        XCTAssertTrue(digest.contains("21-40: = Process"), digest)
+        XCTAssertFalse(digest.contains("Preview:"), digest)
+    }
+
     func testWorkLogRendersBooleansAsWords() {
         let line = AgentHarnessTools.workLogLine(ChatMessage(
             role: .toolCall, toolName: "project__read_file",
@@ -428,14 +437,56 @@ final class DocumentOutlineTests: XCTestCase {
 
     func testRenderSkimWithCompression() async {
         let text = "= Overview\nThis section explains how quantum computing algorithms achieve superpolynomial speedups.\n= Methods\nWe implement the Grover search routine with optimal oracle reflections."
-        let skimmed = await DocumentOutline.renderSkim(text, label: "paper.typ") { raw in
-            "compressed: " + raw.prefix(25)
+        let skimmed = await DocumentOutline.renderSkim(
+            text, label: "paper.typ", maxWordsPerSection: 5, compressorName: "LLMLingua-2"
+        ) { raw, rate in
+            XCTAssertLessThan(rate, 1)
+            return "compressed: " + raw.prefix(25)
         }
-        XCTAssertTrue(skimmed.contains("[skim of 'paper.typ'"))
+        XCTAssertTrue(skimmed.hasPrefix("[skim of 'paper.typ' — 4 lines, 2 headings, long previews condensed with LLMLingua-2]"), skimmed)
         XCTAssertTrue(skimmed.contains("1-2: = Overview"))
         XCTAssertTrue(skimmed.contains("Preview: compressed: This section explains"))
         XCTAssertTrue(skimmed.contains("3-4: = Methods"))
         XCTAssertTrue(skimmed.contains("move_lines"))
+    }
+
+    func testRenderSkimKeepsShortLeadsVerbatim() async {
+        let text = "= Intro\nA short opening.\n= Next\nAlso short."
+        let skimmed = await DocumentOutline.renderSkim(text, label: "doc.typ") { _, _ in
+            XCTFail("Short leads must not be compressed")
+            return ""
+        }
+        XCTAssertTrue(skimmed.contains("Preview: A short opening."))
+        XCTAssertTrue(skimmed.contains("Preview: Also short."))
+    }
+
+    func testSectionLeadSkipsCodeAndStopsAtSubheading() {
+        let text = """
+        = Chapter
+        #set text(size: 11pt)
+        // a comment
+        <chapter-label>
+        Chapter prose here.
+        ```python
+        print("not prose")
+        ```
+        == Child
+        Child prose.
+        """
+        let lines = text.components(separatedBy: "\n")
+        XCTAssertEqual(DocumentOutline.sectionLead(lines, after: 1, through: 10), "Chapter prose here.")
+        XCTAssertEqual(DocumentOutline.sectionLead(lines, after: 9, through: 10), "Child prose.")
+    }
+
+    func testRenderSkimGivesIncludesNoPreview() async {
+        let text = "= Part\nIntro.\n#include \"ch1.typ\"\nAfter include."
+        let skimmed = await DocumentOutline.renderSkim(text, label: "main.typ")
+        let lines = skimmed.components(separatedBy: "\n")
+        let includeIndex = lines.firstIndex(of: "3: #include \"ch1.typ\"")
+        XCTAssertNotNil(includeIndex, skimmed)
+        if let includeIndex, includeIndex + 1 < lines.count {
+            XCTAssertFalse(lines[includeIndex + 1].hasPrefix("  Preview:"), skimmed)
+        }
     }
 }
 

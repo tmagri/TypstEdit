@@ -148,7 +148,8 @@ struct AIToolResult {
 struct ToolCallRepeatGuard {
     /// Tools whose identical repeats are pure waste while nothing changes.
     static let readOnlyToolNames: Set<String> = [
-        "list_files", "read_file", "grep_project", "search_project",
+        "list_files", "read_file", "get_outline", "skim_outline", "find_section", "check_references",
+        "grep_project", "search_project",
         "read_skill_file", "web_fetch", "git_status", "git_diff", "git_log", "recall"
     ]
     /// Tools that change nothing on disk, so they don't invalidate the
@@ -2003,13 +2004,16 @@ class AICompletionService: ObservableObject {
         let isCompressed = output.hasPrefix(compressedToolOutputMarker)
         let outputLines = output.components(separatedBy: "\n")
 
-        if base == "read_file", outputLines.first?.hasPrefix("[outline of ") == true {
-            // Already a map of the file: keep its header and first entries.
+        if (base == "read_file" || base == "get_outline" || base == "skim_outline"),
+           let first = outputLines.first, first.hasPrefix("[outline of ") || first.hasPrefix("[skim of ") {
+            // Already a map of the file: keep its header and first entries
+            // (a skim's previews are dropped — the line ranges are what matter).
             let entries = outputLines.dropFirst().filter { $0.first?.isNumber == true }
-            lines.append(outputLines[0])
+            lines.append(first)
             lines.append(contentsOf: entries.prefix(elisionDigestMaxEntries))
             if entries.count > elisionDigestMaxEntries {
-                lines.append("… \(entries.count - elisionDigestMaxEntries) more — call read_file with outline: true again for the full list")
+                let again = base == "read_file" ? "read_file with outline: true" : base
+                lines.append("… \(entries.count - elisionDigestMaxEntries) more — call \(again) again for the full list")
             }
         } else if base == "read_file" || base == "read_skill_file" {
             // The window header, when the read was paged.

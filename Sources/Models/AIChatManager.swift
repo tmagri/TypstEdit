@@ -1083,7 +1083,7 @@ final class AIChatManager: ObservableObject {
         - For a PDF, never read_file it (that returns raw bytes): read_pdf returns its text as Markdown (tables, headings and code included), a page range at a time; import_pdf converts it into a Typst file the user can edit.
         - For a finished document or handoff package, use the export tools instead of Python: export_document compiles to PDF/PNG/SVG, export_markdown writes a .md copy with the editor's own converter, create_folder makes a delivery folder, and copy_files gathers related files/evidence into it in one approved batch. A typical request ("make a deploy folder with the PDF, a Markdown copy and related evidence") is: create_folder, export_document, export_markdown, then copy_files for the evidence — all inside the current scope.
         - Use grep_project for exact lookups (a symbol, a phrase, a heading) before reading whole files, and read_file's offset/limit to page through a large document instead of pulling it in at once.
-        - To restructure, reorganize or review a long document, work in this order: (1) call get_outline or skim_outline (with optional start_line/end_line range for condensed section previews) to map it; (2) write the target structure into update_plan, one item per section or move; (3) move whole sections (into an appendix, for example) with move_lines using the exact start_line, end_line, and start_text from the outline — work from the bottom of the file up so earlier line numbers stay valid; (4) read and edit remaining sections with offset/limit; (5) check that the compile result is clean. Don't page through a whole long file just to learn how it's organized.
+        - To restructure, reorganize or review a long document, work in this order: (1) call get_outline, or skim_outline for a short preview of each section, to map it — find_section finds the section about a topic when you don't know its heading; (2) write the target structure into update_plan, one item per section or move; (3) move whole sections (into an appendix, for example) with move_lines by heading name — section: "Results", after_section: "Discussion" — which stays correct after earlier moves; with line numbers instead, work from the bottom of the file up; (4) read a section with read_file section: "…" and edit it; (5) check that the compile result is clean, and run check_references after moving sections or renaming labels. Don't page through a whole long file just to learn how it's organized.
         - Use evaluate_math for exact or approximate math. It returns plain text and Typst math. Do not use Python for arithmetic or algebra.
         - For a job with several distinct steps, call update_plan first and keep it current. The plan must cover the whole request — every file and part the user mentions, not only the first one. When a CURRENT PLAN is shown below, continue from it rather than starting over.
         - If you can't finish everything in this reply, end with what is done and what is still left (for example, a file you didn't get to), so the user can ask you to continue.
@@ -2846,7 +2846,8 @@ final class AIChatManager: ObservableObject {
     /// list never gains a writer, runner, or delegate. The read-only Git tools
     /// are added separately, only while the Git opt-in is on.
     static let subagentReadOnlyToolNames: Set<String> = [
-        "list_files", "read_file", "grep_project", "search_project",
+        "list_files", "read_file", "get_outline", "skim_outline", "find_section", "check_references",
+        "grep_project", "search_project",
         "read_skill_file", "web_fetch", CalculatorTool.name
     ]
 

@@ -204,7 +204,7 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(rangedOutline.contains("3-4: = Heading 2"))
         XCTAssertFalse(rangedOutline.contains("= Heading 3"))
 
-        // skim_outline satisfies read requirement for move_lines without extra read_file
+        // get_outline satisfies read requirement for move_lines without extra read_file
         let moveOut = try await run("move_lines", [
             "path": "notes.typ", "start_line": 5, "end_line": 6, "before_line": 1, "start_text": "= Heading 3"
         ])
@@ -240,6 +240,160 @@ final class LocalToolExecutorTests: XCTestCase {
         ])
         XCTAssertTrue(moveOut.contains("Moved lines 5-6"))
         XCTAssertTrue(try read("paper.typ").hasPrefix("= Evaluation"))
+    }
+
+    // MARK: - Section addressing
+
+    private let sectionedDoc = "= Intro\nintro text\n= Methods\nmethods text\n== Data\ndata text\n= Results\nresults text\n"
+
+    func testReadFileBySection() async throws {
+        try write("doc.typ", sectionedDoc)
+        let out = try await run("read_file", ["path": "doc.typ", "section": "Methods"])
+        XCTAssertTrue(out.hasPrefix("[section = Methods — lines 3-6]"), out)
+        XCTAssertTrue(out.contains("data text"))
+        XCTAssertFalse(out.contains("results text"))
+        XCTAssertFalse(out.contains("intro text"))
+    }
+
+    func testReadFileBySectionReportsUnknownName() async throws {
+        try write("doc.typ", sectionedDoc)
+        await assertThrows({ error in
+            if case .invalidArguments(let message) = error { return message.contains("Closest headings") }
+            return false
+        }) {
+            try await self.run("read_file", ["path": "doc.typ", "section": "Methods overview"])
+        }
+    }
+
+    func testGetOutlineBySection() async throws {
+        try write("doc.typ", sectionedDoc)
+        let out = try await run("get_outline", ["path": "doc.typ", "section": "Methods"])
+        XCTAssertTrue(out.contains("5-6: == Data"), out)
+        XCTAssertFalse(out.contains("= Results"), out)
+    }
+
+    func testMoveLinesBySectionNames() async throws {
+        try write("doc.typ", sectionedDoc)
+        _ = try await run("get_outline", ["path": "doc.typ"])
+        let out = try await run("move_lines", ["path": "doc.typ", "section": "Intro", "after_section": "Results"])
+        XCTAssertTrue(out.contains("Moved section = Intro"), out)
+        XCTAssertEqual(try read("doc.typ"), "= Methods\nmethods text\n== Data\ndata text\n= Results\nresults text\n= Intro\nintro text\n")
+
+        // Names stay valid after the earlier move shifted every line.
+        _ = try await run("move_lines", ["path": "doc.typ", "section": "Results", "before_section": "Methods"])
+        XCTAssertEqual(try read("doc.typ"), "= Results\nresults text\n= Methods\nmethods text\n== Data\ndata text\n= Intro\nintro text\n")
+    }
+
+    func testMoveLinesToEndByWord() async throws {
+        try write("doc.typ", sectionedDoc)
+        _ = try await run("read_file", ["path": "doc.typ"])
+        _ = try await run("move_lines", ["path": "doc.typ", "section": "Data", "before_line": "end"])
+        XCTAssertEqual(try read("doc.typ"), "= Intro\nintro text\n= Methods\nmethods text\n= Results\nresults text\n== Data\ndata text\n")
+    }
+
+    func testMoveLinesWithoutBlockExplainsBothForms() async throws {
+        try write("doc.typ", sectionedDoc)
+        _ = try await run("read_file", ["path": "doc.typ"])
+        await assertThrows({ error in
+            if case .invalidArguments(let message) = error { return message.contains("section") && message.contains("start_line") }
+            return false
+        }) {
+            try await self.run("move_lines", ["path": "doc.typ", "before_line": 1])
+        }
+    }
+
+    // MARK: - find_section / check_references
+
+    /// Embeds by counting a few topic words, so meaning-only matches are
+    /// deterministic and no test reaches a real embedding model.
+    private struct TopicEmbeddingProvider: EmbeddingProvider {
+        var dimensions: Int { 3 }
+        func getEmbedding(for text: String) async throws -> [Float] {
+            let lower = text.lowercased()
+            return [["wash", "fade", "dishwasher"], ["price", "cost", "bulk"], ["mug", "coffee"]].map { words in
+                Float(words.filter { lower.contains($0) }.count) + 0.01
+            }
+        }
+    }
+
+    private struct UnavailableEmbeddingProvider: EmbeddingProvider {
+        var dimensions: Int { 3 }
+        func getEmbedding(for text: String) async throws -> [Float] { throw EmbeddingError.modelUnavailable }
+    }
+
+    func testFindSectionUsesMeaningWhenKeywordsMiss() async throws {
+        executor.embeddingProviderOverride = TopicEmbeddingProvider()
+        try write("shop.typ", """
+        = Coffee mugs
+        Our mug range.
+        = Dishwasher testing
+        Results after fifty wash cycles; prints fade slightly.
+        = Bulk pricing
+        Price breaks for large orders.
+        """)
+        let out = try await run("find_section", ["query": "does it survive the wash", "path": "shop.typ"])
+        XCTAssertTrue(out.contains("ranked by meaning"), out)
+        XCTAssertTrue(out.contains("1. shop.typ:3-4: = Dishwasher testing"), out)
+    }
+
+    func testFindSectionRanksAndEnablesMoveLines() async throws {
+        executor.embeddingProviderOverride = UnavailableEmbeddingProvider()
+        try write("report.typ", """
+        = Introduction
+        Coffee mug printing overview.
+        = Error analysis
+        We compute error bars from repeated measurements.
+        = Colour management
+        Profiles keep printed colours consistent.
+        """)
+        let out = try await run("find_section", ["query": "error bars", "path": "report.typ"])
+        XCTAssertTrue(out.contains("ranked by keywords (no embedding model reachable)"), out)
+        XCTAssertTrue(out.contains("1. report.typ:3-4: = Error analysis"), out)
+        XCTAssertTrue(out.contains("section: \"= Error analysis\""), out)
+
+        // A find_section result counts as having seen the file's layout.
+        _ = try await run("move_lines", ["path": "report.typ", "section": "= Error analysis", "before_section": "Introduction"])
+        XCTAssertTrue(try read("report.typ").hasPrefix("= Error analysis"))
+    }
+
+    func testFindSectionSearchesWholeProject() async throws {
+        executor.embeddingProviderOverride = UnavailableEmbeddingProvider()
+        try write("a.typ", "= Apples\nRed fruit.\n")
+        try write("notes/b.md", "# Bananas\nYellow fruit, rich in potassium.\n")
+        let out = try await run("find_section", ["query": "potassium bananas"])
+        XCTAssertTrue(out.contains("notes/b.md:1-"), out)
+        XCTAssertTrue(out.contains("in 2 files"), out)
+    }
+
+    func testCheckReferencesFollowsIncludesAndBibliography() async throws {
+        try write("main.typ", """
+        = Intro <intro>
+        See @intro, @methods and @smith2020, but not @smiht2020.
+        #include "chapters/methods.typ"
+        #bibliography("refs.bib")
+        """)
+        try write("chapters/methods.typ", "= Methods <methods>\nDetails.")
+        try write("refs.bib", "@article{smith2020, title={T}}\n@book{unused1, title={U}}\n")
+        try write("stray.typ", "= Stray <stray>") // not included by main.typ
+
+        let out = try await run("check_references", ["path": "main.typ"])
+        XCTAssertTrue(out.contains("2 .typ files"), out)
+        XCTAssertTrue(out.contains("Undefined references (1)"), out)
+        XCTAssertTrue(out.contains("@smiht2020 at main.typ:2 — did you mean @smith2020?"), out)
+        XCTAssertTrue(out.contains("unused1"), out)
+        XCTAssertFalse(out.contains("stray"), out)
+
+        let projectWide = try await run("check_references", [:])
+        XCTAssertTrue(projectWide.contains("3 .typ files"), projectWide)
+        XCTAssertTrue(projectWide.contains("<stray> at stray.typ:1"), projectWide)
+    }
+
+    func testCheckReferencesReportsMissingBibliography() async throws {
+        try write("main.typ", "As @knuth said.\n#bibliography(\"missing.bib\")")
+        let out = try await run("check_references", [:])
+        XCTAssertTrue(out.contains("Missing bibliography files (1)"), out)
+        XCTAssertTrue(out.contains("missing.bib (named at main.typ:2)"), out)
+        XCTAssertTrue(out.contains("Some may be citations"), out)
     }
 
     // MARK: - Read-before-edit invariant

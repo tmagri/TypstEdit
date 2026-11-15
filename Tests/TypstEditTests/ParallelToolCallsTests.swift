@@ -101,7 +101,7 @@ final class ParallelToolCallsTests: XCTestCase {
     func testReadFilePlanResolvesInsideTheScope() throws {
         try write("doc.typ", "hello\n")
         let plan = try executor.readOnlyPlan(toolName: "read_file", arguments: ["path": "doc.typ"])
-        guard case .readFile(let url, let label, _, _, let outline, _, _, _)? = plan else {
+        guard case .readFile(let url, let label, _, _, let outline, _, _, _, _)? = plan else {
             return XCTFail("expected a readFile plan, got \(String(describing: plan))")
         }
         XCTAssertEqual(label, "doc.typ")
@@ -231,6 +231,26 @@ final class ParallelToolCallsTests: XCTestCase {
             return XCTFail("the missing file should fail")
         }
         XCTAssertTrue(message.contains("ghost.typ"), message)
+    }
+
+    func testConcurrentReadsResolveSectionNames() async throws {
+        try write("doc.typ", "= A\na text\n= B\nb text\n== B1\nb1 text\n= C\nc text\n")
+        let read = try XCTUnwrap(executor.readOnlyPlan(toolName: "read_file", arguments: ["path": "doc.typ", "section": "B"]))
+        let outline = try XCTUnwrap(executor.readOnlyPlan(toolName: "get_outline", arguments: ["path": "doc.typ", "section": "B"]))
+        let unknown = try XCTUnwrap(executor.readOnlyPlan(toolName: "read_file", arguments: ["path": "doc.typ", "section": "Zed"]))
+        let results = await executor.runReadOnlyBatch([(0, read), (1, outline), (2, unknown)])
+
+        guard case .success(let readOutcome)? = results[0] else { return XCTFail("section read should succeed") }
+        XCTAssertTrue(readOutcome.output.hasPrefix("[section = B — lines 3-6]"), readOutcome.output)
+        XCTAssertTrue(readOutcome.output.contains("b1 text"))
+        XCTAssertFalse(readOutcome.output.contains("c text"))
+
+        guard case .success(let outlineOutcome)? = results[1] else { return XCTFail("section outline should succeed") }
+        XCTAssertTrue(outlineOutcome.output.contains("5-6: == B1"), outlineOutcome.output)
+        XCTAssertFalse(outlineOutcome.output.contains("= C"), outlineOutcome.output)
+
+        guard case .failure(let message)? = results[2] else { return XCTFail("an unknown section should fail") }
+        XCTAssertTrue(message.contains("No heading"), message)
     }
 
     func testEmptyBatchIsANoOp() async {
