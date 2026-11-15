@@ -425,6 +425,18 @@ final class DocumentOutlineTests: XCTestCase {
         XCTAssertEqual(lines[1], "3-5: = Section 2")
         XCTAssertTrue(rendered.contains("move_lines"))
     }
+
+    func testRenderSkimWithCompression() async {
+        let text = "= Overview\nThis section explains how quantum computing algorithms achieve superpolynomial speedups.\n= Methods\nWe implement the Grover search routine with optimal oracle reflections."
+        let skimmed = await DocumentOutline.renderSkim(text, label: "paper.typ") { raw in
+            "compressed: " + raw.prefix(25)
+        }
+        XCTAssertTrue(skimmed.contains("[skim of 'paper.typ'"))
+        XCTAssertTrue(skimmed.contains("1-2: = Overview"))
+        XCTAssertTrue(skimmed.contains("Preview: compressed: This section explains"))
+        XCTAssertTrue(skimmed.contains("3-4: = Methods"))
+        XCTAssertTrue(skimmed.contains("move_lines"))
+    }
 }
 
 @MainActor

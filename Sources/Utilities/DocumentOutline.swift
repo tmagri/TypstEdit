@@ -119,6 +119,95 @@ enum DocumentOutline {
         return output
     }
 
+    /// Formats an outline with a compressed preview of each section's contents.
+    static func renderSkim(
+        _ text: String,
+        label: String,
+        startLine: Int? = nil,
+        endLine: Int? = nil,
+        maxWordsPerSection: Int = 50,
+        compress: (@Sendable (String) async -> String)? = nil
+    ) async -> String {
+        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+        let totalLines = lines.count
+        let all = entries(in: text)
+        let filtered: [Entry]
+        let rangeLabel: String
+        if startLine != nil || endLine != nil {
+            let start = startLine ?? 1
+            let end = endLine ?? totalLines
+            rangeLabel = " (lines \(start)–\(end))"
+            filtered = all.filter { entry in
+                let entryStart = entry.line
+                let entryEnd = entry.endLine ?? entry.line
+                return entryStart <= end && entryEnd >= start
+            }
+        } else {
+            rangeLabel = ""
+            filtered = all
+        }
+
+        let headingCount = filtered.filter { if case .heading = $0.kind { return true } else { return false } }.count
+        let headerCountSuffix = (startLine != nil || endLine != nil) ? "total " : ""
+        var output = "[skim of '\(label)'\(rangeLabel) — \(totalLines) \(headerCountSuffix)line\(totalLines == 1 ? "" : "s"), \(headingCount) heading\(headingCount == 1 ? "" : "s")]"
+        guard !filtered.isEmpty else {
+            let note = (startLine != nil || endLine != nil) ? " in this range" : ""
+            return output + "\nNo headings or #include lines found\(note). Read it with offset/limit instead."
+        }
+
+        for entry in filtered.prefix(maxEntries) {
+            let lineSpan: String
+            let nextSectionStart = entry.endLine ?? totalLines
+            if let end = entry.endLine {
+                let count = end - entry.line + 1
+                lineSpan = "\(entry.line)-\(end) (\(count) line\(count == 1 ? "" : "s"))"
+            } else {
+                lineSpan = "\(entry.line)"
+            }
+            output += "\n\(lineSpan): \(entry.text)"
+
+            // Extract section lead lines
+            let bodyStart = entry.line // 1-based line of next line
+            let bodyEnd = min(nextSectionStart, entry.line + 35)
+            if bodyStart < bodyEnd && bodyStart <= totalLines {
+                var bodyLines: [String] = []
+                for i in bodyStart..<min(bodyEnd, totalLines) {
+                    let line = lines[i].trimmingCharacters(in: .whitespaces)
+                    if !line.isEmpty && !line.hasPrefix("```") && !isHeadingLine(line) {
+                        bodyLines.append(line)
+                        if bodyLines.count >= 20 { break }
+                    }
+                }
+                let rawBody = bodyLines.joined(separator: " ")
+                if !rawBody.isEmpty {
+                    let preview: String
+                    if let compress {
+                        let compressed = await compress(rawBody)
+                        let words = compressed.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+                        if words.count > maxWordsPerSection {
+                            preview = words.prefix(maxWordsPerSection).joined(separator: " ") + " …"
+                        } else {
+                            preview = compressed
+                        }
+                    } else {
+                        let words = rawBody.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+                        preview = words.prefix(maxWordsPerSection).joined(separator: " ") + (words.count > maxWordsPerSection ? " …" : "")
+                    }
+                    output += "\n  Preview: \(preview)"
+                }
+            }
+        }
+
+        if filtered.count > maxEntries {
+            output += "\n… \(filtered.count - maxEntries) more entries not shown"
+        }
+        if let example = filtered.first(where: { $0.endLine != nil }), let end = example.endLine {
+            output += "\nTo move a section, use move_lines with start_line, end_line, and start_text (e.g. lines \(example.line)-\(end): start_line: \(example.line), end_line: \(end), start_text: \"\(example.text)\")."
+            output += "\nTo read the full text of a section, use read_file with offset: \(example.line), limit: \(end - example.line + 1)."
+        }
+        return output
+    }
+
     private static func clipped(_ line: String) -> String {
         line.count > 100 ? String(line.prefix(100)) + "…" : line
     }

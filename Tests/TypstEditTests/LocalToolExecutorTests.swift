@@ -204,12 +204,42 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(rangedOutline.contains("3-4: = Heading 2"))
         XCTAssertFalse(rangedOutline.contains("= Heading 3"))
 
-        // get_outline satisfies read requirement for move_lines without extra read_file
+        // skim_outline satisfies read requirement for move_lines without extra read_file
         let moveOut = try await run("move_lines", [
             "path": "notes.typ", "start_line": 5, "end_line": 6, "before_line": 1, "start_text": "= Heading 3"
         ])
         XCTAssertTrue(moveOut.contains("Moved lines 5-6"))
         XCTAssertTrue(try read("notes.typ").hasPrefix("= Heading 3"))
+    }
+
+    func testSkimOutlineReturnsCompressedPreviewsAndSatisfiesMoveLines() async throws {
+        let content = """
+        = Background
+        This document provides deep technical background on quantum error correcting surface codes and fault tolerance.
+        = Implementation
+        We implement rotated surface codes with syndrome measurement cycles executed in real time.
+        = Evaluation
+        Simulations show a threshold of one percent under depolarizing circuit noise models.
+        """
+        try write("paper.typ", content)
+
+        let skimmed = try await run("skim_outline", ["path": "paper.typ"])
+        XCTAssertTrue(skimmed.contains("[skim of 'paper.typ'"))
+        XCTAssertTrue(skimmed.contains("= Background"))
+        XCTAssertTrue(skimmed.contains("Preview:"))
+        XCTAssertTrue(skimmed.contains("= Implementation"))
+
+        // Range filtering
+        let ranged = try await run("skim_outline", ["path": "paper.typ", "start_line": 3, "end_line": 4])
+        XCTAssertTrue(ranged.contains("= Implementation"))
+        XCTAssertFalse(ranged.contains("= Evaluation"))
+
+        // skim_outline satisfies move_lines read requirement
+        let moveOut = try await run("move_lines", [
+            "path": "paper.typ", "start_line": 5, "end_line": 6, "before_line": 1, "start_text": "= Evaluation"
+        ])
+        XCTAssertTrue(moveOut.contains("Moved lines 5-6"))
+        XCTAssertTrue(try read("paper.typ").hasPrefix("= Evaluation"))
     }
 
     // MARK: - Read-before-edit invariant

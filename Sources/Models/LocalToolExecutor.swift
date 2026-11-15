@@ -311,6 +311,23 @@ final class LocalToolExecutor {
             ))
             tools.append(MCPTool(
                 serverName: Self.namespace,
+                name: "skim_outline",
+                description: "Skim a document's sections and outline: returns each section's exact line range, heading, and a condensed semantic preview of its contents (compressed using local LLMLingua-2 when available). Use this to quickly understand what each section discusses before reading in full or moving sections with move_lines.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
+                        "start_line": ["type": "integer", "description": "1-based line number to start skimming from. Omit to start from the top of the file."],
+                        "end_line": ["type": "integer", "description": "Last line number (inclusive) of the range to skim. Omit to skim through the end of the file."],
+                        "offset": ["type": "integer", "description": "Alternative to start_line (1-based line number)."],
+                        "limit": ["type": "integer", "description": "Number of lines from start_line/offset to skim."],
+                        "max_words_per_section": ["type": "integer", "description": "Maximum preview words per section (default 50)."]
+                    ],
+                    "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
                 name: "grep_project",
                 description: "Search file contents for a literal string or regular expression and return matching lines with their file and line number. Case-insensitive by default. Use this for exact lookups (a symbol, a phrase, a tag) — prefer it over search_project for anything you can spell exactly, and over reading a whole file to find one line. Skips binary files, hidden folders, and build/backup directories.",
                 inputSchema: [
@@ -638,6 +655,7 @@ final class LocalToolExecutor {
         case "list_files": return try listFiles(arguments)
         case "read_file": return try readFile(arguments)
         case "get_outline": return try getOutline(arguments)
+        case "skim_outline": return try await skimOutline(arguments)
         case "read_skill_file": return try readSkillFile(arguments)
         case "read_skill": return try readSkill(arguments)
         case "grep_project": return try await grepProject(arguments)
@@ -1059,6 +1077,42 @@ final class LocalToolExecutor {
         }
 
         return DocumentOutline.render(fullText, label: path, startLine: startLine, endLine: endLine)
+    }
+
+    private func skimOutline(_ arguments: [String: Any]) async throws -> String {
+        guard let path = arguments["path"] as? String else {
+            throw LocalToolError.invalidArguments("path is required")
+        }
+        let url = try resolvePath(path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw LocalToolError.fileNotFound(path)
+        }
+        let data = try Data(contentsOf: url)
+        guard data.count <= maxScannableBytes else {
+            throw LocalToolError.fileTooLarge(path)
+        }
+        let fullText = TextFileEncoding.decode(data).text
+        outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+
+        let startLine = Self.intValue(arguments["start_line"]) ?? Self.intValue(arguments["offset"])
+        var endLine = Self.intValue(arguments["end_line"])
+        if let limit = Self.intValue(arguments["limit"]) {
+            let start = startLine ?? 1
+            let computedEnd = start + max(1, limit) - 1
+            endLine = min(endLine ?? computedEnd, computedEnd)
+        }
+        let maxWords = Self.intValue(arguments["max_words_per_section"]) ?? 50
+
+        let compressor = await ChatCompressor.bestAvailable()
+        return await DocumentOutline.renderSkim(
+            fullText,
+            label: path,
+            startLine: startLine,
+            endLine: endLine,
+            maxWordsPerSection: maxWords
+        ) { @Sendable rawBody in
+            await compressor.compress(rawBody, keepRate: 0.35, forceTokens: [], isCode: false)
+        }
     }
 
     private nonisolated static func boolValue(_ any: Any?) -> Bool? {

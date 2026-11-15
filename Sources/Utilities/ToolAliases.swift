@@ -57,6 +57,10 @@ enum ToolAliases {
         "outline": "get_outline",
         "document_outline": "get_outline",
         "file_outline": "get_outline",
+        "skim": "skim_outline",
+        "skim_file": "skim_outline",
+        "skim_document": "skim_outline",
+        "skim_sections": "skim_outline",
         // Task lists.
         "todo_write": "update_plan",
         "todowrite": "update_plan",
