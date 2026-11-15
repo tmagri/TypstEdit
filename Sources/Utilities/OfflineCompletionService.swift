@@ -75,7 +75,7 @@ class OfflineCompletionService {
         }
 
         // Context Check: Are we after #set or #show?
-        let prevWord = getPreviousWord(text: text, cursorIndex: cursorIndex - prefix.count)
+        let prevWord = getPreviousWord(text: text, cursorIndex: cursorIndex - prefix.utf16.count)
         if prevWord == "#set" || prevWord == "#show" {
             let term = prefix.lowercased()
             let matches = setTargets.filter { $0.hasPrefix(term) }
@@ -118,7 +118,7 @@ class OfflineCompletionService {
 
         // Grammar: Sentence Capitalization
         if suggestions.isEmpty, let first = prefix.first, first.isLowercase {
-            let startOfWordIndex = cursorIndex - prefix.count
+            let startOfWordIndex = cursorIndex - prefix.utf16.count
             if isStartOfSentence(text: text, index: startOfWordIndex) {
                 suggestions.append(prefix.capitalized)
             }
@@ -248,27 +248,37 @@ class OfflineCompletionService {
         return getEnclosingFunction(text: text, cursorIndex: cursorIndex) != nil
     }
     
+    /// Extracts the word prefix ending at `cursorIndex`.
+    ///
+    /// `cursorIndex` is a **UTF-16 offset**, matching every `NSRange` the editor
+    /// uses. The previous version took a grapheme-cluster offset and resolved it
+    /// with `text.index(_:offsetBy:)`, which walks the whole document: ~50 ms per
+    /// call on a 1.6 MB document, on every keystroke. Scanning `unichar`s
+    /// backwards from the cursor is O(word length) and allocation-free.
     private func getWordPrefix(text: String, cursorIndex: Int) -> String {
-        guard cursorIndex > 0, cursorIndex <= text.count else { return "" }
-        let endIndex = text.index(text.startIndex, offsetBy: cursorIndex)
-        var startIndex = endIndex
-        
-        while startIndex > text.startIndex {
-            let prevIndex = text.index(before: startIndex)
-            let char = text[prevIndex]
-            // Stop at whitespace or special structural chars
-            if char.isWhitespace || ["(", ")", "[", "]", "{", "}", ",", ";"].contains(char) {
+        let nsText = text as NSString
+        let end = min(max(cursorIndex, 0), nsText.length)
+        guard end > 0 else { return "" }
+
+        var start = end
+        while start > 0 {
+            let unit = nsText.character(at: start - 1)
+            // Stop at whitespace or special structural chars.
+            if unit == 0x20 || unit == 0x09 || unit == 0x0A || unit == 0x0D {
                 break
             }
-            // If we hit #, that's the start of the function, so we include it and stop going back
-            if char == "#" {
-                startIndex = prevIndex
-                break
+            switch unit {
+            case 0x28, 0x29, 0x5B, 0x5D, 0x7B, 0x7D, 0x2C, 0x3B: // ( ) [ ] { } , ;
+                return nsText.substring(with: NSRange(location: start, length: end - start))
+            case 0x23: // "#": part of the function name, include it and stop.
+                start -= 1
+                return nsText.substring(with: NSRange(location: start, length: end - start))
+            default:
+                start -= 1
             }
-            startIndex = prevIndex
         }
-        
-        return String(text[startIndex..<endIndex])
+
+        return nsText.substring(with: NSRange(location: start, length: end - start))
     }
     
     private func isStartOfSentence(text: String, index: Int) -> Bool {

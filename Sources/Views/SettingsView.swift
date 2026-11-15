@@ -2236,6 +2236,26 @@ struct TypstSettingsView: View {
 
         // Installed version status
         SettingsCard(
+            title: "Large Document Highlighting",
+            icon: "textformat.size",
+            description: "Markdown and note files are colored by a grammar that re-reads most of the document after every keystroke. TypstEdit does that work on a background thread, so typing stays responsive at any size, but in a very large document it keeps a processor core busy while you type. To save battery you can turn the coloring off above a size you choose. Typst files are unaffected: their grammar only re-reads what changed."
+        ) {
+            SettingsRow(
+                label: "Turn Coloring Off Above:",
+                caption: "Applies to Markdown and .note documents, decided when the file is opened. The default keeps full coloring at every size."
+            ) {
+                Picker("", selection: $settings.markdownHighlightLimitKilochars) {
+                    Text("Never (always full)").tag(0)
+                    Text("250,000 characters").tag(250)
+                    Text("500,000 characters").tag(500)
+                    Text("1,000,000 characters").tag(1000)
+                }
+                .labelsHidden()
+                .frame(maxWidth: 240, alignment: .leading)
+            }
+        }
+
+        SettingsCard(
             title: "Typst Engine",
             icon: "terminal",
             description: "The Typst compiler version currently active in TypstEdit."

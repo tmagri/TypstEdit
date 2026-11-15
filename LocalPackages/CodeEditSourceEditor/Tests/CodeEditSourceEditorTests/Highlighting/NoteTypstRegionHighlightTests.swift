@@ -254,4 +254,54 @@ final class NoteTypstRegionHighlightTests: XCTestCase {
         XCTAssertFalse(captures(result, covering: "weak", in: source).contains(.variable),
                        "a plain parameter ident must not render as a variable")
     }
+
+    // MARK: - Regressions found by differential fuzzing against the original scanner
+
+    private func regionTexts(_ source: String) -> [String] {
+        let ns = source as NSString
+        return NoteTypstRegions.regions(in: source).map { ns.substring(with: $0) }
+    }
+
+    func test_blockCommentClosesAndBracketsInsideAreIgnored() {
+        // The UTF-16 rewrite once tested for "/*" where it needed "*/", so a block
+        // comment never closed and swallowed the rest of the document.
+        let source = "#show x: it => (\n/* block (\n*/\n)\nplain text (still prose"
+        XCTAssertEqual(regionTexts(source), ["#show x: it => (\n/* block (\n*/\n)"])
+    }
+
+    func test_unterminatedBlockCommentRunsToEndOfDocument() {
+        let source = "#f(\n/* never closed )\nmore"
+        XCTAssertEqual(regionTexts(source), ["#f(\n/* never closed )\nmore"])
+    }
+
+    func test_nonASCIIHashtagProseIsNotTypstCode() {
+        // `Character.isLetter` is Unicode-aware, so "#été, ..." is hashtag-shaped
+        // prose, exactly like "#hashtag, ...". An ASCII-only walk mis-read it as code.
+        XCTAssertEqual(regionTexts("#été, accent"), [])
+        XCTAssertEqual(regionTexts("#日本語, text"), [])
+        XCTAssertEqual(regionTexts("#hashtag, text"), [])
+        // A genuine call with a non-ASCII name is still code.
+        XCTAssertEqual(regionTexts("#été(1)"), ["#été(1)"])
+        // Decomposed é (e + U+0301) is one Character: must behave the same.
+        XCTAssertEqual(regionTexts("#e\u{301}te\u{301}, accent"), [])
+    }
+
+    func test_blockOpenerLineAcceptsUnicodeLetterBeforeEquals() {
+        XCTAssertTrue(NoteTypstRegions.isBlockOpenerLine("#let 日 ="))
+        XCTAssertTrue(NoteTypstRegions.isBlockOpenerLine("#let é ="))
+        let source = "#let 日 =\n{ 1 }"
+        XCTAssertEqual(regionTexts(source), ["#let 日 =\n{ 1 }"])
+    }
+
+    func test_crlfDocumentsFindTheSameRegionsAsLF() {
+        // The previous implementation split on "\n" as a `Character`, but "\r\n" is
+        // a single Character, so CRLF documents found no regions at all.
+        let lf = "#set page(\n  margin: 1cm\n)\nprose\n#let x = 1"
+        let crlf = lf.replacingOccurrences(of: "\n", with: "\r\n")
+        XCTAssertEqual(
+            regionTexts(crlf).map { $0.replacingOccurrences(of: "\r\n", with: "\n") },
+            regionTexts(lf)
+        )
+        XCTAssertEqual(regionTexts(lf).count, 2)
+    }
 }

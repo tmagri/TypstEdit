@@ -240,10 +240,13 @@ class EditorController: NSObject, ObservableObject {
 
         let range = replacementRange ?? selectedRange
 
-        guard let stringRange = Range(range, in: sourceCode) else { 
-             print("[EditorController] insertText FAILED: Invalid range \(range) for len \(sourceCode.count)")
+        // Validate the range against the model. `Range(_:in:)` is a cheap bounds +
+        // grapheme-boundary check; it is the mutation below that used to be the
+        // expensive part (see the note on `replaceSubrange`).
+        guard Range(range, in: sourceCode) != nil else {
+             print("[EditorController] insertText FAILED: Invalid range \(range) for len \(TextEquality.length(sourceCode))")
              showStatus("Insert failed: invalid range")
-             return 
+             return
         }
 
         // Capture whether the live text view matches the model BEFORE editing the model.
@@ -258,12 +261,31 @@ class EditorController: NSObject, ObservableObject {
         // rebuild, so by the time we get here the view matches the model and a surgical
         // replaceCharacters is safe.
         
-        // Set isApplyingProgrammaticChange before mutating sourceCode so that
-        // onChange listeners observe the programmatic edit and can force a preview refresh.
+        // Mutate the model in UTF-16 space, then hand back a native string.
+        //
+        // This is the programmatic edit path (toolbar, snippets, paste,
+        // autoformat); ordinary typing goes through the text view directly.
+        //
+        // (1) `replaceSubrange(Range(_:in: sourceCode), …)` walked every
+        // grapheme cluster from the start of the document to resolve the range:
+        // ~26 ms on a 1.6 MB non-ASCII document. Editing through
+        // `NSMutableString` addresses text in the same UTF-16 units as the text
+        // view's `NSRange`. It is still O(n) — the document is copied twice, once
+        // into the `NSMutableString` and once on bridging back (~4-5 ms at
+        // 1.6 MB) — so it scales with document size, just ~6x more cheaply.
+        //
+        // (2) `NSTextStorage.string` hands back a *foreign* UTF-16-backed
+        // string, and every later `String.count` / `index(offsetBy:)` on it
+        // walks grapheme clusters: ~99 ms per call at this size. The bridged
+        // result is a contiguous native string, where the same calls take
+        // ~1.4 ms — so this also repays the cost of the edits that follow.
+        let mutable = NSMutableString(string: sourceCode)
+        mutable.replaceCharacters(in: range, with: text)
+        // `isApplyingProgrammaticChange` must cover the assignment so listeners
+        // observe a programmatic edit (and refresh the preview), not a keystroke.
         isApplyingProgrammaticChange = true
         defer { isApplyingProgrammaticChange = false }
-
-        sourceCode.replaceSubrange(stringRange, with: text)
+        sourceCode = mutable as String
 
         // --- Sync with actual editor if available ---
         // This is necessary because SourceEditor's binding is one-way (upwards) in some versions
@@ -288,13 +310,13 @@ class EditorController: NSObject, ObservableObject {
             editorState.cursorPositions = [.init(range: explicitCursor)]
             textViewController?.setCursorPositions([.init(range: explicitCursor)], scrollToVisible: true)
         } else {
-            // Default behavior: move to end
-            if let newEndIndex = sourceCode.index(stringRange.lowerBound, offsetBy: text.count, limitedBy: sourceCode.endIndex) {
-                 let loc = newEndIndex.utf16Offset(in: sourceCode)
-                 let newRange = NSRange(location: loc, length: 0)
-                 editorState.cursorPositions = [.init(range: newRange)]
-                 textViewController?.setCursorPositions([.init(range: newRange)], scrollToVisible: true)
-            }
+            // Default behavior: move to end. Offset math in UTF-16 units — the
+            // range is UTF-16, so the caret lands after the inserted text
+            // without walking grapheme clusters.
+            let loc = min(range.location + TextEquality.length(text), TextEquality.length(sourceCode))
+            let newRange = NSRange(location: loc, length: 0)
+            editorState.cursorPositions = [.init(range: newRange)]
+            textViewController?.setCursorPositions([.init(range: newRange)], scrollToVisible: true)
         }
     }
 
@@ -337,9 +359,12 @@ class EditorController: NSObject, ObservableObject {
     func reconcileTextViewIfNeeded() {
         guard let tvc = textViewController, let textView = tvc.textView else { return }
         let current = textView.string
-        guard current != sourceCode else { return }
+        // Length first: a divergent view almost always differs in length, so the
+        // common "already in sync" case costs one `utf16.count` rather than a
+        // full multi-megabyte comparison on every edit.
+        guard !TextEquality.equal(current, sourceCode) else { return }
 
-        print("[EditorController] reconcileTextViewIfNeeded: view (len \(current.count)) != sourceCode (len \(sourceCode.count)); forcing full resync")
+        print("[EditorController] reconcileTextViewIfNeeded: view (len \(TextEquality.length(current))) != sourceCode (len \(TextEquality.length(sourceCode))); forcing full resync")
 
         let previousRange = textView.selectionManager.textSelections.first?.range
             ?? NSRange(location: (sourceCode as NSString).length, length: 0)
@@ -790,6 +815,9 @@ class EditorController: NSObject, ObservableObject {
         hasUnsavedChanges = false
         sourceCode = ""
         editorState = .init()
+        // The highlight grammar is chosen per document; drop the latch so the
+        // next file is judged on its own size rather than inheriting this one.
+        largeDocumentHighlighting = false
         // The count describes the document that was just closed; leaving it
         // would show it against the next window state in the status bar.
         wordCount = 0
@@ -906,7 +934,10 @@ class EditorController: NSObject, ObservableObject {
             if !isSyncingFromTextView { objectWillChange.send() }
         }
         didSet {
-            if sourceCode != oldValue {
+            // `TextEquality.equal` compares lengths before contents. Typing always
+            // changes the length, so this stays O(1) on a large document; a bare
+            // `sourceCode != oldValue` compared both multi-megabyte strings.
+            if !TextEquality.equal(sourceCode, oldValue) {
                 if cleanPDFURL != nil { cleanPDFURL = nil }
                 scheduleSourceCodeDidChange()
             }
@@ -1151,12 +1182,48 @@ class EditorController: NSObject, ObservableObject {
     /// Every other editable file asks `EditorFileTypes`: source code gets its own
     /// tree-sitter grammar (Python, JSON, XML, YAML, …), and plain text gets the
     /// no-grammar language so nothing is mis-colored.
+    ///
+    /// Optionally, very large Markdown/`.note` documents drop to plain text; see
+    /// ``largeDocumentHighlighting``.
     var highlightLanguage: CodeLanguage {
         guard let url = currentFileURL else { return .typst }
-        if EditorFileTypes.noteExtensions.contains(url.pathExtension.lowercased()) { return .note }
-        if EditorFileTypes.markdownExtensions.contains(url.pathExtension.lowercased()) { return .markdown }
+        let isNote = EditorFileTypes.noteExtensions.contains(url.pathExtension.lowercased())
+        let isMarkdown = EditorFileTypes.markdownExtensions.contains(url.pathExtension.lowercased())
+
+        // Plain text, not the Typst grammar, is the fallback for notes too. Measured at 1.6 MB while typing:
+        //
+        //                      CPU while typing (one core = 100%)
+        //   hybrid .note        82%
+        //   Typst grammar       52%   <- keeps a miscolored document and saves little
+        //   plain text           9%
+        if (isNote || isMarkdown), largeDocumentHighlighting { return .default }
+
+        if isNote { return .note }
+        if isMarkdown { return .markdown }
         if EditorFileTypes.isTypstFamily(url) { return .typst }
         return EditorFileTypes.syntax(for: url)?.language ?? .default
+    }
+
+    /// True when the user's size limit says this document should be shown as plain text.
+    ///
+    /// **Latched per document, never recomputed per keystroke.** The choice lives in a stored property set
+    /// when a document is loaded, because `SourceEditor` responds to a language change by re-highlighting the
+    /// entire document. Recomputing from live text length would send the whole file through a full re-highlight
+    /// every time an edit straddled the limit.
+    private(set) var largeDocumentHighlighting: Bool = false
+
+    /// Recomputes ``largeDocumentHighlighting`` for a freshly loaded document.
+    /// Call this only when the document changes (open, reload, restore), not on edits.
+    func updateLargeDocumentHighlighting(for contentLength: Int) {
+        let limit = GeneralSettingsManager.shared.markdownHighlightLimitKilochars
+        // `0` means "no limit": always use the full hybrid grammar.
+        let shouldSuppress = limit > 0 && contentLength > limit * 1000
+        if shouldSuppress != largeDocumentHighlighting {
+            largeDocumentHighlighting = shouldSuppress
+            // A language change only takes effect when `SourceEditor` reloads,
+            // which `objectWillChange` triggers for the views that read it.
+            objectWillChange.send()
+        }
     }
 
     /// Human-readable name of the current file's syntax, for the status bar
@@ -1392,27 +1459,15 @@ class EditorController: NSObject, ObservableObject {
         self.showStatus("File Loaded")
     }
 
-    /// `text` without leading and trailing whitespace and newlines, as a view into the original storage.
-    private static func trimmedView(_ text: String) -> Substring {
-        let whitespace = CharacterSet.whitespacesAndNewlines
-        let scalars = text.unicodeScalars
-        var start = scalars.startIndex
-        var end = scalars.endIndex
-        while start < end, whitespace.contains(scalars[start]) {
-            start = scalars.index(after: start)
-        }
-        while end > start, whitespace.contains(scalars[scalars.index(before: end)]) {
-            end = scalars.index(before: end)
-        }
-        return text[start..<end]
-    }
-
     func checkUnsavedChanges(currentContent: String) {
         // Normalize by trimming trailing whitespace/newlines to avoid SourceEditor auto-adjustments
         // from triggering a false "dirty" state immediately after load.
-        // This runs on every keystroke, so compare trimmed views instead of allocating
-        // two trimmed copies of the whole document.
-        let dirty = Self.trimmedView(currentContent) != Self.trimmedView(savedContent)
+        //
+        // This runs on every keystroke. `TextEquality` checks the trimmed
+        // lengths first, so typing — which always changes the document
+        // length — resolves in O(1) instead of comparing two 1.6 MB strings
+        // (~56 ms measured on a 250k-word document).
+        let dirty = !TextEquality.equalIgnoringSurroundingWhitespace(currentContent, savedContent)
         
         if self.hasUnsavedChanges != dirty {
             print("[DEBUG] EditorController(\(ObjectIdentifier(self))): checkUnsavedChanges changing to \(dirty) (prev=\(self.hasUnsavedChanges))")
@@ -1431,6 +1486,10 @@ class EditorController: NSObject, ObservableObject {
     }
     
     func restoreContent(_ content: String) {
+        // A restored document can be a different size than the one the highlight
+        // grammar was chosen for (recovery, AI rewrite), so re-evaluate before
+        // the text lands.
+        updateLargeDocumentHighlighting(for: content.utf16.count)
         self.sourceCode = content
         
         // Force update the underlying text view if available

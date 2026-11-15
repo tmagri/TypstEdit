@@ -158,7 +158,11 @@ public class LanguageLayer: Hashable {
                 }
                 wasLongParse = true
             }
-            newTree = DispatchQueue.waitMainIfNot { parser.parse(tree: tree, readBlock: readBlock) }
+            // Runs on the calling thread. This used to be wrapped in `DispatchQueue.waitMainIfNot`, which put every
+            // 50 ms parse slice of an "asynchronous" edit on the main thread because the read block needed the text
+            // storage. The read block now reads a thread-safe snapshot (see `TreeSitterTextSource`), so there is
+            // no reason to borrow the main thread.
+            newTree = parser.parse(tree: tree, readBlock: readBlock)
         }
 
         if wasLongParse {

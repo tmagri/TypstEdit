@@ -1,5 +1,6 @@
 import XCTest
 import CodeEditTextView
+import CodeEditLanguages
 @testable import CodeEditSourceEditor
 
 // swiftlint:disable all
@@ -15,6 +16,17 @@ final class TreeSitterClientTests: XCTestCase {
 
     override func tearDown() {
         TreeSitterClient.Constants.maxSyncContentLength = maxSyncContentLength
+    }
+
+    /// `state` is assigned on the executor, so reading it straight from the test thread is a data race. Going
+    /// through the executor serializes the read; `nil` means "not set up yet, or an operation is running".
+    static func stateSnapshot(_ client: TreeSitterClient) -> (language: TreeSitterLanguage?, layerCount: Int)? {
+        if case .success(let value) = client.executor.execSync({
+            client.state.map { ($0.primaryLayer.id as TreeSitterLanguage?, $0.layers.count) }
+        }) {
+            return value
+        }
+        return nil
     }
 
     @MainActor
@@ -39,7 +51,7 @@ final class TreeSitterClientTests: XCTestCase {
         let expectation = XCTestExpectation(description: "Setup occurs")
 
         Task.detached {
-            while client.state == nil {
+            while TreeSitterClientTests.stateSnapshot(client) == nil {
                 try await Task.sleep(for: .seconds(0.5))
             }
             expectation.fulfill()
@@ -47,8 +59,9 @@ final class TreeSitterClientTests: XCTestCase {
 
         await fulfillment(of: [expectation], timeout: 5.0)
 
-        let primaryLanguage = client.state?.primaryLayer.id
-        let layerCount = client.state?.layers.count
+        let snapshot = TreeSitterClientTests.stateSnapshot(client)
+        let primaryLanguage = snapshot?.language
+        let layerCount = snapshot?.layerCount
         XCTAssertEqual(primaryLanguage, .swift, "Client set up incorrect language")
         XCTAssertEqual(layerCount, 1, "Client set up too many layers")
     }
@@ -137,7 +150,7 @@ final class TreeSitterClientTests: XCTestCase {
         let finalSetupExpectation = XCTestExpectation(description: "Final setup should complete successfully.")
 
         Task.detached {
-            while client.state?.primaryLayer.id != .swift {
+            while TreeSitterClientTests.stateSnapshot(client)?.language != .swift {
                 try await Task.sleep(for: .seconds(0.5))
             }
             finalSetupExpectation.fulfill()
@@ -146,8 +159,9 @@ final class TreeSitterClientTests: XCTestCase {
         await fulfillment(of: [cancelledQuery, cancelledEdit, finalSetupExpectation], timeout: 5.0)
 
         // Ensure only the final setup's language is active
-        let primaryLanguage = client.state?.primaryLayer.id
-        let layerCount = client.state?.layers.count
+        let snapshot = TreeSitterClientTests.stateSnapshot(client)
+        let primaryLanguage = snapshot?.language
+        let layerCount = snapshot?.layerCount
         XCTAssertEqual(primaryLanguage, .swift, "Client set up incorrect language after re-setup.")
         XCTAssertEqual(layerCount, 1, "Client set up too many layers after re-setup.")
     }

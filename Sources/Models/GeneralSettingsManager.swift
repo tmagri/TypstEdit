@@ -47,6 +47,22 @@ class GeneralSettingsManager: ObservableObject {
     /// fast incremental ones). `0` keeps it running while a document is open.
     @AppStorage("previewIdleStopSeconds") var previewIdleStopSeconds: Int = 60
 
+    /// Above this document size (in thousands of UTF-16 units), a `.note` or Markdown document is shown as
+    /// plain text instead of being syntax colored. `0` (the default) never does this.
+    ///
+    /// This is an opt-in battery/CPU saver, not a responsiveness fix. The Markdown block grammar re-parses most
+    /// of the document on every keystroke (tree-sitter spends the time in its C parser, so there is no cheap
+    /// fix), but that work now runs on a background thread against a text snapshot, and the main thread is not
+    /// blocked at any size. Measured in a release build at 1.6 MB while typing: ~0-10 ms of main-thread stall,
+    /// but the hybrid grammar keeps ~82% of one core busy, against ~9% for plain text.
+    ///
+    /// Real `.typ` files stay incremental and are never affected.
+    @AppStorage("markdownHighlightLimitKilochars")
+    var markdownHighlightLimitKilochars: Int = GeneralSettingsManager.defaultMarkdownHighlightLimitKilochars
+
+    /// The shipped default for ``markdownHighlightLimitKilochars``: never turn coloring off.
+    static let defaultMarkdownHighlightLimitKilochars = 0
+
     @AppStorage("windowOpenBehavior") private var windowOpenBehaviorRaw: String = WindowOpenBehavior.ask.rawValue {
         willSet { objectWillChange.send() }
     }

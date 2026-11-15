@@ -52,4 +52,19 @@ extension TextView {
             return DispatchQueue.waitMainIfNot(workItem)
         }
     }
+
+    /// Like ``createReadBlock()``, but reads through a ``TreeSitterTextSource`` so a background operation that
+    /// holds a snapshot never has to touch the main thread.
+    func createReadBlock(source: TreeSitterTextSource) -> Parser.ReadBlock {
+        return { byteOffset, _ in
+            source.chunk(atByteOffset: byteOffset, maxLength: TreeSitterClient.Constants.charsToReadInBlock)
+        }
+    }
+
+    /// Like ``createReadCallback()``, but reads through a ``TreeSitterTextSource``.
+    func createReadCallback(source: TreeSitterTextSource) -> SwiftTreeSitter.Predicate.TextProvider {
+        return { range, _ in
+            source.string(in: range)
+        }
+    }
 }

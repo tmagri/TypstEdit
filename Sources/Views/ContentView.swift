@@ -1833,6 +1833,11 @@ struct ContentView: View {
                     
                     self.editorController.syncSavedContent(content)
                     self.editorController.noteDiskState(for: url)
+                    // Decide the highlight grammar once, for this document's
+                    // size. Must happen before `sourceCode` is set so the editor
+                    // is created with the right language; see
+                    // `updateLargeDocumentHighlighting`.
+                    self.editorController.updateLargeDocumentHighlighting(for: content.utf16.count)
                     // Freshly loaded content has an up-to-date (soon-to-be-built) preview.
                     self.editorController.previewStale = false
                     print("[DEBUG] loadFile: Updating sourceCode")
