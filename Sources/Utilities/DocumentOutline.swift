@@ -73,27 +73,46 @@ enum DocumentOutline {
         }
     }
 
-    /// The text `read_file` returns in outline mode.
-    static func render(_ text: String, label: String) -> String {
+    /// The text `read_file` or `get_outline` returns in outline mode.
+    static func render(_ text: String, label: String, startLine: Int? = nil, endLine: Int? = nil) -> String {
         let totalLines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n").count
         let all = entries(in: text)
-        let headingCount = all.filter { if case .heading = $0.kind { return true } else { return false } }.count
-        var output = "[outline of '\(label)' — \(totalLines) line\(totalLines == 1 ? "" : "s"), \(headingCount) heading\(headingCount == 1 ? "" : "s")]"
-        guard !all.isEmpty else {
-            return output + "\nNo headings or #include lines found. Read it with offset/limit instead."
+        let filtered: [Entry]
+        let rangeLabel: String
+        if startLine != nil || endLine != nil {
+            let start = startLine ?? 1
+            let end = endLine ?? totalLines
+            rangeLabel = " (lines \(start)–\(end))"
+            filtered = all.filter { entry in
+                let entryStart = entry.line
+                let entryEnd = entry.endLine ?? entry.line
+                return entryStart <= end && entryEnd >= start
+            }
+        } else {
+            rangeLabel = ""
+            filtered = all
         }
-        for entry in all.prefix(maxEntries) {
+
+        let headingCount = filtered.filter { if case .heading = $0.kind { return true } else { return false } }.count
+        let headerCountSuffix = (startLine != nil || endLine != nil) ? "total " : ""
+        var output = "[outline of '\(label)'\(rangeLabel) — \(totalLines) \(headerCountSuffix)line\(totalLines == 1 ? "" : "s"), \(headingCount) heading\(headingCount == 1 ? "" : "s")]"
+        guard !filtered.isEmpty else {
+            let note = (startLine != nil || endLine != nil) ? " in this range" : ""
+            return output + "\nNo headings or #include lines found\(note). Read it with offset/limit instead."
+        }
+        for entry in filtered.prefix(maxEntries) {
             if let end = entry.endLine {
                 output += "\n\(entry.line)-\(end): \(entry.text)"
             } else {
                 output += "\n\(entry.line): \(entry.text)"
             }
         }
-        if all.count > maxEntries {
-            output += "\n… \(all.count - maxEntries) more entries not shown"
+        if filtered.count > maxEntries {
+            output += "\n… \(filtered.count - maxEntries) more entries not shown"
         }
-        if let example = all.first(where: { $0.endLine != nil }), let end = example.endLine {
+        if let example = filtered.first(where: { $0.endLine != nil }), let end = example.endLine {
             output += "\nRead one section with read_file offset/limit from its line range — e.g. lines \(example.line)-\(end) are offset: \(example.line), limit: \(end - example.line + 1)."
+            output += "\nMove a section with move_lines — e.g. start_line: \(example.line), end_line: \(end), start_text: \"\(example.text)\"."
         } else {
             output += "\nRead the parts you need with read_file offset/limit."
         }

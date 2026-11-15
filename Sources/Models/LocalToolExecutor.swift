@@ -229,6 +229,7 @@ final class LocalToolExecutor {
     /// every new user turn by `beginRequest()` — a fresh turn means a fresh
     /// context, and the model must look at the file again.
     private var readFiles: [String: Date] = [:]
+    private var outlinedFiles: [String: Date] = [:]
 
     /// Status line for long-running tools (`import_pdf`), so the chat can
     /// show "Reading page 800 of 1550" instead of a silent spinner while a
@@ -239,6 +240,7 @@ final class LocalToolExecutor {
     /// Called by the chat manager at the start of each user turn.
     func beginRequest() {
         readFiles.removeAll()
+        outlinedFiles.removeAll()
         // A new turn is a new context: a skill the previous turn loaded must
         // be loadable again, since its body is no longer in the prompt.
         loadedSkillIDs.removeAll()
@@ -279,14 +281,30 @@ final class LocalToolExecutor {
             tools.append(MCPTool(
                 serverName: Self.namespace,
                 name: "read_file",
-                description: "Read a text file's contents, by path relative to the \(scope.noun) root. Files over \(defaultReadLineLimit) lines are returned in a window instead of all at once — the result tells you the total line count and, if truncated, which `offset` to pass next to keep reading. Prefer requesting a smaller `limit` for a quick look before pulling in the rest of a large file. To learn how a long document is organized, pass `outline: true` first: it returns only the headings, with the line range each section covers, and #include lines — one small call instead of paging through the whole file. A file must be read in the current request before you can edit or overwrite it (an outline doesn't count).",
+                description: "Read a text file's contents, by path relative to the \(scope.noun) root. Files over \(defaultReadLineLimit) lines are returned in a window instead of all at once — the result tells you the total line count and, if truncated, which `offset` to pass next to keep reading. Prefer requesting a smaller `limit` for a quick look before pulling in the rest of a large file. To learn how a long document is organized, pass `outline: true` first or call `get_outline`: it returns only the headings, with the line range each section covers, and #include lines — one small call instead of paging through the whole file. A file must be read in the current request before you can edit or overwrite it (an outline doesn't count for edit_file).",
                 inputSchema: [
                     "type": "object",
                     "properties": [
                         "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
                         "offset": ["type": "integer", "description": "1-based line number to start reading from. Omit to start at the top of the file."],
                         "limit": ["type": "integer", "description": "Maximum number of lines to return (default \(defaultReadLineLimit), capped at \(maxReadLineLimit))."],
-                        "outline": ["type": "boolean", "description": "Return the document's structure (headings with line ranges, #include lines) instead of its text. offset/limit are ignored. Default false."]
+                        "outline": ["type": "boolean", "description": "Return the document's structure (headings with line ranges, #include lines) instead of its text. offset/limit filter the range. Default false."]
+                    ],
+                    "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "get_outline",
+                description: "Get the structural outline of a Typst or Markdown document (headings, sections, line ranges, and #include lines). Returns each section's exact start line, end line, line count, and heading text. Use this to quickly navigate long documents, inspect a specific line range, or obtain the exact parameters (start_line, end_line, start_text) needed for move_lines to reorganize sections.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
+                        "start_line": ["type": "integer", "description": "1-based line number to start inspecting outline from. Omit to start from the top of the file."],
+                        "end_line": ["type": "integer", "description": "Last line number (inclusive) of the range to inspect outline. Omit to inspect through the end of the file."],
+                        "offset": ["type": "integer", "description": "Alternative to start_line (1-based line number)."],
+                        "limit": ["type": "integer", "description": "Number of lines from start_line/offset to inspect outline."]
                     ],
                     "required": ["path"]
                 ]
@@ -619,6 +637,7 @@ final class LocalToolExecutor {
         switch toolName {
         case "list_files": return try listFiles(arguments)
         case "read_file": return try readFile(arguments)
+        case "get_outline": return try getOutline(arguments)
         case "read_skill_file": return try readSkillFile(arguments)
         case "read_skill": return try readSkill(arguments)
         case "grep_project": return try await grepProject(arguments)
@@ -700,6 +719,26 @@ final class LocalToolExecutor {
                 maxLineLimit: maxReadLineLimit
             )
 
+        case "get_outline":
+            guard let path = arguments["path"] as? String else {
+                throw LocalToolError.invalidArguments("path is required")
+            }
+            let url = try resolvePath(path)
+            let startLine = Self.intValue(arguments["start_line"]) ?? Self.intValue(arguments["offset"])
+            var endLine = Self.intValue(arguments["end_line"])
+            if let limit = Self.intValue(arguments["limit"]) {
+                let start = startLine ?? 1
+                let computedEnd = start + max(1, limit) - 1
+                endLine = min(endLine ?? computedEnd, computedEnd)
+            }
+            return .getOutline(
+                url: url,
+                label: path,
+                startLine: startLine,
+                endLine: endLine,
+                maxBytes: maxScannableBytes
+            )
+
         case "grep_project":
             guard let root = scope.root else { throw LocalToolError.noScope }
             guard let pattern = arguments["pattern"] as? String, !pattern.isEmpty else {
@@ -766,10 +805,15 @@ final class LocalToolExecutor {
             let data = try Data(contentsOf: url)
             guard data.count <= maxBytes else { throw LocalToolError.fileTooLarge(label) }
             let fullText = TextFileEncoding.decode(data).text
-            // An outline shows structure, not the exact text edit_file needs
-            // to match, so it deliberately doesn't satisfy read-before-edit.
+            // An outline shows structure, but records read time so move_lines can operate.
             if outline {
-                return ReadOnlyToolOutcome(output: DocumentOutline.render(fullText, label: label))
+                let endLine = limit != nil ? (offset ?? 1) + max(1, limit!) - 1 : nil
+                return ReadOnlyToolOutcome(
+                    output: DocumentOutline.render(fullText, label: label, startLine: offset, endLine: endLine),
+                    readFilePath: url.standardizedFileURL.path,
+                    readFileDate: modificationDate(of: url),
+                    isOutlineOnly: true
+                )
             }
             return ReadOnlyToolOutcome(
                 output: windowed(
@@ -782,6 +826,20 @@ final class LocalToolExecutor {
                 ),
                 readFilePath: url.standardizedFileURL.path,
                 readFileDate: modificationDate(of: url)
+            )
+
+        case .getOutline(let url, let label, let startLine, let endLine, let maxBytes):
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw LocalToolError.fileNotFound(label)
+            }
+            let data = try Data(contentsOf: url)
+            guard data.count <= maxBytes else { throw LocalToolError.fileTooLarge(label) }
+            let fullText = TextFileEncoding.decode(data).text
+            return ReadOnlyToolOutcome(
+                output: DocumentOutline.render(fullText, label: label, startLine: startLine, endLine: endLine),
+                readFilePath: url.standardizedFileURL.path,
+                readFileDate: modificationDate(of: url),
+                isOutlineOnly: true
             )
 
         case .grep(let root, let pattern, let literal, let caseSensitive,
@@ -845,7 +903,11 @@ final class LocalToolExecutor {
     /// is main-actor state the runner cannot touch.
     func applyReadOnlyOutcome(_ outcome: ReadOnlyToolOutcome) {
         guard let path = outcome.readFilePath else { return }
-        readFiles[path] = outcome.readFileDate
+        if outcome.isOutlineOnly {
+            outlinedFiles[path] = outcome.readFileDate
+        } else {
+            readFiles[path] = outcome.readFileDate
+        }
     }
 
     /// Runs several read-only plans at once and returns their results keyed by
@@ -961,13 +1023,42 @@ final class LocalToolExecutor {
             throw LocalToolError.fileTooLarge(path)
         }
         let fullText = TextFileEncoding.decode(data).text
-        // An outline shows structure, not the exact text edit_file needs to
-        // match, so it deliberately doesn't satisfy read-before-edit.
+        // An outline shows structure, but records read time so move_lines can operate.
         if Self.boolValue(arguments["outline"]) == true {
-            return DocumentOutline.render(fullText, label: path)
+            let offset = Self.intValue(arguments["offset"])
+            let limit = Self.intValue(arguments["limit"])
+            let endLine = limit != nil ? (offset ?? 1) + max(1, limit!) - 1 : nil
+            outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+            return DocumentOutline.render(fullText, label: path, startLine: offset, endLine: endLine)
         }
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
         return Self.windowed(fullText, label: path, arguments: arguments, defaultLimit: defaultReadLineLimit, maxLimit: maxReadLineLimit)
+    }
+
+    private func getOutline(_ arguments: [String: Any]) throws -> String {
+        guard let path = arguments["path"] as? String else {
+            throw LocalToolError.invalidArguments("path is required")
+        }
+        let url = try resolvePath(path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw LocalToolError.fileNotFound(path)
+        }
+        let data = try Data(contentsOf: url)
+        guard data.count <= maxScannableBytes else {
+            throw LocalToolError.fileTooLarge(path)
+        }
+        let fullText = TextFileEncoding.decode(data).text
+        outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+
+        let startLine = Self.intValue(arguments["start_line"]) ?? Self.intValue(arguments["offset"])
+        var endLine = Self.intValue(arguments["end_line"])
+        if let limit = Self.intValue(arguments["limit"]) {
+            let start = startLine ?? 1
+            let computedEnd = start + max(1, limit) - 1
+            endLine = min(endLine ?? computedEnd, computedEnd)
+        }
+
+        return DocumentOutline.render(fullText, label: path, startLine: startLine, endLine: endLine)
     }
 
     private nonisolated static func boolValue(_ any: Any?) -> Bool? {
@@ -1332,7 +1423,13 @@ final class LocalToolExecutor {
     /// is a partial change, that it hasn't been touched on disk since).
     private func requireFreshRead(of url: URL, path: String, tool: String) throws {
         let key = url.standardizedFileURL.path
-        guard let readAt = readFiles[key] else {
+        let readAt: Date?
+        if tool == "move_lines" {
+            readAt = readFiles[key] ?? outlinedFiles[key]
+        } else {
+            readAt = readFiles[key]
+        }
+        guard let readAt else {
             throw LocalToolError.fileNotReadYet(path, tool: tool)
         }
         if let current = Self.modificationDate(of: url), current != readAt {
@@ -1462,18 +1559,27 @@ final class LocalToolExecutor {
         try requireFreshRead(of: url, path: path, tool: "move_lines")
 
         let data = try Data(contentsOf: url)
-        // The approval shows a whole-file diff, so the same cap as write_file.
-        guard data.count <= maxReadableBytes else { throw LocalToolError.fileTooLarge(path) }
+        guard data.count <= maxScannableBytes else { throw LocalToolError.fileTooLarge(path) }
         let decoded = TextFileEncoding.decode(data)
         let usesCRLF = decoded.text.contains("\r\n")
         let normalized = decoded.text.replacingOccurrences(of: "\r\n", with: "\n")
         let moved = try Self.movingLines(in: normalized, start: start, end: end, before: before, startText: startText)
 
-        let approved = await requestApproval(.fileWrite(
+        var lines = normalized.components(separatedBy: "\n")
+        if normalized.hasSuffix("\n") { lines.removeLast() }
+        let blockSnippet: String
+        if start >= 1 && end >= start && end <= lines.count {
+            blockSnippet = lines[(start - 1)...(end - 1)].joined(separator: "\n")
+        } else {
+            blockSnippet = startText
+        }
+
+        let approved = await requestApproval(.fileMoveLines(
             relativePath: path,
-            oldContent: normalized,
-            newContent: moved.text,
-            isNewFile: false
+            startLine: start,
+            endLine: end,
+            beforeLine: before,
+            movedSnippet: blockSnippet
         ))
         guard approved else { throw LocalToolError.approvalDenied }
 

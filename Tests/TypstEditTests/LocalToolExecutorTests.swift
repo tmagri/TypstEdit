@@ -161,6 +161,55 @@ final class LocalToolExecutorTests: XCTestCase {
         await assertThrows({ if case .fileTooLarge = $0 { return true }; return false }) {
             try await self.run("write_file", ["path": "huge.typ", "content": "gone"])
         }
+
+        // move_lines is allowed up to maxScannableBytes (10 MB), so a 600 KB file moves successfully.
+        let moved = try await run("move_lines", [
+            "path": "huge.typ", "start_line": 1, "end_line": 2, "before_line": 5, "start_text": "1: \(filler)"
+        ])
+        XCTAssertTrue(moved.contains("Moved lines 1-2"), moved)
+    }
+
+    func testMoveLinesRequestsFileMoveLinesApproval() async throws {
+        try write("doc.typ", "line 1\nline 2\nline 3\nline 4\n")
+        _ = try await run("read_file", ["path": "doc.typ"])
+        var seenApproval: PendingApprovalKind?
+        _ = try await executor.execute(toolName: "move_lines", arguments: [
+            "path": "doc.typ", "start_line": 1, "end_line": 2, "before_line": 5, "start_text": "line 1"
+        ]) { kind in
+            seenApproval = kind
+            return true
+        }
+        guard case .fileMoveLines(let path, let start, let end, let before, let snippet)? = seenApproval else {
+            return XCTFail("Expected .fileMoveLines approval, got \(String(describing: seenApproval))")
+        }
+        XCTAssertEqual(path, "doc.typ")
+        XCTAssertEqual(start, 1)
+        XCTAssertEqual(end, 2)
+        XCTAssertEqual(before, 5)
+        XCTAssertEqual(snippet, "line 1\nline 2")
+    }
+
+    func testGetOutlineReturnsStructureAndSatisfiesMoveLines() async throws {
+        let content = "= Heading 1\nbody 1\n= Heading 2\nbody 2\n= Heading 3\nbody 3\n"
+        try write("notes.typ", content)
+
+        // get_outline for entire file
+        let fullOutline = try await run("get_outline", ["path": "notes.typ"])
+        XCTAssertTrue(fullOutline.contains("1-2: = Heading 1"))
+        XCTAssertTrue(fullOutline.contains("3-4: = Heading 2"))
+        XCTAssertTrue(fullOutline.contains("= Heading 3"))
+
+        // get_outline with range
+        let rangedOutline = try await run("get_outline", ["path": "notes.typ", "start_line": 3, "end_line": 4])
+        XCTAssertTrue(rangedOutline.contains("3-4: = Heading 2"))
+        XCTAssertFalse(rangedOutline.contains("= Heading 3"))
+
+        // get_outline satisfies read requirement for move_lines without extra read_file
+        let moveOut = try await run("move_lines", [
+            "path": "notes.typ", "start_line": 5, "end_line": 6, "before_line": 1, "start_text": "= Heading 3"
+        ])
+        XCTAssertTrue(moveOut.contains("Moved lines 5-6"))
+        XCTAssertTrue(try read("notes.typ").hasPrefix("= Heading 3"))
     }
 
     // MARK: - Read-before-edit invariant

@@ -25,6 +25,14 @@ enum ReadOnlyToolPlan: Sendable {
         defaultLineLimit: Int,
         maxLineLimit: Int
     )
+    /// `get_outline`. `url` is already resolved and checked against the scope.
+    case getOutline(
+        url: URL,
+        label: String,
+        startLine: Int?,
+        endLine: Int?,
+        maxBytes: Int
+    )
     /// `grep_project`. The pattern is carried as a string and recompiled in
     /// the runner, because `NSRegularExpression` is a non-`Sendable` class;
     /// it is validated at parse time so an invalid pattern still fails fast.
@@ -65,11 +73,13 @@ struct ReadOnlyToolOutcome: Sendable {
     /// count — an outline, a grep, a failure.
     var readFilePath: String?
     var readFileDate: Date?
+    var isOutlineOnly: Bool
 
-    init(output: String, readFilePath: String? = nil, readFileDate: Date? = nil) {
+    init(output: String, readFilePath: String? = nil, readFileDate: Date? = nil, isOutlineOnly: Bool = false) {
         self.output = output
         self.readFilePath = readFilePath
         self.readFileDate = readFileDate
+        self.isOutlineOnly = isOutlineOnly
     }
 }
 

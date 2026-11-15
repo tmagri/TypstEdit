@@ -114,6 +114,10 @@ enum PendingApprovalKind {
     /// A precise `edit_file` replacement: the snippets that matched, not the
     /// whole file, so the diff preview stays readable on a huge document.
     case fileEdit(relativePath: String, oldSnippet: String, newSnippet: String, occurrences: Int)
+    /// A block of lines moved within the same file by `move_lines`. Shows the
+    /// lines being moved and where they are placed, keeping the approval card
+    /// fast on large documents without diffing the whole file.
+    case fileMoveLines(relativePath: String, startLine: Int, endLine: Int, beforeLine: Int, movedSnippet: String)
     /// A Python tool run. `wantsElevation` is the executor's detection of
     /// sudo / administrator-privilege use in the code — it drives the red
     /// elevated-privileges warning on the approval card, and it keeps these

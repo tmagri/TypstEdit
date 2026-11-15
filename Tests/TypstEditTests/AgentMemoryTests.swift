@@ -416,6 +416,15 @@ final class DocumentOutlineTests: XCTestCase {
         XCTAssertTrue(rendered.hasPrefix("[outline of 'notes.txt' — 2 lines, 0 headings]"))
         XCTAssertTrue(rendered.contains("No headings"))
     }
+
+    func testRenderWithLineRange() {
+        let text = "= Section 1\nline 2\n= Section 2\nline 4\nline 5\n= Section 3\nline 7"
+        let rendered = DocumentOutline.render(text, label: "doc.typ", startLine: 3, endLine: 5)
+        let lines = rendered.components(separatedBy: "\n")
+        XCTAssertEqual(lines[0], "[outline of 'doc.typ' (lines 3–5) — 7 total lines, 1 heading]")
+        XCTAssertEqual(lines[1], "3-5: = Section 2")
+        XCTAssertTrue(rendered.contains("move_lines"))
+    }
 }
 
 @MainActor

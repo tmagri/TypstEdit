@@ -1352,6 +1352,24 @@ struct AIChatView: View {
                 diffPreview(old: oldSnippet, new: newSnippet)
                     .frame(maxHeight: 180)
 
+            case .fileMoveLines(let path, let startLine, let endLine, let beforeLine, let movedSnippet):
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.up.and.down.text.horizontal").foregroundColor(.orange)
+                    let count = endLine - startLine + 1
+                    Text("Move \(count) line\(count == 1 ? "" : "s") (lines \(startLine)–\(endLine)) before line \(beforeLine) in '\(path)'?")
+                        .font(.subheadline.bold())
+                }
+                ScrollView {
+                    Text(movedSnippet)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                }
+                .frame(maxHeight: 180)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+
             case .webFetch(let urlString):
                 HStack(spacing: 6) {
                     Image(systemName: "globe").foregroundColor(.orange)

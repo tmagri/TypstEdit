@@ -53,6 +53,10 @@ enum ToolAliases {
         "ls": "list_files",
         "list_directory": "list_files",
         "find": "list_files",
+        // Outline.
+        "outline": "get_outline",
+        "document_outline": "get_outline",
+        "file_outline": "get_outline",
         // Task lists.
         "todo_write": "update_plan",
         "todowrite": "update_plan",
