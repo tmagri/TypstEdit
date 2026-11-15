@@ -69,6 +69,18 @@ enum ToolAliases {
         "validate_references": "check_references",
         "check_labels": "check_references",
         "find_broken_references": "check_references",
+        // Writing tools.
+        "lint_prose": "check_writing",
+        "ste_lint": "check_writing",
+        "check_style": "check_writing",
+        "style_check": "check_writing",
+        "check_prose": "check_writing",
+        "find_duplicates": "find_repetition",
+        "detect_duplicates": "find_repetition",
+        "find_repeats": "find_repetition",
+        "duplicate_check": "find_repetition",
+        "merge_section": "merge_sections",
+        "combine_sections": "merge_sections",
         // Task lists.
         "todo_write": "update_plan",
         "todowrite": "update_plan",

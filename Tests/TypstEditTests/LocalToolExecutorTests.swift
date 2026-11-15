@@ -396,6 +396,134 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(out.contains("Some may be citations"), out)
     }
 
+    // MARK: - Writing tools
+
+    func testEditFileReportsLostFacts() async throws {
+        try write("notes.md", "We tested 1,240 mugs and none of the samples passed the scratch test.\n")
+        _ = try await run("read_file", ["path": "notes.md"])
+        let out = try await run("edit_file", [
+            "path": "notes.md",
+            "old_string": "We tested 1,240 mugs and none of the samples passed the scratch test.",
+            "new_string": "We tested many mugs and the samples passed the scratch test."
+        ])
+        XCTAssertTrue(out.contains("⚠️ Fact check"), out)
+        XCTAssertTrue(out.contains("number 1,240"), out)
+        XCTAssertTrue(out.contains("\"none\" gone"), out)
+    }
+
+    func testEditFileConfirmsKeptFactsAndSkipsCode() async throws {
+        try write("notes.md", "The press runs at 200 degrees for 180 seconds.\n")
+        _ = try await run("read_file", ["path": "notes.md"])
+        let prose = try await run("edit_file", [
+            "path": "notes.md",
+            "old_string": "The press runs at 200 degrees for 180 seconds.",
+            "new_string": "The press heats to 200 degrees and runs for 180 seconds."
+        ])
+        XCTAssertTrue(prose.contains("✓ Fact check"), prose)
+
+        try write("code.typ", "#set page(margin: 2cm)\n")
+        _ = try await run("read_file", ["path": "code.typ"])
+        let code = try await run("edit_file", ["path": "code.typ", "old_string": "2cm", "new_string": "3cm"])
+        XCTAssertFalse(code.contains("Fact check"), code)
+    }
+
+    func testCheckWritingToolBySection() async throws {
+        try write("guide.md", "# Setup\nYou should simply leverage the robust installer.\n\n# Usage\nRun the tool.\n")
+        let out = try await run("check_writing", ["path": "guide.md", "section": "Setup"])
+        XCTAssertTrue(out.hasPrefix("[writing check of # Setup in 'guide.md'"), out)
+        XCTAssertTrue(out.contains("Weak modal"), out)
+        XCTAssertTrue(out.contains("Hype or filler word (3)"), out)
+        XCTAssertFalse(out.contains("Run the tool"), out)
+    }
+
+    func testFindRepetitionToolFindsCopiedSection() async throws {
+        executor.embeddingProviderOverride = UnavailableEmbeddingProvider()
+        let paragraph = "Sublimation printing transfers dye from coated paper onto a polymer coated ceramic mug under heat and pressure."
+        try write("a.typ", "= Intro\n\(paragraph)\n")
+        try write("b.typ", "= Appendix\n\(paragraph)\n")
+        let out = try await run("find_repetition", [:])
+        XCTAssertTrue(out.contains("Copied passages (1)"), out)
+        XCTAssertTrue(out.contains("a.typ:2-2 in = Intro ≈ b.typ:2-2 in = Appendix"), out)
+        XCTAssertTrue(out.contains("Same-meaning check skipped: no embedding model reachable"), out)
+    }
+
+    func testFindRepetitionToolFindsSameMeaning() async throws {
+        executor.embeddingProviderOverride = TopicEmbeddingProvider()
+        try write("shop.typ", """
+        = Care
+        Put the mug in the dishwasher on a gentle wash and the print will not fade for years.
+
+        Our coffee range comes in four sizes and two glazes for every kind of kitchen.
+
+        = Notes
+        A gentle dishwasher wash keeps the colours from fading over many cycles of use.
+        """)
+        let out = try await run("find_repetition", ["path": "shop.typ", "min_similarity": 0.9])
+        XCTAssertTrue(out.contains("Same meaning, different words (1)"), out)
+        XCTAssertTrue(out.contains("shop.typ:2-2 in = Care ~ shop.typ:7-7 in = Notes"), out)
+    }
+
+    private let mergeDoc = """
+    = Report
+    == Results <results>
+    Supplier A averaged a colour error of 2.1. Supplier B averaged 3.8 and looked too warm.
+
+    == Findings <findings>
+    Supplier A averaged a colour error of 2.1 in the trial. Supplier B mugs faded after 30 dishwasher cycles.
+
+    == Summary
+    See @findings.
+
+    """
+
+    func testMergeSectionsPlanThenApply() async throws {
+        try write("r.typ", mergeDoc)
+        let plan = try await run("merge_sections", ["path": "r.typ", "keep": "Results", "remove": "Findings"])
+        XCTAssertTrue(plan.contains("Dropped — already said with the same facts (1)"), plan)
+        XCTAssertTrue(plan.contains("Added word for word (1)"), plan)
+        XCTAssertTrue(plan.contains("will point to <results>"), plan)
+        XCTAssertEqual(try read("r.typ"), mergeDoc, "the plan must not write")
+
+        let out = try await run("merge_sections", ["path": "r.typ", "keep": "Results", "remove": "Findings", "apply": true])
+        XCTAssertTrue(out.contains("extractive"), out)
+        XCTAssertTrue(out.contains("Pointed 1 reference"), out)
+        XCTAssertTrue(out.contains("✓ Fact check"), out)
+        XCTAssertEqual(try read("r.typ"), """
+        = Report
+        == Results <results>
+        Supplier A averaged a colour error of 2.1. Supplier B averaged 3.8 and looked too warm.
+
+        Supplier B mugs faded after 30 dishwasher cycles.
+
+        == Summary
+        See @results.
+
+        """)
+    }
+
+    func testMergeSectionsRefusesConflictsUntilResolved() async throws {
+        let conflicting = mergeDoc.replacingOccurrences(of: "2.1 in the trial", with: "2.4 in the trial")
+        try write("r.typ", conflicting)
+        _ = try await run("merge_sections", ["path": "r.typ", "keep": "Results", "remove": "Findings"])
+        await assertThrows({ error in
+            if case .invalidArguments(let message) = error { return message.contains("disagree in 1 place") }
+            return false
+        }) {
+            try await self.run("merge_sections", ["path": "r.typ", "keep": "Results", "remove": "Findings", "apply": true])
+        }
+        XCTAssertEqual(try read("r.typ"), conflicting)
+
+        // The model resolves it with its own text; the fact check sees the
+        // dropped 2.4 and says so.
+        let out = try await run("merge_sections", [
+            "path": "r.typ", "keep": "Results", "remove": "Findings",
+            "merged_text": "Supplier A averaged a colour error of 2.1. Supplier B averaged 3.8, looked too warm, and faded after 30 dishwasher cycles."
+        ])
+        XCTAssertTrue(out.contains("⚠️ Fact check"), out)
+        XCTAssertTrue(out.contains("number 2.4"), out)
+        XCTAssertFalse(try read("r.typ").contains("== Findings"))
+    }
+
     // MARK: - Read-before-edit invariant
 
     func testEditRequiresPriorRead() async throws {

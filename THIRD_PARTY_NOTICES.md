@@ -27,6 +27,7 @@ the license text itself (collected at the end of this file).
 | MathLive (`mathlive.min.js`) | Equation editor (vendored JS) | MIT |
 | tex2typst (`tex2typst.min.js`) | LaTeX↔Typst math conversion (vendored JS) | Apache 2.0 |
 | LLMLingua-2 model | Optional AI compression model | Apache 2.0 |
+| SimpleEnglish rules (`ste_lint.py`, `slop.tsv`) | Rules and word list ported into the writing checker | MIT |
 | SwiftLintPlugin, `llmlingua`/`torch`/`transformers`/`coremltools` | Build/development tools only, **never shipped** | MIT / (varies) |
 
 ---
@@ -156,6 +157,15 @@ Converts LaTeX math to Typst math.
   2023). Those dataset licenses govern the datasets, not these model
   weights; listed here for completeness.
 
+## SimpleEnglish writing rules
+
+`Sources/Utilities/WritingChecker.swift` ports the mechanical rule patterns
+of `evals/ste_lint.py` and the hype-word list `evals/slop.tsv` from
+[AminBlg/SimpleEnglish](https://github.com/AminBlg/SimpleEnglish),
+© 2026 AminBlg, **MIT License** (full text at the end of this file). The
+patterns were adapted to Typst and Markdown sources. No ASD-STE100
+dictionary content is included.
+
 ## Development-only components (not distributed)
 
 **SwiftLintPlugin** (MIT, © 2022 Lukas Pistrol) is a SwiftPM build plugin
@@ -165,6 +175,32 @@ the Core ML model never reaches the app bundle.
 ---
 
 # License Texts
+
+## MIT License (SimpleEnglish — © 2026 AminBlg)
+
+```text
+MIT License
+
+Copyright (c) 2026 AminBlg
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## MIT License (CodeEditSourceEditor — © 2022 CodeEdit; CodeEditTextView — © 2023 CodeEdit)
 

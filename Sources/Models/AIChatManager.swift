@@ -1084,6 +1084,7 @@ final class AIChatManager: ObservableObject {
         - For a finished document or handoff package, use the export tools instead of Python: export_document compiles to PDF/PNG/SVG, export_markdown writes a .md copy with the editor's own converter, create_folder makes a delivery folder, and copy_files gathers related files/evidence into it in one approved batch. A typical request ("make a deploy folder with the PDF, a Markdown copy and related evidence") is: create_folder, export_document, export_markdown, then copy_files for the evidence — all inside the current scope.
         - Use grep_project for exact lookups (a symbol, a phrase, a heading) before reading whole files, and read_file's offset/limit to page through a large document instead of pulling it in at once.
         - To restructure, reorganize or review a long document, work in this order: (1) call get_outline, or skim_outline for a short preview of each section, to map it — find_section finds the section about a topic when you don't know its heading; (2) write the target structure into update_plan, one item per section or move; (3) move whole sections (into an appendix, for example) with move_lines by heading name — section: "Results", after_section: "Discussion" — which stays correct after earlier moves; with line numbers instead, work from the bottom of the file up; (4) read a section with read_file section: "…" and edit it; (5) check that the compile result is clean, and run check_references after moving sections or renaming labels. Don't page through a whole long file just to learn how it's organized.
+        - To improve or simplify prose: write, then run check_writing on the file (or section) and fix what it lists. After each prose edit, read the "Fact check" line in the result: it lists numbers, references, names and negations your rewrite lost or added — restore any loss you did not intend. To clean up repeated content, run find_repetition, then combine two repeated sections with merge_sections (plan first, then merged_text) instead of rewriting both by hand.
         - Use evaluate_math for exact or approximate math. It returns plain text and Typst math. Do not use Python for arithmetic or algebra.
         - For a job with several distinct steps, call update_plan first and keep it current. The plan must cover the whole request — every file and part the user mentions, not only the first one. When a CURRENT PLAN is shown below, continue from it rather than starting over.
         - If you can't finish everything in this reply, end with what is done and what is still left (for example, a file you didn't get to), so the user can ask you to continue.
@@ -2100,7 +2101,7 @@ final class AIChatManager: ObservableObject {
     /// and `convert_markdown_to_typst` (both pure in-memory checks, which a
     /// plan needs to verify proposed snippets), stay available.
     nonisolated static let planModeBlockedLocalToolNames: Set<String> = [
-        "edit_file", "move_lines", "write_file", "apply_patch",
+        "edit_file", "move_lines", "merge_sections", "write_file", "apply_patch",
         "export_document", "export_markdown", "copy_files", "create_folder",
         "import_pdf",
     ]
@@ -2847,7 +2848,7 @@ final class AIChatManager: ObservableObject {
     /// are added separately, only while the Git opt-in is on.
     static let subagentReadOnlyToolNames: Set<String> = [
         "list_files", "read_file", "get_outline", "skim_outline", "find_section", "check_references",
-        "grep_project", "search_project",
+        "check_writing", "find_repetition", "grep_project", "search_project",
         "read_skill_file", "web_fetch", CalculatorTool.name
     ]
 

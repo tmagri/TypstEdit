@@ -356,6 +356,50 @@ final class LocalToolExecutor {
             ))
             tools.append(MCPTool(
                 serverName: Self.namespace,
+                name: "check_writing",
+                description: "Check prose against the mechanical rules of Simplified Technical English (ASD-STE100, as in the simple-english skill): sentences over 20 words (instructions) or 25 (descriptions), conditions after the command, passive voice, should/would/may/might/could, perfect tenses, \", making…\" clauses, contractions, semicolons, dashes, e.g./i.e., hype words (with the plain word to use), several words for one meaning, one term spelled several ways, acronyms not spelled out. Every hit has its line; the worst sections are listed first. Exact, on-device, free. Run it after writing or rewriting prose, then fix the hits. Non-English paragraphs get the language-neutral checks only.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "The .typ or .md file to check."],
+                        "section": Self.sectionArgumentSchema("Check only this section."),
+                        "type": ["type": "string", "enum": ["auto", "procedural", "descriptive"], "description": "Sentence length limit: procedural = 20 words, descriptive = 25, auto (default) = 20 for sentences that start with a verb, else 25."]
+                    ],
+                    "required": ["path"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "find_repetition",
+                description: "Find content written twice in one file or the whole \(scope.noun): copied passages (same wording, maybe slightly changed — runs of paragraphs reported as one repeated section), paragraphs that say the same thing in other words (with the embedding model set for the project index), repeated sentences, repeated headings and doubled words. Each hit gives file:line and its section. Combine two repeated sections with merge_sections.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Optional: check only this file. Omit to check every .typ and .md file."],
+                        "meaning": ["type": "boolean", "description": "Also look for the same meaning in different words (default true; needs an embedding model)."],
+                        "min_similarity": ["type": "number", "description": "Optional: similarity (0–1) from which two paragraphs count as the same meaning. Default: set from the embedding model's own scale."]
+                    ]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
+                name: "merge_sections",
+                description: "Merge two sections that repeat each other into one, without losing facts and without rewriting: the kept text stays as written, sentences of the removed section that say the same thing with the same facts are dropped, new ones are inserted word for word next to the most related sentence, and figures/tables/code move whole. Step 1 — call with path, keep and remove (heading names): returns the plan (dropped, added, conflicts where the two disagree on a fact) and the merged body. Step 2 — call again with apply: true to write it, or with merged_text (your edited body, without the heading) to smooth the joins or resolve conflicts. The removed section's label keeps working, the user approves the diff, and every number, reference, name and negation of both sections is checked.",
+                inputSchema: [
+                    "type": "object",
+                    "properties": [
+                        "path": ["type": "string", "description": "Path relative to the \(scope.noun) root"],
+                        "keep": Self.sectionArgumentSchema("The section that stays (its heading and position are kept)."),
+                        "remove": Self.sectionArgumentSchema("The section merged into it and then deleted."),
+                        "apply": ["type": "boolean", "description": "Step 2: write the merged body from the plan as it is."],
+                        "keep_both": ["type": "boolean", "description": "With apply: keep both versions of each conflicting statement side by side."],
+                        "merged_text": ["type": "string", "description": "Step 2, instead of apply: your edited merged body of the kept section, without its heading line."]
+                    ],
+                    "required": ["path", "keep", "remove"]
+                ]
+            ))
+            tools.append(MCPTool(
+                serverName: Self.namespace,
                 name: "grep_project",
                 description: "Search file contents for a literal string or regular expression and return matching lines with their file and line number. Case-insensitive by default. Use this for exact lookups (a symbol, a phrase, a tag) — prefer it over search_project for anything you can spell exactly, and over reading a whole file to find one line. Skips binary files, hidden folders, and build/backup directories.",
                 inputSchema: [
@@ -689,6 +733,9 @@ final class LocalToolExecutor {
         case "skim_outline": return try await skimOutline(arguments)
         case "find_section": return try await findSection(arguments)
         case "check_references": return try await checkReferences(arguments)
+        case "check_writing": return try await checkWriting(arguments)
+        case "find_repetition": return try await findRepetition(arguments)
+        case "merge_sections": return try await mergeSections(arguments, requestApproval: requestApproval)
         case "read_skill_file": return try readSkillFile(arguments)
         case "read_skill": return try readSkill(arguments)
         case "grep_project": return try await grepProject(arguments)
@@ -1199,7 +1246,7 @@ final class LocalToolExecutor {
             await compressor.compress(
                 lead,
                 keepRate: keepRate,
-                forceTokens: Self.skimForceTokens,
+                forceTokens: Self.skimForceTokens(for: lead),
                 isCode: PromptCompression.codeRatio(lead) > 0.3
             )
         }
@@ -1219,6 +1266,14 @@ final class LocalToolExecutor {
             + contractions.map { $0.replacingOccurrences(of: "'", with: "\u{2019}") }
     }()
 
+    /// The negations to protect in one section lead: the English list, or
+    /// the word list of the lead's language ("nicht", "pas", "nunca").
+    nonisolated static func skimForceTokens(for lead: String) -> [String] {
+        let language = ProseLanguage.detect(lead) ?? .english
+        if language == .english { return skimForceTokens }
+        return ProseLanguage.pack(for: language).map { Array($0.negations) } ?? []
+    }
+
     // MARK: - find_section
 
     /// Most sections one `find_section` call scores.
@@ -1235,70 +1290,106 @@ final class LocalToolExecutor {
     /// Replaces the Settings embedding model. For tests only.
     var embeddingProviderOverride: EmbeddingProvider?
 
-    private func findSection(_ arguments: [String: Any]) async throws -> String {
-        guard let root = scope.root else { throw LocalToolError.noScope }
-        guard let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
-            throw LocalToolError.invalidArguments("query is required — describe the section in plain words.")
-        }
-        let limit = min(max(Self.intValue(arguments["max_results"]) ?? 8, 1), 20)
+    /// One batch of embeddings from the model set for the project index.
+    struct EmbeddingRun {
+        /// Vector per requested text that could be embedded (cached or new).
+        let vectors: [String: [Float]]
+        /// False when the model could not be reached at all.
+        let reachable: Bool
+        let isAppleBuiltIn: Bool
+        /// For messages: "nomic-embed-text".
+        let modelName: String
+        /// Texts left for a later call by `limit`.
+        let pending: Int
+        let provider: EmbeddingProvider
+        let modelKey: String
+    }
 
-        let files: [(relative: String, text: String)]
-        if let path = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+    /// Embeds `texts` with the embedding model the project index uses
+    /// (Settings → embedding), which separates meaning far better than
+    /// Apple's built-in one. Vectors are cached per model, so repeat calls
+    /// over an unchanged project embed nothing new. At most `limit` uncached
+    /// texts are embedded per call, in the order given — put what matters
+    /// most (a query) first.
+    private func embedWithCache(_ texts: [String], limit: Int = maxSectionsEmbeddedPerCall) async -> EmbeddingRun {
+        let provider = embeddingProviderOverride ?? RAGManager.makeActiveProvider()
+        let fingerprint = RAGManager.activeFingerprint(dimensions: provider.dimensions)
+        let modelKey = embeddingProviderOverride == nil ? "\(fingerprint.source)|\(fingerprint.model)|\(fingerprint.endpoint)" : "override"
+        func cacheKey(_ text: String) -> String { modelKey + "\n" + text }
+
+        var seen = Set<String>()
+        let unseen = texts.filter { sectionVectorCache[cacheKey($0)] == nil && seen.insert($0).inserted }
+        let missing = Array(unseen.prefix(limit))
+        var reachable = true
+        if !missing.isEmpty {
+            let embedded = await Task.detached(priority: .userInitiated) {
+                await EmbeddingBatcher.embed(missing, with: provider)
+            }.value
+            reachable = embedded.contains { $0 != nil }
+            if sectionVectorCache.count + missing.count > Self.maxSectionVectorCache {
+                sectionVectorCache.removeAll()
+            }
+            for (text, vector) in zip(missing, embedded) {
+                if let vector { sectionVectorCache[cacheKey(text)] = vector }
+            }
+        }
+        var vectors: [String: [Float]] = [:]
+        for text in texts { vectors[text] = sectionVectorCache[cacheKey(text)] }
+        return EmbeddingRun(
+            vectors: vectors,
+            reachable: reachable && !vectors.isEmpty,
+            isAppleBuiltIn: provider is LocalEmbeddingProvider,
+            modelName: fingerprint.model.isEmpty ? fingerprint.source : fingerprint.model,
+            pending: unseen.count - missing.count,
+            provider: provider,
+            modelKey: modelKey
+        )
+    }
+
+    /// One file (`path`) or every file with `extensions` in the scope, as
+    /// scope-relative paths and text.
+    private func scopeFiles(path: String?, extensions: Set<String>) async throws -> [(relative: String, text: String)] {
+        guard let root = scope.root else { throw LocalToolError.noScope }
+        if let path = path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
             let url = try resolvePath(path)
             guard FileManager.default.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
             let data = try Data(contentsOf: url)
             guard data.count <= maxScannableBytes else { throw LocalToolError.fileTooLarge(path) }
-            files = [(path, TextFileEncoding.decode(data).text)]
-        } else {
-            let excluded = Self.excludedDirectories
-            files = await Task.detached(priority: .userInitiated) {
-                Self.projectTextFiles(root: root, extensions: ["typ", "md", "markdown"], excluded: excluded)
-            }.value
+            return [(path, TextFileEncoding.decode(data).text)]
         }
+        let excluded = Self.excludedDirectories
+        return await Task.detached(priority: .userInitiated) {
+            Self.projectTextFiles(root: root, extensions: extensions, excluded: excluded)
+        }.value
+    }
+
+    private func findSection(_ arguments: [String: Any]) async throws -> String {
+        guard let query = (arguments["query"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+            throw LocalToolError.invalidArguments("query is required — describe the section in plain words.")
+        }
+        let limit = min(max(Self.intValue(arguments["max_results"]) ?? 8, 1), 20)
+        let files = try await scopeFiles(path: arguments["path"] as? String, extensions: ["typ", "md", "markdown"])
 
         let candidates = Array(files.flatMap { SectionFinder.candidates(in: $0.text, path: $0.relative) }
             .prefix(Self.maxSectionCandidates))
 
-        // The embedding model the project index uses (Settings → embedding):
-        // a configured model separates meaning far better than Apple's
-        // built-in one. Vectors are cached per model, so a repeat search
-        // over an unchanged project embeds only the query.
-        let provider = embeddingProviderOverride ?? RAGManager.makeActiveProvider()
-        let fingerprint = RAGManager.activeFingerprint(dimensions: provider.dimensions)
-        let isAppleBuiltIn = provider is LocalEmbeddingProvider
-        let modelKey = embeddingProviderOverride == nil ? "\(fingerprint.source)|\(fingerprint.model)|\(fingerprint.endpoint)" : "override"
-        func cacheKey(_ text: String) -> String { modelKey + "\n" + text }
-
-        let cache = sectionVectorCache
-        let unseen = Array(Set(candidates.map(\.embeddingText)).filter { cache[cacheKey($0)] == nil })
-        let missing = Array(unseen.prefix(Self.maxSectionsEmbeddedPerCall))
-        let embedded = await Task.detached(priority: .userInitiated) {
-            await EmbeddingBatcher.embed([query] + missing, with: provider)
-        }.value
-        let queryVector = embedded.first ?? nil
-
-        if queryVector != nil {
-            if sectionVectorCache.count + missing.count > Self.maxSectionVectorCache {
-                sectionVectorCache.removeAll()
-            }
-            for (text, vector) in zip(missing, embedded.dropFirst()) {
-                if let vector { sectionVectorCache[cacheKey(text)] = vector }
-            }
-        }
-        let vectors = candidates.map { sectionVectorCache[cacheKey($0.embeddingText)] }
+        // The query goes first so it is always embedded, even when the
+        // per-call limit leaves some sections for later.
+        let run = await embedWithCache([query] + candidates.map(\.embeddingText), limit: Self.maxSectionsEmbeddedPerCall + 1)
+        let queryVector = run.vectors[query]
         let hits = SectionFinder.rank(
             query: query,
             candidates: candidates,
             queryVector: queryVector,
-            vectors: vectors,
-            meaningWeight: isAppleBuiltIn ? SectionFinder.weakMeaningWeight : SectionFinder.strongMeaningWeight,
+            vectors: candidates.map { run.vectors[$0.embeddingText] },
+            meaningWeight: run.isAppleBuiltIn ? SectionFinder.weakMeaningWeight : SectionFinder.strongMeaningWeight,
             limit: limit
         )
         let method: SectionFinder.Method = queryVector == nil
             ? .keywordsOnly
-            : (isAppleBuiltIn ? .weakMeaning : .meaning(model: fingerprint.model.isEmpty ? fingerprint.source : fingerprint.model))
-        let note = unseen.count > missing.count
-            ? "\(unseen.count - missing.count) sections not embedded yet were ranked on keywords only; search again (or pass path) to include them"
+            : (run.isAppleBuiltIn ? .weakMeaning : .meaning(model: run.modelName))
+        let note = run.pending > 0
+            ? "\(run.pending) sections not embedded yet were ranked on keywords only; search again (or pass path) to include them"
             : nil
 
         // The results give exact line ranges, so they count like an outline
@@ -1316,6 +1407,202 @@ final class LocalToolExecutor {
             method: method,
             note: note
         )
+    }
+
+    // MARK: - check_writing
+
+    private func checkWriting(_ arguments: [String: Any]) async throws -> String {
+        guard let path = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
+            throw LocalToolError.invalidArguments("path is required — the .typ or .md file to check.")
+        }
+        let url = try resolvePath(path)
+        guard FileManager.default.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
+        let data = try Data(contentsOf: url)
+        guard data.count <= maxScannableBytes else { throw LocalToolError.fileTooLarge(path) }
+        let text = TextFileEncoding.decode(data).text
+
+        var range: ClosedRange<Int>?
+        var label = "'\(path)'"
+        if let entry = try Self.sectionEntry(arguments["section"], in: text, path: path), let end = entry.endLine {
+            range = entry.line...end
+            label = "\(entry.text) in '\(path)'"
+        }
+        let type = (arguments["type"] as? String).flatMap { WritingChecker.TextType(rawValue: $0.lowercased()) } ?? .auto
+        let isMarkdown = ProseText.isMarkdown(path)
+        let report = await Task.detached(priority: .userInitiated) {
+            WritingChecker.check(text, isMarkdown: isMarkdown, type: type, range: range)
+        }.value
+        // The result names exact lines and sections, like an outline.
+        outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+        return WritingChecker.render(report, label: label)
+    }
+
+    // MARK: - find_repetition
+
+    /// Most paragraphs compared pairwise by meaning (the work grows with
+    /// the square of this).
+    private static let maxMeaningUnits = 900
+    /// Noise floor per embedding model, measured once per session.
+    private var noiseFloors: [String: Float] = [:]
+
+    private func findRepetition(_ arguments: [String: Any]) async throws -> String {
+        let path = arguments["path"] as? String
+        let files = try await scopeFiles(path: path, extensions: ["typ", "md", "markdown"])
+        let useMeaning = Self.boolValue(arguments["meaning"]) ?? true
+        let requestedThreshold = (arguments["min_similarity"] as? Double) ?? (arguments["min_similarity"] as? NSNumber)?.doubleValue
+
+        var report = RepetitionFinder.Report()
+        report.fileCount = files.count
+        let analysis = await Task.detached(priority: .userInitiated) { () -> (units: [RepetitionFinder.Unit], copies: [RepetitionFinder.CopyMatch], sentences: [RepetitionFinder.RepeatedSentence], headings: [(String, [DocumentOutline.Entry])], doubled: [(String, Int, String)]) in
+            let units = files.flatMap { RepetitionFinder.units(in: $0.text, path: $0.relative) }
+            let copies = RepetitionFinder.copiedPassages(units)
+            let sentences = RepetitionFinder.repeatedSentences(in: files.map { ($0.relative, $0.text) })
+            let headings = files.flatMap { file in RepetitionFinder.repeatedHeadings(in: file.text).map { (file.relative, $0) } }
+            let doubled = files.flatMap { file in
+                RepetitionFinder.doubledWords(in: file.text, isMarkdown: ProseText.isMarkdown(file.relative)).map { (file.relative, $0.line, $0.text) }
+            }
+            return (units, copies, sentences, headings, doubled)
+        }.value
+        report.paragraphCount = analysis.units.count
+        report.copies = analysis.copies
+        report.sentences = analysis.sentences
+        report.headings = analysis.headings.map { (path: $0.0, entries: $0.1) }
+        report.doubled = analysis.doubled.map { (path: $0.0, line: $0.1, text: $0.2) }
+
+        if useMeaning {
+            let units = Array(analysis.units.prefix(Self.maxMeaningUnits))
+            let texts = units.map { String($0.text.prefix(2_000)) }
+            let run = await embedWithCache(texts)
+            if run.isAppleBuiltIn {
+                report.meaningStatus = .skippedWeakModel
+            } else if !run.reachable {
+                report.meaningStatus = .unavailable
+            } else {
+                var floor = noiseFloors[run.modelKey]
+                if floor == nil, embeddingProviderOverride == nil {
+                    let provider = run.provider
+                    floor = await Task.detached(priority: .userInitiated) {
+                        await EmbeddingCalibration.measure(with: provider)
+                    }.value
+                    if let floor { noiseFloors[run.modelKey] = floor }
+                }
+                let threshold = requestedThreshold ?? RepetitionFinder.meaningThreshold(noiseFloor: floor.map(Double.init))
+                let vectors = texts.map { run.vectors[$0] }
+                let copies = report.copies
+                report.meaning = await Task.detached(priority: .userInitiated) {
+                    RepetitionFinder.meaningMatches(units, vectors: vectors, threshold: threshold, excluding: copies)
+                }.value
+                report.meaningStatus = .checked(model: run.modelName, threshold: threshold)
+            }
+        }
+
+        // Findings name exact lines and sections, like an outline.
+        var touched = Set(report.copies.flatMap { [$0.first.start.path, $0.second.start.path] })
+        touched.formUnion(report.meaning.flatMap { [$0.first.path, $0.second.path] })
+        for path in touched {
+            if let url = try? resolvePath(path) {
+                outlinedFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+            }
+        }
+        let scopeLabel = (path?.isEmpty == false) ? "'\(path!)'" : "the \(scope.noun)"
+        return RepetitionFinder.render(report, scopeLabel: scopeLabel)
+    }
+
+    // MARK: - merge_sections
+
+    private func mergeSections(_ arguments: [String: Any], requestApproval: @escaping (PendingApprovalKind) async -> Bool) async throws -> String {
+        guard let path = (arguments["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else {
+            throw LocalToolError.invalidArguments("path is required")
+        }
+        guard arguments["keep"] is String, arguments["remove"] is String else {
+            throw LocalToolError.invalidArguments("keep and remove are required: the heading of the section to keep and of the one to merge into it.")
+        }
+        let url = try resolvePath(path)
+        guard FileManager.default.fileExists(atPath: url.path) else { throw LocalToolError.fileNotFound(path) }
+        let data = try Data(contentsOf: url)
+        guard data.count <= maxScannableBytes else { throw LocalToolError.fileTooLarge(path) }
+        let decoded = TextFileEncoding.decode(data)
+        let usesCRLF = decoded.text.contains("\r\n")
+        let text = decoded.text.replacingOccurrences(of: "\r\n", with: "\n")
+        let isMarkdown = ProseText.isMarkdown(path)
+
+        guard let keep = try Self.sectionEntry(arguments["keep"], in: text, path: path),
+              let remove = try Self.sectionEntry(arguments["remove"], in: text, path: path) else {
+            throw LocalToolError.invalidArguments("keep and remove must be heading names.")
+        }
+
+        let plan: SectionMerger.Plan
+        switch SectionMerger.plan(source: text, keep: keep, remove: remove, isMarkdown: isMarkdown) {
+        case .failure(let error): throw LocalToolError.invalidArguments(error.message)
+        case .success(let value): plan = value
+        }
+
+        let ownText = (arguments["merged_text"] as? String).flatMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        }
+        let applyExtractive = Self.boolValue(arguments["apply"]) == true
+        guard ownText != nil || applyExtractive else {
+            // Step 1: the plan. It shows the kept text and everything the
+            // removed section adds, so it counts as reading the file for
+            // step 2.
+            readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+            return SectionMerger.render(plan, path: path)
+        }
+
+        // Step 2: apply. The sections are found by name again in the file
+        // as it is now, so line shifts since the plan don't matter.
+        try requireFreshRead(of: url, path: path, tool: "merge_sections")
+        let merged: String
+        if let ownText {
+            merged = ownText
+        } else {
+            let keepBoth = Self.boolValue(arguments["keep_both"]) == true
+            guard plan.conflictCount == 0 || keepBoth else {
+                throw LocalToolError.invalidArguments("The two sections disagree in \(plan.conflictCount) place\(plan.conflictCount == 1 ? "" : "s") (call merge_sections without apply to see them). Pass merged_text with the right version, or apply: true with keep_both: true to keep both versions side by side.")
+            }
+            merged = SectionMerger.mergedBody(plan, keepConflicts: keepBoth)
+        }
+        let lines = text.components(separatedBy: "\n")
+        func body(_ entry: DocumentOutline.Entry) -> String {
+            let end = min(entry.endLine ?? entry.line, lines.count)
+            return entry.line < end ? lines[entry.line..<end].joined(separator: "\n") : ""
+        }
+        let oldBodies = [body(keep), body(remove)]
+        let applied = SectionMerger.apply(source: text, keep: keep, remove: remove, mergedBody: merged)
+
+        let approved = await requestApproval(.fileWrite(relativePath: path, oldContent: text, newContent: applied.text, isNewFile: false))
+        guard approved else { throw LocalToolError.approvalDenied }
+        let finalText = usesCRLF ? applied.text.replacingOccurrences(of: "\n", with: "\r\n") : applied.text
+        try Self.write(text: finalText, to: url, originalData: data, encoding: decoded.encoding)
+        readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
+        Self.notifyFileChangedOnDisk(url)
+
+        var summary = "Merged \(remove.text) into \(keep.text) in '\(path)' and deleted \(remove.text)"
+            + (ownText == nil ? " (extractive: every sentence is original text)." : ".")
+        if ownText == nil, !plan.danglingStarts.isEmpty {
+            let lines = plan.danglingStarts.prefix(6).map { "\"\($0.word)\" (was line \($0.line))" }.joined(separator: ", ")
+            summary += " Read the joins: \(plan.danglingStarts.count) added sentence\(plan.danglingStarts.count == 1 ? " opens" : "s open") with a word that refers back — \(lines)."
+        }
+        if applied.retargeted > 0, let removeLabel = DocumentOutline.label(of: remove.text), let keepLabel = DocumentOutline.label(of: keep.text) {
+            summary += " Pointed \(applied.retargeted) reference\(applied.retargeted == 1 ? "" : "s") to <\(removeLabel)> at <\(keepLabel)>."
+        }
+        if let moved = applied.movedLabel {
+            summary += " Moved its label <\(moved)> to \(keep.text), so references to it still work."
+        }
+        summary += " Other files may still reference the removed section: run check_references to be sure."
+        // Every fact of *both* sections must survive in the merged text.
+        if let report = FactCheck.compareMerge(parts: oldBodies, merged: merged, isMarkdown: isMarkdown) {
+            summary += "\n\n" + FactCheck.note(report)
+        }
+        return summary + (await validationNote(for: url, path: path))
+    }
+
+    /// The fact check appended after a prose edit, or "" for code, new
+    /// files and non-prose files.
+    private func factCheckNote(old: String, new: String, path: String) -> String {
+        guard ProseText.isProseFile(path), !old.isEmpty,
+              let report = FactCheck.compare(old: old, new: new, isMarkdown: ProseText.isMarkdown(path)) else { return "" }
+        return "\n\n" + FactCheck.note(report)
     }
 
     // MARK: - check_references
@@ -1748,7 +2035,9 @@ final class LocalToolExecutor {
         try content.write(to: url, atomically: true, encoding: .utf8)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
         Self.notifyFileChangedOnDisk(url)
-        return "Wrote \(content.utf8.count) bytes to '\(path)'." + (await validationNote(for: url, path: path))
+        return "Wrote \(content.utf8.count) bytes to '\(path)'."
+            + factCheckNote(old: oldContent, new: content, path: path)
+            + (await validationNote(for: url, path: path))
     }
 
     /// Tells any open editor window — and the sidebar — that a file just
@@ -1880,9 +2169,10 @@ final class LocalToolExecutor {
             updated = working.replacingCharacters(in: ranges[0], with: replacement(for: ranges[0]))
         }
 
+        let oldSnippet = matchedLoosely ? String(decoded.text[ranges[0]]) : oldNormalized
         let approved = await requestApproval(.fileEdit(
             relativePath: path,
-            oldSnippet: matchedLoosely ? String(decoded.text[ranges[0]]) : oldNormalized,
+            oldSnippet: oldSnippet,
             newSnippet: newNormalized,
             occurrences: occurrences
         ))
@@ -1901,6 +2191,7 @@ final class LocalToolExecutor {
         if matchedLoosely {
             summary += " (Matched on whole lines, ignoring trailing whitespace and differences in quotes or dashes.)"
         }
+        summary += factCheckNote(old: oldSnippet, new: newNormalized, path: path)
         return summary + (await validationNote(for: url, path: path))
     }
 
@@ -2766,6 +3057,12 @@ final class LocalToolExecutor {
         // Compile any .typ file the patch touched, so a restructure that broke
         // an #include is reported in this same result.
         var notes: [String] = []
+        // Fact check each rewritten prose file (whole old vs new text: the
+        // unchanged parts cancel out).
+        for change in changes where change.kind == .modified || change.kind == .moved {
+            let note = factCheckNote(old: change.oldContent, new: change.newContent, path: change.path)
+            if !note.isEmpty { notes.append("\n\n\(change.path): " + note.trimmingCharacters(in: .newlines)) }
+        }
         for change in changes where change.path.hasSuffix(".typ") && change.kind != .deleted {
             let url = try resolvePath(change.path)
             if fm.fileExists(atPath: url.path) {
