@@ -3137,9 +3137,49 @@ class EditorController: NSObject, ObservableObject {
         if !selectedText.isEmpty && !selectedText.contains("\n") {
              editorState.findText = selectedText
         }
-        
+
         // 2. Show the native panel
         editorState.findPanelVisible = true
+    }
+
+    /// Reveals a file-and-line once that file's content has loaded. Used by
+    /// Find in Project: the caller sets the sidebar selection (which starts
+    /// the load), and the reveal must wait for the loaded text or it would
+    /// scroll an old document.
+    ///
+    /// When `url` is already open, the reveal happens immediately.
+    func openFileAtLine(_ url: URL, line: Int) {
+        pendingRevealLine = (url.resolvingSymlinksInPath().standardizedFileURL, line)
+        if currentFileURL?.resolvingSymlinksInPath().standardizedFileURL
+            == url.resolvingSymlinksInPath().standardizedFileURL,
+           !hasUnsavedChanges {
+            revealPendingLine()
+        }
+    }
+
+    /// A request to open the Find in Project panel, posted to the sidebar
+    /// view (which owns the panel's state) via the same route the sidebar's
+    /// own button uses. The notification pattern keeps the controller free
+    /// of a reference into the view tree.
+    @Published var findInProjectRequested = false
+
+    /// Marks Find in Project as requested: the sidebar view observes this
+    /// and shows the panel (and focuses its field).
+    func requestFindInProject() {
+        findInProjectRequested.toggle()
+    }
+
+    /// A file-and-line to reveal once that file's content has loaded.
+    private var pendingRevealLine: (url: URL, line: Int)?
+
+    /// Reveals the pending line when its file is loaded; harmless no-op
+    /// otherwise. Called after `loadFile` updates `sourceCode`.
+    func revealPendingLine() {
+        guard let pending = pendingRevealLine,
+              let current = currentFileURL,
+              current.resolvingSymlinksInPath().standardizedFileURL == pending.url else { return }
+        pendingRevealLine = nil
+        goToLine(max(pending.line, 1))
     }
 
     

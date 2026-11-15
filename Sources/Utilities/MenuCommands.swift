@@ -272,6 +272,11 @@ struct AppMenuCommands: Commands {
                 }
             }
             .keyboardShortcut("f", modifiers: .command)
+
+            Button("Find in Project…") {
+                NotificationCenter.default.post(name: .menuCommand, object: "findInProject")
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
             
             Button("Go to Line") {
                 NotificationCenter.default.post(name: .menuCommand, object: "goToLine")

@@ -777,6 +777,58 @@ class RAGManager: ObservableObject {
         SHA256.hash(data: Data(input.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// The JSON chunk extractor, exposed statically so the detached chunking
+    /// step can call it (a detached closure cannot touch main-actor state).
+    nonisolated static func extractSemanticChunksStub(from json: Any, fileName: String) -> [String] {
+        // Mirrors the instance method below; see it for the strategy.
+        extractSemanticChunksStatic(from: json, path: "", parentMetadata: "", fileName: fileName)
+    }
+
+    private nonisolated static func extractSemanticChunksStatic(
+        from json: Any, path: String, parentMetadata: String, fileName: String
+    ) -> [String] {
+        var chunks: [String] = []
+
+        if let dict = json as? [String: Any] {
+            var localMetadata = parentMetadata
+
+            for (key, value) in dict {
+                if let str = value as? String, str.count < 50 {
+                    localMetadata += "\(key.capitalized): \(str), "
+                } else if let num = value as? NSNumber {
+                    localMetadata += "\(key.capitalized): \(num), "
+                } else if let bool = value as? Bool {
+                    localMetadata += "\(key.capitalized): \(bool), "
+                }
+            }
+
+            for (key, value) in dict {
+                let currentPath = path.isEmpty ? key : "\(path) > \(key)"
+
+                if let str = value as? String, str.count >= 50 {
+                    let cleanText = RAGRegex.xmlTags.stringByReplacingMatches(in: str, options: [], range: NSRange(0..<str.utf16.count), withTemplate: "")
+                    let chunk = "Source: \(fileName) | Path: \(currentPath)\nContext: \(localMetadata)\nContent: \(cleanText)"
+                    chunks.append(chunk)
+                } else if let nestedDict = value as? [String: Any] {
+                    chunks.append(contentsOf: extractSemanticChunksStatic(from: nestedDict, path: currentPath, parentMetadata: localMetadata, fileName: fileName))
+                } else if let nestedArray = value as? [Any] {
+                    chunks.append(contentsOf: extractSemanticChunksStatic(from: nestedArray, path: currentPath, parentMetadata: parentMetadata, fileName: fileName))
+                }
+            }
+        } else if let array = json as? [Any] {
+            for (index, value) in array.enumerated() {
+                let currentPath = "\(path)[\(index)]"
+                chunks.append(contentsOf: extractSemanticChunksStatic(from: value, path: currentPath, parentMetadata: parentMetadata, fileName: fileName))
+            }
+        } else if let str = json as? String, str.count >= 50 {
+            let cleanText = RAGRegex.xmlTags.stringByReplacingMatches(in: str, options: [], range: NSRange(0..<str.utf16.count), withTemplate: "")
+            let chunk = "Source: \(fileName) | Path: \(path)\nContext: \(parentMetadata)\nContent: \(cleanText)"
+            chunks.append(chunk)
+        }
+
+        return chunks
+    }
+
     /// The stored vectors of one file, keyed by embedding-input hash.
     private func storedVectors(forFile fileId: Int64, in db: OpaquePointer, dimensions: Int) -> [String: Data] {
         var stmt: OpaquePointer?
@@ -845,7 +897,8 @@ class RAGManager: ObservableObject {
     /// Completely disables the RAG Manager and closes any active DB connections for standalone editing.
     public func disableForStandaloneMode() {
         self.currentProjectDir = nil
-        
+        passCancellation.cancel()
+
         if db != nil {
             sqlite3_close(db)
             db = nil
@@ -853,16 +906,21 @@ class RAGManager: ObservableObject {
         openConnectionKey = nil
         indexedFingerprint = nil
         indexNoiseFloor = nil
-        
+
         // Reset any indexing state just in case it was interrupted
         isIndexing = false
         indexProgress = 0.0
         indexStatus = ""
-        
+
+        // Fresh cancellation flag for the next pass, and no helper process
+        // outliving the project it belonged to.
+        passCancellation = IndexRunCancellation()
+        embeddingWorker.stop()
         print("RAGManager: Vector DB locked out and closed for standalone mode.")
     }
-    
+
     public func clearIndexCache() {
+        passCancellation.cancel()
         if db != nil {
             sqlite3_close(db)
             db = nil
@@ -870,6 +928,7 @@ class RAGManager: ObservableObject {
         openConnectionKey = nil
         indexedFingerprint = nil
         indexNoiseFloor = nil
+        passCancellation = IndexRunCancellation()
         
         if let fileURL = dbFileURL, FileManager.default.fileExists(atPath: fileURL.path) {
             try? FileManager.default.removeItem(at: fileURL)
@@ -880,47 +939,132 @@ class RAGManager: ObservableObject {
     }
     
     // MARK: - Indexing
-    
+
+    /// A file's freshly-read bytes and their content hash, produced off the
+    /// main actor for one file of a pass.
+    private struct PreparedFile: Sendable {
+        let data: Data
+        let hash: String
+    }
+
+    /// Embeds `texts` for a pass: in the helper process when possible, else
+    /// in-process. The worker keeps the embedding model's memory and CPU
+    /// out of the app; the in-process path remains as the fallback (helper
+    /// could not start, or this is a test with an injected provider).
+    private func embedPassages(_ texts: [String], provider: EmbeddingProvider) async -> [[Float]?] {
+        // An injected test provider is in-process by design.
+        if embeddingProviderOverride == nil,
+           let spec = EmbeddingWorkerSpec(provider: provider),
+           let vectors = await embeddingWorker.embed(texts: texts, spec: spec) {
+            return vectors
+        }
+        return await EmbeddingBatcher.embed(texts, with: provider)
+    }
+
+    /// Embeds a single query through the helper process, falling back to
+    /// in-process embedding. Throws when neither path produces a vector.
+    private func embedQuery(_ query: String) async throws -> [Float] {
+        let provider = activeProvider
+        if embeddingProviderOverride == nil,
+           let spec = EmbeddingWorkerSpec(provider: provider),
+           let vectors = await embeddingWorker.embed(texts: [query], spec: spec),
+           let vector = vectors.first {
+            guard let vector else { throw EmbeddingError.generationFailed }
+            return vector
+        }
+        return try await provider.getEmbedding(for: query)
+    }
+
+    /// The worker-process client, lazily created and shared by every pass of
+    /// this manager. Stopped in `disableForStandaloneMode`.
+    private lazy var embeddingWorker = EmbeddingWorkerClient()
+
+    /// Cancellation flag for the running pass. `isIndexing` covers the
+    /// sidebar's stop button (which flips it to false); this flag covers the
+    /// paths the button cannot reach directly — a project switch or the
+    /// standalone lockout cancelling a pass that is awaiting an embedding
+    /// batch. Fresh flag per pass.
+    private var passCancellation = IndexRunCancellation()
+
+    /// Cancels the running pass (the sidebar's stop button) and kills the
+    /// embedding helper, so a stopped pass stops *now* rather than after
+    /// the in-flight batch. The next pass starts a fresh helper on demand.
+    func cancelIndexing() {
+        guard isIndexing else { return }
+        isIndexing = false
+        indexStatus = "Cancelled."
+        passCancellation.cancel()
+        embeddingWorker.stop()
+    }
+
+    /// Runs an indexing pass over `projectDir`.
+    ///
+    /// The pass runs on the main actor (its SQLite connection is not
+    /// thread-safe), but every expensive step hops off it and comes back
+    /// with plain values: the file walk, each file's read + hash + chunking
+    /// run detached; embeddings run in a **separate process** (see
+    /// `embedPassages`). Two guarantees the caller cares about:
+    ///
+    /// - **Embedding cannot halt or slow the app.** A whole-project pass
+    ///   hands its batches to `typstedit embed-worker`, so the model's
+    ///   memory and CPU live outside the app; when the helper cannot start,
+    ///   the pass falls back to in-process embedding rather than failing.
+    /// - **File reads are lossy and never lock.** The pass reads through
+    ///   `LossyFileReader`, so a save in progress can at worst cost this
+    ///   pass one file (retried on the next); nothing ever waits on the
+    ///   reader, and no file is held open across an embedding request.
+    ///
+    /// `forceReindex` wipes the stored index first, as before.
     func indexProject(at projectDir: URL, forceReindex: Bool = false) async {
         let isDirectory = (try? projectDir.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
         guard isDirectory else {
             print("RAGManager: Aborting index. Provided URL is a standalone file, not a directory.")
             return
         }
-
         guard !isIndexing else { return }
         isIndexing = true
         indexProgress = 0.0
         indexStatus = "Gathering files..."
-        
-        defer { 
-            isIndexing = false 
+        // A new pass means a fresh cancellation flag; cancelling the old
+        // one (project switch, standalone lockout) must not bleed in.
+        passCancellation = IndexRunCancellation()
+        let cancellation = passCancellation
+        defer {
+            isIndexing = false
             indexStatus = ""
             indexProgress = 0.0
         }
-        
         guard Self.shouldUseRAG(for: projectDir) else {
-            if db != nil {
-                sqlite3_close(db)
-                db = nil
-            }
-            openConnectionKey = nil
-            indexedFingerprint = nil
-            indexNoiseFloor = nil
-            self.currentProjectDir = nil
-            isIndexing = false
-            indexProgress = 0.0
+            disableIndexState()
+            currentProjectDir = nil
             indexStatus = "RAG disabled for protected directory"
             print("RAGManager: Skipping indexing for protected directory \(projectDir.path)")
             return
         }
+        currentProjectDir = projectDir
+        if forceReindex { clearIndexCache() }
 
-        self.currentProjectDir = projectDir
-        
-        if forceReindex {
-            clearIndexCache()
+        await indexProjectInternal(at: projectDir, forceReindex: false, cancellation: cancellation)
+    }
+
+    /// Closes the connection and forgets the index state, shared by the
+    /// standalone lockout and the protected-directory skip.
+    private func disableIndexState() {
+        if db != nil {
+            sqlite3_close(db)
+            db = nil
         }
+        openConnectionKey = nil
+        indexedFingerprint = nil
+        indexNoiseFloor = nil
+    }
 
+    /// The pass itself. Runs after `indexProject` has set the guard state.
+    /// Heavy steps (walk, read, hash, chunk) detach and hand back values;
+    /// SQLite writes stay here on the main actor, and the vector
+    /// extension's connection is never used from two threads. `cancellation`
+    /// is this pass's flag; `isIndexing` covers the sidebar's stop button.
+    private func indexProjectInternal(at projectDir: URL, forceReindex: Bool, cancellation: IndexRunCancellation) async {
         // The vector length comes from the model itself. Guessing it from the
         // model name ("large" → 3072, "mxbai" → 1024, else 768) was wrong for
         // most local models, and every insert then had the wrong size.
@@ -982,22 +1126,22 @@ class RAGManager: ObservableObject {
         guard totalFiles > 0 else { return }
         
         for (index, fileURL) in filesToProcess.enumerated() {
-            guard isIndexing else { break }
-            
+            guard isIndexing, !cancellation.isCancelled else { break }
+
             self.indexProgress = Double(index) / Double(totalFiles)
             self.indexStatus = "Indexing \(fileURL.lastPathComponent)..."
-            
+
             let ext = fileURL.pathExtension.lowercased()
             let resourceValues = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             guard let lastModifiedDate = resourceValues?.contentModificationDate else { continue }
             let lastModified = lastModifiedDate.timeIntervalSince1970
             let currentFileSize = Int64(resourceValues?.fileSize ?? 0)
-            
+
             let fileKey = Self.relativePath(of: fileURL, in: projectDir)
-            
+
             var needsIndexing = true
             var fileId: Int64 = -1
-            
+
             // Step 1: Fast metadata check (size + mtime) — free, no I/O
             let checkSQL = "SELECT id, last_modified, file_size, content_hash FROM files WHERE path = ?;"
             var checkStmt: OpaquePointer?
@@ -1009,7 +1153,7 @@ class RAGManager: ObservableObject {
                     let storedModified = sqlite3_column_double(checkStmt, 1)
                     let storedSize = sqlite3_column_int64(checkStmt, 2)
                     storedHash = sqlite3_column_text(checkStmt, 3).map { String(cString: $0) } ?? ""
-                    
+
                     if storedSize == currentFileSize && storedModified >= lastModified {
                         // Metadata matches exactly — skip without reading the file
                         needsIndexing = false
@@ -1017,14 +1161,28 @@ class RAGManager: ObservableObject {
                 }
             }
             sqlite3_finalize(checkStmt)
-            
+
             if !needsIndexing { continue }
-            
-            // Step 2: Metadata differed — compute SHA-256 hash to confirm real content change
-            guard let fileData = try? Data(contentsOf: fileURL) else { continue }
-            let newHash = SHA256.hash(data: fileData)
-                .compactMap { String(format: "%02x", $0) }.joined()
-            
+
+            // Steps 2–4 for this file: read the bytes (lossy, no locks), hash
+            // them and split into passages. All off the main actor — these
+            // are the pass's blocking I/O, and running them here used to
+            // stall the UI for the duration of every pass. A read that fails
+            // (file vanished or locked by nothing we honor) yields nil and
+            // the file is retried on the next pass.
+            let prepared = await Task.detached(priority: .utility) { () -> PreparedFile? in
+                // Lossy, lock-free read: a save in progress can at worst cost
+                // this pass the file, never stall the writer.
+                guard let reading = LossyFileReader.read(fileURL, maxBytes: 50 * 1024 * 1024) else { return nil }
+                let fileData = reading.data
+                let newHash = SHA256.hash(data: fileData)
+                    .compactMap { String(format: "%02x", $0) }.joined()
+                return PreparedFile(data: fileData, hash: newHash)
+            }.value
+            guard let prepared else { continue }
+            let fileData = prepared.data
+            let newHash = prepared.hash
+
             if !storedHash.isEmpty && storedHash == newHash {
                 // Content is identical despite metadata change (e.g. git checkout, copy).
                 // Just update the metadata columns to avoid hashing again next sync.
@@ -1040,7 +1198,7 @@ class RAGManager: ObservableObject {
                 print("[RAG] \(fileURL.lastPathComponent): metadata changed but content unchanged — skipping re-embed.")
                 continue
             }
-            
+
             // Content actually changed (or new file) — fall through to re-index.
 
             let passages: [TextChunk]
@@ -1064,13 +1222,19 @@ class RAGManager: ObservableObject {
                         + "the file will be retried next pass. \(error.localizedDescription)")
                     continue
                 }
-            } else if ext == "json" {
-                let json = try? JSONSerialization.jsonObject(with: fileData)
-                passages = json.map {
-                    DocumentChunker.unlinedChunks(extractSemanticChunks(from: $0, fileName: fileURL.lastPathComponent))
-                } ?? []
             } else {
-                passages = DocumentChunker.chunks(in: TextFileEncoding.decode(fileData).text, fileExtension: ext)
+                // Chunking is CPU work over the whole file; run it off the
+                // main actor too.
+                passages = await Task.detached(priority: .utility) { () -> [TextChunk] in
+                    if ext == "json" {
+                        let json = try? JSONSerialization.jsonObject(with: fileData)
+                        return json.map {
+                            DocumentChunker.unlinedChunks(
+                                RAGManager.extractSemanticChunksStub(from: $0, fileName: fileURL.lastPathComponent))
+                        } ?? []
+                    }
+                    return DocumentChunker.chunks(in: TextFileEncoding.decode(fileData).text, fileExtension: ext)
+                }.value
             }
             let inputs = passages.map { $0.embeddingInput(path: fileKey) }
             let inputHashes = inputs.map(Self.inputHash)
@@ -1083,7 +1247,7 @@ class RAGManager: ObservableObject {
             let missing = vectors.indices.filter { vectors[$0] == nil }
             if !missing.isEmpty {
                 self.indexStatus = "Embedding \(fileURL.lastPathComponent) (\(missing.count) passage\(missing.count == 1 ? "" : "s"))..."
-                let fresh = await EmbeddingBatcher.embed(missing.map { inputs[$0] }, with: provider)
+                let fresh = await embedPassages(missing.map { inputs[$0] }, provider: provider)
                 for (offset, index) in missing.enumerated() {
                     guard let vector = fresh[offset], vector.count == dimensions else { continue }
                     vectors[index] = vector.withUnsafeBufferPointer { Data(buffer: $0) }
@@ -1093,7 +1257,7 @@ class RAGManager: ObservableObject {
             if embeddingFailed {
                 print("[RAG Error] \(fileURL.lastPathComponent): \(vectors.filter { $0 == nil }.count) passage(s) could not be embedded; the file is retried next pass.")
             }
-            guard isIndexing else { break }
+            guard isIndexing, !cancellation.isCancelled else { break }
 
             // Embedding happens before the transaction, so the database is
             // never held locked across network requests.
@@ -1140,7 +1304,7 @@ class RAGManager: ObservableObject {
             cacheUpdated = true
         }
         
-        if isIndexing {
+        if isIndexing, !cancellation.isCancelled {
             self.indexProgress = 1.0
             self.indexStatus = "Finishing up..."
             
@@ -1222,7 +1386,11 @@ class RAGManager: ObservableObject {
 
         let queryVector: [Float]
         do {
-            queryVector = try await activeProvider.getEmbedding(for: query)
+            // Query embeddings go through the helper process too, so even
+            // this single request keeps a heavy model's cost out of the
+            // app. Falls back in-process whenever the helper cannot serve
+            // the request (not started, test provider, unknown provider).
+            queryVector = try await embedQuery(query)
         } catch {
             print("Search failed: \(error)")
             return .unavailable("the query could not be embedded (\(error.localizedDescription))")

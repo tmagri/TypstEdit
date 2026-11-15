@@ -67,6 +67,12 @@ class FileSystemModel: ObservableObject {
     /// batch of changed URLs.
     static let projectFilesDidChange = Notification.Name("TypstEdit.projectFilesDidChange")
 
+    /// Called on the main actor with the canonical paths of files that
+    /// changed on disk, so panels that hold results naming project files
+    /// (find in project) can drop entries whose file is gone. Optional and
+    /// weak-free: the view sets it and unsets it on disappear.
+    var onProjectFilesChangedExternally: ((Set<String>) -> Void)?
+
     deinit {
         watcher?.stop()
         reloadTask?.cancel()
@@ -205,6 +211,11 @@ class FileSystemModel: ObservableObject {
             // so the model holds no reference into the view hierarchy.
             NotificationCenter.default.post(name: Self.projectFilesDidChange, object: external)
             if changedIndexableFile { indexProjectIfNeeded(force: false) }
+            // Find-in-project results can name a file that just vanished.
+            let changedPaths = Set(external.map { ProjectTreeLoader.canonical($0).path })
+            DispatchQueue.main.async { [weak self] in
+                self?.onProjectFilesChangedExternally?(changedPaths)
+            }
         }
         if needsScan && watchEnabled { scheduleLoad(debounced: true) }
     }
@@ -603,6 +614,10 @@ struct SidebarView: View {
 
     @State private var sidebarMode: Int = 0 // 0: Projects, 1: Notebooks
     @State private var imageCleanupTarget: ImageCleanupTarget?
+    /// Find-in-project state, owned here so it survives switching tabs but
+    /// stays scoped to this window's project.
+    @StateObject private var findReplace = ProjectFindReplaceModel()
+    @State private var showFindInProject = false
 
     private var visibility: SidebarVisibility {
         generalSettings.sidebarVisibility(chatEnabled: false)
@@ -698,11 +713,8 @@ struct SidebarView: View {
                             // 👉 Smart Resume / Cancel Button
                             Button(action: {
                                 if ragManager.isIndexing {
-                                    // Cancel if running
-                                    ragManager.isIndexing = false 
-                                    ragManager.indexStatus = "Cancelled."
+                                    ragManager.cancelIndexing()
                                 } else if let folder = model.currentFolder {
-                                    // 👉 changed to false so it resumes/updates!
                                     Task { await ragManager.indexProject(at: folder, forceReindex: false) }
                                 }
                             }) {
@@ -720,6 +732,17 @@ struct SidebarView: View {
                                 }
                             }
                             
+                            Button(action: {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    showFindInProject.toggle()
+                                }
+                            }) {
+                                Image(systemName: showFindInProject ? "magnifyingglass.circle.fill" : "magnifyingglass")
+                                    .foregroundColor(showFindInProject ? themeManager.accentColor : themeManager.textColor.opacity(0.6))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Find in Project (search and replace across all files)")
+
                             Button(action: { model.loadFiles() }) {
                                 Image(systemName: "arrow.clockwise")
                                     .foregroundColor(themeManager.textColor.opacity(0.6))
@@ -860,6 +883,25 @@ struct SidebarView: View {
                 .scrollContentBackground(.hidden)
                 .environment(\.defaultMinListRowHeight, 22)
 
+                if showFindInProject {
+                    Divider()
+                    ProjectFindReplaceView(
+                        model: findReplace,
+                        projectRoot: model.currentFolder,
+                        openFile: { url, line in
+                            // Open (or focus) the file, then reveal the line
+                            // once the editor has loaded it.
+                            selectedFile = url
+                            editorController.openFileAtLine(url, line: line)
+                        },
+                        onReplaced: {
+                            // The replace rewrote files on disk; the watcher
+                            // re-indexes, and a fresh scan shows what remains.
+                        }
+                    )
+                    .environmentObject(themeManager)
+                }
+
                 if let root = sourceControlRoot {
                     Divider()
                     // `.id(root)` intentionally resets the commit message,
@@ -901,10 +943,23 @@ struct SidebarView: View {
         // Live project view. The watcher runs only while the Projects list is
         // on screen: switching to Notebooks, hiding the sidebar or selecting
         // another panel turns it off, so an unviewed project costs nothing.
-        .onAppear { syncProjectWatch() }
+        .onAppear {
+            syncProjectWatch()
+            // Find-in-project results must never outlive a file the
+            // watcher saw deleted; prune them as changes land.
+            model.onProjectFilesChangedExternally = { _ in
+                findReplace.pruneDeletedFiles()
+            }
+        }
         .onDisappear {
+            model.onProjectFilesChangedExternally = nil
             model.setWatchActive(false)
             model.stopWatching()
+        }
+        .onChange(of: editorController.findInProjectRequested) { _ in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showFindInProject = true
+            }
         }
         .onChange(of: isProjectsBrowserVisible) { _ in syncProjectWatch() }
         .onChange(of: model.refreshGeneration) { _ in

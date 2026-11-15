@@ -12,6 +12,7 @@ enum TypstEditCLI {
     nonisolated static let commands: Set<String> = [
         "compile", "check", "convert", "to-markdown", "mcp", "info", "open",
         "install-cli", "help", "--help", "-h", "--version", "version",
+        "embed-worker",
     ]
 
     static let bundleIdentifier = "com.tmagri.TypstEdit"
@@ -31,6 +32,12 @@ enum TypstEditCLI {
         let output = ProtocolOutput(fileDescriptor: reserveStdout())
         if arguments.first == "mcp" {
             TypstEditMCPServer(output: output).start()
+        }
+        if arguments.first == "embed-worker" {
+            // fd 1 was redirected to stderr by `reserveStdout`, so the
+            // worker writes its replies to the saved real stdout — the
+            // same handle `ProtocolOutput` uses.
+            EmbeddingWorker.main(output: output)
         }
         Task { @MainActor in
             let code = await run(arguments, output: output)
@@ -95,6 +102,10 @@ enum TypstEditCLI {
             }
         case "--version", "version":
             output.writeLine("TypstEdit \(appVersion)")
+            return 0
+        case "embed-worker":
+            // Handled in `start` before the CLI runs — the worker never
+            // returns and must not touch the app's stdout/stderr routing.
             return 0
         default:
             output.writeLine(usage)
@@ -333,6 +344,7 @@ enum TypstEditCLI {
       typstedit info    [--json]                      Show versions and paths
       typstedit mcp                                   Run the MCP server (stdio) for AI agents
       typstedit install-cli [--dir DIR]               Install the `typstedit` command
+      typstedit embed-worker                           Embedding helper for the app (internal)
 
     INPUTS
       .typ, .md and .note files. Markdown and Notes are converted exactly like

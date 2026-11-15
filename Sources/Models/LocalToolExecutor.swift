@@ -1994,7 +1994,10 @@ final class LocalToolExecutor {
 
     /// Minimal glob support for `grep_project`'s `glob` argument:
     /// `**` matches across folders, `*` within a segment, `?` one character.
-    private nonisolated static func globToRegex(_ glob: String) -> NSRegularExpression? {
+    /// `*.typ` → `^.*\.typ$`-style filename matcher. Shared with the
+    /// project find-and-replace panel, which filters the same way
+    /// `grep_project` does.
+    nonisolated static func globToRegex(_ glob: String) -> NSRegularExpression? {
         var pattern = glob.trimmingCharacters(in: .whitespaces)
         if pattern.hasPrefix("/") {
             pattern = String(pattern.dropFirst())

@@ -108,6 +108,24 @@ enum EditorFileTypes {
         return table
     }()
 
+    /// Extensions the code table registers, so other features (find in
+    /// project, the semantic index) can search every language the editor
+    /// highlights without duplicating the table.
+    static let searchableCodeExtensions: Set<String> = [
+        "json", "jsonc", "json5", "jsonl", "ndjson", "geojson", "webmanifest", "ipynb",
+        "yml", "yaml", "toml", "ini", "cfg", "conf", "properties",
+        "html", "htm", "xhtml", "xml", "xsd", "xsl", "xslt", "svg", "rss", "atom",
+        "csproj", "vbproj", "fsproj", "nuspec", "kml", "gpx", "rdf", "wsdl",
+        "css", "scss", "sass", "less",
+        "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx",
+        "sh", "bash", "zsh", "ksh", "fish",
+        "c", "h", "cc", "cpp", "cxx", "hpp", "hxx", "c++", "h++", "m", "mm",
+        "cs", "csx", "java", "kt", "kts", "swift", "go", "rs",
+        "rb", "rake", "gemspec", "php", "phtml", "scala", "sc", "dart", "lua",
+        "ex", "exs", "hs", "ml", "mli", "sql", "zig",
+        "dockerfile", "containerfile",
+    ]
+
     /// Files recognized by name, because they have no reliable extension.
     private static let fileNameTable: [String: Entry] = [
         "Dockerfile": Entry(languageID: "dockerfile", displayName: "Dockerfile"),

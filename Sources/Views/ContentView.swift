@@ -1842,6 +1842,9 @@ struct ContentView: View {
                     self.editorController.previewStale = false
                     print("[DEBUG] loadFile: Updating sourceCode")
                     self.editorController.sourceCode = content
+                    // A Find-in-Project click asked for a line in this file;
+                    // the content is in, so the reveal can scroll to it now.
+                    self.editorController.revealPendingLine()
                     // Reset undo manager/state by creating new state?
                     // self.editorController.editorState = .init() // Let .id() handle recreation or keep state?
                     // Better to reset state for new file
@@ -2389,6 +2392,11 @@ struct ContentView: View {
 
         case "delete": editorController.deleteSelection()
         case "goToLine": editorController.showGoToLineAlert = true
+        case "findInProject":
+            editorController.isSidebarVisible = true
+            editorController.sidebarContent = .files
+            editorController.requestFindInProject()
+
         case "selectAll": editorController.selectAll()
         case "promoteHeading": editorController.promoteHeadingSelection()
         case "demoteHeading": editorController.demoteHeadingSelection()
