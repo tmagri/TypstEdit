@@ -983,11 +983,24 @@ class EditorController: NSObject, ObservableObject {
     }
 
     /// Bindings for `SourceEditor`. Its writes come from the text view, so they are applied silently.
+    ///
+    /// SwiftUI can keep more than one `SourceEditor` alive for this controller at once (a view
+    /// rebuilt while the old one is still being torn down, a duplicate main window). Each one
+    /// writes its own text and caret through these bindings. Only the active editor may write:
+    /// a stale editor would put its old text and caret back into the model, and the next SwiftUI
+    /// update would push them into the editor the user types in — the caret jumps back and the
+    /// new keystrokes land before text that was already typed.
     var sourceCodeBinding: Binding<String> {
         Binding(
             get: { [weak self] in self?.sourceCode ?? "" },
             set: { [weak self] newValue in
                 guard let self else { return }
+                // Length only: O(1) on both sides, and a stale editor's text differs in length
+                // from the live one as soon as the user has typed.
+                if let storage = self.textViewController?.textView?.textStorage,
+                   storage.length != (newValue as NSString).length {
+                    return
+                }
                 self.syncFromTextView { self.sourceCode = newValue }
             }
         )
@@ -997,9 +1010,35 @@ class EditorController: NSObject, ObservableObject {
         Binding(
             get: { [weak self] in self?.editorState ?? .init() },
             set: { [weak self] newValue in
-                self?.syncFromTextView { self?.editorState = newValue }
+                guard let self else { return }
+                var newValue = newValue
+                // The coordinator copies its own controller's carets into the state. Keep the
+                // carets of the active editor when the write comes from another one.
+                if let tvc = self.textViewController,
+                   let positions = newValue.cursorPositions,
+                   positions != tvc.cursorPositions {
+                    newValue.cursorPositions = self.editorState.cursorPositions
+                }
+                self.syncFromTextView { self.editorState = newValue }
             }
         )
+    }
+
+    /// Makes `controller` the editor that programmatic edits and the bindings follow, when it
+    /// is the one the user is typing in. Several editors can be alive at once, and the one
+    /// prepared last is not always the one SwiftUI keeps on screen.
+    /// - Returns: `true` when `controller` is (now) the active editor.
+    @discardableResult
+    func adoptTextViewControllerIfFocused(_ controller: TextViewController) -> Bool {
+        if textViewController === controller { return true }
+        // A hidden window (a duplicate that was ordered out) can still have the text view as
+        // its first responder, so the window must also be on screen.
+        guard let textView = controller.textView,
+              let window = textView.window,
+              window.isVisible,
+              window.firstResponder === textView else { return false }
+        textViewController = controller
+        return true
     }
 
     // Bridge to the actual editor for programmatic updates
@@ -5031,6 +5070,8 @@ class SourceEditorBridge: TextViewCoordinator {
         // Guard against infinite loops if we are already in an update
         MainActor.assumeIsolated {
             guard let ctrl = self.controller else { return }
+            // A stale editor (not active, not focused) must not write its text into the model.
+            guard ctrl.adoptTextViewControllerIfFocused(controller) else { return }
             // `sourceCode.didSet` skips equal values, so no separate full-text compare here.
             let text = controller.text
             ctrl.syncFromTextView { ctrl.sourceCode = text }
@@ -5051,6 +5092,9 @@ class SourceEditorBridge: TextViewCoordinator {
     nonisolated func textViewDidChangeSelection(controller: TextViewController, newPositions: [CursorPosition]) {
         MainActor.assumeIsolated {
             guard let ctrl = self.controller else { return }
+            // The selection changes before `textDidChange` is posted, so this adopts the
+            // focused editor before its coordinator writes the text binding.
+            guard ctrl.adoptTextViewControllerIfFocused(controller) else { return }
             // Update formatting state (bold/italic detection). Debounced so rapid
             // cursor movement doesn't re-scan the document on every selection change.
             ctrl.scheduleFormattingUpdate()

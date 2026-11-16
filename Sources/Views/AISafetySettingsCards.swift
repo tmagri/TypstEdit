@@ -275,23 +275,28 @@ struct SafetyRulesSettingsCard: View {
         SettingsCard(
             title: "Safety Rules",
             icon: "exclamationmark.shield",
-            description: "A monitor that watches a turn's tool calls and hands a call back to you when a rule matches — even in YOLO mode. It can only add an approval card, never remove one, so turning it on cannot make the assistant more permissive. The approval card names the rule that fired, so a re-approval never looks like YOLO forgot. A half-written rule is skipped rather than treated as “match everything”."
+            description: "A monitor that watches a turn's tool calls and hands a call back to you when a rule matches — even in YOLO mode. It can only add an approval card, never remove one, so turning it on cannot make the assistant more permissive. It reads the actual values, not just file names: a key pasted into a script, or a `.env` renamed `notes.txt`, is caught by its shape. Strict runs every rule; Safe keeps only the credential and exfiltration rules; Off disables the monitor. The approval card names the rule that fired, so a re-approval never looks like YOLO forgot. A half-written rule of your own is skipped rather than treated as “match everything”, and your own rules run in Strict and Safe alike."
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Let the safety monitor send a call back to me", isOn: $settings.chatSafetyMonitorEnabled)
-                    .font(.body.weight(.medium))
-                Text(settings.chatSafetyMonitorEnabled
-                     ? "On. A matching rule brings the approval card back, even in YOLO mode."
-                     : "Off. YOLO and your Allow rules decide on their own, with no safety check in between. Deny rules still apply.")
+                Picker("Safety mode", selection: Binding(
+                    get: { settings.chatSafetyMode },
+                    set: { settings.chatSafetyMode = $0 }
+                )) {
+                    ForEach(SafetyMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(settings.chatSafetyMode.explanation)
                     .font(.caption2)
-                    .foregroundColor(settings.chatSafetyMonitorEnabled ? .secondary : .orange)
-                    .padding(.leading, 20)
+                    .foregroundColor(settings.chatSafetyMode.isActive ? .secondary : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
 
                 Text("Built-in rules").font(.caption.bold()).foregroundColor(.secondary)
-                    .opacity(settings.chatSafetyMonitorEnabled ? 1 : 0.5)
                 ForEach(SafetyMonitor.builtInRules) { rule in
+                    let runs = settings.chatSafetyMode.enabledBuiltInRuleIDs.contains(rule.id)
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: rule.severity.symbol)
                             .foregroundColor(rule.severity == .alert ? .red : .orange)
@@ -299,8 +304,19 @@ struct SafetyRulesSettingsCard: View {
                             Text(rule.title).font(.caption.weight(.medium))
                             Text(rule.explanation).font(.caption2).foregroundColor(.secondary)
                         }
+                        Spacer()
+                        if runs {
+                            Text("on")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("off")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .italic()
+                        }
                     }
-                    .opacity(settings.chatSafetyMonitorEnabled ? 1 : 0.5)
+                    .opacity(runs ? 1 : 0.5)
                 }
 
                 Divider().padding(.vertical, 4)

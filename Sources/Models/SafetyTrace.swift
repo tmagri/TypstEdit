@@ -245,6 +245,24 @@ extension AttackDetector {
         }
     }
 
+    /// True when a tool's *output* holds a credential-shaped value.
+    ///
+    /// This is what catches the file that hides: a `.env` renamed `notes.txt`
+    /// passes every path-name rule, but the key inside it does not change
+    /// shape. It checks the tool's result, which is the text the model has
+    /// just been handed.
+    static func outputContainsCredential(
+        kinds: Set<CredentialScanner.Kind>? = nil
+    ) -> AttackDetector {
+        AttackDetector("output_contains_credential") { trace in
+            trace.toolCalls.contains { call in
+                let matches = CredentialScanner.matches(in: call.output)
+                guard let kinds else { return !matches.isEmpty }
+                return matches.contains { kinds.contains($0.kind) }
+            }
+        }
+    }
+
     /// OR-combines detectors: a hit from any one is a hit.
     static func anyOf(_ detectors: AttackDetector...) -> AttackDetector {
         AttackDetector("any_of(\(detectors.map(\.label).joined(separator: " | ")))") { trace in

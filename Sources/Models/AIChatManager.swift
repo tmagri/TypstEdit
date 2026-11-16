@@ -474,7 +474,7 @@ final class AIChatManager: ObservableObject {
             rules: PermissionRuleStore.shared.currentRules,
             trace: SafetyTrace.currentTurnTrace(from: messages),
             userRules: SafetyRuleStore.shared.effectiveRules,
-            monitorEnabled: AISettingsManager.shared.chatSafetyMonitorEnabled
+            mode: AISettingsManager.shared.chatSafetyMode
         )
     }
 
@@ -3064,7 +3064,7 @@ final class AIChatManager: ObservableObject {
     private func requestApproval(_ kind: PendingApprovalKind, toolCallName: String) async -> Bool {
         let trace = SafetyTrace.currentTurnTrace(from: messages)
         let userRules = SafetyRuleStore.shared.effectiveRules
-        let monitorEnabled = AISettingsManager.shared.chatSafetyMonitorEnabled
+        let mode = AISettingsManager.shared.chatSafetyMode
         SafetyMonitor.humanApprovedWebHosts = SafetyMonitor.humanApprovedWebHosts(in: messages)
         if SafetyMonitor.canAutoApprove(
             kind: kind,
@@ -3072,15 +3072,15 @@ final class AIChatManager: ObservableObject {
             rules: PermissionRuleStore.shared.currentRules,
             trace: trace,
             userRules: userRules,
-            monitorEnabled: monitorEnabled
+            mode: mode
         ) {
             return true
         }
         // A safety hit is the only reason to show a card YOLO would have
         // skipped, so name the rule on the card. With the monitor off there is
         // no hit to name, and the card is the ordinary "this kind always asks".
-        let safetyHits = (yoloMode && monitorEnabled)
-            ? SafetyMonitor.hits(for: trace, userRules: userRules)
+        let safetyHits = (yoloMode && mode.isActive)
+            ? SafetyMonitor.hits(for: trace, mode: mode, userRules: userRules)
             : []
         let approval = PendingApproval(
             kind: kind,

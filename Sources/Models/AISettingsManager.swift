@@ -528,12 +528,21 @@ class AISettingsManager: ObservableObject {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
     }
-    /// Whether the safety monitor may send a YOLO-skipped call back to the
-    /// human. On by default: it can only ever *add* an approval card, never
-    /// remove one, so turning it on (or leaving it on) cannot make the
-    /// assistant more permissive than YOLO already was.
-    @AppStorage("aiChatSafetyMonitorEnabled") var chatSafetyMonitorEnabled: Bool = true {
-        willSet { objectWillChange.send() }
+    /// How much the safety monitor checks: `strict`, `safe`, or `off`.
+    /// `safe` is the default — it keeps the credential rules and drops the
+    /// suspicion-only ones, so the monitor never becomes noise people turn
+    /// off wholesale. Stored as its raw string, so an unknown future value
+    /// reads as the default rather than making the whole settings object
+    /// undecodable.
+    @AppStorage("aiChatSafetyMode") private var chatSafetyModeRaw: String = SafetyMode.safe.rawValue
+
+    /// The monitor's mode, with the raw string behind `@AppStorage`.
+    var chatSafetyMode: SafetyMode {
+        get { SafetyMode(rawValue: chatSafetyModeRaw) ?? .safe }
+        set {
+            chatSafetyModeRaw = newValue.rawValue
+            objectWillChange.send()
+        }
     }
     /// Rough token budget for one chat request before old turns get summarized
     /// into a compaction summary. Bigger models/local models with long

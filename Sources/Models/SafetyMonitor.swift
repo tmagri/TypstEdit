@@ -211,29 +211,131 @@ enum SafetyMonitor {
     private static let secretPathPattern =
         "(id_rsa|id_ed25519|\\.ssh|credentials|\\.env$|secret|token|password|\\.pem$|keychain)"
 
+    // MARK: - Credential shapes
+
+    /// Every built-in rule's id, for `SafetyMode.enabledBuiltInRuleIDs`.
+    static let allBuiltInRuleIDs: [String] = [
+        "credential_in_script_to_network",
+        "credential_in_args_to_network",
+        "credential_file_then_egress",
+        "secret_read_then_git_push",
+        "private_key_in_write",
+        "output_holds_private_key",
+        "python_then_egress",
+        "overwriting_write_sweep",
+        "repeated_script_runs",
+    ]
+
+    /// Something in the text that sends data somewhere.
+    ///
+    /// atif-scan's `NETWORK_CLIENT` names shell clients, because its channel is
+    /// a shell command. The Python tool's channel is Python source, where
+    /// `requests.get(...)` is the common case and no shell client appears — a
+    /// straight port would never fire. So this covers three spellings:
+    ///
+    /// - shell clients (`curl`, `wget`, `nc`, …),
+    /// - Python network libraries (`requests`, `urllib`, `httpx`, `socket`, …),
+    /// - and any `http(s)://` URL literal, which is where the data would go.
+    static let networkClientPattern = #"(?:\b(?:curl|wget|nc|ncat|netcat|socat|xh|httpie|ssh|scp|rsync|ftp|telnet)\b|\b(?:requests|urllib3?|httpx|aiohttp|http\.client|socket|ftplib|smtplib|paramiko|websocket|websockets)\b|\bhttps?://)"#
+
+    /// High-confidence credential shapes, from `CredentialScanner`.
+    static let credentialPattern =
+        #"(?:\bsk_live_[0-9a-zA-Z]{8,}|\bsk-(?:proj-)?[0-9a-zA-Z_-]{20,}|\bsk-ant-[0-9a-zA-Z_-]{20,}|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{20,}\b|\bgithub_pat_[0-9A-Za-z_]{20,}\b|\bxox[baprs]-[0-9A-Za-z-]{10,}\b|\bAIza[0-9A-Za-z_-]{35}\b|\bhf_[0-9A-Za-z]{20,}\b|-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----)"#
+
+    /// A `.env`-shaped file name, but not `.env.example` and friends, which
+    /// hold no secrets. Ported from atif-scan's `DOTENV_FILE`.
+    static let dotenvFilePattern =
+        #"(?<![\w])\.env(?!\.(?:example|sample|template|dist|defaults))"#
+
+    /// A pattern that matches text containing both `first` and `second`, in
+    /// either order. Ported from atif-scan's `_both` helper, which is the
+    /// cleanest way to express "a network client and a key, together".
+    ///
+    /// Each lookahead is anchored at `^` inside a group and scanned across the
+    /// whole string with `[\s\S]*`, so the two patterns may appear anywhere.
+    static func both(_ first: String, _ second: String) -> String {
+        #"^(?=[\s\S]*?(\#(first)))(?=[\s\S]*?(\#(second)))"#
+    }
+
     /// Built-in rules. Each one names a combination that a person should see
     /// before it happens, even in YOLO mode.
     static var builtInRules: [SafetyRule] {
         [
+            // MARK: Credential exfiltration (the "safe" mode set)
+
             SafetyRule(
-                id: "overwriting_write_sweep",
-                title: "Sweep of file writes",
-                severity: .watch,
-                explanation: "This turn is writing files over and over. YOLO can automate one write, not a sweep.",
-                detector: .countToolCalls(projectPrefix + "write_file", threshold: 4)
+                id: "credential_in_script_to_network",
+                title: "A script holds a key and reaches the network",
+                severity: .alert,
+                explanation: "This Python code contains a credential-shaped value and also has a network client or URL in it. That is how a key leaves the machine.",
+                detector: .toolCalledWithArgs(pythonPrefix + "run", [
+                    "code": .matches(both(networkClientPattern, credentialPattern))
+                ])
             ),
             SafetyRule(
-                id: "credential_read_then_egress",
-                title: "Secret-looking file, then a network call",
+                id: "credential_in_args_to_network",
+                title: "A key sent to a URL",
                 severity: .alert,
-                explanation: "A file whose name looks like it holds credentials was read, and this turn also reached the network. That is the shape of an exfiltration.",
+                explanation: "A web fetch carries a credential-shaped value in its URL. The key would be sent in that request.",
+                detector: .toolCalledWithArgs(projectPrefix + "web_fetch", [
+                    "url": .matches(both(credentialPattern, #"\bhttps?://"#))
+                ])
+            ),
+            SafetyRule(
+                id: "credential_file_then_egress",
+                title: "A secret-looking file was read, then the network was reached",
+                severity: .alert,
+                explanation: "A file whose name or contents look like they hold a credential was read, and this turn also reached the network. That is the shape of an exfiltration.",
                 detector: .allOf(
-                    .toolCalledWithArgs(projectPrefix + "read_file", [
-                        "path": .matches(secretPathPattern)
-                    ]),
-                    .toolsCalled(networkTools)
+                    .anyOf(
+                        // The file is named like a secret.
+                        .toolCalledWithArgs(projectPrefix + "read_file", [
+                            "path": .matches(secretPathPattern)
+                        ]),
+                        // Or the output it returned is full of key-shaped values,
+                        // which catches a `.env` renamed `notes.txt`.
+                        .outputContainsCredential()
+                    ),
+                    .anyOf(
+                        .toolsCalled(networkTools),
+                        .toolsCalled([pythonPrefix + "run"])
+                    )
                 )
             ),
+            SafetyRule(
+                id: "secret_read_then_git_push",
+                title: "Secret-looking file read, then a Git push",
+                severity: .alert,
+                explanation: "A file that looks like it holds a credential was read, and this turn tried to push. Publishing is the one place that must never carry a secret out.",
+                detector: .allOf(
+                    .anyOf(
+                        .toolCalledWithArgs(projectPrefix + "read_file", [
+                            "path": .matches(secretPathPattern)
+                        ]),
+                        .outputContainsCredential()
+                    ),
+                    .toolsCalled([gitPrefix + "git_push"])
+                )
+            ),
+            SafetyRule(
+                id: "private_key_in_write",
+                title: "A private key is being written to a file",
+                severity: .alert,
+                explanation: "This write puts a private key block into a file the model can choose. A key on disk is a key that can be read later.",
+                detector: .toolCalledWithArgs(projectPrefix + "write_file", [
+                    "content": .matches(#"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"#)
+                ])
+            ),
+            SafetyRule(
+                id: "output_holds_private_key",
+                title: "Tool output looks like a private key",
+                severity: .alert,
+                explanation: "A tool returned what looks like a private key or a password line. Check what the assistant is about to do with it.",
+                detector: .logContains("(-----BEGIN [A-Z ]*PRIVATE KEY-----|password\\s*[:=]\\s*\\S+)", caseSensitive: false)
+            ),
+
+            // MARK: Suspicion-only rules (strict mode)
+
             SafetyRule(
                 id: "python_then_egress",
                 title: "Script run, then a network call",
@@ -245,16 +347,11 @@ enum SafetyMonitor {
                 )
             ),
             SafetyRule(
-                id: "secret_read_then_git_push",
-                title: "Secret-looking file read, then a Git push",
-                severity: .alert,
-                explanation: "A file that looks like it holds credentials was read, and this turn tried to push. Publishing is the one place that must never carry a secret out.",
-                detector: .allOf(
-                    .toolCalledWithArgs(projectPrefix + "read_file", [
-                        "path": .matches(secretPathPattern)
-                    ]),
-                    .toolsCalled([gitPrefix + "git_push"])
-                )
+                id: "overwriting_write_sweep",
+                title: "Sweep of file writes",
+                severity: .watch,
+                explanation: "This turn is writing files over and over. YOLO can automate one write, not a sweep.",
+                detector: .countToolCalls(projectPrefix + "write_file", threshold: 4)
             ),
             SafetyRule(
                 id: "repeated_script_runs",
@@ -263,28 +360,40 @@ enum SafetyMonitor {
                 explanation: "This turn has run more scripts than a person usually reviews. YOLO should hand the next one back to you.",
                 detector: .countToolCalls(pythonPrefix + "run", threshold: 5)
             ),
-            SafetyRule(
-                id: "secret_contents_in_output",
-                title: "Tool output looks like a private key",
-                severity: .alert,
-                explanation: "A tool returned what looks like a private key or a password line. Check what the assistant is about to do with it.",
-                detector: .logContains("(-----BEGIN [A-Z ]*PRIVATE KEY-----|password\\s*[:=]\\s*\\S+)", caseSensitive: false)
-            ),
         ]
     }
 
-    /// Every rule that applies, built-ins first, with the user's enabled and
-    /// well-formed rules after them.
-    static func rules(userRules: [UserSafetyRule]) -> [SafetyRule] {
+    /// Every rule that applies to `mode`, built-ins first, with the user's
+    /// enabled and well-formed rules after them.
+    ///
+    /// A user rule runs in `strict` and `safe` alike: it is the person's own
+    /// instruction, so no mode may quietly drop it. `off` drops everything.
+    static func rules(mode: SafetyMode, userRules: [UserSafetyRule]) -> [SafetyRule] {
+        guard mode.isActive else { return [] }
+        let enabled = mode.enabledBuiltInRuleIDs
+        let builtIns = builtInRules.filter { enabled.contains($0.id) }
         let custom = userRules
             .filter(\.isEnabled)
             .compactMap { $0.makeRule() }
-        return builtInRules + custom
+        return builtIns + custom
     }
 
-    /// The rules that fired for `trace`.
-    static func hits(for trace: SafetyTrace, userRules: [UserSafetyRule]) -> [SafetyRule] {
-        rules(userRules: userRules).filter { $0.detector(trace) }
+    /// The rules that fired for `trace` under `mode`.
+    static func hits(
+        for trace: SafetyTrace,
+        mode: SafetyMode,
+        userRules: [UserSafetyRule]
+    ) -> [SafetyRule] {
+        rules(mode: mode, userRules: userRules).filter { $0.detector(trace) }
+    }
+
+    /// Whether a trace trips any rule, for `mode`.
+    static func isFlagged(
+        _ trace: SafetyTrace,
+        mode: SafetyMode,
+        userRules: [UserSafetyRule]
+    ) -> Bool {
+        !hits(for: trace, mode: mode, userRules: userRules).isEmpty
     }
 
     /// Whether `kind` may skip its approval card.
@@ -294,16 +403,16 @@ enum SafetyMonitor {
     /// add one. `canAutoApprove` keeps the final say on kinds that are
     /// always manual, and this can only narrow it further.
     ///
-    /// `monitorEnabled` is the Settings toggle. Off, the monitor stands down
-    /// entirely — YOLO and saved allow rules decide on their own, which is
-    /// what "off" has to mean for the switch to be worth having.
+    /// `mode` is the Settings dial. Off, the monitor stands down entirely —
+    /// YOLO and saved allow rules decide on their own, which is what "off"
+    /// has to mean for the switch to be worth having.
     static func canAutoApprove(
         kind: PendingApprovalKind,
         yoloMode: Bool,
         rules: [PermissionRule],
         trace: SafetyTrace,
         userRules: [UserSafetyRule],
-        monitorEnabled: Bool = true
+        mode: SafetyMode = .safe
     ) -> Bool {
         // A fetch that carries a saved site sign-in is a credentialed request,
         // so it is never automated on the strength of the cookies alone: the
@@ -318,8 +427,8 @@ enum SafetyMonitor {
         // before this one. Here we only decide whether the card may be skipped.
         if case .deny = PermissionRules.decision(for: kind, rules: rules) { return false }
         guard PermissionRules.mayAutoApprove(kind, yoloMode: yoloMode, rules: rules) else { return false }
-        guard monitorEnabled else { return true }
-        return hits(for: trace, userRules: userRules).isEmpty
+        guard mode.isActive else { return true }
+        return !isFlagged(trace, mode: mode, userRules: userRules)
     }
 
     /// The signed-in web hosts this conversation's transcript says the user
