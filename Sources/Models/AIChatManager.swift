@@ -457,14 +457,25 @@ final class AIChatManager: ObservableObject {
         }
         localTools.willAutoApprove = { [weak self] kind in
             guard let self else { return false }
-            return SafetyMonitor.canAutoApprove(
-                kind: kind,
-                yoloMode: self.yoloMode,
-                rules: PermissionRuleStore.shared.currentRules,
-                trace: SafetyTrace.currentTurnTrace(from: self.messages),
-                userRules: SafetyRuleStore.shared.effectiveRules
-            )
+            return self.maySkipApproval(kind)
         }
+    }
+
+    /// Whether `kind` may skip its card: YOLO or a saved allow rule permits it,
+    /// the safety monitor does not object, and a signed-in fetch has been
+    /// approved by hand in this conversation. Pure enough to call from the
+    /// executor's synchronous `willAutoApprove` hook and from the async
+    /// approval gate alike.
+    private func maySkipApproval(_ kind: PendingApprovalKind) -> Bool {
+        SafetyMonitor.humanApprovedWebHosts = SafetyMonitor.humanApprovedWebHosts(in: messages)
+        return SafetyMonitor.canAutoApprove(
+            kind: kind,
+            yoloMode: yoloMode,
+            rules: PermissionRuleStore.shared.currentRules,
+            trace: SafetyTrace.currentTurnTrace(from: messages),
+            userRules: SafetyRuleStore.shared.effectiveRules,
+            monitorEnabled: AISettingsManager.shared.chatSafetyMonitorEnabled
+        )
     }
 
     // MARK: - Skill Defaults
@@ -3053,18 +3064,22 @@ final class AIChatManager: ObservableObject {
     private func requestApproval(_ kind: PendingApprovalKind, toolCallName: String) async -> Bool {
         let trace = SafetyTrace.currentTurnTrace(from: messages)
         let userRules = SafetyRuleStore.shared.effectiveRules
+        let monitorEnabled = AISettingsManager.shared.chatSafetyMonitorEnabled
+        SafetyMonitor.humanApprovedWebHosts = SafetyMonitor.humanApprovedWebHosts(in: messages)
         if SafetyMonitor.canAutoApprove(
             kind: kind,
             yoloMode: yoloMode,
             rules: PermissionRuleStore.shared.currentRules,
             trace: trace,
-            userRules: userRules
+            userRules: userRules,
+            monitorEnabled: monitorEnabled
         ) {
             return true
         }
         // A safety hit is the only reason to show a card YOLO would have
-        // skipped, so name the rule on the card.
-        let safetyHits = yoloMode
+        // skipped, so name the rule on the card. With the monitor off there is
+        // no hit to name, and the card is the ordinary "this kind always asks".
+        let safetyHits = (yoloMode && monitorEnabled)
             ? SafetyMonitor.hits(for: trace, userRules: userRules)
             : []
         let approval = PendingApproval(

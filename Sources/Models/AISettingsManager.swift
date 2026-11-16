@@ -528,6 +528,13 @@ class AISettingsManager: ObservableObject {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
     }
+    /// Whether the safety monitor may send a YOLO-skipped call back to the
+    /// human. On by default: it can only ever *add* an approval card, never
+    /// remove one, so turning it on (or leaving it on) cannot make the
+    /// assistant more permissive than YOLO already was.
+    @AppStorage("aiChatSafetyMonitorEnabled") var chatSafetyMonitorEnabled: Bool = true {
+        willSet { objectWillChange.send() }
+    }
     /// Rough token budget for one chat request before old turns get summarized
     /// into a compaction summary. Bigger models/local models with long
     /// contexts can raise this; individual saved models can override it

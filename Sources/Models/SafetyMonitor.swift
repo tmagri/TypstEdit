@@ -293,18 +293,64 @@ enum SafetyMonitor {
     /// blunt: a trace match can only ever *remove* an auto-approval, never
     /// add one. `canAutoApprove` keeps the final say on kinds that are
     /// always manual, and this can only narrow it further.
+    ///
+    /// `monitorEnabled` is the Settings toggle. Off, the monitor stands down
+    /// entirely — YOLO and saved allow rules decide on their own, which is
+    /// what "off" has to mean for the switch to be worth having.
     static func canAutoApprove(
         kind: PendingApprovalKind,
         yoloMode: Bool,
         rules: [PermissionRule],
         trace: SafetyTrace,
-        userRules: [UserSafetyRule]
+        userRules: [UserSafetyRule],
+        monitorEnabled: Bool = true
     ) -> Bool {
+        // A fetch that carries a saved site sign-in is a credentialed request,
+        // so it is never automated on the strength of the cookies alone: the
+        // user has to approve that host by hand in this conversation first.
+        // Without this, YOLO would turn a one-off sign-in into standing
+        // permission to act as the user on that site. Checked before the
+        // rules, because no allow rule can supply that human decision.
+        if case .webFetch(_, let siteHost) = kind, let siteHost {
+            guard humanApprovedWebHosts.contains(siteHost.lowercased()) else { return false }
+        }
         // Deny rules refuse outright — that is the executor's call, checked
         // before this one. Here we only decide whether the card may be skipped.
         if case .deny = PermissionRules.decision(for: kind, rules: rules) { return false }
         guard PermissionRules.mayAutoApprove(kind, yoloMode: yoloMode, rules: rules) else { return false }
+        guard monitorEnabled else { return true }
         return hits(for: trace, userRules: userRules).isEmpty
+    }
+
+    /// The signed-in web hosts this conversation's transcript says the user
+    /// approved by hand. Rebuilt once per approval check by the chat, which
+    /// owns the transcript.
+    ///
+    /// Kept here as a plain static so `canAutoApprove` stays a pure function
+    /// of (kind, mode, rules, trace, hosts) and can be tested without a chat.
+    nonisolated(unsafe) static var humanApprovedWebHosts: Set<String> = []
+
+    /// The signed-in hosts a transcript says the user approved by hand.
+    ///
+    /// Only `.succeeded` rows count, and that is deliberate: the loop records
+    /// every thrown refusal as `.failed`, so a status test like "was not
+    /// denied" would read a refusal as permission. A signed-in fetch that
+    /// succeeded can only have run after a human approved it, so success is
+    /// the one honest signal. A call the user approved and that then failed
+    /// at the network is not remembered — the closed direction to fail in.
+    static func humanApprovedWebHosts(in messages: [ChatMessage]) -> Set<String> {
+        var hosts: Set<String> = []
+        for message in messages where message.role == .toolCall && !message.isSubagent {
+            guard message.toolName == projectPrefix + "web_fetch",
+                  message.toolStatus == .succeeded else { continue }
+            guard let json = message.toolArgumentsJSON,
+                  let data = json.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawURL = object["url"] as? String,
+                  let host = URL(string: rawURL)?.host?.lowercased() else { continue }
+            hosts.insert(host)
+        }
+        return hosts
     }
 }
 

@@ -261,6 +261,7 @@ struct PermissionRulesSettingsCard: View {
 /// approval card that YOLO would have skipped — never remove one.
 struct SafetyRulesSettingsCard: View {
     @ObservedObject private var store = SafetyRuleStore.shared
+    @StateObject private var settings = AISettingsManager.shared
     @State private var newTitle: String = ""
     @State private var newKind: UserSafetyRule.Kind = .toolCalled
     @State private var newToolName: String = "python__run"
@@ -277,7 +278,19 @@ struct SafetyRulesSettingsCard: View {
             description: "A monitor that watches a turn's tool calls and hands a call back to you when a rule matches — even in YOLO mode. It can only add an approval card, never remove one, so turning it on cannot make the assistant more permissive. The approval card names the rule that fired, so a re-approval never looks like YOLO forgot. A half-written rule is skipped rather than treated as “match everything”."
         ) {
             VStack(alignment: .leading, spacing: 12) {
+                Toggle("Let the safety monitor send a call back to me", isOn: $settings.chatSafetyMonitorEnabled)
+                    .font(.body.weight(.medium))
+                Text(settings.chatSafetyMonitorEnabled
+                     ? "On. A matching rule brings the approval card back, even in YOLO mode."
+                     : "Off. YOLO and your Allow rules decide on their own, with no safety check in between. Deny rules still apply.")
+                    .font(.caption2)
+                    .foregroundColor(settings.chatSafetyMonitorEnabled ? .secondary : .orange)
+                    .padding(.leading, 20)
+
+                Divider()
+
                 Text("Built-in rules").font(.caption.bold()).foregroundColor(.secondary)
+                    .opacity(settings.chatSafetyMonitorEnabled ? 1 : 0.5)
                 ForEach(SafetyMonitor.builtInRules) { rule in
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: rule.severity.symbol)
@@ -287,6 +300,7 @@ struct SafetyRulesSettingsCard: View {
                             Text(rule.explanation).font(.caption2).foregroundColor(.secondary)
                         }
                     }
+                    .opacity(settings.chatSafetyMonitorEnabled ? 1 : 0.5)
                 }
 
                 Divider().padding(.vertical, 4)

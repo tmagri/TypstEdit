@@ -17,6 +17,11 @@ final class SafetyMonitorTests: XCTestCase {
         SafetyTrace(task: "test", toolCalls: calls)
     }
 
+    override func tearDown() {
+        SafetyMonitor.humanApprovedWebHosts = []
+        super.tearDown()
+    }
+
     /// A kind YOLO may normally automate: a project file write.
     private var plainWrite: PendingApprovalKind {
         .fileWrite(relativePath: "notes/a.md", oldContent: "", newContent: "x", isNewFile: true)
@@ -99,6 +104,81 @@ final class SafetyMonitorTests: XCTestCase {
         XCTAssertTrue(SafetyMonitor.canAutoApprove(
             kind: plainWrite, yoloMode: true, rules: [], trace: clean, userRules: []
         ))
+    }
+
+    // MARK: - The Settings toggle
+
+    func testDisabledMonitorLetsYoloDecideAlone() {
+        let sweep = trace(Array(repeating: call("project__write_file"), count: 5))
+        XCTAssertFalse(SafetyMonitor.canAutoApprove(
+            kind: plainWrite, yoloMode: true, rules: [], trace: sweep, userRules: [], monitorEnabled: true
+        ))
+        XCTAssertTrue(SafetyMonitor.canAutoApprove(
+            kind: plainWrite, yoloMode: true, rules: [], trace: sweep, userRules: [], monitorEnabled: false
+        ), "with the monitor off, YOLO decides on its own")
+    }
+
+    func testDisabledMonitorStillHonoursADenyRule() {
+        let deny = PermissionRule(action: .edit, pattern: "notes/*", effect: .deny)
+        XCTAssertFalse(SafetyMonitor.canAutoApprove(
+            kind: plainWrite, yoloMode: true, rules: [deny], trace: trace([]),
+            userRules: [], monitorEnabled: false
+        ), "a deny rule is not part of the safety monitor and still refuses")
+    }
+
+    // MARK: - Signed-in fetches
+
+    func testSignedInFetchIsNeverAutomatedWithoutAHandApproval() {
+        let signedIn = PendingApprovalKind.webFetch(url: "https://example.com/page", savedSignInHost: "example.com")
+        SafetyMonitor.humanApprovedWebHosts = []
+        XCTAssertFalse(SafetyMonitor.canAutoApprove(
+            kind: signedIn, yoloMode: true, rules: [], trace: trace([]), userRules: []
+        ), "a credentialed fetch is not automated on the cookies alone")
+    }
+
+    func testSignedInFetchIsAutomatedOnceTheHostWasApprovedByHand() {
+        let signedIn = PendingApprovalKind.webFetch(url: "https://example.com/page", savedSignInHost: "example.com")
+        SafetyMonitor.humanApprovedWebHosts = ["example.com"]
+        XCTAssertTrue(SafetyMonitor.canAutoApprove(
+            kind: signedIn, yoloMode: true, rules: [], trace: trace([]), userRules: []
+        ))
+    }
+
+    func testAnAllowRuleCannotSupplyTheHandApproval() {
+        let allow = PermissionRule(action: .webfetch, pattern: "*", effect: .allow)
+        let signedIn = PendingApprovalKind.webFetch(url: "https://example.com/page", savedSignInHost: "example.com")
+        SafetyMonitor.humanApprovedWebHosts = []
+        XCTAssertFalse(SafetyMonitor.canAutoApprove(
+            kind: signedIn, yoloMode: true, rules: [allow], trace: trace([]), userRules: []
+        ))
+    }
+
+    func testPlainFetchIsUnaffectedByTheSignInGate() {
+        let plain = PendingApprovalKind.webFetch(url: "https://example.com/page", savedSignInHost: nil)
+        SafetyMonitor.humanApprovedWebHosts = []
+        XCTAssertTrue(SafetyMonitor.canAutoApprove(
+            kind: plain, yoloMode: true, rules: [], trace: trace([]), userRules: []
+        ))
+    }
+
+    func testHandApprovedHostsComeFromSucceededFetchesOnly() {
+        var approved = ChatMessage(role: .toolCall)
+        approved.toolName = "project__web_fetch"
+        approved.toolArgumentsJSON = #"{"url":"https://example.com/a"}"#
+        approved.toolStatus = .succeeded
+        var refused = ChatMessage(role: .toolCall)
+        refused.toolName = "project__web_fetch"
+        refused.toolArgumentsJSON = #"{"url":"https://other.test/b"}"#
+        refused.toolStatus = .denied
+        var subagent = ChatMessage(role: .toolCall)
+        subagent.toolName = "project__web_fetch"
+        subagent.toolArgumentsJSON = #"{"url":"https://nested.test/c"}"#
+        subagent.toolStatus = .succeeded
+        subagent.isSubagent = true
+
+        let hosts = SafetyMonitor.humanApprovedWebHosts(in: [approved, refused, subagent])
+        XCTAssertEqual(hosts, ["example.com"],
+                       "a refusal is not permission, and a subagent's fetch is not the user's decision")
     }
 
     func testMonitorCanOnlyNarrowNeverWiden() {
