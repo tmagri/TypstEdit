@@ -201,11 +201,18 @@ struct MCPOAuthTokenResponse: Decodable, Equatable {
     }
 }
 
-/// A registered client, kept so re-signing in after a restart reuses it
-/// instead of littering the authorization server with registrations.
+/// A registered client, kept so re-signing in can reuse it instead of
+/// littering the authorization server with registrations — but only for the
+/// redirect URI it was registered with.
 struct MCPOAuthClient: Codable, Equatable, Sendable {
     var clientID: String
     var clientSecret: String?
+    /// The redirect URI sent at registration. Servers such as Atlassian's
+    /// match it exactly, port included, and answer HTTP 500 to any other. The
+    /// loopback port changes on every sign-in, so a client is reusable only
+    /// when this still equals the new redirect URI. `nil` for clients saved
+    /// before this was recorded: unknown, so they are registered again.
+    var redirectURI: String?
 }
 
 /// What TypstEdit stores for one server after a successful sign-in.
@@ -236,7 +243,18 @@ struct MCPOAuthCredentials: Codable, Equatable, Sendable {
         return expiresAt.addingTimeInterval(-60) <= now
     }
 
-    var authorizationHeader: String { "\(tokenType) \(accessToken)" }
+    /// The `Authorization` value, with the scheme in its canonical spelling.
+    ///
+    /// HTTP auth schemes are case-insensitive (RFC 7235 §2.1) and RFC 6750
+    /// §2.1 names this one `Bearer`, so a correct server accepts any casing.
+    /// Servers are not all correct: Atlassian's token endpoint returns
+    /// `"token_type": "bearer"` and its MCP endpoint then refuses the very
+    /// token it just minted unless the word is capitalised. Sending the
+    /// canonical spelling makes that work and is still valid for the rest.
+    var authorizationHeader: String {
+        let scheme = tokenType.caseInsensitiveCompare("bearer") == .orderedSame ? "Bearer" : tokenType
+        return "\(scheme) \(accessToken)"
+    }
 }
 
 // MARK: - Transport
@@ -391,13 +409,13 @@ final class MCPOAuthFlow {
     // MARK: Registration
 
     /// Registers TypstEdit with the authorization server (RFC 7591), unless
-    /// the caller already has a client for it. Servers without a registration
-    /// endpoint are given the empty client id some expect for a public
-    /// client, so sign-in still has a chance.
+    /// the caller already has a client registered for this exact redirect URI.
+    /// Servers without a registration endpoint are given the empty client id
+    /// some expect for a public client, so sign-in still has a chance.
     func registerClient(endpoint: MCPOAuthEndpoint, redirectURI: String, existing: MCPOAuthClient?) async throws -> MCPOAuthClient {
-        if let existing, !existing.clientID.isEmpty { return existing }
+        if let existing, !existing.clientID.isEmpty, existing.redirectURI == redirectURI { return existing }
         guard let registrationURL = endpoint.registrationURL else {
-            return MCPOAuthClient(clientID: "", clientSecret: nil)
+            return MCPOAuthClient(clientID: "", clientSecret: nil, redirectURI: redirectURI)
         }
         var request = URLRequest(url: registrationURL)
         request.httpMethod = "POST"
@@ -423,7 +441,7 @@ final class MCPOAuthFlow {
               let clientID = json["client_id"] as? String, !clientID.isEmpty else {
             throw MCPOAuthError.registrationFailed("the reply had no client_id")
         }
-        return MCPOAuthClient(clientID: clientID, clientSecret: json["client_secret"] as? String)
+        return MCPOAuthClient(clientID: clientID, clientSecret: json["client_secret"] as? String, redirectURI: redirectURI)
     }
 
     // MARK: Sign-in

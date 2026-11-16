@@ -120,6 +120,28 @@ enum ChatImageLoader {
     /// photo works even though most providers can't read HEIC.
     static let supportedTypes: [UTType] = [.png, .jpeg, .gif, .webP, .heic, .heif, .tiff, .bmp]
 
+    /// Clipboard encodings a pasted or dropped image is read from, cheapest
+    /// first. The order matters: a macOS screenshot lands on the clipboard as
+    /// both a PNG and an uncompressed TIFF of the same pixels, and the TIFF is
+    /// routinely twenty times the size (33 MB against 3.7 MB for a full-screen
+    /// grab). Reading it first meant pulling tens of megabytes on the main
+    /// thread to decode a picture the PNG already described.
+    static let clipboardImageTypes: [NSPasteboard.PasteboardType] = [
+        NSPasteboard.PasteboardType("public.png"),
+        NSPasteboard.PasteboardType("public.jpeg"),
+        NSPasteboard.PasteboardType("public.heic"),
+        NSPasteboard.PasteboardType("org.webmproject.webp"),
+        NSPasteboard.PasteboardType("com.compuserve.gif"),
+        .tiff,
+    ]
+
+    /// The first decodable image encoding on a pasteboard, cheapest first (see
+    /// `clipboardImageTypes`). Shared by paste and drop so a screenshot reads
+    /// the same way whichever gesture produced it.
+    static func clipboardImageData(from pasteboard: NSPasteboard) -> Data? {
+        clipboardImageTypes.lazy.compactMap { pasteboard.data(forType: $0) }.first
+    }
+
     /// What `fit` did with the images it was given, for a short inline notice.
     struct FitResult: Equatable {
         var accepted: [ChatImage] = []

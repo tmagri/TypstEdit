@@ -228,4 +228,21 @@ final class ChatImageTests: XCTestCase {
         XCTAssertTrue(chat.pendingQueued.isEmpty)
         XCTAssertEqual(chat.messages.last?.text, "text only")
     }
+
+    // MARK: - Clipboard encoding order
+
+    /// A macOS screenshot is on the clipboard as a PNG *and* an uncompressed
+    /// TIFF of the same pixels, and the TIFF is often twenty times the size.
+    /// Reading it first pulled tens of megabytes on the main thread to decode
+    /// a picture the PNG already described, so the cheap encodings come first
+    /// and TIFF is the fallback.
+    func testClipboardImageTypesPreferCompressedEncodings() {
+        let types = ChatImageLoader.clipboardImageTypes
+        XCTAssertEqual(types.first?.rawValue, "public.png", "PNG is the cheapest common encoding")
+        XCTAssertEqual(types.last, .tiff, "TIFF is the last resort, not the first read")
+        XCTAssertLessThan(
+            types.firstIndex(of: NSPasteboard.PasteboardType("public.jpeg")) ?? .max,
+            types.firstIndex(of: .tiff) ?? .max
+        )
+    }
 }

@@ -2076,10 +2076,12 @@ struct AIChatView: View {
     private func attachClipboardImageIfPresent() -> Bool {
         let pasteboard = NSPasteboard.general
         if pasteboard.string(forType: .string)?.isEmpty == false { return false }
-        let types: [NSPasteboard.PasteboardType] = [.tiff, NSPasteboard.PasteboardType("public.png"), NSPasteboard.PasteboardType("public.jpeg")]
-        // Read the bytes eagerly on the main thread: NSImage(pasteboard:) uses
-        // a lazy provider that can IPC back to the source app and deadlock.
-        guard let data = types.compactMap({ pasteboard.data(forType: $0) }).first else { return false }
+        // Cheapest encoding first: a screenshot is on the clipboard as a PNG
+        // and an uncompressed TIFF of the same pixels, and the TIFF is often
+        // twenty times the size. Read the bytes eagerly on the main thread:
+        // NSImage(pasteboard:) uses a lazy provider that can IPC back to the
+        // source app and deadlock.
+        guard let data = ChatImageLoader.clipboardImageData(from: pasteboard) else { return false }
         guard let image = try? ChatImageLoader.make(from: data) else { return false }
         applyAttachments([image])
         return true

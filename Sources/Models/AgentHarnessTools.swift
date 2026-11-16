@@ -204,6 +204,13 @@ enum AgentHarnessTools {
     ]
 
     static func workLogLine(_ row: ChatMessage) -> String {
+        "- \(workLogCall(row)) → \(workLogOutcome(status: row.toolStatus, output: row.toolOutput ?? ""))"
+    }
+
+    /// The call half of a work-log line, `name(key: value, …)`, without the
+    /// outcome — for callers that only label the call and would otherwise
+    /// scan its whole output for nothing.
+    static func workLogCall(_ row: ChatMessage) -> String {
         let qualified = row.toolName ?? "tool"
         let name = qualified.range(of: "__").map { String(qualified[$0.upperBound...]) } ?? qualified
 
@@ -229,8 +236,7 @@ enum AgentHarnessTools {
             return "\(key): \(rendered)"
         }.joined(separator: ", ")
 
-        let header = argumentText.isEmpty ? name : "\(name)(\(argumentText))"
-        return "- \(header) → \(workLogOutcome(status: row.toolStatus, output: row.toolOutput ?? ""))"
+        return argumentText.isEmpty ? name : "\(name)(\(argumentText))"
     }
 
     /// Short outcome for a work-log line: the read window, the compile
@@ -244,12 +250,14 @@ enum AgentHarnessTools {
         case .skipped: return "not run"
         case .succeeded, .none: break
         }
-        let lines = output.components(separatedBy: "\n")
+        // Lazily: only the first few lines are read, and splitting a
+        // multi-megabyte output whole to look at them dominated every caller.
         // read_file / read_skill_file / web_fetch window header.
-        if let window = lines.prefix(3).first(where: { $0.hasPrefix("[lines ") && $0.hasSuffix("]") }) {
+        if let window = firstLine(in: output, within: 3, where: { $0.hasPrefix("[lines ") && $0.hasSuffix("]") }) {
             return "ok, " + String(window.dropFirst().dropLast())
         }
-        let firstLine = lines.first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? ""
+        let firstLine = firstLine(in: output, where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            .map(String.init) ?? ""
         var outcome = oneLine(firstLine, max: 120)
         if output.contains("✓ Typst check: compiles cleanly") {
             outcome += " (compiles cleanly)"
@@ -257,6 +265,28 @@ enum AgentHarnessTools {
             outcome += " (Typst check reported problems)"
         }
         return outcome.isEmpty ? "ok" : outcome
+    }
+
+    /// The first of the first `limit` lines of `text` that matches, reading
+    /// no further into the text than that line.
+    private static func firstLine(
+        in text: String,
+        within limit: Int = .max,
+        where matches: (Substring) -> Bool
+    ) -> Substring? {
+        var start = text.startIndex
+        var seen = 0
+        while seen < limit {
+            // Bytes, not Characters: `\r\n` is one Character and would hide
+            // the break, where the old Foundation split found it.
+            let end = text.utf8[start...].firstIndex(of: UInt8(ascii: "\n")) ?? text.endIndex
+            let line = text[start..<end]
+            if matches(line) { return line }
+            seen += 1
+            guard end < text.endIndex else { return nil }
+            start = text.index(after: end)
+        }
+        return nil
     }
 
     private static func oneLine(_ text: String, max: Int) -> String {
