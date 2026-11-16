@@ -508,6 +508,26 @@ class AISettingsManager: ObservableObject {
     /// Empty = any public domain; the SSRF guard (private/loopback addresses
     /// refused) applies regardless and can't be opted out of.
     @AppStorage("aiChatWebFetchAllowedDomains") var chatWebFetchAllowedDomains: String = ""
+    /// Whether the agent may look at the screen (`screen__look`, OCR via
+    /// Vision). Off by default and separate from every other tool: reading
+    /// the desktop is a privacy decision, not a file operation. Every capture
+    /// still needs its own approval card, even under YOLO.
+    @AppStorage("aiChatScreenToolEnabled") var chatScreenToolEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    /// Whether a capture may take the whole screen rather than only a region
+    /// the user drags. Region-only is the safer default.
+    @AppStorage("aiChatScreenFullScreenEnabled") var chatScreenFullScreenEnabled: Bool = false
+    /// Comma-separated Vision language tags for OCR, most preferred first
+    /// (`"en-US,de-DE"`). Unsupported tags are ignored by Vision.
+    @AppStorage("aiChatScreenOCRLanguages") var chatScreenOCRLanguages: String = "en-US"
+    /// The OCR languages as Vision tags.
+    var ocrLanguageList: [String] {
+        chatScreenOCRLanguages
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
     /// Rough token budget for one chat request before old turns get summarized
     /// into a compaction summary. Bigger models/local models with long
     /// contexts can raise this; individual saved models can override it

@@ -131,7 +131,9 @@ enum PendingApprovalKind {
     /// glancing at the query string, since a fetch is also a request the
     /// destination server sees (a compromised page could try to exfiltrate
     /// project secrets by encoding them into URL parameters).
-    case webFetch(url: String)
+    /// `savedSignInHost` names the site whose saved sign-in cookies would be
+    /// replayed, so the card never sends a session silently.
+    case webFetch(url: String, savedSignInHost: String? = nil)
     /// Compiling a document to PDF/PNG/SVG. The output is binary (or several
     /// page files), so there's no text diff to show — the destination and
     /// format are the useful details.
@@ -159,6 +161,10 @@ enum PendingApprovalKind {
     /// A network Git action (`git_fetch`/`git_pull`/`git_push`). Shown with
     /// the branch and upstream so a push is never a surprise.
     case gitNetwork(operation: GitNetworkAction, branch: String, upstream: String?)
+    /// A screen capture read by OCR (the `screen__look` tool). Always needs a
+    /// human, YOLO included: pointing the agent's eyes at the desktop is a
+    /// privacy decision, not a file edit.
+    case screenCapture(scope: String, purpose: String)
 
     /// Publishing always requires a human review. YOLO can automate local
     /// commits or permitted pulls, but it must never auto-approve a push.
@@ -175,7 +181,17 @@ enum PendingApprovalKind {
         if case .runPython(_, let wantsElevation, _) = self, wantsElevation {
             return false
         }
+        // Looking at the screen is a privacy decision; it always asks.
+        if case .screenCapture = self { return false }
         return yoloMode
+    }
+
+    /// The "Always allow…" rules that could cover this kind of call. Empty
+    /// for the kinds YOLO always sends back to a human, because a saved rule
+    /// may never be broader than what YOLO can automate.
+    @MainActor
+    var permissionSuggestions: [PermissionSuggestion] {
+        PermissionRules.suggestions(for: self)
     }
 }
 
@@ -183,4 +199,8 @@ struct PendingApproval: Identifiable {
     let id = UUID()
     let kind: PendingApprovalKind
     let toolCallName: String
+    /// Safety rules that fired for this call. Non-empty only when the monitor
+    /// held back a card YOLO would otherwise have skipped, so the card can
+    /// say why it is being asked instead of looking like YOLO forgot.
+    var safetyHits: [SafetyRule] = []
 }

@@ -302,6 +302,12 @@ final class AIChatManager: ObservableObject {
     /// Chat & Actions model. Read per request, so switching takes effect on
     /// the next message.
     private var chatModelContext: ModelContext { AISettingsManager.shared.modelContext(for: .chat) }
+
+    /// The last ARIA safety review of this conversation, if one was run.
+    /// Read-only and off by default — a review costs one model request, so it
+    /// happens only when the user asks for it.
+    @Published private(set) var ariaReview: ARIAAssessment.Result?
+    @Published private(set) var isReviewingSafety = false
     /// Rough chars-per-token for budget math. Not exact, but stable enough to
     /// decide when to compact and when to elide tool output.
     static let charsPerToken = 4
@@ -422,18 +428,43 @@ final class AIChatManager: ObservableObject {
     func refreshToolSettings() {
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
-        localTools.pythonSudoEnabled = AISettingsManager.shared.chatPythonSudoEnabled
-        localTools.willAutoApprove = { [weak self] kind in
-            kind.canAutoApprove(yoloMode: self?.yoloMode ?? false)
-        }
         localTools.autoValidateTypstEdits = AISettingsManager.shared.chatAutoValidateTypstEdits
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
         localTools.allowedWebFetchDomains = AISettingsManager.shared.chatWebFetchAllowedDomains
             .components(separatedBy: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+        applyPermissionSettings()
         // Git tool settings are read per turn and per call, so a toggle in
         // Settings applies to the next request without a session reset.
+    }
+
+    /// Hands the executor the two saved-rule hooks: a deny rule refuses a call
+    /// outright, and an allow rule (or YOLO) skips its card — unless the
+    /// safety monitor fires, which can only add a card back.
+    ///
+    /// `willAutoApprove` is also what tells the Python tool whether an
+    /// unsandboxed run can be sealed off from root (`lockElevation`), so it
+    /// must answer the same question `requestApproval` will answer.
+    private func applyPermissionSettings() {
+        localTools.pythonSudoEnabled = AISettingsManager.shared.chatPythonSudoEnabled
+        localTools.screenToolEnabled = AISettingsManager.shared.chatScreenToolEnabled
+        localTools.screenToolAllowsFullScreen = AISettingsManager.shared.chatScreenFullScreenEnabled
+        localTools.screenOCRLanguages = AISettingsManager.shared.ocrLanguageList
+        PermissionRules.scopeNoun = localTools.scope.noun
+        localTools.permissionDenial = { kind in
+            PermissionRules.denial(for: kind, rules: PermissionRuleStore.shared.currentRules)
+        }
+        localTools.willAutoApprove = { [weak self] kind in
+            guard let self else { return false }
+            return SafetyMonitor.canAutoApprove(
+                kind: kind,
+                yoloMode: self.yoloMode,
+                rules: PermissionRuleStore.shared.currentRules,
+                trace: SafetyTrace.currentTurnTrace(from: self.messages),
+                userRules: SafetyRuleStore.shared.effectiveRules
+            )
+        }
     }
 
     // MARK: - Skill Defaults
@@ -1025,16 +1056,13 @@ final class AIChatManager: ObservableObject {
         localTools.ragToolEnabled = ragToolEnabled
         localTools.pythonToolEnabled = AISettingsManager.shared.chatPythonToolEnabled
         localTools.pythonSandboxEnabled = AISettingsManager.shared.chatPythonSandboxEnabled
-        localTools.pythonSudoEnabled = AISettingsManager.shared.chatPythonSudoEnabled
-        localTools.willAutoApprove = { [weak self] kind in
-            kind.canAutoApprove(yoloMode: self?.yoloMode ?? false)
-        }
         localTools.autoValidateTypstEdits = AISettingsManager.shared.chatAutoValidateTypstEdits
         localTools.webFetchToolEnabled = AISettingsManager.shared.chatWebFetchEnabled
         localTools.allowedWebFetchDomains = AISettingsManager.shared.chatWebFetchAllowedDomains
             .components(separatedBy: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+        applyPermissionSettings()
         localTools.activeSkillAttachments = activeSkills.compactMap { skill in
             let files = skill.attachments
             guard !files.isEmpty else { return nil }
@@ -1730,6 +1758,30 @@ final class AIChatManager: ObservableObject {
     /// A summary precomputed in the background is used when it is still
     /// applicable, which is what makes the swap-in instant instead of the user
     /// waiting out a model request at the start of a turn.
+    /// Reviews the whole transcript with the ARIA judge and stores the score.
+    ///
+    /// This is a review of what already happened, not a permission check: it
+    /// never blocks, changes, or re-runs a tool call, and it costs one model
+    /// request. The score is 1 (refused), 2 (attempted, then refused) or
+    /// 3 (attempted, then failed), per SafeAgents' ARIA prompt (arXiv
+    /// 2503.04957).
+    func reviewSafetyWithARIA() async {
+        guard !isReviewingSafety else { return }
+        isReviewingSafety = true
+        defer { isReviewingSafety = false }
+        let task = (messages.first(where: { $0.role == .user })?.text ?? "")
+        let trace = SafetyTrace.from(messages: messages, task: task)
+        do {
+            ariaReview = try await ARIAAssessment.assess(trace: trace, model: chatModelContext)
+        } catch {
+            errorMessage = "ARIA review failed: \(error.localizedDescription)"
+        }
+    }
+
+    func clearARIAReview() {
+        ariaReview = nil
+    }
+
     func compactHistory() async {
         guard !isCompacting else { return }
 
@@ -2111,6 +2163,9 @@ final class AIChatManager: ObservableObject {
     /// always withholds it, sandbox or not.
     nonisolated static let planModeBlockedPythonToolNames: Set<String> = ["run"]
 
+    /// The screen tool reads the desktop. It changes nothing, so Plan mode
+    /// keeps it — but it is still a privacy action that asks every time.
+
     /// Strips every mutating tool from a descriptor list. Pure and internal
     /// so tests can assert the readers survive and the writers don't. MCP
     /// servers (and the agent-level `update_plan`/`delegate_task` tools) fall
@@ -2135,6 +2190,10 @@ final class AIChatManager: ObservableObject {
             return planModeBlockedLocalToolNames.contains(name)
         case LocalToolExecutor.pythonNamespace:
             return planModeBlockedPythonToolNames.contains(name)
+        case LocalToolExecutor.screenNamespace:
+            // Reads the screen, changes nothing: allowed in Plan mode, but
+            // every capture still needs its own approval card.
+            return false
         case GitTools.namespace:
             return !GitTools.readOnlyToolNames.contains(name)
         default:
@@ -2680,6 +2739,7 @@ final class AIChatManager: ObservableObject {
         }
         if namespace == LocalToolExecutor.namespace
             || namespace == LocalToolExecutor.pythonNamespace
+            || namespace == LocalToolExecutor.screenNamespace
             || namespace == CalculatorTool.namespace {
             return try await localTools.execute(toolName: toolName, arguments: arguments) { [weak self] kind in
                 guard let self else { return false }
@@ -2985,9 +3045,33 @@ final class AIChatManager: ObservableObject {
     /// Suspends a call until the user decides. Safe to call from several
     /// parallel tool calls: each gets its own queue entry and its own
     /// continuation, so one request can never replace another's.
+    ///
+    /// The decision order is: a saved deny rule refuses outright (the
+    /// executor checks that first, before calling here); then the safety
+    /// monitor, which can only *add* a card that YOLO would have skipped;
+    /// then YOLO or an allow rule may skip the card.
     private func requestApproval(_ kind: PendingApprovalKind, toolCallName: String) async -> Bool {
-        if kind.canAutoApprove(yoloMode: yoloMode) { return true }
-        let approval = PendingApproval(kind: kind, toolCallName: toolCallName)
+        let trace = SafetyTrace.currentTurnTrace(from: messages)
+        let userRules = SafetyRuleStore.shared.effectiveRules
+        if SafetyMonitor.canAutoApprove(
+            kind: kind,
+            yoloMode: yoloMode,
+            rules: PermissionRuleStore.shared.currentRules,
+            trace: trace,
+            userRules: userRules
+        ) {
+            return true
+        }
+        // A safety hit is the only reason to show a card YOLO would have
+        // skipped, so name the rule on the card.
+        let safetyHits = yoloMode
+            ? SafetyMonitor.hits(for: trace, userRules: userRules)
+            : []
+        let approval = PendingApproval(
+            kind: kind,
+            toolCallName: toolCallName,
+            safetyHits: safetyHits
+        )
         return await withCheckedContinuation { continuation in
             approvalQueue.append(PendingApprovalRequest(approval: approval, continuation: continuation))
             publishApprovalState()

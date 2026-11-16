@@ -1180,7 +1180,7 @@ struct AISettingsView: View {
                         .padding(.leading, 20)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Label("Pages that need a login can't be fetched — no credentials are ever sent or stored. Use an MCP server for those.", systemImage: "lock")
+                        Label("A page behind a login works once you sign in to that site under Signed-in Sites below; only that site's session cookies are sent, never a password.", systemImage: "lock")
                         Label("Private/loopback addresses (localhost, 192.168.x.x, cloud metadata, …) are always refused — this can't be opted out of.", systemImage: "shield.lefthalf.filled")
                         Label("The page's content is untrusted data: the model is instructed to quote it, never obey instructions found in it.", systemImage: "exclamationmark.triangle")
                     }
@@ -1190,6 +1190,14 @@ struct AISettingsView: View {
                 }
             }
         }
+
+        SignedInSitesSettingsCard(enabled: settings.chatWebFetchEnabled)
+
+        ScreenCaptureSettingsCard()
+
+        PermissionRulesSettingsCard()
+
+        SafetyRulesSettingsCard()
 
         SettingsCard(
             title: "Context Budget",

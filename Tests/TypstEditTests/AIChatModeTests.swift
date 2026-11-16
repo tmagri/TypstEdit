@@ -21,6 +21,7 @@ final class AIChatModeTests: XCTestCase {
         localTools.scope = .project(root: URL(fileURLWithPath: "/tmp/plan-mode-test"))
         localTools.pythonToolEnabled = true
         localTools.webFetchToolEnabled = true
+        localTools.screenToolEnabled = true
         localTools.activeSkillAttachments = [
             LocalToolExecutor.SkillAttachmentInfo(
                 skillID: "typst-reference",
@@ -52,7 +53,8 @@ final class AIChatModeTests: XCTestCase {
         for reader in ["project__list_files", "project__read_file", "project__grep_project",
                        "project__search_project", "project__read_skill_file",
                        "project__run_typst_check", "project__convert_markdown_to_typst",
-                       "project__web_fetch", "git__git_status", "git__git_diff", "git__git_log",
+                       "project__web_fetch", "screen__look",
+                       "git__git_status", "git__git_diff", "git__git_log",
                        "agent__update_plan", "agent__delegate_task"] {
             XCTAssertTrue(names.contains(reader), "\(reader) must stay available in Plan mode")
         }
@@ -84,12 +86,24 @@ final class AIChatModeTests: XCTestCase {
     func testValidateToolAccessAllowsReadersInPlanMode() {
         for reader in ["project__read_file", "project__grep_project", "project__run_typst_check",
                        "git__git_status", "agent__update_plan", "agent__delegate_task",
-                       "myserver__anything"] {
+                       "screen__look", "myserver__anything"] {
             XCTAssertNoThrow(
                 try AIChatManager.validateToolAccess(qualifiedName: reader, isSubagent: false, planMode: true),
                 "\(reader) must stay allowed in Plan mode"
             )
         }
+    }
+
+    /// The screen tool reads the desktop and changes nothing, so Plan mode
+    /// keeps it — but it cannot ride along to a read-only subagent, which must
+    /// never see the user's screen.
+    func testScreenToolIsNeverOfferedToAReadOnlySubagent() {
+        XCTAssertThrowsError(
+            try AIChatManager.validateToolAccess(qualifiedName: "screen__look", isSubagent: true, planMode: false)
+        )
+        XCTAssertThrowsError(
+            try AIChatManager.validateToolAccess(qualifiedName: "screen__look", isSubagent: true, planMode: true)
+        )
     }
 
     func testValidateToolAccessWithoutPlanModeKeepsAllowingWriters() {

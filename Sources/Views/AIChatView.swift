@@ -123,6 +123,10 @@ struct AIChatView: View {
                     Divider()
                     goalBanner(goal)
                 }
+                if let review = chat.ariaReview {
+                    Divider()
+                    ariaReviewCard(review)
+                }
                 if !chat.plan.isEmpty {
                     Divider()
                     planCard
@@ -1329,6 +1333,37 @@ struct AIChatView: View {
         chat.setQuestionAnswer(answer)
     }
 
+    /// The ARIA safety review of this conversation: a score, what it means,
+    /// and the model that answered. Dismissible — it is a report, not a gate.
+    @ViewBuilder
+    private func ariaReviewCard(_ review: ARIAAssessment.Result) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: review.score.symbol)
+                    .foregroundColor(review.score == .attemptedAndFailed ? .orange : .green)
+                Text("Safety review: \(review.score.title)")
+                    .font(.caption.bold())
+                Spacer()
+                Button {
+                    chat.clearARIAReview()
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            Text(review.score.explanation)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Text("Scored by \(review.modelName) · \(review.assessedAt.formatted(date: .abbreviated, time: .shortened))")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(0.06))
+    }
+
     @ViewBuilder
     private func approvalCard(_ approval: PendingApproval) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1370,7 +1405,7 @@ struct AIChatView: View {
                 .background(Color.black.opacity(0.06))
                 .cornerRadius(6)
 
-            case .webFetch(let urlString):
+            case .webFetch(let urlString, let savedSignInHost):
                 HStack(spacing: 6) {
                     Image(systemName: "globe").foregroundColor(.orange)
                     Text("Fetch this web page?").font(.subheadline.bold())
@@ -1383,6 +1418,14 @@ struct AIChatView: View {
                     Text("Glance at the URL before approving — the destination server sees this request, so a crafted page could try to encode project data into it. Only public internet addresses can be fetched.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                    if let savedSignInHost {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.badge.key.fill").foregroundColor(.orange)
+                            Text("Sends your saved sign-in for \(savedSignInHost) with this request.")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
+                    }
                 }
                 .padding(8)
                 .background(Color.black.opacity(0.06))
@@ -1588,6 +1631,48 @@ struct AIChatView: View {
                 Text(gitNetworkWarning(operation))
                     .font(.caption2)
                     .foregroundColor(operation == .push ? .red : .secondary)
+
+            case .screenCapture(let scope, let purpose):
+                HStack(spacing: 6) {
+                    Image(systemName: "eye.circle.fill").foregroundColor(.red)
+                    Text("Look at your screen?").font(.subheadline.bold())
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("TypstEdit would capture \(scope) and read the text in it (OCR), on this Mac only — nothing is uploaded.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text("Reason: \(purpose)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text("Every capture needs its own approval, even in YOLO mode.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+            }
+
+            // A safety rule can only ever *add* a card that YOLO would have
+            // skipped, so say which rule did — otherwise a re-approval looks
+            // like YOLO forgot.
+            if !approval.safetyHits.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.shield.fill").foregroundColor(.red)
+                        Text("Safety check held this call").font(.caption.bold())
+                    }
+                    ForEach(approval.safetyHits) { hit in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(hit.title).font(.caption2.bold())
+                            Text(hit.explanation).font(.caption2).foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.08))
+                .cornerRadius(6)
             }
 
             HStack {
@@ -1595,6 +1680,24 @@ struct AIChatView: View {
                     Text("\(chat.pendingApprovalCount - 1) more waiting")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                }
+                // A saved rule turns "ask every time" into "allow this from
+                // now on". The menu is absent for kinds a rule may never
+                // allow (elevated runs, screen captures, Git push), so the
+                // two settings are not silently merged into one.
+                let suggestions = approval.kind.permissionSuggestions
+                if !suggestions.isEmpty {
+                    Menu("Always allow…") {
+                        ForEach(suggestions) { suggestion in
+                            Button(suggestion.title) {
+                                PermissionRuleStore.shared.add(suggestion.rule)
+                                chat.resolveApproval(approved: true)
+                            }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .font(.caption)
                 }
                 Spacer()
                 Button("Deny") { chat.resolveApproval(approved: false) }
@@ -2160,6 +2263,14 @@ struct AIChatView: View {
                         Text("\(server.config.name) · \(server.scope.label)")
                     }
                 }
+            }
+            Divider()
+            Button("Review safety with ARIA…") {
+                Task { await chat.reviewSafetyWithARIA() }
+            }
+            .disabled(chat.isReviewingSafety || chat.messages.filter { $0.role == .toolCall }.isEmpty)
+            if chat.ariaReview != nil {
+                Button("Clear safety review") { chat.clearARIAReview() }
             }
         } label: {
             pickerLabel("Tools", systemImage: "wrench.and.screwdriver", iconOnly: iconOnly)

@@ -3,9 +3,7 @@ import Foundation
 /// How a configured MCP server is reached. Stdio servers are spawned as local
 /// subprocesses (the common case — most MCP servers today ship as an `npx`/
 /// `uvx`/binary command); SSE and streamable-HTTP are remote servers reached
-/// over a URL. Only stdio is wired up to an actual transport right now —
-/// remote transports are defined so configs round-trip but `MCPClient`
-/// currently only implements `.stdio`.
+/// over a URL.
 enum MCPTransportType: String, Codable, CaseIterable, Identifiable {
     case stdio
     case sse
@@ -20,6 +18,10 @@ enum MCPTransportType: String, Codable, CaseIterable, Identifiable {
         case .http: return "Remote (HTTP)"
         }
     }
+
+    /// Remote servers are reached over the network and can carry an OAuth
+    /// token; a local command cannot.
+    var isRemote: Bool { self != .stdio }
 }
 
 /// One configured MCP server, matching the `mcpServers` map convention shared
@@ -33,6 +35,10 @@ struct MCPServerConfig: Codable, Identifiable, Equatable {
     var args: [String] = []
     var env: [String: String] = [:]
     var url: String?
+    /// Extra HTTP headers for a remote server. Values may use the
+    /// `${env:VAR}` / `${keychain:name}` placeholders, so a shareable
+    /// `mcp.json` never has to contain the token itself.
+    var headers: [String: String] = [:]
     var enabled: Bool = true
 
     /// Tool names explicitly disabled by the user even though the server is
@@ -45,8 +51,61 @@ struct MCPServerConfig: Codable, Identifiable, Equatable {
     var isConfigured: Bool {
         switch transport {
         case .stdio: return !(command ?? "").trimmingCharacters(in: .whitespaces).isEmpty
-        case .sse, .http: return !(url ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+        case .sse, .http: return MCPServerConfig.remoteURL(url) != nil
         }
+    }
+
+    /// The remote endpoint, when `url` is a usable absolute http(s) URL.
+    static func remoteURL(_ raw: String?) -> URL? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespaces), !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else { return nil }
+        return url
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, transport, command, args, env, url, headers, enabled, disabledTools
+    }
+
+    /// Decoded by hand so an older `mcp.json` (no `headers`, no `transport`)
+    /// still reads, and an unknown transport name falls back to stdio rather
+    /// than making the whole file undecodable.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        let rawTransport = try container.decodeIfPresent(String.self, forKey: .transport) ?? "stdio"
+        transport = MCPTransportType(rawValue: rawTransport) ?? .stdio
+        command = try container.decodeIfPresent(String.self, forKey: .command)
+        args = try container.decodeIfPresent([String].self, forKey: .args) ?? []
+        env = try container.decodeIfPresent([String: String].self, forKey: .env) ?? [:]
+        url = try container.decodeIfPresent(String.self, forKey: .url)
+        headers = try container.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        disabledTools = try container.decodeIfPresent([String].self, forKey: .disabledTools) ?? []
+    }
+
+    init(
+        name: String,
+        transport: MCPTransportType = .stdio,
+        command: String? = nil,
+        args: [String] = [],
+        env: [String: String] = [:],
+        url: String? = nil,
+        headers: [String: String] = [:],
+        enabled: Bool = true,
+        disabledTools: [String] = []
+    ) {
+        self.name = name
+        self.transport = transport
+        self.command = command
+        self.args = args
+        self.env = env
+        self.url = url
+        self.headers = headers
+        self.enabled = enabled
+        self.disabledTools = disabledTools
     }
 }
 

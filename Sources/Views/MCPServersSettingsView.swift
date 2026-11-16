@@ -12,6 +12,8 @@ struct MCPServersSettingsView: View {
     @State private var isCreatingNew = false
     @State private var newServerScope: ConfigScope = .global
     @State private var testingServerID: String?
+    @State private var signingInServerID: String?
+    @State private var signInError: String?
 
     var body: some View {
         ScrollView {
@@ -119,6 +121,9 @@ struct MCPServersSettingsView: View {
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
+                    if scoped.config.transport.isRemote {
+                        remoteSignInRow(scoped)
+                    }
                     if let error {
                         Text(error)
                             .font(.caption2)
@@ -161,6 +166,54 @@ struct MCPServersSettingsView: View {
         }
     }
 
+    /// A remote server has no process to start, so its state is "signed in or
+    /// not". A server with an explicit Authorization header skips this: that
+    /// header is the credential, and OAuth would only fight it.
+    @ViewBuilder
+    private func remoteSignInRow(_ scoped: ScopedMCPServer) -> some View {
+        let hasStaticAuth = scoped.config.headers.keys.contains { $0.lowercased() == "authorization" }
+        if !hasStaticAuth {
+            let signedIn = mcpManager.isSignedIn(scoped)
+            HStack(spacing: 6) {
+                Image(systemName: signedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.questionmark")
+                    .foregroundColor(signedIn ? .green : .secondary)
+                Text(signedIn ? "Signed in" : "Not signed in")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                Button(signedIn ? "Sign in again…" : "Sign in…") {
+                    signingInServerID = scoped.id
+                    Task {
+                        do {
+                            try await mcpManager.signIn(scoped)
+                        } catch {
+                            signInError = error.localizedDescription
+                        }
+                        signingInServerID = nil
+                    }
+                }
+                .buttonStyle(.link)
+                .font(.caption2)
+                .disabled(signingInServerID != nil)
+                if signedIn {
+                    Button("Sign out") {
+                        mcpManager.signOut(scoped)
+                    }
+                    .buttonStyle(.link)
+                    .font(.caption2)
+                }
+                if signingInServerID == scoped.id {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            if let signInError {
+                Text(signInError)
+                    .font(.caption2)
+                    .foregroundColor(.red)
+                    .lineLimit(3)
+            }
+        }
+    }
+
     private func commandPreview(_ config: MCPServerConfig) -> String {
         switch config.transport {
         case .stdio:
@@ -189,6 +242,7 @@ private struct MCPServerEditorSheet: View {
     @State private var argsText: String = ""
     @State private var envText: String = ""
     @State private var url: String = ""
+    @State private var headersText: String = ""
     @State private var enabled: Bool = true
 
     private var isEditing: Bool {
@@ -250,9 +304,29 @@ private struct MCPServerEditorSheet: View {
             } else {
                 TextField("Server URL", text: $url)
                     .textFieldStyle(.roundedBorder)
-                Label("\(transport.label) is not wired up to tool calling yet — the config is saved, but this server won't be usable until support is added.", systemImage: "info.circle")
+                Text("Remote servers speak \(transport == .http ? "Streamable HTTP (MCP 2025-03-26), which is what servers offer today" : "the older HTTP+SSE transport (MCP 2024-11-05)"). A server that answers 401 gets a browser sign-in: TypstEdit discovers the service, registers itself, and keeps the token in the Keychain — never in mcp.json.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                Text("Headers — one per line, NAME: VALUE. Use ${env:VAR} or ${keychain:name} instead of a literal token for servers you'll share via git.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                TextEditor(text: $headersText)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(height: 70)
+                    .padding(4)
+                    .background(Color(NSColor.controlBackgroundColor))
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+
+                if scope == .project && headersText.split(separator: "\n").contains(where: { line in
+                    guard let colon = line.firstIndex(of: ":") else { return false }
+                    return MCPEnvironmentResolver.looksLikeLiteralSecret(String(line[line.index(after: colon)...]))
+                }) {
+                    Label("One of these values looks like a real secret. Project configs may be committed to git — consider ${keychain:name} instead.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
             }
 
             Toggle("Enabled", isOn: $enabled)
@@ -282,6 +356,7 @@ private struct MCPServerEditorSheet: View {
             argsText = scoped.config.args.joined(separator: " ")
             envText = scoped.config.env.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
             url = scoped.config.url ?? ""
+            headersText = scoped.config.headers.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
             enabled = scoped.config.enabled
         }
     }
@@ -302,6 +377,15 @@ private struct MCPServerEditorSheet: View {
             if !key.isEmpty { env[key] = value }
         }
         config.env = env
+
+        var headers: [String: String] = [:]
+        for line in headersText.split(separator: "\n") {
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            if !key.isEmpty { headers[key] = value }
+        }
+        config.headers = headers
 
         if case .edit(let scoped) = mode {
             config.disabledTools = scoped.config.disabledTools

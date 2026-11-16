@@ -23,6 +23,8 @@ enum SafeURLFetcher {
         let status: Int
         let contentType: String?
         let data: Data
+        /// True when a saved site sign-in's cookies were sent with the request.
+        var sentSavedSignIn: Bool = false
     }
 
     enum FetchError: LocalizedError {
@@ -34,6 +36,8 @@ enum SafeURLFetcher {
         case http(Int, String)
         case dns(String)
         case noResponse
+        /// The server refused the request and the page needs a human sign-in.
+        case needsSignIn(WebAuthNeed)
 
         var errorDescription: String? {
             switch self {
@@ -53,6 +57,8 @@ enum SafeURLFetcher {
                 return "Could not resolve '\(host)'."
             case .noResponse:
                 return "No HTTP response."
+            case .needsSignIn(let need):
+                return need.modelMessage
             }
         }
     }
@@ -62,7 +68,11 @@ enum SafeURLFetcher {
     /// Fetches `url`, following same-host redirects — re-validating the
     /// destination address on every hop — and stopping, without following,
     /// the moment a redirect would leave the original host.
-    static func fetch(_ url: URL, timeout: TimeInterval = 20, maxBytes: Int = 5_000_000, maxRedirects: Int = 5) async throws -> FetchedPage {
+    ///
+    /// `cookieHeader` is the saved site sign-in to replay, if the user has one
+    /// for this site. It is sent only to the host it was saved for, because
+    /// the caller looks it up by the same host this fetch stays on.
+    static func fetch(_ url: URL, timeout: TimeInterval = 20, maxBytes: Int = 5_000_000, maxRedirects: Int = 5, cookieHeader: String? = nil) async throws -> FetchedPage {
         var currentURL = url
         var hopsLeft = maxRedirects
         let delegate = RedirectBlockingDelegate()
@@ -74,6 +84,9 @@ enum SafeURLFetcher {
             request.timeoutInterval = timeout
             request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("text/html, application/xhtml+xml, text/plain, application/json;q=0.9, */*;q=0.5", forHTTPHeaderField: "Accept")
+            if let cookieHeader {
+                request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+            }
 
             let data: Data
             let response: URLResponse
@@ -97,6 +110,13 @@ enum SafeURLFetcher {
                 continue
             }
 
+            // A refusal from a site the user has (or has not) signed in to is
+            // the one status worth naming precisely, because the fix is a
+            // human action in Settings rather than a retry.
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw FetchError.needsSignIn(cookieHeader == nil ? .signedOut(status: http.statusCode) : .expired(status: http.statusCode))
+            }
+
             guard (200...299).contains(http.statusCode) else {
                 throw FetchError.http(http.statusCode, HTTPURLResponse.localizedString(forStatusCode: http.statusCode))
             }
@@ -106,7 +126,7 @@ enum SafeURLFetcher {
             guard data.count <= maxBytes else {
                 throw FetchError.tooLarge(maxBytes)
             }
-            return FetchedPage(finalURL: currentURL, status: http.statusCode, contentType: http.value(forHTTPHeaderField: "Content-Type"), data: data)
+            return FetchedPage(finalURL: currentURL, status: http.statusCode, contentType: http.value(forHTTPHeaderField: "Content-Type"), data: data, sentSavedSignIn: cookieHeader != nil)
         }
     }
 

@@ -206,7 +206,47 @@ final class MCPManager: ObservableObject {
         if scoped.config.disabledTools.contains(toolName) {
             throw MCPError.serverDisabled
         }
-        return try await client.callTool(name: toolName, arguments: arguments)
+        do {
+            return try await client.callTool(name: toolName, arguments: arguments)
+        } catch MCPError.sessionExpired {
+            // A Streamable HTTP server that dropped the session answers 404 to
+            // a request carrying the old id. One reconnect and retry is the
+            // documented recovery; a second failure surfaces to the model.
+            stopClient(id: scoped.id)
+            guard let restarted = await ensureStarted(scoped) else {
+                throw MCPError.sessionExpired
+            }
+            return try await restarted.callTool(name: toolName, arguments: arguments)
+        }
+    }
+
+    // MARK: - Sign-in
+
+    /// Whether a remote server currently has usable OAuth credentials.
+    func isSignedIn(_ scoped: ScopedMCPServer) -> Bool {
+        guard scoped.config.transport.isRemote else { return false }
+        return MCPOAuthStore().load(serverName: scoped.config.name) != nil
+    }
+
+    /// Runs the browser sign-in (or a silent refresh) for a remote server and
+    /// restarts its client so the next request carries the new token.
+    func signIn(_ scoped: ScopedMCPServer) async throws {
+        let client = MCPClient(config: scoped.config)
+        try await client.signInInteractively()
+        stopClient(id: scoped.id)
+        notifyPeers()
+    }
+
+    /// Forgets a server's tokens and closes its connection.
+    func signOut(_ scoped: ScopedMCPServer) {
+        MCPClient(config: scoped.config).signOut()
+        stopClient(id: scoped.id)
+        notifyPeers()
+    }
+
+    /// The most recent error for a server, for the Settings row.
+    func lastError(for scoped: ScopedMCPServer) -> String? {
+        lastErrors[scoped.id]
     }
 
     private func findRunningClient(serverName: String) -> (ScopedMCPServer, MCPClient)? {
