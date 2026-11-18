@@ -138,13 +138,13 @@ struct AIToolResult {
 /// Stops the tool-calling loop from re-running the same read over and over.
 /// One instance lives for one `fetchCompletionWithTools` request.
 ///
-/// Only read-only tools are tracked. A repeat still runs, so the answer is
-/// never stale, but when it returns exactly what the previous identical call
-/// returned the result is labelled as a repeat. Once a call has come back
-/// identical `maxIdenticalRuns` times it is no longer executed: the model gets
-/// a note telling it to use what it has. Any call that can change files (or
-/// an unknown MCP tool) clears the history, because re-reading after an edit
-/// is legitimate.
+/// Only read-only and verification tools are tracked. A repeat still runs, so
+/// the answer is never stale, but when it returns exactly what the previous
+/// identical call returned the result is labelled as a repeat. Once a call has
+/// come back identical `maxIdenticalRuns` times it is no longer executed: the
+/// model gets a note telling it to use what it has. Any call that can change
+/// files (or an unknown MCP tool) clears the history, because re-reading after
+/// an edit is legitimate.
 struct ToolCallRepeatGuard {
     /// Tools whose identical repeats are pure waste while nothing changes.
     static let readOnlyToolNames: Set<String> = [
@@ -152,16 +152,34 @@ struct ToolCallRepeatGuard {
         "check_writing", "find_repetition", "grep_project", "search_project",
         "read_skill_file", "web_fetch", "git_status", "git_diff", "git_log", "recall"
     ]
-    /// Tools that change nothing on disk, so they don't invalidate the
-    /// history, but aren't worth tracking either.
-    static let neutralToolNames: Set<String> = [
-        "update_plan", "delegate_task", "run_typst_check",
-        "convert_markdown_to_typst", "evaluate_math"
+    /// Checks and pure conversions. They change nothing on disk, so they don't
+    /// invalidate the history, but an identical repeat with nothing edited in
+    /// between answers a question the model has already had answered — the
+    /// classic validation loop ("compile the clean file again, and again").
+    /// Unlike a read, a compile's output need not be byte-identical across
+    /// runs (a failure names its scratch file, which carries a fresh UUID), so
+    /// for these an identical call counts as a repeat regardless.
+    static let verificationToolNames: Set<String> = [
+        "run_typst_check", "convert_markdown_to_typst", "evaluate_math"
     ]
+    /// The subset whose whole purpose is confirming that something compiles.
+    /// Only these can make up a "validation loop" round: converting three
+    /// different snippets in a row is real work that produces content, while
+    /// compiling the same untouched file for the fourth time is not.
+    static let checkToolNames: Set<String> = ["run_typst_check"]
+    /// Everything whose identical repeats are tracked.
+    static let trackedToolNames: Set<String> = readOnlyToolNames.union(verificationToolNames)
+    /// Tools that change nothing and aren't tracked: they neither repeat nor
+    /// invalidate the history.
+    static let neutralToolNames: Set<String> = ["update_plan", "delegate_task"]
     /// Default for the Settings value (`chatRepeatCallLimit`).
     static let defaultMaxIdenticalRuns = 2
 
     static let repeatNote = "[Same result as your earlier identical call in this request — nothing has changed. Use what you already have instead of calling it again.]\n"
+
+    /// Label for an identical verification call, whose output may differ in
+    /// cosmetic details (a scratch path) while saying the same thing.
+    static let verificationRepeatNote = "[Same check as your earlier identical call in this request — nothing has been edited since, so it says the same thing. Act on it instead of checking again.]\n"
 
     /// Identical runs allowed before a call is refused. 0 turns the guard
     /// off: nothing is labelled or refused.
@@ -200,9 +218,12 @@ struct ToolCallRepeatGuard {
     func refusal(name: String, argumentsJSON: String) -> String? {
         let base = Self.baseName(name)
         guard maxIdenticalRuns > 0,
-              Self.readOnlyToolNames.contains(base),
+              Self.trackedToolNames.contains(base),
               let entry = history[Self.signature(name: name, argumentsJSON: argumentsJSON)],
               entry.runs >= maxIdenticalRuns else { return nil }
+        if Self.verificationToolNames.contains(base) {
+            return "Not run: this exact \(base) call already ran \(entry.runs == 1 ? "once" : "\(entry.runs) times") in this request, and nothing has been edited since, so it would say the same thing. Act on what it already told you: fix what it flagged, or write your answer now."
+        }
         let times = entry.runs == 1 ? "once" : "\(entry.runs) times, with the same result each time,"
         return "Not run: this exact \(base) call already ran \(times) in this request, and nothing has been edited since, so it would return the same thing. Use what it already returned, read a different range or search for something else, or write your answer now."
     }
@@ -212,6 +233,18 @@ struct ToolCallRepeatGuard {
     mutating func record(name: String, argumentsJSON: String, output: String) -> String {
         guard maxIdenticalRuns > 0 else { return output }
         let base = Self.baseName(name)
+        if Self.verificationToolNames.contains(base) {
+            // Counted by signature alone: a compiler message may name a fresh
+            // scratch path on every run, so comparing output would miss the
+            // loop entirely.
+            let key = Self.signature(name: name, argumentsJSON: argumentsJSON)
+            if let entry = history[key] {
+                history[key] = (entry.runs + 1, output)
+                return Self.verificationRepeatNote + output
+            }
+            history[key] = (1, output)
+            return output
+        }
         guard Self.readOnlyToolNames.contains(base) else {
             if !Self.neutralToolNames.contains(base) {
                 history.removeAll()
@@ -741,6 +774,22 @@ class AICompletionService: ObservableObject {
         // Consecutive tool rounds that only read and searched — reset by any
         // round that changes something or updates the plan.
         var investigativeRounds = 0
+        // Consecutive rounds of nothing but checks (`run_typst_check` and the
+        // pure conversions). A model that keeps validating a file it has
+        // already validated is stuck even though every call is cheap, so after
+        // a few such rounds the check tools are withdrawn for this request.
+        // Any round that edits something resets the count and the withdrawal.
+        var validationRounds = 0
+        // Check targets already seen this request, by call signature: a check
+        // of a *new* file is work ("check every chapter"), while re-checking a
+        // target already checked — even with slightly different arguments, so
+        // the repeat guard alone doesn't catch it — is the loop.
+        var checkedTargets: Set<String> = []
+        var validationToolsWithdrawn = false
+        let validationRoundThreshold = Self.validationRoundThreshold
+        // Shares the Loop Protection off switch: `chatRepeatCallLimit: 0` is
+        // the user saying they don't want the harness second-guessing repeats.
+        let validationLoopGuardOn = settings.effectiveChatRepeatCallLimit > 0
         let noProgressThreshold = settings.effectiveChatNoProgressRounds
         let turnWarningReplies = settings.effectiveChatTurnLimitWarningReplies
         // Rounds since the plan was last updated; nil while there is no plan.
@@ -1132,6 +1181,20 @@ class AICompletionService: ObservableObject {
                             "turn": turn, "called": call.name, "ran": resolvedName
                         ])
                     }
+                    // The validation loop, caught hard: after several rounds of
+                    // nothing but checks, the check tools are withdrawn for the
+                    // rest of the request (until something is actually edited),
+                    // so a model that keeps asking "does it compile?" gets told
+                    // to act instead of compiling the same thing forever.
+                    if validationToolsWithdrawn, Self.isValidationCall(executedName) {
+                        let note = Self.validationWithdrawnNote()
+                        AgentTrace.log("tool_refused", [
+                            "turn": turn, "name": executedName, "reason": "validation_loop"
+                        ])
+                        onToolRefused?(executedName, call.argumentsJSON, note)
+                        messages.append(.toolResult(AIToolResult(callID: call.id, name: executedName, output: note)))
+                        continue
+                    }
                     if let refusal = repeatGuard.refusal(name: executedName, argumentsJSON: call.argumentsJSON) {
                         AgentTrace.log("tool_refused", ["turn": turn, "name": executedName, "args": AgentTrace.preview(call.argumentsJSON)])
                         onToolRefused?(executedName, call.argumentsJSON, refusal)
@@ -1171,7 +1234,42 @@ class AICompletionService: ObservableObject {
                 // every provider accepts (an extra user message would break
                 // Anthropic's strict alternation).
                 investigativeRounds = Self.isInvestigativeRound(calls) ? investigativeRounds + 1 : 0
+                // The validation loop: the same compile check repeated without
+                // an edit in between. Counting is per *target* (a path or a
+                // snippet), so checking ten different chapters is work while
+                // re-checking one untouched file is the loop. Past the
+                // threshold the check tool is withdrawn for the rest of the
+                // request, so the model has to act on what it already knows.
+                let changesFiles = calls.contains { Self.changesFiles($0.name) }
+                if changesFiles {
+                    validationRounds = 0
+                    checkedTargets.removeAll()
+                    validationToolsWithdrawn = false
+                } else if Self.isCheckRound(calls) {
+                    let targets = calls.compactMap {
+                        Self.checkTargetKey(qualifiedName: $0.name, argumentsJSON: $0.argumentsJSON)
+                    }
+                    if !targets.isEmpty {
+                        // A target checked for the first time is progress.
+                        validationRounds = targets.contains(where: checkedTargets.contains)
+                            ? validationRounds + 1
+                            : 0
+                        checkedTargets.formUnion(targets)
+                    } else {
+                        validationRounds = 0
+                    }
+                } else {
+                    // Reads and other lookups between checks: the model is
+                    // still researching, not just re-validating.
+                    validationRounds = 0
+                }
                 var notes: [String] = []
+                if validationLoopGuardOn, validationRounds >= validationRoundThreshold, !validationToolsWithdrawn {
+                    validationToolsWithdrawn = true
+                    AgentTrace.log("validation_loop", ["turn": turn, "rounds": validationRounds])
+                    notes.append(Self.validationWithdrawnNote())
+                    onReasoningDelta?("\n\n[\(validationRounds) rounds of checks in a row, with nothing edited — the check tools are withdrawn for now, and the model is asked to act.]\n\n")
+                }
                 if let note = Self.noProgressNote(rounds: investigativeRounds, threshold: noProgressThreshold) {
                     notes.append(note)
                     onReasoningDelta?("\n\n[\(investigativeRounds) rounds of reading and searching in a row — asking the model to act or answer.]\n\n")
@@ -1605,6 +1703,77 @@ class AICompletionService: ObservableObject {
         }
     }
 
+    /// How many rounds in a row of nothing but checks before the check tools
+    /// are withdrawn. A model that compiles a clean file a second time on
+    /// purpose is fine; one that keeps asking after the third round is stuck.
+    nonisolated static let validationRoundThreshold = 3
+
+    /// Whether this call writes anything. Mirrors `ToolCallRepeatGuard`'s rule
+    /// (anything outside its read/verification/neutral sets changes state),
+    /// kept separate so the loop can reset the validation count on an edit
+    /// without duplicating the sets.
+    nonisolated static func changesFiles(_ qualifiedName: String) -> Bool {
+        let base = ToolCallRepeatGuard.baseName(qualifiedName)
+        return !ToolCallRepeatGuard.trackedToolNames.contains(base)
+            && !ToolCallRepeatGuard.neutralToolNames.contains(base)
+    }
+
+    /// What a compile check targets: `path:…` for a real file. `nil` when the
+    /// call is malformed, so it neither counts as progress nor as a repeat.
+    /// Whitespace is trimmed so a re-paste of the same snippet with a trailing
+    /// newline is still the same target.
+    nonisolated static func checkTargetKey(qualifiedName: String, argumentsJSON: String) -> String? {
+        guard ToolCallRepeatGuard.checkToolNames.contains(ToolCallRepeatGuard.baseName(qualifiedName)),
+              let data = argumentsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let path = (object["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty {
+            return "path:" + path
+        }
+        if let source = object["source"] as? String, !source.isEmpty {
+            // A stable digest keeps the key small without retaining the whole
+            // snippet (and unlike `hashValue`, is reproducible in a test).
+            return "source:\(stableDigest(source.trimmingCharacters(in: .whitespacesAndNewlines)))"
+        }
+        return nil
+    }
+
+    /// FNV-1a over the UTF-8 bytes: a deterministic 64-bit digest, used only to
+    /// compare two checks of a snippet within one request.
+    nonisolated static func stableDigest(_ text: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return String(hash, radix: 16)
+    }
+
+    /// Whether this call is one that the validation-loop withdrawal removes.
+    /// Only the compile check: converting a snippet and evaluating an
+    /// expression both produce something the model needs, so they stay.
+    nonisolated static func isValidationCall(_ qualifiedName: String) -> Bool {
+        ToolCallRepeatGuard.checkToolNames.contains(ToolCallRepeatGuard.baseName(qualifiedName))
+    }
+
+    /// A round made only of compile checks — the only kind that can trip the
+    /// withdrawal. Converting a snippet or evaluating an expression produces
+    /// something (Typst to write, a number to quote), so several in a row is
+    /// real work; compiling the same untouched file again is not.
+    nonisolated static func isCheckRound(_ calls: [AIToolCallRequest]) -> Bool {
+        !calls.isEmpty && calls.allSatisfy {
+            ToolCallRepeatGuard.checkToolNames.contains(ToolCallRepeatGuard.baseName($0.name))
+        }
+    }
+
+    /// What the model gets when a check is refused because the check tools
+    /// have been withdrawn, and the note attached to the round that withdrew
+    /// them. Deliberately concrete about what to do instead — a model stuck in
+    /// this loop is usually trying to raise its confidence, not to learn facts.
+    nonisolated static func validationWithdrawnNote() -> String {
+        "\(harnessNotePrefix) Not run: you have checked the same thing for several rounds in a row without editing anything since, and the check tools are now turned off for this request. Repeating a check cannot change its answer. Do one of these instead: fix what the last check reported with edit_file/write_file, or write your answer now and say what you changed and what is still open. Checking again is only possible after an edit."
+    }
+
     /// The nudge after `rounds` investigative rounds in a row, or `nil`.
     /// Repeats every `threshold` rounds; 0 turns it off. Worded without tool
     /// names, since a read-only subagent gets it too.
@@ -1995,8 +2164,9 @@ class AICompletionService: ObservableObject {
     /// only re-reads a specific range when it needs the exact text.
     nonisolated static func elisionDigest(for result: AIToolResult) -> String {
         var output = result.output
-        if output.hasPrefix(ToolCallRepeatGuard.repeatNote) {
-            output.removeFirst(ToolCallRepeatGuard.repeatNote.count)
+        for note in [ToolCallRepeatGuard.repeatNote, ToolCallRepeatGuard.verificationRepeatNote]
+        where output.hasPrefix(note) {
+            output.removeFirst(note.count)
         }
         let base = ToolCallRepeatGuard.baseName(result.name)
         var lines = ["[\(result.output.count) characters of earlier \(result.name) \(elidedToolOutputPhrase).]"]

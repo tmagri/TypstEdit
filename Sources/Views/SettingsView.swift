@@ -1599,7 +1599,7 @@ struct AISettingsView: View {
         SettingsCard(
             title: "Loop Protection",
             icon: "arrow.uturn.backward.circle",
-            description: "Keeps a long tool-calling run from going in circles. An identical read or search that runs again with nothing edited in between is marked as a repeat, and after the limit it is not run at all: the assistant is told to use what it already has, and the chat shows the call as \"not run\". After a run of rounds that only read and search, the assistant is told to act or answer. Near the turn limit, it is warned so it writes an answer instead of running out mid-task. Each setting also applies to the read-only subagent. 0 turns a setting off."
+            description: "Keeps a long tool-calling run from going in circles. An identical read or search that runs again with nothing edited in between is marked as a repeat, and after the limit it is not run at all: the assistant is told to use what it already has, and the chat shows the call as \"not run\". The same limit covers a compile check (`run_typst_check`) of a file or snippet it has already checked, and after several rounds of nothing but re-checking one target the check is withdrawn until something is actually edited, so a model that keeps asking \"does it compile?\" is told to act instead. After a run of rounds that only read and search, the assistant is told to act or answer. Near the turn limit, it is warned so it writes an answer instead of running out mid-task. Each setting also applies to the read-only subagent. 0 turns a setting off."
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {

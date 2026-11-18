@@ -143,6 +143,123 @@ final class AgentWorkingMemoryTests: XCTestCase {
         }
     }
 
+    // MARK: Validation loop
+
+    func testRepeatGuardTracksIdenticalCompileChecks() throws {
+        var guardState = ToolCallRepeatGuard()
+        let name = "project__run_typst_check"
+        let args = #"{"path":"Mugs.typ"}"#
+
+        XCTAssertNil(guardState.refusal(name: name, argumentsJSON: args))
+        XCTAssertEqual(guardState.record(name: name, argumentsJSON: args, output: "Compiled successfully with no errors."),
+                       "Compiled successfully with no errors.")
+
+        // Second identical check runs, but is labelled as the same check.
+        XCTAssertNil(guardState.refusal(name: name, argumentsJSON: args))
+        XCTAssertEqual(guardState.record(name: name, argumentsJSON: args, output: "Compiled successfully with no errors."),
+                       ToolCallRepeatGuard.verificationRepeatNote + "Compiled successfully with no errors.")
+
+        // Third is refused without compiling again.
+        let refusal = try XCTUnwrap(guardState.refusal(name: name, argumentsJSON: args))
+        XCTAssertTrue(refusal.hasPrefix("Not run: this exact run_typst_check"), refusal)
+        XCTAssertTrue(refusal.contains("nothing has been edited since"), refusal)
+
+        // A different snippet is a different check.
+        XCTAssertNil(guardState.refusal(name: name, argumentsJSON: #"{"source":"= Hello"}"#))
+    }
+
+    func testRepeatGuardCountsCompileChecksEvenWhenTheOutputDiffers() {
+        // A failing compile names its scratch directory, which carries a fresh
+        // UUID on every run: the words differ, the answer does not.
+        var guardState = ToolCallRepeatGuard(maxIdenticalRuns: 2)
+        let name = "project__run_typst_check"
+        let args = #"{"path":"broken.typ"}"#
+        _ = guardState.record(name: name, argumentsJSON: args,
+                              output: "Compile failed:\n/tmp/typstedit-check-A/check.typ:1:1: error: unknown variable")
+        _ = guardState.record(name: name, argumentsJSON: args,
+                              output: "Compile failed:\n/tmp/typstedit-check-B/check.typ:1:1: error: unknown variable")
+        XCTAssertNotNil(guardState.refusal(name: name, argumentsJSON: args))
+    }
+
+    func testRepeatGuardClearsValidationHistoryAfterAnEdit() {
+        var guardState = ToolCallRepeatGuard()
+        let name = "project__run_typst_check"
+        let args = #"{"path":"a.typ"}"#
+        _ = guardState.record(name: name, argumentsJSON: args, output: "Compiled successfully with no errors.")
+        _ = guardState.record(name: name, argumentsJSON: args, output: "Compiled successfully with no errors.")
+        XCTAssertNotNil(guardState.refusal(name: name, argumentsJSON: args))
+
+        // An edit makes checking the file again legitimate.
+        _ = guardState.record(name: "project__edit_file", argumentsJSON: "{}", output: "Edited")
+        XCTAssertNil(guardState.refusal(name: name, argumentsJSON: args))
+    }
+
+    func testCheckRoundRecognizesCompileOnlyRounds() {
+        XCTAssertTrue(AICompletionService.isCheckRound([call("project__run_typst_check")]))
+        XCTAssertTrue(AICompletionService.isCheckRound([
+            call("project__run_typst_check"), call("project__run_typst_check")
+        ]))
+        // A read mixed in is research, not a check loop.
+        XCTAssertFalse(AICompletionService.isCheckRound([
+            call("project__run_typst_check"), call("project__read_file")
+        ]))
+        // Conversions produce content, so they don't count as a check loop.
+        XCTAssertFalse(AICompletionService.isCheckRound([call("project__convert_markdown_to_typst")]))
+        XCTAssertFalse(AICompletionService.isCheckRound([]))
+    }
+
+    func testValidationWithdrawnNoteIsAHarnessNote() {
+        let note = AICompletionService.validationWithdrawnNote()
+        XCTAssertTrue(note.hasPrefix(AICompletionService.harnessNotePrefix), note)
+        XCTAssertTrue(note.contains("Not run"), note)
+        XCTAssertTrue(note.contains("edit_file"), note)
+    }
+
+    func testCheckTargetKeyDistinguishesPathsAndSnippets() {
+        let args = { (json: String) in json }
+        XCTAssertEqual(
+            AICompletionService.checkTargetKey(
+                qualifiedName: "project__run_typst_check",
+                argumentsJSON: args(#"{"path":"Mugs.typ"}"#)
+            ),
+            "path:Mugs.typ"
+        )
+        // Same path with padding is the same target.
+        XCTAssertEqual(
+            AICompletionService.checkTargetKey(
+                qualifiedName: "project__run_typst_check",
+                argumentsJSON: args(#"{"path":" Mugs.typ "}"#)
+            ),
+            "path:Mugs.typ"
+        )
+        // Two snippets are different targets; the same snippet re-pasted with
+        // a trailing newline is not.
+        let a = AICompletionService.checkTargetKey(
+            qualifiedName: "project__run_typst_check", argumentsJSON: #"{"source":"= A"}"#)
+        let b = AICompletionService.checkTargetKey(
+            qualifiedName: "project__run_typst_check", argumentsJSON: #"{"source":"= B"}"#)
+        let aAgain = AICompletionService.checkTargetKey(
+            qualifiedName: "project__run_typst_check", argumentsJSON: #"{"source":"= A\n"}"#)
+        XCTAssertNotNil(a)
+        XCTAssertNotEqual(a, b)
+        XCTAssertEqual(a, aAgain)
+        // Another tool never produces a check target.
+        XCTAssertNil(AICompletionService.checkTargetKey(
+            qualifiedName: "project__read_file", argumentsJSON: #"{"path":"a.typ"}"#))
+        XCTAssertNil(AICompletionService.checkTargetKey(
+            qualifiedName: "project__run_typst_check", argumentsJSON: "{}"))
+    }
+
+    func testChangesFilesSeparatesEditsFromReadsAndChecks() {
+        XCTAssertTrue(AICompletionService.changesFiles("project__edit_file"))
+        XCTAssertTrue(AICompletionService.changesFiles("project__write_file"))
+        XCTAssertTrue(AICompletionService.changesFiles("python__run"))
+        XCTAssertTrue(AICompletionService.changesFiles("myserver__unknown"))
+        XCTAssertFalse(AICompletionService.changesFiles("project__read_file"))
+        XCTAssertFalse(AICompletionService.changesFiles("project__run_typst_check"))
+        XCTAssertFalse(AICompletionService.changesFiles("agent__update_plan"))
+    }
+
     // MARK: Elision digest
 
     func testReadDigestKeepsWindowAndHeadingLineNumbers() {
