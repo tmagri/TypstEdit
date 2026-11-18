@@ -466,6 +466,8 @@ enum AISettingsSection: String, CaseIterable, Identifiable {
 // MARK: - AI Assistant Settings View
 
 struct AISettingsView: View {
+    private static let serverTimeZoneIdentifiers = TimeZone.knownTimeZoneIdentifiers.sorted()
+
     @StateObject private var settings = AISettingsManager.shared
     @ObservedObject private var compressionModel = LLMLingua2Manager.shared
     @State private var selectedSection: AISettingsSection = .autocomplete
@@ -770,6 +772,13 @@ struct AISettingsView: View {
 
                 generationSourceFields
 
+                SettingsRow(
+                    label: "Server Time Zone:",
+                    caption: "Used for provider reset times that omit a timezone. Choose the timezone where this server is located."
+                ) {
+                    serverTimeZonePicker(selection: $settings.generationRateLimitResetTimeZoneIdentifier)
+                }
+
                 SettingsRow(label: "Reasoning Effort:", caption: reasoningEffortCaption(for: .generation)) {
                     Picker("Reasoning Effort", selection: reasoningEffortBinding(for: .generation)) {
                         ForEach(ReasoningEffort.allCases) { effort in
@@ -892,12 +901,29 @@ struct AISettingsView: View {
             : "Optional — falling back to the shared Local Server key"
     }
 
+    private func serverTimeZonePicker(selection: Binding<String>) -> some View {
+        Picker("Server Time Zone", selection: selection) {
+            ForEach(Self.serverTimeZoneIdentifiers, id: \.self) { identifier in
+                Text(serverTimeZoneLabel(identifier)).tag(identifier)
+            }
+        }
+        .pickerStyle(.menu)
+    }
+
+    private func serverTimeZoneLabel(_ identifier: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: identifier) ?? .current
+        formatter.dateFormat = "ZZZZZ"
+        return "\(identifier) (\(formatter.string(from: Date())))"
+    }
+
     @ViewBuilder
     private var savedModelsCard: some View {
         SettingsCard(
             title: "Saved Models",
             icon: "square.stack.3d.up",
-            description: "Save extra models, from any provider, to pick per feature below or to switch on the fly from the model menu in the AI Chat panel and the AI Prompt sheet. API keys are shared per provider (API Keys & Limits tab), and a local model can set its own key when several local servers need different tokens. Each saved model can also set its own AI Chat context budget and compaction method."
+            description: "Save extra models, from any provider, to pick per feature below or to switch on the fly from the model menu in the AI Chat panel and the AI Prompt sheet. API keys are shared per provider (API Keys & Limits tab), and a local model can set its own key when several local servers need different tokens. Each saved model can also set its own server timezone, AI Chat context budget, and compaction method."
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 if settings.modelProfiles.isEmpty {
@@ -952,6 +978,13 @@ struct AISettingsView: View {
 
             SettingsRow(label: "Model:", caption: value.source == .portkey ? portkeyModelCaption : nil) {
                 ModelNameField(placeholder: modelPlaceholder(for: value.source), text: profile.model, source: value.source, localEndpoint: value.endpoint, apiKey: value.source.isLocal ? value.apiKey : "")
+            }
+
+            SettingsRow(
+                label: "Server Time Zone:",
+                caption: "Used for provider reset times that omit a timezone. Choose the timezone where this server is located."
+            ) {
+                serverTimeZonePicker(selection: profile.rateLimitResetTimeZoneIdentifier)
             }
 
             SettingsRow(label: "Reasoning Effort:") {
@@ -1480,7 +1513,7 @@ struct AISettingsView: View {
                     Toggle("Also retry after a failure", isOn: $settings.chatAutoProceedOnFailure)
                         .font(.caption)
                         .padding(.leading, 20)
-                    Text("When the turn ends in an error — a dropped connection, a timeout, or a provider hiccup — another attempt is sent after the same countdown, with the error given to the model as context. A run set up for \"set and forget\" keeps going instead of stopping quietly. The round cap still applies.")
+                    Text("When the turn ends in an error — a dropped connection, a timeout, or a provider hiccup — another attempt is sent after the countdown, with the error given to the model as context. If a 429 usage-limit error includes a reset time, the retry waits until then instead. For timestamps without a timezone, the configured model's Server Time Zone is used. A run set up for \"set and forget\" keeps going instead of stopping quietly. The round cap still applies.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .padding(.leading, 40)

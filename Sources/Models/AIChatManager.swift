@@ -1489,14 +1489,33 @@ final class AIChatManager: ObservableObject {
             return false
         }
 
-        let seconds = settings.effectiveChatAutoProceedSeconds
+        let providerResetDelay: TimeInterval?
+        if case .failure(let message) = trigger {
+            providerResetDelay = AIChatAutoProceed.usageLimitRetryDelay(
+                in: message,
+                timeZone: chatModelContext.rateLimitResetTimeZone
+            )
+        } else {
+            providerResetDelay = nil
+        }
+        let seconds: Int
+        if let resetDelay = providerResetDelay {
+            seconds = Int(ceil(resetDelay))
+        } else {
+            seconds = settings.effectiveChatAutoProceedSeconds
+        }
         autoProceedSkipped = false
         autoProceed = AutoProceedState(trigger: trigger, totalSeconds: seconds, remainingSeconds: seconds)
-        liveStatus = "Waiting to continue automatically…"
+        liveStatus = providerResetDelay != nil
+            ? "Waiting for the provider's usage limit to reset…"
+            : "Waiting to continue automatically…"
 
         defer {
             autoProceed = nil
-            if liveStatus == "Waiting to continue automatically…" { liveStatus = nil }
+            if liveStatus == "Waiting to continue automatically…"
+                || liveStatus == "Waiting for the provider's usage limit to reset…" {
+                liveStatus = nil
+            }
         }
 
         // Short ticks keep "Continue now" and Cancel immediate, while the

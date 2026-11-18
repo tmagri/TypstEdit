@@ -176,6 +176,9 @@ struct ModelContext {
     var isOpenRouter: Bool { source == .openRouter }
     var isPortkey: Bool { source == .portkey }
 
+    /// Timezone used to interpret reset timestamps that omit a timezone.
+    var rateLimitResetTimeZone: TimeZone = .current
+
     /// The chat completions endpoint for this context.
     var chatEndpoint: String {
         switch source {
@@ -249,6 +252,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     /// behind the same source need different tokens.
     var apiKey: String
     var reasoningEffort: ReasoningEffort
+    /// Timezone used for unzoned provider rate-limit reset timestamps.
+    var rateLimitResetTimeZoneIdentifier: String
     /// How AI Chat compacts long conversations while this model is in use.
     /// `nil` = follow the global setting (AI Chat → Context Compression).
     var compressionMethod: ChatCompressionMethod?
@@ -273,6 +278,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         endpoint: String = AIModelProfile.defaultLocalEndpoint,
         apiKey: String = "",
         reasoningEffort: ReasoningEffort = .auto,
+        rateLimitResetTimeZoneIdentifier: String = TimeZone.current.identifier,
         compressionMethod: ChatCompressionMethod? = nil,
         contextBudgetTokens: Int? = nil,
         pricing: ModelPricing? = nil
@@ -284,6 +290,7 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         self.endpoint = endpoint
         self.apiKey = apiKey
         self.reasoningEffort = reasoningEffort
+        self.rateLimitResetTimeZoneIdentifier = rateLimitResetTimeZoneIdentifier
         self.compressionMethod = compressionMethod
         self.contextBudgetTokens = contextBudgetTokens
         self.pricing = pricing
@@ -304,6 +311,8 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         apiKey = (try? c.decode(String.self, forKey: .apiKey)) ?? ""
         let effortRaw = (try? c.decode(String.self, forKey: .reasoningEffort)) ?? ""
         reasoningEffort = ReasoningEffort(rawValue: effortRaw) ?? .auto
+        rateLimitResetTimeZoneIdentifier = (try? c.decode(String.self, forKey: .rateLimitResetTimeZoneIdentifier))
+            ?? TimeZone.current.identifier
         // Missing (older saved models) or unknown → follow the global setting.
         compressionMethod = (try? c.decode(String.self, forKey: .compressionMethod)).flatMap(ChatCompressionMethod.init(rawValue:))
         // Missing (older saved models) → follow the global budget.
@@ -314,6 +323,9 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
 
     var trimmedModel: String { model.trimmingCharacters(in: .whitespacesAndNewlines) }
     var trimmedApiKey: String { apiKey.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var rateLimitResetTimeZone: TimeZone {
+        TimeZone(identifier: rateLimitResetTimeZoneIdentifier) ?? .current
+    }
 
     /// Label used in pickers: the friendly name if set, else the model name.
     var displayName: String {
@@ -372,6 +384,13 @@ typealias AIProvider = ModelSource
 @MainActor
 class AISettingsManager: ObservableObject {
     static let shared = AISettingsManager()
+
+    /// Timezone used for unzoned rate-limit reset timestamps on the default
+    /// Chat & Actions model. Saved models can override this individually.
+    @AppStorage("aiGenerationRateLimitResetTimeZone") var generationRateLimitResetTimeZoneIdentifier: String = TimeZone.current.identifier
+    var generationRateLimitResetTimeZone: TimeZone {
+        TimeZone(identifier: generationRateLimitResetTimeZoneIdentifier) ?? .current
+    }
 
     @AppStorage("aiCompletionEnabled") var completionEnabled: Bool = false
     @AppStorage("aiAssistantEnabled") var assistantEnabled: Bool = false
@@ -1069,7 +1088,12 @@ class AISettingsManager: ObservableObject {
         }
 
         if src == .portkey && task != .embedding {
-            return portkeyContext(task: task, model: modelName, reasoningEffort: reasoningEffort(for: task))
+            return portkeyContext(
+                task: task,
+                model: modelName,
+                reasoningEffort: reasoningEffort(for: task),
+                rateLimitResetTimeZone: generationRateLimitResetTimeZone
+            )
         }
 
         return ModelContext(
@@ -1078,13 +1102,14 @@ class AISettingsManager: ObservableObject {
             model: modelName,
             endpoint: endpoint,
             apiKey: apiKey(for: src, task: task),
-            reasoningEffort: reasoningEffort(for: task)
+            reasoningEffort: reasoningEffort(for: task),
+            rateLimitResetTimeZone: generationRateLimitResetTimeZone
         )
     }
 
     /// A Portkey request context: the shared gateway URL, Portkey key, and
     /// optional default provider/config routing headers.
-    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort, apiKey: String? = nil, compressionMethod: ChatCompressionMethod? = nil, contextBudgetTokens: Int? = nil) -> ModelContext {
+    private func portkeyContext(task: ModelTask, model: String, reasoningEffort: ReasoningEffort, apiKey: String? = nil, compressionMethod: ChatCompressionMethod? = nil, contextBudgetTokens: Int? = nil, rateLimitResetTimeZone: TimeZone? = nil) -> ModelContext {
         ModelContext(
             task: task,
             source: .portkey,
@@ -1094,7 +1119,8 @@ class AISettingsManager: ObservableObject {
             reasoningEffort: reasoningEffort,
             extraHeaders: portkeyRoutingHeaders,
             compressionMethod: compressionMethod,
-            contextBudgetTokens: contextBudgetTokens
+            contextBudgetTokens: contextBudgetTokens,
+            rateLimitResetTimeZone: rateLimitResetTimeZone ?? generationRateLimitResetTimeZone
         )
     }
 
@@ -1164,7 +1190,8 @@ class AISettingsManager: ObservableObject {
             source: src,
             model: "",
             endpoint: src.isLocal ? generationEndpoint : AIModelProfile.defaultLocalEndpoint,
-            reasoningEffort: generationReasoningEffort
+            reasoningEffort: generationReasoningEffort,
+            rateLimitResetTimeZoneIdentifier: generationRateLimitResetTimeZoneIdentifier
         )
         modelProfiles.append(profile)
         return profile
@@ -1226,7 +1253,15 @@ class AISettingsManager: ObservableObject {
     func modelContext(for profile: AIModelProfile) -> ModelContext {
         let resolvedKey = apiKey(for: profile)
         if profile.source == .portkey {
-            return portkeyContext(task: .generation, model: profile.trimmedModel, reasoningEffort: profile.reasoningEffort, apiKey: resolvedKey, compressionMethod: profile.compressionMethod, contextBudgetTokens: profile.contextBudgetTokens)
+            return portkeyContext(
+                task: .generation,
+                model: profile.trimmedModel,
+                reasoningEffort: profile.reasoningEffort,
+                apiKey: resolvedKey,
+                compressionMethod: profile.compressionMethod,
+                contextBudgetTokens: profile.contextBudgetTokens,
+                rateLimitResetTimeZone: profile.rateLimitResetTimeZone
+            )
         }
         return ModelContext(
             task: .generation,
@@ -1237,7 +1272,8 @@ class AISettingsManager: ObservableObject {
             reasoningEffort: profile.reasoningEffort,
             compressionMethod: profile.compressionMethod,
             contextBudgetTokens: profile.contextBudgetTokens,
-            pricing: profile.pricing
+            pricing: profile.pricing,
+            rateLimitResetTimeZone: profile.rateLimitResetTimeZone
         )
     }
 

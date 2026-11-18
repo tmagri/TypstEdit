@@ -10,11 +10,27 @@ final class AIModelProfileTests: XCTestCase {
 
     func testProfilesRoundTrip() {
         let profiles = [
-            AIModelProfile(name: "Fast", source: .openAI, model: "gpt-4o-mini", reasoningEffort: .low),
+            AIModelProfile(
+                name: "Fast",
+                source: .openAI,
+                model: "gpt-4o-mini",
+                reasoningEffort: .low,
+                rateLimitResetTimeZoneIdentifier: "Asia/Shanghai"
+            ),
             AIModelProfile(source: .local, model: "llama3", endpoint: "http://localhost:1234/v1/chat/completions"),
         ]
         let raw = AISettingsManager.encodeProfiles(profiles)
         XCTAssertEqual(AISettingsManager.decodeProfiles(raw), profiles)
+    }
+
+    func testOlderProfilesDefaultResetTimezoneToCurrent() {
+        let raw = """
+        [{"id":"\(UUID().uuidString)","name":"","source":"OpenAI","model":"gpt-4o","endpoint":"","reasoningEffort":"auto"}]
+        """
+        XCTAssertEqual(
+            AISettingsManager.decodeProfiles(raw).first?.rateLimitResetTimeZoneIdentifier,
+            TimeZone.current.identifier
+        )
     }
 
     func testEmptyRawDecodesToEmptyList() {
@@ -67,12 +83,25 @@ final class AIModelProfileTests: XCTestCase {
         }
     }
 
+    func testDefaultModelContextUsesConfiguredResetTimezone() {
+        let settings = AISettingsManager.shared
+        let original = settings.generationRateLimitResetTimeZoneIdentifier
+        defer { settings.generationRateLimitResetTimeZoneIdentifier = original }
+
+        settings.generationRateLimitResetTimeZoneIdentifier = "Asia/Shanghai"
+        XCTAssertEqual(
+            settings.modelContext(for: .generation).rateLimitResetTimeZone.identifier,
+            "Asia/Shanghai"
+        )
+    }
+
     func testFeatureUsesChosenProfile() {
         withCleanProfiles { settings in
             var profile = settings.addModelProfile()
             profile.source = .anthropic
             profile.model = " claude-test "
             profile.reasoningEffort = .high
+            profile.rateLimitResetTimeZoneIdentifier = "Asia/Shanghai"
             settings.updateModelProfile(profile)
 
             settings.setModelProfileID(profile.id, for: .prompt)
@@ -81,6 +110,7 @@ final class AIModelProfileTests: XCTestCase {
             XCTAssertEqual(ctx.source, .anthropic)
             XCTAssertEqual(ctx.model, "claude-test")
             XCTAssertEqual(ctx.reasoningEffort, .high)
+            XCTAssertEqual(ctx.rateLimitResetTimeZone.identifier, "Asia/Shanghai")
             XCTAssertEqual(ctx.apiKey, settings.apiKey(for: .anthropic))
 
             // Other features are untouched.

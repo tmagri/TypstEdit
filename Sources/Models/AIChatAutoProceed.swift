@@ -97,6 +97,48 @@ enum AIChatAutoProceed {
         return (unfinishedPhrases + readyPhrases).contains { lower.contains($0) }
     }
 
+    /// Delay a failed API request until a reported usage-limit reset. Messages
+    /// without a parseable reset time keep using the normal Auto-proceed delay.
+    static func usageLimitRetryDelay(
+        in failure: String,
+        timeZone: TimeZone = .current,
+        now: Date = Date()
+    ) -> TimeInterval? {
+        guard failure.range(of: "API Error (429)", options: .caseInsensitive) != nil else { return nil }
+        let pattern = #"\breset\s+at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\s*(?:UTC|GMT|Z|[+-]\d{2}:?\d{2}))?)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: failure, range: NSRange(failure.startIndex..., in: failure)),
+              let range = Range(match.range(at: 1), in: failure) else { return nil }
+
+        let timestamp = String(failure[range]).trimmingCharacters(in: .whitespaces)
+        let resetDate: Date?
+        if timestamp.contains("T") || timestamp.localizedCaseInsensitiveContains("UTC")
+            || timestamp.localizedCaseInsensitiveContains("GMT")
+            || timestamp.hasSuffix("Z")
+            || timestamp.range(of: #"[+-]\d{2}:?\d{2}$"#, options: .regularExpression) != nil {
+            var isoTimestamp = timestamp.replacingOccurrences(of: " ", with: "T")
+            if isoTimestamp.localizedCaseInsensitiveContains("UTC")
+                || isoTimestamp.localizedCaseInsensitiveContains("GMT") {
+                isoTimestamp = isoTimestamp.replacingOccurrences(
+                    of: #"\s*(UTC|GMT)$"#,
+                    with: "Z",
+                    options: [.regularExpression, .caseInsensitive]
+                )
+            }
+            if isoTimestamp.range(of: #"[+-]\d{4}$"#, options: .regularExpression) != nil {
+                isoTimestamp.insert(":", at: isoTimestamp.index(isoTimestamp.endIndex, offsetBy: -2))
+            }
+            resetDate = ISO8601DateFormatter().date(from: isoTimestamp)
+        } else {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = timeZone
+            formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            resetDate = formatter.date(from: timestamp)
+        }
+        return resetDate.map { max(0, $0.timeIntervalSince(now)) }
+    }
+
     private static func isUnfinishedHeadingLine(_ rawLine: String) -> Bool {
         let line = normalizedHeadingLine(rawLine)
         guard !line.isEmpty else { return false }

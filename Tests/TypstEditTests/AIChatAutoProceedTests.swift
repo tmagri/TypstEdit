@@ -96,6 +96,42 @@ final class AIChatAutoProceedTests: XCTestCase {
         XCTAssertLessThan(text.count, 1_200)
     }
 
+    func testUsageLimitFailureWaitsUntilTheReportedResetTime() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T13:30:25Z"))
+        let chinaTime = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        let failure = "API Error (429): Usage limit reached for 5 hour. Your limit will reset at 2026-11-18 22:00:47"
+
+        XCTAssertEqual(
+            try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(
+                in: failure,
+                timeZone: chinaTime,
+                now: now
+            )),
+            1_822,
+            accuracy: 1
+        )
+    }
+
+    func testUsageLimitFailureAcceptsAnExplicitTimezone() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T21:30:25Z"))
+        let failure = "API Error (429): Usage limit reached. Your limit will reset at 2026-11-18T22:00:47Z"
+
+        XCTAssertEqual(
+            try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(in: failure, now: now)),
+            1_822,
+            accuracy: 1
+        )
+    }
+
+    func testUsageLimitRetryDelayIgnoresOtherErrorsAndUnparseableResets() {
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: "API Error (500): Your limit will reset at 2026-11-18 22:00:47"
+        ))
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: "API Error (429): Your limit will reset soon"
+        ))
+    }
+
     func testTriggerFailureFlag() {
         XCTAssertTrue(AIChatAutoProceed.Trigger.failure("boom").isFailure)
         XCTAssertFalse(AIChatAutoProceed.Trigger.unfinished.isFailure)
