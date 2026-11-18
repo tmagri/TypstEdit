@@ -112,17 +112,175 @@ final class AIChatAutoProceedTests: XCTestCase {
         )
     }
 
-    func testUsageLimitFailureAcceptsAnExplicitTimezone() throws {
-        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T21:30:25Z"))
-        let failure = "API Error (429): Usage limit reached. Your limit will reset at 2026-11-18T22:00:47Z"
+    /// z.ai uses three phrasings across its plan-limit codes: 1308 and 1310 say
+    /// "will reset at", while 1316–1321 say "Resets at … ." — a different verb
+    /// and a trailing period.
+    func testUsageLimitFailureAcceptsEveryZaiPhrasing() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T13:30:25Z"))
+        let chinaTime = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        let messages = [
+            "API Error (429): Usage limit reached for 5 hour. Your limit will reset at 2026-11-18 22:00:47",
+            "API Error (429): Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-18 22:00:47",
+            "API Error (429): Usage limit reached for the past 5 hours. Insufficient balance for extra usage. Resets at 2026-11-18 22:00:47.",
+            "API Error (429): Usage limit reached for the past 7 days. Extra usage is not available due to monthly spend limit. Resets at 2026-11-18 22:00:47.",
+        ]
+        for message in messages {
+            XCTAssertEqual(
+                try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(
+                    in: message,
+                    timeZone: chinaTime,
+                    now: now
+                )),
+                1_822,
+                accuracy: 1,
+                message
+            )
+        }
+    }
 
+    /// A `UTC` or `GMT` suffix used to be mangled into `…TZ` and silently
+    /// dropped, so every zoned timestamp fell back to the 10-second countdown.
+    func testUsageLimitFailureAcceptsWordZones() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T20:30:25Z"))
+        let messages = [
+            "API Error (429): your limit will reset at 2026-11-18 22:00:47 UTC",
+            "API Error (429): your limit will reset at 2026-11-18 22:00:47 GMT",
+            "API Error (429): your limit will reset at 2026-11-18T22:00:47Z",
+        ]
+        for message in messages {
+            XCTAssertEqual(
+                try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(in: message, now: now)),
+                5_422,
+                accuracy: 1,
+                message
+            )
+        }
+    }
+
+    /// `GMT+8` is a zone, not part of the time. It used to be captured as a
+    /// bare `GMT` and read as UTC, an eight-hour error.
+    func testUsageLimitFailureHonoursAWordZoneWithAnOffset() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T13:30:25Z"))
+        let chinaTime = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        for suffix in ["GMT+8", "UTC+08:00", "+08:00", "+0800"] {
+            XCTAssertEqual(
+                try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(
+                    in: "API Error (429): your limit will reset at 2026-11-18 22:00:47 \(suffix)",
+                    timeZone: chinaTime,
+                    now: now
+                )),
+                1_822,
+                accuracy: 1,
+                suffix
+            )
+        }
+    }
+
+    func testUsageLimitFailureAcceptsFractionalSecondsAndMinutePrecision() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T20:30:25Z"))
         XCTAssertEqual(
-            try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(in: failure, now: now)),
-            1_822,
+            try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(
+                in: "API Error (429): reset at 2026-11-18T22:00:47.123Z",
+                now: now
+            )),
+            5_422.123,
+            accuracy: 1
+        )
+        // Anthropic's spend cap states the time without seconds.
+        XCTAssertEqual(
+            try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(
+                in: "API Error (429): You have reached your API usage limits. You will regain access on 2026-11-18 at 22:00 UTC.",
+                now: now
+            )),
+            5_375,
             accuracy: 1
         )
     }
 
+    /// An unzoned timestamp is the one case where the setting matters, so pin
+    /// it: the same text is a different instant in each Server Time Zone.
+    func testUsageLimitFailureReadsUnzonedTimestampsInTheConfiguredZone() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T13:30:25Z"))
+        let failure = "API Error (429): your limit will reset at 2026-11-18 22:00:47"
+
+        XCTAssertEqual(
+            try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(
+                in: failure,
+                timeZone: try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai")),
+                now: now
+            )),
+            1_822,
+            accuracy: 1
+        )
+        // In UTC the same wall-clock time is 8.5 hours out — past the cap, so
+        // no wait is offered rather than a silently wrong one.
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: failure,
+            timeZone: try XCTUnwrap(TimeZone(identifier: "UTC")),
+            now: now
+        ))
+    }
+
+    /// The regression that matters most: a reset in the past used to clamp to
+    /// zero, making the countdown empty and re-sending into the same limit
+    /// immediately, once per auto-proceed round.
+    func testUsageLimitFailureInThePastFallsBackToTheNormalCountdown() {
+        let now = Date()
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: "API Error (429): reset at \(formatter.string(from: now.addingTimeInterval(-3_600)))",
+            timeZone: formatter.timeZone,
+            now: now
+        ))
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: "API Error (429): reset at \(formatter.string(from: now.addingTimeInterval(-0.5)))",
+            timeZone: formatter.timeZone,
+            now: now
+        ))
+    }
+
+    /// Despite the third-party comment suggesting z.ai runs on UTC, its stated
+    /// unit is China time; a wrong zone must not park the chat for weeks.
+    func testUsageLimitFailureBeyondTheMaximumWaitIsNotHonoured() throws {        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-18T13:30:25Z"))
+        let chinaTime = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: "API Error (429): Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-25 22:00:47",
+            timeZone: chinaTime,
+            now: now
+        ))
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = chinaTime
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        func message(offsetBy seconds: TimeInterval) -> String {
+            "API Error (429): reset at \(formatter.string(from: now.addingTimeInterval(seconds)))"
+        }
+
+        XCTAssertEqual(
+            try XCTUnwrap(AIChatAutoProceed.usageLimitRetryDelay(
+                in: message(offsetBy: AIChatAutoProceed.maxUsageLimitWait),
+                timeZone: chinaTime,
+                now: now
+            )),
+            AIChatAutoProceed.maxUsageLimitWait,
+            accuracy: 1
+        )
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: message(offsetBy: AIChatAutoProceed.maxUsageLimitWait + 1),
+            timeZone: chinaTime,
+            now: now
+        ))
+    }
+
+    /// Only a 429 with a stated reset gets the long wait. Everything else —
+    /// other statuses, and 429s that state a relative delay or nothing at all —
+    /// keeps the ordinary countdown.
     func testUsageLimitRetryDelayIgnoresOtherErrorsAndUnparseableResets() {
         XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
             in: "API Error (500): Your limit will reset at 2026-11-18 22:00:47"
@@ -130,6 +288,28 @@ final class AIChatAutoProceedTests: XCTestCase {
         XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
             in: "API Error (429): Your limit will reset soon"
         ))
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: "API Error (429): Rate limit reached. Please try again in 120ms."
+        ))
+        XCTAssertNil(AIChatAutoProceed.usageLimitRetryDelay(
+            in: "API Error (429): Rate limit exceeded: free-models-per-min."
+        ))
+    }
+
+    func testUsageLimitResetTimestampExtraction() {
+        XCTAssertEqual(
+            AIChatAutoProceed.usageLimitResetTimestamp(
+                in: "API Error (429): Usage limit reached for 5 hour. Your limit will reset at 2026-11-18 22:00:47"
+            ),
+            "2026-11-18 22:00:47"
+        )
+        XCTAssertEqual(
+            AIChatAutoProceed.usageLimitResetTimestamp(
+                in: "API Error (429): your limit will reset at 2026-11-18 22:00:47 GMT+8"
+            ),
+            "2026-11-18 22:00:47 GMT+8"
+        )
+        XCTAssertNil(AIChatAutoProceed.usageLimitResetTimestamp(in: "API Error (429): Try later."))
     }
 
     func testTriggerFailureFlag() {

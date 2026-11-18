@@ -387,7 +387,9 @@ class AISettingsManager: ObservableObject {
 
     /// Timezone used for unzoned rate-limit reset timestamps on the default
     /// Chat & Actions model. Saved models can override this individually.
-    @AppStorage("aiGenerationRateLimitResetTimeZone") var generationRateLimitResetTimeZoneIdentifier: String = TimeZone.current.identifier
+    @AppStorage("aiGenerationRateLimitResetTimeZone") var generationRateLimitResetTimeZoneIdentifier: String = TimeZone.current.identifier {
+        willSet { objectWillChange.send() }
+    }
     var generationRateLimitResetTimeZone: TimeZone {
         TimeZone(identifier: generationRateLimitResetTimeZoneIdentifier) ?? .current
     }

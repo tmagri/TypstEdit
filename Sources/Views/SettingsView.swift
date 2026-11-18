@@ -466,7 +466,16 @@ enum AISettingsSection: String, CaseIterable, Identifiable {
 // MARK: - AI Assistant Settings View
 
 struct AISettingsView: View {
-    private static let serverTimeZoneIdentifiers = TimeZone.knownTimeZoneIdentifiers.sorted()
+    private static let serverTimeZoneOptions: [(identifier: String, label: String)] = {
+        let instant = Date()
+        return TimeZone.knownTimeZoneIdentifiers.sorted().map { identifier in
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(identifier: identifier) ?? .current
+            formatter.dateFormat = "ZZZZZ"
+            return (identifier, "\(identifier) (\(formatter.string(from: instant)))")
+        }
+    }()
 
     @StateObject private var settings = AISettingsManager.shared
     @ObservedObject private var compressionModel = LLMLingua2Manager.shared
@@ -903,19 +912,11 @@ struct AISettingsView: View {
 
     private func serverTimeZonePicker(selection: Binding<String>) -> some View {
         Picker("Server Time Zone", selection: selection) {
-            ForEach(Self.serverTimeZoneIdentifiers, id: \.self) { identifier in
-                Text(serverTimeZoneLabel(identifier)).tag(identifier)
+            ForEach(Self.serverTimeZoneOptions, id: \.identifier) { option in
+                Text(option.label).tag(option.identifier)
             }
         }
         .pickerStyle(.menu)
-    }
-
-    private func serverTimeZoneLabel(_ identifier: String) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: identifier) ?? .current
-        formatter.dateFormat = "ZZZZZ"
-        return "\(identifier) (\(formatter.string(from: Date())))"
     }
 
     @ViewBuilder
@@ -1513,7 +1514,7 @@ struct AISettingsView: View {
                     Toggle("Also retry after a failure", isOn: $settings.chatAutoProceedOnFailure)
                         .font(.caption)
                         .padding(.leading, 20)
-                    Text("When the turn ends in an error — a dropped connection, a timeout, or a provider hiccup — another attempt is sent after the countdown, with the error given to the model as context. If a 429 usage-limit error includes a reset time, the retry waits until then instead. For timestamps without a timezone, the configured model's Server Time Zone is used. A run set up for \"set and forget\" keeps going instead of stopping quietly. The round cap still applies.")
+                    Text("When the turn ends in an error — a dropped connection, a timeout, or a provider hiccup — another attempt is sent after the countdown, with the error given to the model as context. If a 429 usage-limit error includes a reset time, the retry waits until then instead, up to 6 hours; a further reset is not waited out, so the round cap stops the run and offers \"Keep going\" rather than leaving the chat asleep for days. For timestamps without a timezone, the configured model's Server Time Zone is used. A run set up for \"set and forget\" keeps going instead of stopping quietly. The round cap still applies.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .padding(.leading, 40)
