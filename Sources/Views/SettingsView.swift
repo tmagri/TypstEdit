@@ -1233,6 +1233,8 @@ struct AISettingsView: View {
 
         SafetyRulesSettingsCard()
 
+        SecretRedactionSettingsCard()
+
         SettingsCard(
             title: "Context Budget",
             icon: "gauge.with.dots.needle.67percent",
@@ -1800,6 +1802,36 @@ struct AISettingsView: View {
                         .font(.caption)
                         .foregroundColor(settings.chatPythonSudoEnabled ? .orange : .secondary)
                         .padding(.leading, 38)
+                }
+            }
+        }
+
+        SettingsCard(
+            title: "Code Mode",
+            icon: "chevron.left.forwardslash.chevron.right",
+            description: "The `code__execute` tool: the model writes a short JavaScript program that calls its other tools — reads, searches, checks — and returns only the answer, so one question that needs six reads costs one round instead of six, and the raw file text never enters the conversation. The interpreter is restricted: no network, no files, no timers — the only way out is calling your existing tools, and every one of those shows its approval card exactly as it would on its own. A compute budget and a call cap end a runaway script."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Allow the Code Mode Tool (code__execute)", isOn: $settings.codeModeEnabled)
+                    .font(.body.weight(.medium))
+
+                if settings.codeModeEnabled {
+                    HStack(spacing: 10) {
+                        Text("Compute budget")
+                            .font(.caption)
+                        TextField("20", value: $settings.codeModeComputeSeconds, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                        Text("seconds of JavaScript per script (waiting on a tool does not count; capped at 120)")
+                            .font(.caption)
+                        Spacer()
+                    }
+                    .padding(.leading, 18)
+
+                    Text("Off by default, and additive: the direct tools stay exactly as they are. Plan mode withholds code mode entirely — a script could compose a write the mode just withheld.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 18)
                 }
             }
         }

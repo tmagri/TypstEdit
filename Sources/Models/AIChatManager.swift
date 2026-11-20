@@ -206,6 +206,12 @@ final class AIChatManager: ObservableObject {
     @Published var ragToolEnabled: Bool = AISettingsManager.shared.chatRAGToolEnabledDefault
 
     private let localTools = LocalToolExecutor()
+    /// The tools offered in the current turn, stashed by `runTurn` so the
+    /// `code__execute` dispatcher can offer the same set to scripts.
+    private var turnOfferedTools: [MCPTool] = []
+    /// Pre-images of the files the tools changed, so a turn's edits can be
+    /// undone from the transcript (see `FileRevert`).
+    private let fileSnapshots = FileSnapshotStore()
     /// Semantic search over the parts of this conversation that left the
     /// context, behind the `recall` tool.
     private let recall = ConversationRecall()
@@ -333,6 +339,10 @@ final class AIChatManager: ObservableObject {
         self.scopeLabel = scope.label
         self.plan = AgentHarnessTools.plan(from: messages)
         refreshContextEstimate()
+        // Snapshots nobody undoes would grow without bound; the retention
+        // matches `FileRevert.retention` so a change never outlives its
+        // snapshot.
+        fileSnapshots.prune(olderThan: FileRevert.retention)
     }
 
     /// Rebuilds a saved conversation.
@@ -1107,10 +1117,22 @@ final class AIChatManager: ObservableObject {
         let builtInTools = localTools.toolDescriptors()
             + GitTools.descriptors(permissions: AISettingsManager.shared.chatGitPermissions)
             + harnessTools
-        let tools = (planMode ? Self.descriptorsForPlanMode(builtInTools) : builtInTools) + mcpTools
+        var tools = (planMode ? Self.descriptorsForPlanMode(builtInTools) : builtInTools) + mcpTools
+        // Code mode composes the other tools, so it is offered only when
+        // enabled and never in Plan mode: a script could reach a write the
+        // mode just withheld. (`validateToolAccess` re-checks at dispatch.)
+        if !planMode, AISettingsManager.shared.codeModeEnabled {
+            tools.append(AgentHarnessTools.executeTool(
+                catalog: builtInTools + mcpTools,
+                computeSeconds: AISettingsManager.shared.effectiveCodeModeComputeSeconds
+            ))
+        }
         // For argument repair (opencode's tool-input-repair): the schema
         // tells the repairer which fields are numbers, booleans, objects.
         toolInputSchemas = Dictionary(uniqueKeysWithValues: tools.map { ($0.qualifiedName, $0.inputSchema) })
+        // The script dispatcher (`code__execute`) offers exactly this list,
+        // filtered, so a script can only call what a direct turn could.
+        turnOfferedTools = tools
 
         var baseSystemPrompt = """
         You are the AI Chat assistant embedded in TypstEdit, a Typst/Markdown editor. Unlike a single-insertion prompt, you are having an ongoing conversation about \(localTools.scope == .none ? "the user's open work, with no project or notebook scope" : "the user's \(localTools.scope.noun) as a whole").
@@ -2067,7 +2089,7 @@ final class AIChatManager: ObservableObject {
     private func startRecallWarmUpIfUseful() {
         guard AISettingsManager.shared.includeProjectContext,
               messages.contains(where: { $0.isCompacted }) else { return }
-        recall.prepare(messages: messages)
+        recall.prepare(messages: messages, sessionID: id)
     }
 
     /// Project passages for a turn that starts right after a compaction,
@@ -2216,6 +2238,10 @@ final class AIChatManager: ObservableObject {
         let namespace = String(qualifiedName[..<separator.lowerBound])
         let name = String(qualifiedName[separator.upperBound...])
         switch namespace {
+        case "code":
+            // `code__execute` composes other tools, so a script could reach
+            // a write the mode just withheld.
+            return true
         case LocalToolExecutor.namespace:
             return planModeBlockedLocalToolNames.contains(name)
         case LocalToolExecutor.pythonNamespace:
@@ -2563,15 +2589,18 @@ final class AIChatManager: ObservableObject {
                 // The tool finished (or returned early) but the user pressed
                 // Stop in the meantime — record that and unwind the loop.
                 updateToolMessage(id: messageID, status: .cancelled, output: "Stopped.")
+                attachFileChangeRecords(toolCallID: messageID)
                 throw CancellationError()
             }
             updateToolMessage(id: messageID, status: .succeeded, output: output)
+            attachFileChangeRecords(toolCallID: messageID)
             return output
         } catch {
             if Task.isCancelled {
                 // A stop pressed mid-tool (including one suspended on the
                 // approval prompt) isn't a failure or a denial.
                 updateToolMessage(id: messageID, status: .cancelled, output: "Stopped.")
+                attachFileChangeRecords(toolCallID: messageID)
                 throw CancellationError()
             }
             if error is CancellationError || stoppedToolMessageIDs.contains(messageID) {
@@ -2579,6 +2608,7 @@ final class AIChatManager: ObservableObject {
                 // Stop, hand the model a result and keep the turn alive.
                 let output = "The user stopped this task before it completed. Continue without its result."
                 updateToolMessage(id: messageID, status: .cancelled, output: output)
+                attachFileChangeRecords(toolCallID: messageID)
                 return output
             }
             let status: ChatMessage.ToolStatus
@@ -2588,8 +2618,85 @@ final class AIChatManager: ObservableObject {
                 status = .failed
             }
             updateToolMessage(id: messageID, status: status, output: error.localizedDescription)
+            attachFileChangeRecords(toolCallID: messageID)
             throw error
         }
+    }
+
+    /// Snapshots and records the project files the just-finished tool call
+    /// changed, attaching the metadata to its transcript row so the turn can
+    /// be undone (see `FileRevert`). Drains the executor's buffer however
+    /// the call ended, so nothing leaks into the next call.
+    private func attachFileChangeRecords(toolCallID: UUID) {
+        let changes = localTools.drainRecordedFileChanges()
+        guard !changes.isEmpty,
+              let index = messages.firstIndex(where: { $0.id == toolCallID }) else { return }
+        messages[index].fileChanges = changes.map { change in
+            if let before = change.before {
+                // Only a failed save is ever silent: without the blob the
+                // change is simply not undoable, and the transcript still
+                // says what was written.
+                try? fileSnapshots.save(before: before, sessionID: id, toolCallID: toolCallID)
+            }
+            return FileChangeRecord(
+                relativePath: change.relativePath,
+                absolutePath: change.absolutePath,
+                existedBefore: change.before != nil,
+                // Empty means the file was removed by this call.
+                afterHash: change.after.map(FileRevert.sha256) ?? ""
+            )
+        }
+        persist()
+    }
+
+    // MARK: - Undo file changes
+
+    /// For each user message whose turn changed project files, how many
+    /// distinct files undoing from there would restore.
+    var undoableFileTurns: [UUID: Int] {
+        FileRevert.undoableTurns(in: messages)
+    }
+
+    /// The plan undoing from `userMessageID` would carry out, for the
+    /// confirmation alert.
+    func fileRevertPlan(from userMessageID: UUID) -> FileRevert.Plan {
+        FileRevert.plan(messages: messages, from: userMessageID)
+    }
+
+    /// The plan's entries whose file was touched since the tool wrote it —
+    /// undoing those also discards that later work, so the alert warns.
+    func filesChangedSinceRevert(_ plan: FileRevert.Plan) -> [FileRevert.Entry] {
+        FileRevert.changedSince(plan)
+    }
+
+    /// Puts every file changed from `userMessageID` on back the way it was,
+    /// and marks the calls reverted so the model knows its edits no longer
+    /// stand. Returns the restored paths and the failures.
+    @discardableResult
+    func undoFileChanges(from userMessageID: UUID) -> FileRevert.Outcome {
+        let plan = FileRevert.plan(messages: messages, from: userMessageID)
+        guard !plan.isEmpty else { return FileRevert.Outcome() }
+        let outcome = FileRevert.apply(plan, store: fileSnapshots, sessionID: id)
+        // Annotate the rows, so the transcript and the model both see that
+        // these edits were taken back.
+        for (index, message) in messages.enumerated()
+        where outcome.revertedToolCallIDs.contains(message.id) {
+            guard message.fileChanges != nil else { continue }
+            messages[index].fileChanges = message.fileChanges?.map { record in
+                var updated = record
+                updated.isReverted = true
+                return updated
+            }
+        }
+        persist()
+        // Open editors (and the sidebar) must hear that the files are back
+        // the way they were — the same notification a tool write sends.
+        for entry in plan.entries {
+            let url = URL(fileURLWithPath: entry.absolutePath)
+            NotificationCenter.default.post(name: .aiChatModifiedFile, object: url)
+            NotificationCenter.default.post(name: .refreshProjectSidebar, object: url)
+        }
+        return outcome
     }
 
     /// Runs a round of read-only calls concurrently, recording a transcript
@@ -2810,6 +2917,12 @@ final class AIChatManager: ObservableObject {
 
     private func performAgentTool(toolName: String, arguments: [String: Any]) async throws -> String {
         switch toolName {
+        case "execute":
+            guard let code = arguments["code"] as? String,
+                  !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw LocalToolError.invalidArguments("code is required")
+            }
+            return await runCodeMode(code: code)
         case "update_plan":
             let rawItems = arguments["items"] as? [[String: Any]] ?? []
             let items: [AgentPlanItem] = rawItems.compactMap { item in
@@ -2841,7 +2954,8 @@ final class AIChatManager: ObservableObject {
             let outcome = await recall.search(
                 query,
                 messages: messages,
-                useEmbeddings: AISettingsManager.shared.includeProjectContext
+                useEmbeddings: AISettingsManager.shared.includeProjectContext,
+                sessionID: id
             )
             return ConversationRecall.format(outcome)
 
@@ -2927,6 +3041,63 @@ final class AIChatManager: ObservableObject {
         return await withCheckedContinuation { continuation in
             questionContinuation = continuation
         }
+    }
+
+    // MARK: - Code mode (code__execute)
+
+    /// Runs a short model-written JavaScript program in the restricted
+    /// interpreter, dispatching its nested tool calls through
+    /// `trackedToolCall` so every one raises the same approval card, obeys
+    /// the same permission rules and the safety monitor, and lands its own
+    /// transcript row. Only the script's return value (plus a summary of the
+    /// calls it made) comes back into the conversation.
+    private func runCodeMode(code: String) async -> String {
+        // The live list from this turn, re-filtered: `execute` and
+        // `ask_question` are dropped again here, so a script cannot reach
+        // them by name even if the model writes one.
+        let callable = turnOfferedTools.filter { AgentHarnessTools.codeModeCanCall($0.qualifiedName) }
+        let exposed = callable.map { tool in
+            // `qualifiedName` is `namespace__name`, and a name may itself
+            // contain `__` (an MCP server's own tool name often does), so
+            // the namespace is only the part before the first separator.
+            CodeModeRunner.ExposedTool(
+                namespace: tool.serverName,
+                name: String(tool.qualifiedName.dropFirst(tool.serverName.count + 2)),
+                qualifiedName: tool.qualifiedName
+            )
+        }
+        let allowed = Set(callable.map { $0.qualifiedName })
+
+        let runner = CodeModeRunner()
+        let outcome = await runner.run(
+            code: code,
+            tools: exposed,
+            budget: TimeInterval(AISettingsManager.shared.effectiveCodeModeComputeSeconds)
+        ) { [weak self] qualifiedName, argumentsJSON in
+            guard let self else { return "Error: agent gone." }
+            // A script may only call what a direct turn could call. The
+            // name it writes is its own opinion, so it is checked here
+            // rather than trusted.
+            guard allowed.contains(qualifiedName) else {
+                return "Error: '\(qualifiedName)' is not available in code mode."
+            }
+            do {
+                return try await self.trackedToolCall(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON)
+            } catch {
+                // The harness reports a failed call as text starting with
+                // "Error: " — a declined approval, a Plan-mode refusal, a
+                // stop. The runner turns it back into a promise rejection,
+                // so a `try/catch` in the script sees it.
+                return "Error: \(error.localizedDescription)"
+            }
+        }
+
+        // The nested rows carry the approval story; this only flags a failed
+        // script, which those rows cannot show.
+        if outcome.output.hasPrefix("Error") || outcome.output.hasPrefix("Stopped") {
+            liveStatus = "Code mode: \(CodeModeRunner.oneLine(outcome.output))"
+        }
+        return outcome.output
     }
 
     /// Runs a read-only subagent in its own context and returns only its final

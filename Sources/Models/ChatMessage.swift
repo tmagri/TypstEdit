@@ -74,6 +74,11 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var toolArgumentsJSON: String? = nil
     var toolStatus: ToolStatus? = nil
     var toolOutput: String? = nil
+    /// Set when this call changed project files on disk: the metadata that
+    /// drives the transcript's "Undo file changes" (the pre-images themselves
+    /// live in `FileSnapshotStore`). Nil for calls that wrote nothing; a
+    /// batch patch lists every file it touched.
+    var fileChanges: [FileChangeRecord]? = nil
 }
 
 /// Typed actions keep publishing approval independent of the displayed label.

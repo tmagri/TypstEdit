@@ -466,3 +466,31 @@ struct SafetyRulesSettingsCard: View {
         newPattern = ""
     }
 }
+
+// MARK: - Secret redaction
+
+/// The "Redact secrets before sending" switch: a draft that holds a
+/// credential-shaped secret stops before sending and shows a redacted review
+/// card (see `SecretRedaction`), with each finding keepable in the clear one
+/// by one.
+struct SecretRedactionSettingsCard: View {
+    @ObservedObject private var settings = AISettingsManager.shared
+
+    var body: some View {
+        SettingsCard(
+            title: "Secret Redaction",
+            icon: "key.fill",
+            description: "A message you are about to send is checked for credential-shaped values — API keys, private key blocks, URLs with an embedded password, bearer tokens. When one is found, sending stops and the final submission is shown as a delta: each secret struck out and replaced by a placeholder, reviewable before anything leaves the Mac. A finding you really mean to share can be kept in the clear, one by one; the check runs on your drafts only, and the model's replies are not touched."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Redact secrets before sending (review the change first)", isOn: $settings.redactSecretsBeforeSending)
+                    .font(.caption)
+                Text(settings.redactSecretsBeforeSending
+                     ? "On — a draft with a secret in it opens a review card instead of sending. Turn this off to send drafts without the check."
+                     : "Off — drafts are sent exactly as written. The approval cards for tool calls still flag credential-shaped values.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}

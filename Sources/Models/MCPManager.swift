@@ -21,6 +21,9 @@ final class MCPManager: ObservableObject {
     @Published private(set) var projectRoot: URL?
 
     private var clients: [String: MCPClient] = [:]
+    /// Reconnects in flight, per server id. A burst of session expiries must
+    /// produce one handshake, not one per call — see `reconnectAndRetry`.
+    private var reconnects: [String: Task<Void, Never>] = [:]
     private var peerObserver: NSObjectProtocol?
 
     init() {
@@ -212,12 +215,58 @@ final class MCPManager: ObservableObject {
             // A Streamable HTTP server that dropped the session answers 404 to
             // a request carrying the old id. One reconnect and retry is the
             // documented recovery; a second failure surfaces to the model.
-            stopClient(id: scoped.id)
-            guard let restarted = await ensureStarted(scoped) else {
+            //
+            // The reconnect is serialised per server rather than done inline:
+            // the first failure tearing down the shared client would kill the
+            // sibling calls still in flight on it, and a burst of expiries
+            // would each start its own handshake. See `reconnectAndRetry`.
+            return try await reconnectAndRetry(
+                scoped: scoped,
+                staleClient: client,
+                toolName: toolName,
+                arguments: arguments
+            )
+        }
+    }
+
+    /// Recovers from an expired session without stranding concurrent callers.
+    ///
+    /// Serialised per server so a burst of expiries produces one reconnect, not
+    /// one per call. A caller whose client is already gone simply uses the
+    /// replacement; a caller that arrives while a reconnect is in flight waits
+    /// for it rather than starting a second handshake.
+    private func reconnectAndRetry(
+        scoped: ScopedMCPServer,
+        staleClient: MCPClient,
+        toolName: String,
+        arguments: [String: Any]
+    ) async throws -> String {
+        // Already replaced by a sibling: just use the replacement.
+        if clients[scoped.id] !== staleClient, clients[scoped.id]?.isRunning == true {
+            guard let current = clients[scoped.id] else { throw MCPError.sessionExpired }
+            return try await current.callTool(name: toolName, arguments: arguments)
+        }
+        if let inflight = reconnects[scoped.id] {
+            _ = await inflight.value
+            guard let current = clients[scoped.id], current.isRunning else {
                 throw MCPError.sessionExpired
             }
-            return try await restarted.callTool(name: toolName, arguments: arguments)
+            return try await current.callTool(name: toolName, arguments: arguments)
         }
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.stopClient(id: scoped.id)
+            _ = await self.ensureStarted(scoped)
+        }
+        reconnects[scoped.id] = task
+        await task.value
+        reconnects[scoped.id] = nil
+
+        guard let fresh = clients[scoped.id], fresh.isRunning else {
+            throw MCPError.sessionExpired
+        }
+        return try await fresh.callTool(name: toolName, arguments: arguments)
     }
 
     // MARK: - Sign-in
@@ -229,12 +278,16 @@ final class MCPManager: ObservableObject {
     }
 
     /// Runs the browser sign-in (or a silent refresh) for a remote server and
-    /// restarts its client so the next request carries the new token.
+    /// restarts its client, so the next request carries the new token — and
+    /// the connection is verified to actually work with it.
     func signIn(_ scoped: ScopedMCPServer) async throws {
+        stopClient(id: scoped.id)
         let client = MCPClient(config: scoped.config)
         try await client.signInInteractively()
-        stopClient(id: scoped.id)
         notifyPeers()
+        if await ensureStarted(scoped) == nil {
+            throw MCPOAuthError.tokenExchangeFailed(lastErrors[scoped.id] ?? "the server still refused the connection")
+        }
     }
 
     /// Forgets a server's tokens and closes its connection.

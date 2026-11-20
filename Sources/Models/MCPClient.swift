@@ -10,6 +10,9 @@ enum MCPError: LocalizedError {
     case serverDisabled
     /// A remote server answered 401/403.
     case authenticationRequired(host: String, status: Int)
+    /// A remote server refused the Authorization header set in the server's
+    /// own config. Browser sign-in can't replace a fixed token, so it isn't tried.
+    case headerTokenRejected(host: String)
     /// A remote server answered with another non-success status.
     case httpStatus(Int, String)
     /// A Streamable HTTP server no longer knows the session id we sent. The
@@ -28,6 +31,8 @@ enum MCPError: LocalizedError {
             // Reached when the 401 path could not complete a sign-in: the
             // server publishes no OAuth settings, or the user dismissed it.
             return "\(host) refused the connection (HTTP \(status)): it needs sign-in, and TypstEdit couldn't complete it. Use Sign in… on that server in Settings → MCP. If the service offers an API token instead, add it there as a header: Authorization: Bearer ${keychain:name}."
+        case .headerTokenRejected(let host):
+            return "\(host) refused the Authorization header set for this server: the token is probably expired or wrong. Get a new token from the service and update it in the Keychain. Sign in… isn't used while the server has its own Authorization header."
         case .httpStatus(let status, let body):
             return body.isEmpty
                 ? "The MCP server answered HTTP \(status)."
@@ -338,6 +343,17 @@ final class MCPClient {
                 transport = MCPLegacySSETransport(streamURL: url, headers: headers, urlSession: urlSession)
             }
             guard let oauth = transport as? MCPOAuthCapable else { return transport }
+            // The configured header always wins over OAuth tokens (see
+            // makeRequest), so on a 401 a browser sign-in could never help:
+            // its token would be overridden. Report the refused header instead.
+            if Self.hasAuthorizationHeader(headers) {
+                let host = url.host ?? url.absoluteString
+                oauth.attachOAuth(
+                    accessToken: { nil },
+                    signIn: { _ in throw MCPError.headerTokenRejected(host: host) }
+                )
+                return transport
+            }
             oauth.attachOAuth(
                 accessToken: { [weak self] in self?.oauthCredentials },
                 signIn: { [weak self, weak oauth] hint in
@@ -347,6 +363,12 @@ final class MCPClient {
             )
             return transport
         }
+    }
+
+    /// Header names are case-insensitive in HTTP, and configs spell this one
+    /// both ways.
+    static func hasAuthorizationHeader(_ headers: [String: String]) -> Bool {
+        headers.contains { $0.key.caseInsensitiveCompare("Authorization") == .orderedSame && !$0.value.isEmpty }
     }
 
     func stop() {
@@ -390,20 +412,131 @@ final class MCPClient {
             "arguments": arguments
         ])
 
+        let blocks = MCPToolContent.blocks(in: response)
         if let isError = response["isError"] as? Bool, isError {
-            throw MCPError.protocolError(Self.extractText(from: response) ?? "Tool reported an error.")
+            let text = blocks.map(MCPToolContent.describe).joined(separator: "\n")
+            throw MCPError.protocolError(text.isEmpty ? "Tool reported an error." : text)
         }
-        return Self.extractText(from: response) ?? "(no output)"
+        var lines: [String] = []
+        for block in blocks {
+            lines.append(await render(block))
+        }
+        let text = lines.joined(separator: "\n")
+        return text.isEmpty ? "(no output)" : text
     }
 
-    private static func extractText(from result: [String: Any]) -> String? {
-        guard let content = result["content"] as? [[String: Any]] else { return nil }
-        let text = content.compactMap { block -> String? in
-            guard let type = block["type"] as? String else { return nil }
-            if type == "text" { return block["text"] as? String }
-            return "[\(type) content omitted]"
-        }.joined(separator: "\n")
-        return text.isEmpty ? nil : text
+    /// Where files a tool returns are saved. A property so tests can point
+    /// it at a temporary folder.
+    var downloads = MCPDownloads()
+
+    /// One block as the model sees it. A file is saved first, so the line
+    /// names a path that exists; a failure says why, never "done".
+    private func render(_ block: MCPToolContent.Block) async -> String {
+        switch block {
+        case .embedded(let contents):
+            if let text = contents.text, text.count <= MCPToolContent.inlineTextLimit {
+                return text
+            }
+            return save(contents, name: nil)
+        case .link(let link):
+            return await fetch(link)
+        case .text, .other:
+            return MCPToolContent.describe(block)
+        }
+    }
+
+    private func save(_ contents: MCPToolContent.Contents, name: String?) -> String {
+        if contents.blobIsInvalid {
+            return MCPToolContent.invalidBlobLine(contents.uri)
+        }
+        let data = contents.blob ?? Data((contents.text ?? "").utf8)
+        let fileName = MCPDownloads.fileName(name: name, uri: contents.uri, mimeType: contents.mimeType)
+        do {
+            let url = try downloads.save(data, name: fileName)
+            return MCPToolContent.savedLine(url, bytes: data.count, from: contents.uri)
+        } catch {
+            return "[Could not save \(fileName): \(error.localizedDescription)]"
+        }
+    }
+
+    /// A `resource_link` is fetched the way MCP intends, `resources/read` on
+    /// this server. A plain web link the server cannot read that way is
+    /// downloaded directly.
+    private func fetch(_ link: MCPToolContent.Link) async -> String {
+        var readError: Error?
+        do {
+            let result = try await sendRequest(method: "resources/read", params: ["uri": link.uri])
+            let contents = MCPToolContent.contents(inReadResult: result)
+            if !contents.isEmpty {
+                let single = contents.count == 1
+                return contents.map { entry in
+                    // Text with no MIME type is the server talking ("expired,
+                    // ask again"), not the file: saving it would put an error
+                    // message on disk under the zip's name.
+                    if entry.blob == nil, !entry.blobIsInvalid, entry.mimeType == nil, let text = entry.text {
+                        return "[Reading \(link.uri) returned a message instead of a file: \(text)]"
+                    }
+                    return save(entry, name: single ? link.name : nil)
+                }.joined(separator: "\n")
+            }
+        } catch {
+            readError = error
+        }
+
+        if let url = URL(string: link.uri), let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" {
+            do {
+                return try await download(url, link: link)
+            } catch {
+                return "[Could not download \(link.uri): \(error.localizedDescription)]"
+            }
+        }
+        let reason = readError?.localizedDescription ?? "the server returned no contents"
+        return "[Could not read resource \(link.uri): \(reason)]"
+    }
+
+    /// Larger than this is refused: a tool result is not a way to fill the
+    /// disk.
+    static let maxDownloadBytes: Int64 = 1 << 30
+
+    private func download(_ url: URL, link: MCPToolContent.Link) async throws -> String {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 300
+        // This server's credentials go only to this server's own origin. A
+        // link to anywhere else is fetched anonymously.
+        if Self.isSameOrigin(url, MCPServerConfig.remoteURL(config.url)) {
+            for (name, value) in config.headers {
+                request.setValue(MCPEnvironmentResolver.resolve(value), forHTTPHeaderField: name)
+            }
+            if request.value(forHTTPHeaderField: "Authorization") == nil, let token = oauthCredentials {
+                request.setValue(token.authorizationHeader, forHTTPHeaderField: "Authorization")
+            }
+        }
+        let (temporary, response) = try await urlSession.download(for: request)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw MCPError.protocolError("HTTP \(http.statusCode)")
+        }
+        let bytes = (try? temporary.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard Int64(bytes) <= Self.maxDownloadBytes else {
+            throw MCPError.protocolError("the file is larger than 1 GB")
+        }
+        let name = MCPDownloads.fileName(
+            name: link.name ?? response.suggestedFilename,
+            uri: link.uri,
+            mimeType: link.mimeType ?? response.mimeType
+        )
+        let saved = try downloads.adopt(temporary, name: name)
+        return MCPToolContent.savedLine(saved, bytes: bytes, from: link.uri)
+    }
+
+    nonisolated static func isSameOrigin(_ a: URL, _ b: URL?) -> Bool {
+        guard let b else { return false }
+        func port(_ url: URL) -> Int? {
+            url.port ?? (url.scheme?.lowercased() == "https" ? 443 : url.scheme?.lowercased() == "http" ? 80 : nil)
+        }
+        return a.scheme?.lowercased() == b.scheme?.lowercased()
+            && a.host?.lowercased() == b.host?.lowercased()
+            && port(a) == port(b)
     }
 
     // MARK: - JSON-RPC

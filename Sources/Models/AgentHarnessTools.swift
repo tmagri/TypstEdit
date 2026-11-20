@@ -295,4 +295,102 @@ enum AgentHarnessTools {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return flat.count > max ? String(flat.prefix(max)) + "…" : flat
     }
+
+    // MARK: - Code mode (code__execute)
+
+    /// The JavaScript escape hatch (`code__execute`). It lives here rather
+    /// than in `LocalToolExecutor` because it is harness infrastructure: it
+    /// does not touch files itself, it calls the tools that do, through the
+    /// manager.
+    ///
+    /// The catalog in the description is what makes it usable. A model that
+    /// cannot see the exact call signatures guesses at them and wastes the
+    /// round, so every offered tool is listed with its arguments.
+    static func executeTool(catalog: [MCPTool], computeSeconds: Int) -> MCPTool { MCPTool(
+        serverName: "code",
+        name: "execute",
+        description: """
+        Run a short JavaScript program that calls your other tools, and return only what you need from the results.
+
+        Use it when one answer needs several reads or a filter over what they return. Example: read six files with Promise.all, then return only the headings that matched — one round instead of six, and the raw text never enters the conversation. For a single simple call, call that tool directly instead.
+
+        The available tools, as `tools.<namespace>.<name>(arguments)`:
+
+        \(catalogListing(catalog))
+
+        Rules:
+        - `await` and `return` work at the top level. Run independent calls together with `await Promise.all([...])`; a call that needs another's result must wait for it.
+        - A tool that fails rejects the promise, so wrap calls in `try`/`catch` when a failure is possible (a declined approval, a missing file). Every call is still shown to the user for approval exactly as it would be on its own.
+        - Return the smallest thing that answers the question — a count, a filtered array, a few lines. Returning a whole file defeats the purpose.
+        - No imports, network, filesystem, timers or fetch: only `tools`. JavaScript runs in a restricted interpreter with \(computeSeconds) seconds of compute; waiting on a tool does not count against that.
+        - The reply lists the tool calls the script made, so you do not need to report them yourself.
+        """,
+        inputSchema: [
+            "type": "object",
+            "properties": [
+                "code": [
+                    "type": "string",
+                    "description": "The JavaScript to run. Use `return` for the result you want back."
+                ]
+            ],
+            "required": ["code"]
+        ]
+    ) }
+
+    /// One line per tool, `namespace.name(arguments) → what it returns`, for
+    /// the `execute` description. Only the argument names fit; the direct
+    /// tool definition has the rest, and this is a reminder of what exists
+    /// rather than a manual.
+    ///
+    /// Capped at `catalogBudget` characters: a session with several MCP
+    /// servers can offer dozens of tools, and the listing duplicates names
+    /// the declared tool schemas already carry. Past the budget the catalog
+    /// degrades to one summary line per namespace — every tool is still
+    /// declared to the model with its full signature, and
+    /// `tools.<namespace>.<name>(...)` calls it all the same, so nothing is
+    /// unreachable, only unnamed here.
+    nonisolated static let catalogBudget = 2_400
+
+    static func catalogListing(_ tools: [MCPTool], budget: Int = catalogBudget) -> String {
+        guard !tools.isEmpty else { return "(none right now)" }
+        var byNamespace: [String: [String]] = [:]
+        for tool in tools {
+            let signature = "\(tool.name)(\(argumentSummary(tool.inputSchema)))"
+            byNamespace[tool.serverName, default: []].append(signature)
+        }
+        let namespaces = byNamespace.keys.sorted()
+        let full = namespaces.map { namespace in
+            "  tools.\(namespace): " + (byNamespace[namespace] ?? []).joined(separator: ", ")
+        }.joined(separator: "\n")
+        guard full.count > budget else { return full }
+        let summaries = namespaces.map { namespace -> String in
+            let count = byNamespace[namespace]?.count ?? 0
+            return "  tools.\(namespace): \(count) tool\(count == 1 ? "" : "s")"
+        }.joined(separator: "\n")
+        return summaries
+            + "\n  (catalog shortened to fit the prompt budget — every tool of these namespaces is also declared to you with its full signature, and `tools.<namespace>.<name>(...)` calls it the same way)"
+    }
+
+    /// `path, start_line?, end_line?` from a JSON Schema's `properties` and
+    /// `required`.
+    static func argumentSummary(_ schema: [String: Any]) -> String {
+        guard let properties = schema["properties"] as? [String: Any], !properties.isEmpty else {
+            return ""
+        }
+        let required = Set(schema["required"] as? [String] ?? [])
+        return properties.keys.sorted().map { key in
+            required.contains(key) ? key : key + "?"
+        }.joined(separator: ", ")
+    }
+
+    /// Tools a `code__execute` script may call: everything offered, minus
+    /// the one that makes no sense inside a script. `code__execute` itself
+    /// would nest interpreters, and `agent__ask_question` blocks the run
+    /// waiting on a card — a script waiting on a question, inside a call
+    /// that is already waiting, is a deadlock the user would have to
+    /// untangle by hand.
+    nonisolated static func codeModeCanCall(_ qualifiedName: String) -> Bool {
+        qualifiedName != "code__execute"
+            && qualifiedName != "\(namespace)__ask_question"
+    }
 }

@@ -7,6 +7,9 @@ import CryptoKit
 enum MCPOAuthError: LocalizedError {
     case discoveryFailed(String)
     case registrationFailed(String)
+    /// The authorization server publishes no registration endpoint, so
+    /// TypstEdit has no client id to sign in with.
+    case registrationUnsupported(host: String)
     case authorizationDenied(String)
     case tokenExchangeFailed(String)
     case refreshFailed(String)
@@ -23,6 +26,8 @@ enum MCPOAuthError: LocalizedError {
             return "This server needs sign-in, but didn't publish OAuth settings (\(detail)). If it offers an API token, add it in Settings → MCP as a header: Authorization: Bearer ${keychain:name}."
         case .registrationFailed(let detail):
             return "Couldn't register TypstEdit with the sign-in service (\(detail))."
+        case .registrationUnsupported(let host):
+            return "\(host) doesn't let apps register themselves (no dynamic client registration), so TypstEdit can't sign in there. If the service offers an API token, add it in Settings → MCP as a header: Authorization: Bearer ${keychain:name}."
         case .authorizationDenied(let detail):
             return "Sign-in was refused or cancelled\(detail.isEmpty ? "" : ": \(detail)")."
         case .tokenExchangeFailed(let detail):
@@ -410,12 +415,15 @@ final class MCPOAuthFlow {
 
     /// Registers TypstEdit with the authorization server (RFC 7591), unless
     /// the caller already has a client registered for this exact redirect URI.
-    /// Servers without a registration endpoint are given the empty client id
-    /// some expect for a public client, so sign-in still has a chance.
+    ///
+    /// A server without a registration endpoint is refused before the browser
+    /// opens. Sending `client_id=` (empty) instead only reached the server's
+    /// error page: Auth0 tenants with registration turned off showed
+    /// "Oops!, something went wrong", and the user had no way to tell why.
     func registerClient(endpoint: MCPOAuthEndpoint, redirectURI: String, existing: MCPOAuthClient?) async throws -> MCPOAuthClient {
         if let existing, !existing.clientID.isEmpty, existing.redirectURI == redirectURI { return existing }
         guard let registrationURL = endpoint.registrationURL else {
-            return MCPOAuthClient(clientID: "", clientSecret: nil, redirectURI: redirectURI)
+            throw MCPOAuthError.registrationUnsupported(host: endpoint.issuer.host ?? endpoint.issuer.absoluteString)
         }
         var request = URLRequest(url: registrationURL)
         request.httpMethod = "POST"

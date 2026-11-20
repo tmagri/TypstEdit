@@ -450,6 +450,9 @@ final class AIChatSessionStore: ObservableObject {
         managers[id] = nil
         sessions.removeAll { $0.id == id }
         deleteRecord(id: id)
+        // A deleted conversation leaves nothing of itself behind: its cached
+        // recall vectors are dead weight on the disk budget.
+        Task { await VectorStore.shared.delete(id) }
         guard activeSessionID == id else { return }
         if let latest = sessions.first {
             activate(latest.id)

@@ -58,6 +58,26 @@ struct AIChatView: View {
     /// True while an image is dragged over the composer, so the drop target is
     /// visible before the user lets go.
     @State private var composerDropTargeted = false
+    /// Set when the draft held a secret and Send was pressed: the review card
+    /// replaces the field until the user sends or goes back to edit. The
+    /// delivery the user asked for (send or queue) is replayed on approval.
+    @State private var pendingRedaction: SecretRedaction?
+    @State private var pendingRedactionQueued = false
+
+    /// The in-conversation Find bar (⌘F). `findQuery` is matched live
+    /// against every message; `findIndex` steps through the hits.
+    @State private var showFind = false
+    @State private var findQuery = ""
+    @State private var findIndex = 0
+    @State private var findMatches: [ConversationSearch.Match] = []
+    /// Bumped to pull keyboard focus onto the Find field when the bar opens.
+    @State private var findFocusToken = 0
+    /// The message a Find step should scroll to; consumed by an `onChange`
+    /// inside the transcript's `ScrollViewReader`.
+    @State private var findScrollTarget: UUID?
+    /// Set when "Undo file changes" is pressed: the turn's revert plan,
+    /// shown for confirmation before anything is written back.
+    @State private var pendingUndo: (messageID: UUID, plan: FileRevert.Plan)?
 
     /// Guards the one-pending follow-up scroll, so a burst of streaming
     /// updates schedules at most one extra `scrollTo` instead of one per token.
@@ -118,7 +138,7 @@ struct AIChatView: View {
             if !aiSettings.chatEnabled {
                 disabledState
             } else {
-                transcript
+                transcriptWithFind
                 if let goal = chat.goal {
                     Divider()
                     goalBanner(goal)
@@ -206,9 +226,61 @@ struct AIChatView: View {
         } message: {
             Text(actionError ?? "")
         }
+        .alert("Undo file changes?", isPresented: Binding(
+            get: { pendingUndo != nil },
+            set: { if !$0 { pendingUndo = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { pendingUndo = nil }
+            Button("Undo", role: .destructive) {
+                if let pending = pendingUndo {
+                    let outcome = chat.undoFileChanges(from: pending.messageID)
+                    if !outcome.failed.isEmpty {
+                        actionError = "Some files could not be restored: "
+                            + outcome.failed.map { "\($0.path) — \($0.reason)" }.joined(separator: "; ")
+                    }
+                }
+                pendingUndo = nil
+            }
+        } message: {
+            Text(undoAlertMessage)
+        }
         .sheet(isPresented: $showChatHistory) {
             ChatHistorySheet(store: store, activeSessionID: chat.id)
         }
+    }
+
+    /// The confirmation for "Undo file changes": which files go back, and a
+    /// warning on any that were touched since the AI wrote them.
+    private var undoAlertMessage: String {
+        guard let pending = pendingUndo else { return "" }
+        let entries = pending.plan.entries
+        var lines: [String] = []
+        if entries.count == 1 {
+            lines.append("This puts \(entries[0].relativePath) back the way it was before the AI changed it.")
+        } else {
+            lines.append("This puts \(entries.count) files back the way they were before the AI changed them, and removes files it created:")
+            for entry in entries.prefix(10) {
+                lines.append("• \(entry.relativePath)")
+            }
+            if entries.count > 10 {
+                lines.append("• … and \(entries.count - 10) more")
+            }
+        }
+        let changed = chat.filesChangedSinceRevert(pending.plan)
+        if !changed.isEmpty {
+            lines.append("")
+            lines.append("These have changed since the AI wrote them — undoing also discards that later work: "
+                + changed.map(\.relativePath).joined(separator: ", "))
+        }
+        lines.append("")
+        lines.append("The conversation stays; the AI is told its edits were undone.")
+        return lines.joined(separator: "\n")
+    }
+
+    private func askUndoFiles(messageID: UUID) {
+        let plan = chat.fileRevertPlan(from: messageID)
+        guard !plan.isEmpty else { return }
+        pendingUndo = (messageID, plan)
     }
 
     // MARK: - Header
@@ -526,6 +598,34 @@ struct AIChatView: View {
         max(0, chat.messages.count - transcriptWindow)
     }
 
+    private var transcriptWithFind: some View {
+        VStack(spacing: 0) {
+            if showFind {
+                findBar
+            }
+            transcript
+        }
+        // ⌘G steps through the Find hits — the menu does not claim it, so a
+        // hidden shortcut button is enough. ⌘F comes through the Find menu
+        // command instead, which routes here when this panel is showing.
+        .background(
+            Group {
+                Button("") { stepFind(forward: true) }
+                    .keyboardShortcut("g", modifiers: .command)
+                    .opacity(0)
+                Button("") { stepFind(forward: false) }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .opacity(0)
+            }
+        )
+        .onReceive(NotificationCenter.default.publisher(for: .menuCommand)) { notification in
+            guard notification.object as? String == "findInChat",
+                  let target = notification.userInfo?["target"] as? EditorController,
+                  target === controller else { return }
+            openFind()
+        }
+    }
+
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -563,6 +663,8 @@ struct AIChatView: View {
                         messages: visibleMessages,
                         expandedThinkingIDs: expandedThinkingIDs,
                         fullThinkingIDs: fullThinkingIDs,
+                        findQuery: showFind ? findQuery.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+                        currentFindHitID: showFind ? findMatches[safe: findIndex]?.messageID : nil,
                         row: { messageRow($0) }
                     )
                     if chat.isGenerating {
@@ -689,7 +791,136 @@ struct AIChatView: View {
             .onChange(of: chat.liveStatus) { _ in followBottom(proxy) }
             .onChange(of: chat.autoProceed) { _ in followBottom(proxy) }
             .onChange(of: chat.runningTool) { _ in followBottom(proxy) }
+            // A Find step lands on its message, centered, without the live
+            // end dragging the viewport away afterwards.
+            .onChange(of: findScrollTarget) { target in
+                guard let target else { return }
+                proxy.scrollTo(target, anchor: .center)
+                findScrollTarget = nil
+            }
+            // A fresh search updates the matches and resets to the first hit
+            // without stealing focus.
+            .onChange(of: findQuery) { query in
+                findIndex = 0
+                findMatches = ConversationSearch.matches(for: query, in: chat.messages)
+            }
+            .onChange(of: chat.messages.count) { _ in
+                if showFind {
+                    findMatches = ConversationSearch.matches(for: findQuery, in: chat.messages)
+                }
+            }
         }
+    }
+
+    // MARK: Find in conversation
+
+    /// Opens the Find bar. Called from the Find menu command when the AI
+    /// Chat panel is the visible sidebar content.
+    func openFind() {
+        showFind = true
+        findFocusToken += 1
+        findMatches = ConversationSearch.matches(for: findQuery, in: chat.messages)
+    }
+
+    private func closeFind() {
+        showFind = false
+        findQuery = ""
+        findIndex = 0
+        findMatches = []
+    }
+
+    /// Steps to the next/previous hit and scrolls the transcript there. With
+    /// no hits yet it does nothing, so ⌘G in a chat you have not searched
+    /// stays harmless.
+    private func stepFind(forward: Bool) {
+        guard showFind else {
+            openFind()
+            return
+        }
+        let matches = findMatches
+        guard !matches.isEmpty else { return }
+        let target: ConversationSearch.Match
+        if findIndex < 0 || findIndex >= matches.count {
+            target = forward ? matches.first! : matches.last!
+            findIndex = forward ? 0 : matches.count - 1
+        } else if let next = ConversationSearch.stepping(matches, from: findIndex, forward: forward) {
+            target = next
+            findIndex = matches.firstIndex(of: next) ?? findIndex
+        } else {
+            return
+        }
+        scrollToMatch(target)
+    }
+
+    /// Scrolls the message holding a hit into view. Rows are keyed by
+    /// message id, so the anchor is the message, not the character offset.
+    /// A hit older than the visible window first widens the window ("Show
+    /// earlier messages" does the same by hand), since a scroll target that
+    /// is not in the stack cannot be scrolled to.
+    private func scrollToMatch(_ match: ConversationSearch.Match) {
+        if let index = chat.messages.firstIndex(where: { $0.id == match.messageID }),
+           chat.messages.count - index > transcriptWindow {
+            transcriptWindow = chat.messages.count - index + Self.transcriptWindowStep
+        }
+        // Reading an earlier hit is a manual scroll: the live end must not
+        // yank the viewport back while the user steps through results.
+        transcriptAtBottom = false
+        findScrollTarget = match.messageID
+    }
+
+    private var findBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            FindField(
+                text: $findQuery,
+                focusToken: $findFocusToken,
+                onSubmit: { stepFind(forward: true) },
+                onCancel: { closeFind() }
+            )
+            .frame(minWidth: 120)
+
+            Text(findCountLabel)
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(findMatches.isEmpty ? .secondary : .primary)
+                .fixedSize()
+
+            Button { stepFind(forward: false) } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.borderless)
+            .disabled(findMatches.isEmpty)
+            .help("Previous match (⇧⌘G)")
+
+            Button { stepFind(forward: true) } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.borderless)
+            .disabled(findMatches.isEmpty)
+            .help("Next match (⌘G)")
+
+            Button { closeFind() } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Close find (esc)")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private var findCountLabel: String {
+        guard !findQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Find in conversation"
+        }
+        let count = findMatches.count
+        guard count > 0 else { return "No matches" }
+        let position = min(max(findIndex + 1, 1), count)
+        let suffix = count >= 1000 ? "1000+ matches" : "\(count) \(count == 1 ? "match" : "matches")"
+        return "\(position) of \(suffix)"
     }
 
     /// The pill that brings you back after reading older output.
@@ -879,6 +1110,48 @@ struct AIChatView: View {
 
     @ViewBuilder
     private func messageRow(_ message: ChatMessage) -> some View {
+        messageRowContent(message, undoableFileTurns: undoableFileTurns)
+            .overlay {
+                // The Find bar's hits are marked with a tint, the one it is
+                // currently on with an accent outline — the same "highlighted
+                // vs selected" language as a text editor's find.
+                if isCurrentFindHit(message) {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                        .padding(1)
+                }
+            }
+            .background {
+                if !isCurrentFindHit(message), !findQuery.isEmpty, containsFindHit(message) {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.yellow.opacity(0.14))
+                }
+            }
+            .opacity(message.isCompacted ? 0.45 : 1)
+    }
+
+    private var trimmedFindQuery: String {
+        findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isCurrentFindHit(_ message: ChatMessage) -> Bool {
+        guard let id = findMatches[safe: findIndex]?.messageID else { return false }
+        return id == message.id
+    }
+
+    private func containsFindHit(_ message: ChatMessage) -> Bool {
+        ConversationSearch.searchableText(of: message)
+            .localizedCaseInsensitiveContains(trimmedFindQuery)
+    }
+
+    /// Computed once per transcript render, not once per row: the map is
+    /// linear in messages, and a row-by-row lookup would make it quadratic.
+    private var undoableFileTurns: [UUID: Int] { chat.undoableFileTurns }
+
+    /// The chat whose turn this row belongs to changed `count` distinct
+    /// project files.
+    @ViewBuilder
+    private func messageRowContent(_ message: ChatMessage, undoableFileTurns: [UUID: Int]) -> some View {
         Group {
             switch message.role {
             case .user:
@@ -896,6 +1169,14 @@ struct AIChatView: View {
                                 .foregroundColor(.white)
                                 .cornerRadius(10)
                                 .textSelection(.enabled)
+                        }
+                        if let fileCount = undoableFileTurns[message.id] {
+                            Button { askUndoFiles(messageID: message.id) } label: {
+                                Label("Undo file changes (\(fileCount))", systemImage: "arrow.uturn.backward")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.link)
+                            .help("Put every project file this turn changed back the way it was, and remove files the AI created")
                         }
                     }
                 }
@@ -1016,6 +1297,15 @@ struct AIChatView: View {
                         Text("not run")
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                    }
+                    // Its file changes were taken back from the transcript
+                    // (see `FileRevert`), so nobody reads this row as "the
+                    // edit still stands".
+                    if let changes = message.fileChanges, !changes.isEmpty, changes.allSatisfy(\.isReverted) {
+                        Image(systemName: "arrow.uturn.backward.circle")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .help("This call's file changes were undone")
                     }
                 }
             }
@@ -1813,74 +2103,15 @@ struct AIChatView: View {
                 attachmentStrip
             }
 
-            HStack(alignment: .bottom, spacing: 8) {
-                attachButton
-
-                TextEditor(text: $chat.draft)
-                    .focused($inputFocused)
-                    .font(.callout)
-                    .frame(height: 50)
-                    .padding(4)
-                    .background(Color(NSColor.controlBackgroundColor))
-                    .cornerRadius(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
-                    // Stays enabled while the AI works: sending then steers
-                    // the running task instead of starting a new turn.
-                    .disabled(chat.pendingApproval != nil)
-                    .help(chat.isGenerating
-                          ? "The AI is working. Return steers the current task (it reads this at its next step); ⌘⇧Return queues it for after."
-                          : "Ask anything. Return sends. Drop or paste an image to attach it.")
-                    // Anything dropped here attaches to the draft; the whole
-                    // composer accepts images, not just a small corner.
-                    .onDrop(of: [.fileURL, .image], isTargeted: $composerDropTargeted) { providers in
-                        loadDroppedImages(providers)
-                    }
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.accentColor, lineWidth: composerDropTargeted ? 2 : 0)
-                    )
-
-                if chat.isGenerating {
-                    // A sibling of the (still enabled) TextEditor, so it stays
-                    // pressable while generation runs — including while an
-                    // approval is pending, since `isGenerating` covers that.
-                    // A non-empty draft gets both deliveries next to Stop:
-                    // steer joins the running turn, queue waits for it.
-                    if hasDraft {
-                        Button {
-                            send()
-                        } label: {
-                            Image(systemName: "arrow.up.circle").font(.system(size: 24))
-                        }
-                        .buttonStyle(.plain)
-                        .help(chat.draftImages.isEmpty
-                              ? "Steer — send this into the running task. The AI adjusts course at its next step."
-                              : "Queue — images need a turn of their own, so this waits for the current task to finish.")
-
-                        Button {
-                            enqueue()
-                        } label: {
-                            Image(systemName: "text.append").font(.system(size: 24))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Queue — let the current task finish, then run this as its own turn.")
-                    }
-                    Button {
-                        chat.stop()
-                    } label: {
-                        Image(systemName: "stop.circle.fill").font(.system(size: 24)).foregroundColor(.red)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop generating and abort the task that is running (Python, compile, Git, and so on)")
-                } else {
-                    Button {
-                        send()
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 24))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!hasDraft || chat.pendingApproval != nil)
+            if let redaction = pendingRedaction {
+                // The review card replaces the field entirely: while it is
+                // up, nothing can send, and the draft stays in place for
+                // "Edit" to return to.
+                SecretRedactionReviewCard(redaction: redaction) { approved in
+                    finishRedactionReview(sending: approved)
                 }
+            } else {
+                composerRow
             }
 
             if let notice = attachmentNotice {
@@ -1894,6 +2125,80 @@ struct AIChatView: View {
             }
         }
         .padding(10)
+    }
+
+    /// The field and its buttons, extracted from `inputBar` so the secret
+    /// redaction review card can stand in for it while it is up.
+    private var composerRow: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            attachButton
+
+            TextEditor(text: $chat.draft)
+                .focused($inputFocused)
+                .font(.callout)
+                .frame(height: 50)
+                .padding(4)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                // Stays enabled while the AI works: sending then steers
+                // the running task instead of starting a new turn.
+                .disabled(chat.pendingApproval != nil)
+                .help(chat.isGenerating
+                      ? "The AI is working. Return steers the current task (it reads this at its next step); ⌘⇧Return queues it for after."
+                      : "Ask anything. Return sends. Drop or paste an image to attach it.")
+                // Anything dropped here attaches to the draft; the whole
+                // composer accepts images, not just a small corner.
+                .onDrop(of: [.fileURL, .image], isTargeted: $composerDropTargeted) { providers in
+                    loadDroppedImages(providers)
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor, lineWidth: composerDropTargeted ? 2 : 0)
+                )
+
+            if chat.isGenerating {
+                // A sibling of the (still enabled) TextEditor, so it stays
+                // pressable while generation runs — including while an
+                // approval is pending, since `isGenerating` covers that.
+                // A non-empty draft gets both deliveries next to Stop:
+                // steer joins the running turn, queue waits for it.
+                if hasDraft {
+                    Button {
+                        send()
+                    } label: {
+                        Image(systemName: "arrow.up.circle").font(.system(size: 24))
+                    }
+                    .buttonStyle(.plain)
+                    .help(chat.draftImages.isEmpty
+                          ? "Steer — send this into the running task. The AI adjusts course at its next step."
+                          : "Queue — images need a turn of their own, so this waits for the current task to finish.")
+
+                    Button {
+                        enqueue()
+                    } label: {
+                        Image(systemName: "text.append").font(.system(size: 24))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Queue — let the current task finish, then run this as its own turn.")
+                }
+                Button {
+                    chat.stop()
+                } label: {
+                    Image(systemName: "stop.circle.fill").font(.system(size: 24)).foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Stop generating and abort the task that is running (Python, compile, Git, and so on)")
+            } else {
+                Button {
+                    send()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 24))
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasDraft || chat.pendingApproval != nil)
+            }
+        }
     }
 
     /// A photo picker button for the composer. Disabled while AI Chat is off
@@ -2421,6 +2726,7 @@ struct AIChatView: View {
 
     private func send() {
         let text = chat.draft
+        guard redactionGatePasses(for: text, queued: false) else { return }
         let images = chat.draftImages
         chat.draft = ""
         chat.draftImages = []
@@ -2436,6 +2742,7 @@ struct AIChatView: View {
     /// falls through to a normal send — the same rule opencode applies.
     private func enqueue() {
         let text = chat.draft
+        guard redactionGatePasses(for: text, queued: true) else { return }
         let images = chat.draftImages
         guard chat.isGenerating else { return send() }
         chat.draft = ""
@@ -2443,6 +2750,40 @@ struct AIChatView: View {
         attachmentNotice = nil
         scrollToLatestRequest += 1
         Task { await chat.sendMessage(text, images: images, as: .queue) }
+    }
+
+    /// A secret in the draft stops here (see `SecretRedaction`): the review
+    /// card replaces the field until the user sends or goes back to edit, so
+    /// Edit loses nothing — the draft stays in place underneath.
+    private func redactionGatePasses(for text: String, queued: Bool) -> Bool {
+        guard aiSettings.redactSecretsBeforeSending,
+              let redaction = SecretRedaction(scanning: text) else { return true }
+        pendingRedaction = redaction
+        pendingRedactionQueued = queued
+        return false
+    }
+
+    /// The review card's answer. `text` is what the user approved — the
+    /// redacted message, or the original when they chose to send it as is.
+    /// Nil goes back to the field with the draft untouched.
+    private func finishRedactionReview(sending text: String?) {
+        let queued = pendingRedactionQueued
+        pendingRedaction = nil
+        pendingRedactionQueued = false
+        guard let text else {
+            inputFocused = true
+            return
+        }
+        let images = chat.draftImages
+        chat.draft = ""
+        chat.draftImages = []
+        attachmentNotice = nil
+        scrollToLatestRequest += 1
+        if queued && chat.isGenerating {
+            Task { await chat.sendMessage(text, images: images, as: .queue) }
+        } else {
+            Task { await chat.sendMessage(text, images: images) }
+        }
     }
 
     // Shift+Enter submits the draft, like the send button; ⌘Shift+Enter
@@ -2505,12 +2846,20 @@ private struct TranscriptHistory<Row: View>: View, Equatable {
     let messages: [ChatMessage]
     let expandedThinkingIDs: Set<UUID>
     let fullThinkingIDs: Set<UUID>
+    /// The active Find query (trimmed, empty when the bar is closed), so a
+    /// row can tint itself when it holds a hit. Part of the equality: a new
+    /// query must re-render the rows even when no message changed.
+    let findQuery: String
+    /// The message the Find bar is currently stepped onto, outlined.
+    let currentFindHitID: UUID?
     let row: (ChatMessage) -> Row
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.messages == rhs.messages
             && lhs.expandedThinkingIDs == rhs.expandedThinkingIDs
             && lhs.fullThinkingIDs == rhs.fullThinkingIDs
+            && lhs.findQuery == rhs.findQuery
+            && lhs.currentFindHitID == rhs.currentFindHitID
     }
 
     var body: some View {
@@ -2894,3 +3243,221 @@ struct ChatAttachmentThumbnail: View {
     }
 }
 
+/// The pre-send review for a message that holds a secret (see
+/// `SecretRedaction`). It shows the final submission as a delta — each secret
+/// struck out with its placeholder beside it — and lets the user keep any one
+/// of them in the clear. The secret itself is only ever shown masked here.
+struct SecretRedactionReviewCard: View {
+    let redaction: SecretRedaction
+    /// The approved text, or nil to go back and edit.
+    let onFinish: (String?) -> Void
+
+    /// Findings the user chose to send as written. Empty by default: the
+    /// safe answer is the one a quick Send gives.
+    @State private var kept: Set<Int> = []
+
+    private var redactedCount: Int { redaction.findings.count - kept.count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "key.fill")
+                    .foregroundStyle(.orange)
+                Text("This message contains \(redaction.countLabel)")
+                    .font(.caption.bold())
+                Spacer()
+            }
+            Text("Review what will be sent. Struck-out text is replaced by the green placeholder.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ScrollView {
+                Text(deltaText)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+            }
+            .frame(maxHeight: 160)
+            .background(Color(NSColor.textBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(redaction.findings) { finding in
+                    Toggle(isOn: Binding(
+                        get: { !kept.contains(finding.id) },
+                        set: { redact in
+                            if redact { kept.remove(finding.id) } else { kept.insert(finding.id) }
+                        }
+                    )) {
+                        Text("Redact \(finding.kind.displayName) (\(finding.masked))")
+                            .font(.caption)
+                    }
+                    .toggleStyle(.checkbox)
+                }
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { buttons }
+                VStack(alignment: .trailing, spacing: 6) { buttons }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.orange.opacity(0.5), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private var buttons: some View {
+        Button("Edit") { onFinish(nil) }
+            .keyboardShortcut(.cancelAction)
+            .help("Go back to the message without sending it")
+        Button("Send as Written") { onFinish(redaction.original) }
+            .help("Send the message with every secret in it, unchanged")
+        Button(redactedCount == 0 ? "Send" : "Send Redacted") {
+            onFinish(redaction.text(keeping: kept))
+        }
+        .keyboardShortcut(.return, modifiers: .command)
+        .buttonStyle(.borderedProminent)
+        .help("Send the message as shown above")
+    }
+
+    /// The delta as one styled run, so it wraps like the message itself.
+    private var deltaText: AttributedString {
+        var result = AttributedString()
+        for segment in redaction.segments(keeping: kept) {
+            switch segment {
+            case .unchanged(let text):
+                result += AttributedString(text)
+            case .replaced(_, let masked, let placeholder):
+                var removed = AttributedString(masked)
+                removed.foregroundColor = .red
+                removed.strikethroughStyle = .single
+                var added = AttributedString(placeholder)
+                added.foregroundColor = .green
+                added.backgroundColor = Color.green.opacity(0.12)
+                result += removed + AttributedString(" ") + added
+            case .kept(let id, _):
+                let masked = redaction.findings.first { $0.id == id }?.masked ?? "…"
+                var shown = AttributedString("\(masked) (sent as written)")
+                shown.foregroundColor = .orange
+                result += shown
+            }
+        }
+        return result
+    }
+}
+
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+/// The Find bar's text field. An `NSTextField` rather than a SwiftUI
+/// `TextField` so Esc reliably closes the bar and Return steps to the next
+/// hit, and so focus can be pulled onto it when the bar opens (⌘F) — the
+/// same field the editor's find panel uses.
+struct FindField: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var focusToken: Int
+    var onSubmit: () -> Void
+    var onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.isBordered = true
+        field.bezelStyle = .roundedBezel
+        field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.placeholderString = "Find in conversation"
+        field.focusRingType = .default
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit)
+        // Be a real search field for assistive tech and VoiceOver.
+        field.setAccessibilityLabel("Find in conversation")
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        // Don't overwrite the field editor's contents while the user is actively typing in it.
+        if let editor = field.currentEditor() {
+            if editor.string != text {
+                let selectedRange = editor.selectedRange
+                editor.string = text
+                editor.selectedRange = selectedRange
+            }
+        } else if field.stringValue != text {
+            field.stringValue = text
+        }
+        if context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            // The field may not be in a window yet on the frame the bar is
+            // inserted, so try now and again on the next runloop turn.
+            focus(field)
+            DispatchQueue.main.async { [weak field] in
+                guard let field else { return }
+                focus(field)
+            }
+        }
+    }
+
+    /// Makes the field editable and focused, retrying on the next turn when
+    /// it is still being attached (the common case: the bar is inserted by
+    /// the same state change that asked for focus).
+    ///
+    /// `makeFirstResponder` alone leaves an `NSTextField` merely focused —
+    /// typing goes nowhere because its field editor was never started.
+    /// `selectText(_:)` is the API that both takes first responder and
+    /// begins editing (and selects what is there, ready to be replaced).
+    private func focus(_ field: NSTextField) {
+        guard let window = field.window else { return }
+        if window.firstResponder !== field.currentEditor() {
+            window.makeFirstResponder(field)
+        }
+        field.selectText(nil)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: FindField
+        var lastFocusToken: Int
+
+        init(_ parent: FindField) {
+            self.parent = parent
+            self.lastFocusToken = parent.focusToken
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        /// Return steps to the next hit (the caller's `onSubmit`).
+        @objc func submit() {
+            parent.onSubmit()
+        }
+
+        /// Esc closes the bar. `control(_:textView:doCommandBy:)` is the only
+        /// reliable way to see Esc in an NSTextField.
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            if selector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onCancel()
+                return true
+            }
+            return false
+        }
+    }
+}

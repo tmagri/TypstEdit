@@ -11,6 +11,8 @@ struct MCPServersSettingsView: View {
     @State private var editingServer: ScopedMCPServer?
     @State private var isCreatingNew = false
     @State private var newServerScope: ConfigScope = .global
+    @State private var isPastingCommand = false
+    @State private var pasteCommandScope: ConfigScope = .global
     @State private var testingServerID: String?
     @State private var signingInServerID: String?
     @State private var signInError: String?
@@ -49,6 +51,9 @@ struct MCPServersSettingsView: View {
         .sheet(isPresented: $isCreatingNew) {
             MCPServerEditorSheet(mode: .create(scope: newServerScope), mcpManager: mcpManager)
         }
+        .sheet(isPresented: $isPastingCommand) {
+            MCPPasteCommandSheet(initialScope: pasteCommandScope, mcpManager: mcpManager)
+        }
     }
 
     @ViewBuilder
@@ -68,11 +73,19 @@ struct MCPServersSettingsView: View {
                     }
                 }
 
-                Button {
-                    newServerScope = scope
-                    isCreatingNew = true
-                } label: {
-                    Label("Add Server…", systemImage: "plus.circle")
+                HStack(spacing: 12) {
+                    Button {
+                        newServerScope = scope
+                        isCreatingNew = true
+                    } label: {
+                        Label("Add Server…", systemImage: "plus.circle")
+                    }
+                    Button {
+                        pasteCommandScope = scope
+                        isPastingCommand = true
+                    } label: {
+                        Label("Paste Command…", systemImage: "doc.on.clipboard")
+                    }
                 }
                 .padding(.top, 4)
             }
@@ -392,6 +405,147 @@ private struct MCPServerEditorSheet: View {
         }
 
         mcpManager.saveServer(config, scope: scope)
+        dismiss()
+    }
+}
+
+/// Add one or more MCP servers by pasting the command a server's README tells
+/// you to run — `codex mcp add …`, `claude mcp add …`, `mcp add-json …` — or
+/// an `mcpServers` JSON block. Nothing is executed: the line is parsed into a
+/// config by `MCPAddCommand`, and the user sees exactly what will be saved
+/// before it is.
+private struct MCPPasteCommandSheet: View {
+    let initialScope: ConfigScope
+    @ObservedObject var mcpManager: MCPManager
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var text = ""
+    @State private var parsed: [MCPServerConfig] = []
+    @State private var errorMessage: String?
+    @State private var scope: ConfigScope = .global
+
+    private var canUseProjectScope: Bool { mcpManager.projectRoot != nil }
+
+    /// Names already configured in the chosen scope, so the preview can warn
+    /// before a paste overwrites one.
+    private var existingNames: Set<String> {
+        let servers = scope == .global ? mcpManager.globalServers : mcpManager.projectServers
+        return Set(servers.map(\.name))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add MCP Server from Command")
+                .font(.headline)
+
+            Picker("Scope", selection: $scope) {
+                Text("Global").tag(ConfigScope.global)
+                Text("Project").tag(ConfigScope.project).disabled(!canUseProjectScope)
+            }
+            .pickerStyle(.segmented)
+
+            Text("Paste the setup line from the server's documentation. TypstEdit reads it — it never runs it — and shows the server it describes. Examples:\n\n`codex mcp add affinity -- uvx mcp-proxy --transport sse http://localhost:6767/sse`\n`claude mcp add --transport http notion https://mcp.notion.com/mcp`\n`claude mcp add --env KEY=value airtable -- npx -y airtable-mcp-server`")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextEditor(text: $text)
+                .font(.system(.caption, design: .monospaced))
+                .frame(height: 90)
+                .padding(4)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                .onChange(of: text) { _ in parse() }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !parsed.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Will be added")
+                        .font(.caption.weight(.semibold))
+                    ForEach(parsed, id: \.name) { server in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(server.name)
+                                    .font(.caption.weight(.medium))
+                                if existingNames.contains(server.name) {
+                                    Text("replaces the existing entry")
+                                        .font(.caption2)
+                                        .foregroundColor(.orange)
+                                }
+                            }
+                            Text(summary(server))
+                                .font(.caption2.monospaced())
+                                .foregroundColor(.secondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !server.env.isEmpty {
+                                // Keys only: the values may carry tokens.
+                                Text("env: " + server.env.keys.sorted().joined(separator: ", "))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            if !server.headers.isEmpty {
+                                // Names only: a header value can be a token.
+                                Text("headers: " + server.headers.keys.sorted().joined(separator: ", "))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                Spacer()
+                Button(parsed.count == 1 ? "Add" : "Add \(parsed.count) Servers") { save() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(parsed.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 560)
+        .onAppear {
+            scope = initialScope
+            parse()
+        }
+    }
+
+    private func summary(_ server: MCPServerConfig) -> String {
+        switch server.transport {
+        case .stdio:
+            return ([server.command ?? ""] + server.args).joined(separator: " ")
+        case .sse, .http:
+            return "\(server.transport.label): \(server.url ?? "")"
+        }
+    }
+
+    private func parse() {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            parsed = []
+            errorMessage = nil
+            return
+        }
+        do {
+            parsed = try MCPAddCommand.parse(text)
+            errorMessage = nil
+        } catch {
+            parsed = []
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func save() {
+        for server in parsed {
+            mcpManager.saveServer(server, scope: scope)
+        }
         dismiss()
     }
 }

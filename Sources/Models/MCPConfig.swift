@@ -22,6 +22,20 @@ enum MCPTransportType: String, Codable, CaseIterable, Identifiable {
     /// Remote servers are reached over the network and can carry an OAuth
     /// token; a local command cannot.
     var isRemote: Bool { self != .stdio }
+
+    /// Reads the transport names other tools write, so a pasted config keeps
+    /// its meaning: Claude Desktop and VS Code write `"type": "http"` or
+    /// `"sse"`, Cursor `"streamable-http"`, opencode `"local"` / `"remote"`.
+    /// Unknown values return nil so the caller can fall back on the shape of
+    /// the entry (a `url` means remote, a `command` local).
+    static func lenient(_ raw: String) -> MCPTransportType? {
+        switch raw.lowercased().replacingOccurrences(of: "_", with: "-") {
+        case "stdio", "local", "command": return .stdio
+        case "http", "streamable-http", "streamablehttp", "remote": return .http
+        case "sse": return .sse
+        default: return nil
+        }
+    }
 }
 
 /// One configured MCP server, matching the `mcpServers` map convention shared
@@ -57,33 +71,12 @@ struct MCPServerConfig: Codable, Identifiable, Equatable {
 
     /// The remote endpoint, when `url` is a usable absolute http(s) URL.
     static func remoteURL(_ raw: String?) -> URL? {
-        guard let trimmed = raw?.trimmingCharacters(in: .whitespaces), !trimmed.isEmpty,
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty,
               let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
-              url.host != nil else { return nil }
+              url.host?.isEmpty == false else { return nil }
         return url
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case name, transport, command, args, env, url, headers, enabled, disabledTools
-    }
-
-    /// Decoded by hand so an older `mcp.json` (no `headers`, no `transport`)
-    /// still reads, and an unknown transport name falls back to stdio rather
-    /// than making the whole file undecodable.
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        name = try container.decode(String.self, forKey: .name)
-        let rawTransport = try container.decodeIfPresent(String.self, forKey: .transport) ?? "stdio"
-        transport = MCPTransportType(rawValue: rawTransport) ?? .stdio
-        command = try container.decodeIfPresent(String.self, forKey: .command)
-        args = try container.decodeIfPresent([String].self, forKey: .args) ?? []
-        env = try container.decodeIfPresent([String: String].self, forKey: .env) ?? [:]
-        url = try container.decodeIfPresent(String.self, forKey: .url)
-        headers = try container.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
-        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        disabledTools = try container.decodeIfPresent([String].self, forKey: .disabledTools) ?? []
     }
 
     init(
@@ -109,9 +102,101 @@ struct MCPServerConfig: Codable, Identifiable, Equatable {
     }
 }
 
+extension MCPServerConfig {
+    /// Every key the decoder understands, including the spellings other
+    /// tools use. Kept apart from the synthesized `CodingKeys`, so encoding
+    /// still writes TypstEdit's own field names and nothing else.
+    private enum LenientKeys: String, CodingKey {
+        case name, transport, type, command, args, env, environment, url, headers
+        case enabled, disabled, disabledTools
+    }
+
+    /// Decodes TypstEdit's own entries and the shapes other MCP clients write.
+    ///
+    /// The hand decoder required `name` inside every entry, so a Claude
+    /// Desktop entry (`{"command": "npx", "args": […]}`) failed to decode —
+    /// and because `MCPConfigStore.load` swallows decode errors, the *whole
+    /// file* read as empty. `type: "http"` (Claude Desktop/VS Code),
+    /// `streamable-http` (Cursor) and opencode's command-as-array also
+    /// mis-decoded as stdio. Missing fields now take their defaults instead.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: LenientKeys.self)
+        // The map key is the canonical name (see `MCPConfigFile`); an entry
+        // without its own `name` gets it there.
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+
+        // opencode writes the command as one array: executable + arguments.
+        var command: String?
+        var args = try container.decodeIfPresent([String].self, forKey: .args) ?? []
+        if let single = try? container.decodeIfPresent(String.self, forKey: .command) {
+            command = single
+        } else if let parts = try? container.decodeIfPresent([String].self, forKey: .command), let first = parts.first {
+            command = first
+            args = Array(parts.dropFirst()) + args
+        }
+        self.command = command
+        self.args = args
+
+        env = try container.decodeIfPresent([String: String].self, forKey: .env)
+            ?? container.decodeIfPresent([String: String].self, forKey: .environment)
+            ?? [:]
+        url = try container.decodeIfPresent(String.self, forKey: .url)
+        headers = try container.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+
+        let rawTransport = try container.decodeIfPresent(String.self, forKey: .transport)
+            ?? container.decodeIfPresent(String.self, forKey: .type)
+        if let rawTransport, let known = MCPTransportType.lenient(rawTransport) {
+            transport = known
+        } else {
+            // No usable transport name: a URL without a command is remote.
+            transport = (command == nil && url != nil) ? .http : .stdio
+        }
+
+        if let enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) {
+            self.enabled = enabled
+        } else if let disabled = try container.decodeIfPresent(Bool.self, forKey: .disabled) {
+            self.enabled = !disabled
+        } else {
+            self.enabled = true
+        }
+        disabledTools = try container.decodeIfPresent([String].self, forKey: .disabledTools) ?? []
+    }
+}
+
 /// Root shape of `mcp.json`, both globally and per-project.
 struct MCPConfigFile: Codable {
     var mcpServers: [String: MCPServerConfig] = [:]
+
+    init(mcpServers: [String: MCPServerConfig] = [:]) {
+        self.mcpServers = mcpServers
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mcpServers
+    }
+
+    /// The map key is the server's name — that is how every other client
+    /// identifies an entry, and the entries they write carry no `name` field.
+    /// One malformed entry is skipped rather than failing the whole file.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decodeIfPresent([String: FailableServer].self, forKey: .mcpServers) ?? [:]
+        var servers: [String: MCPServerConfig] = [:]
+        for (key, entry) in raw {
+            guard var server = entry.value else { continue }
+            server.name = key
+            servers[key] = server
+        }
+        mcpServers = servers
+    }
+
+    /// Decodes one entry without letting its failure escape.
+    private struct FailableServer: Decodable {
+        let value: MCPServerConfig?
+        init(from decoder: Decoder) throws {
+            value = try? MCPServerConfig(from: decoder)
+        }
+    }
 }
 
 /// Identifies a server across its scope, since a global and a project config

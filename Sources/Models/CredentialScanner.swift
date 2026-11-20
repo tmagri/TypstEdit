@@ -76,7 +76,9 @@ enum CredentialScanner {
     /// One provider-shaped pattern. Separate from `Kind` so a kind can have
     /// more than one spelling (GitHub alone has two). The patterns are
     /// compile-time constants with tests that compile every one, so a failure
-    /// here is a programmer error, not a runtime condition.
+    /// here is a programmer error, not a runtime condition. A `secret` group,
+    /// where there is one, is the part `spans(in:)` replaces; the rest of the
+    /// match is context that stays readable.
     private struct Pattern {
         let kind: Kind
         let regex: NSRegularExpression
@@ -110,15 +112,15 @@ enum CredentialScanner {
         Pattern(.privateKeyBlock, #"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"#),
 
         // A URL that carries a password: scheme://user:pass@host
-        Pattern(.urlWithPassword, #"\b[a-z][a-z0-9+.-]*://[^\s/:@'\"]+:[^\s/@'\"]+@"#),
+        Pattern(.urlWithPassword, #"\b[a-z][a-z0-9+.-]*://[^\s/:@'\"]+:(?<secret>[^\s/@'\"]+)@"#),
 
         // A bearer token, which has no provider prefix to recognise.
-        Pattern(.bearerToken, #"(?i)\bauthorization\s*:\s*bearer\s+[A-Za-z0-9._~+/=-]{16,}"#),
+        Pattern(.bearerToken, #"(?i)\bauthorization\s*:\s*bearer\s+(?<secret>[A-Za-z0-9._~+/=-]{16,})"#),
 
         // A secret named in an assignment. The weakest shape, so it needs a
         // value that looks like a key rather than a word.
         Pattern(.assignedSecret,
-                #"(?i)\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?key)\b\s*[:=]\s*['"]?[A-Za-z0-9_\-]{16,}"#),
+                #"(?i)\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?key)\b\s*[:=]\s*['"]?(?<secret>[A-Za-z0-9_\-]{16,})"#),
     ]
 
     /// Names that mention a secret without being one.
@@ -230,5 +232,96 @@ enum CredentialScanner {
             return String(trimmed.prefix(3)) + "…"
         }
         return String(trimmed.prefix(8)) + "…"
+    }
+
+    // MARK: - Locating (for redaction)
+
+    /// Where one secret sits in a text: the characters to replace, not the
+    /// whole match. `api_key = "abc…"` keeps `api_key = "` and replaces only
+    /// the value, so the redacted message still reads naturally.
+    struct Span: Sendable, Equatable {
+        let range: Range<String.Index>
+        let kind: Kind
+        let masked: String
+    }
+
+    /// Which kind names a span when two patterns cover the same characters.
+    /// The specific beats the generic: `sk-ant-…` also fits the OpenAI shape,
+    /// and `token = ghp_…` also fits the assignment shape.
+    private static let spanPriority: [Kind] = [
+        .privateKeyBlock, .anthropic, .stripeLive, .openAI, .awsAccessKey,
+        .github, .slack, .google, .huggingFace, .jwt, .bearerToken,
+        .urlWithPassword, .assignedSecret,
+    ]
+
+    private static let privateKeyEnd = try! NSRegularExpression(
+        pattern: #"-----END (?:[A-Z]+ )*PRIVATE KEY-----"#
+    )
+    private static let privateKeyBody = try! NSRegularExpression(
+        pattern: #"(?:\s*[A-Za-z0-9+/=]{16,})*"#
+    )
+
+    /// Every secret in `text` as a replaceable range, in order and never
+    /// overlapping. Unlike `matches(in:)` this scans the whole text: a
+    /// redaction that stops at a size limit would send the rest in the clear.
+    /// A name-only mention (`aws_secret_access_key`) is not a value, so it
+    /// is not located.
+    static func spans(in text: String) -> [Span] {
+        guard !text.isEmpty else { return [] }
+        let whole = NSRange(text.startIndex..<text.endIndex, in: text)
+
+        var candidates: [(range: NSRange, kind: Kind)] = []
+        for pattern in patterns {
+            for hit in pattern.regex.matches(in: text, options: [], range: whole) {
+                guard let matchRange = Range(hit.range, in: text),
+                      !isSuppressed(String(text[matchRange])) else { continue }
+                var secret = hit.range(withName: "secret")
+                if secret.location == NSNotFound { secret = hit.range }
+                if pattern.kind == .privateKeyBlock {
+                    secret = privateKeyExtent(from: hit.range, in: text)
+                }
+                guard secret.length > 0 else { continue }
+                candidates.append((secret, pattern.kind))
+            }
+        }
+
+        candidates.sort { $0.range.location < $1.range.location }
+        var merged: [(range: NSRange, kind: Kind)] = []
+        for candidate in candidates {
+            if let last = merged.last,
+               candidate.range.location < NSMaxRange(last.range) {
+                let end = max(NSMaxRange(last.range), NSMaxRange(candidate.range))
+                let kind = rank(candidate.kind) < rank(last.kind) ? candidate.kind : last.kind
+                merged[merged.count - 1] = (NSRange(location: last.range.location,
+                                                    length: end - last.range.location), kind)
+            } else {
+                merged.append(candidate)
+            }
+        }
+
+        return merged.compactMap { item in
+            guard let range = Range(item.range, in: text) else { return nil }
+            return Span(range: range, kind: item.kind, masked: mask(String(text[range])))
+        }
+    }
+
+    private static func rank(_ kind: Kind) -> Int {
+        spanPriority.firstIndex(of: kind) ?? spanPriority.count
+    }
+
+    /// A private key is the header *and* its body. Up to the END line when
+    /// there is one; otherwise over the base64 runs that follow, so a key
+    /// pasted without its footer is still not sent — while prose after it,
+    /// whose words are shorter than a base64 line, is left alone.
+    private static func privateKeyExtent(from header: NSRange, in text: String) -> NSRange {
+        let total = (text as NSString).length
+        let after = NSRange(location: NSMaxRange(header), length: total - NSMaxRange(header))
+        if let end = privateKeyEnd.firstMatch(in: text, options: [], range: after) {
+            return NSRange(location: header.location, length: NSMaxRange(end.range) - header.location)
+        }
+        if let body = privateKeyBody.firstMatch(in: text, options: [.anchored], range: after) {
+            return NSRange(location: header.location, length: NSMaxRange(body.range) - header.location)
+        }
+        return header
     }
 }

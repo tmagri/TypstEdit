@@ -265,7 +265,16 @@ struct AppMenuCommands: Commands {
             .keyboardShortcut("]", modifiers: [.command, .shift])
 
             Button("Search and Replace") {
-                if let terminal = PythonTerminal.focused {
+                if editorController.isSidebarVisible && editorController.sidebarContent == .aiChat {
+                    // The AI Chat panel owns ⌘F while it is showing: it opens
+                    // the conversation's own Find bar. The target scopes the
+                    // command to this window's chat (the same pattern as
+                    // .requestSave), so background windows don't react.
+                    NotificationCenter.default.post(
+                        name: .menuCommand, object: "findInChat",
+                        userInfo: ["target": editorController]
+                    )
+                } else if let terminal = PythonTerminal.focused {
                     terminal.showFind()
                 } else {
                     editorController.showFindPanel()

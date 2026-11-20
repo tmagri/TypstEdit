@@ -258,6 +258,33 @@ final class LocalToolExecutor {
     /// import's background work, so it must hop to the main actor itself.
     var onProgress: (@Sendable (String) -> Void)?
 
+    /// Project-file mutations performed since the last drain, oldest first.
+    /// Appended by the write-capable tools (`write_file`, `edit_file`,
+    /// `move_lines`, `apply_patch`); the chat manager drains the buffer
+    /// after each call and snapshots the pre-images so the turn's changes
+    /// can be undone from the transcript.
+    private(set) var recordedFileChanges: [ProjectFileChange] = []
+
+    /// Hands the recorded changes to the caller and empties the buffer.
+    func drainRecordedFileChanges() -> [ProjectFileChange] {
+        let changes = recordedFileChanges
+        recordedFileChanges.removeAll()
+        return changes
+    }
+
+    /// Records one completed file mutation. `before` is the file's bytes
+    /// before the write (nil: the tool created it); `deleted` marks a
+    /// removal (`after` is then nil). Reads the file back after the write
+    /// so the record hashes what is actually on disk.
+    private func reportFileChange(before: Data?, url: URL, path: String, deleted: Bool = false) {
+        recordedFileChanges.append(ProjectFileChange(
+            relativePath: path,
+            absolutePath: url.standardizedFileURL.path,
+            before: before,
+            after: deleted ? nil : (try? Data(contentsOf: url))
+        ))
+    }
+
     /// Called by the chat manager at the start of each user turn.
     func beginRequest() {
         readFiles.removeAll()
@@ -2089,11 +2116,13 @@ final class LocalToolExecutor {
         let exists = FileManager.default.fileExists(atPath: url.path)
 
         let oldContent: String
+        var beforeData: Data?
         if exists {
             try requireFreshRead(of: url, path: path, tool: "write_file")
             let data = try Data(contentsOf: url)
             guard data.count <= maxReadableBytes else { throw LocalToolError.fileTooLarge(path) }
             oldContent = TextFileEncoding.decode(data).text
+            beforeData = data
         } else {
             oldContent = ""
         }
@@ -2107,6 +2136,7 @@ final class LocalToolExecutor {
 
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
+        reportFileChange(before: beforeData, url: url, path: path)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
         Self.notifyFileChangedOnDisk(url)
         return "Wrote \(content.utf8.count) bytes to '\(path)'."
@@ -2257,6 +2287,7 @@ final class LocalToolExecutor {
         let finalText = matchedLoosely ? updated : (usesCRLF ? updated.replacingOccurrences(of: "\n", with: "\r\n") : updated)
 
         try Self.write(text: finalText, to: url, originalData: data, encoding: decoded.encoding)
+        reportFileChange(before: data, url: url, path: path)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
         Self.notifyFileChangedOnDisk(url)
 
@@ -2307,6 +2338,7 @@ final class LocalToolExecutor {
 
         let finalText = usesCRLF ? moved.text.replacingOccurrences(of: "\n", with: "\r\n") : moved.text
         try Self.write(text: finalText, to: url, originalData: data, encoding: decoded.encoding)
+        reportFileChange(before: data, url: url, path: path)
         readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
         Self.notifyFileChangedOnDisk(url)
 
@@ -3105,6 +3137,7 @@ final class LocalToolExecutor {
             let (url, change, originalData, encoding) = writes[index]
             switch operation {
             case .delete:
+                reportFileChange(before: originalData, url: url, path: operation.path, deleted: true)
                 try fm.removeItem(at: url)
             case .update(_, let moveTo, _):
                 if let originalData {
@@ -3112,10 +3145,15 @@ final class LocalToolExecutor {
                 } else {
                     try change.newContent.write(to: url, atomically: true, encoding: .utf8)
                 }
+                reportFileChange(before: originalData, url: url, path: operation.path)
                 if moveTo != nil {
                     let source = try resolvePath(operation.path)
                     if source.standardizedFileURL.path != url.standardizedFileURL.path {
+                        // The move deletes the source after the target is
+                        // written; undo needs the source's own pre-image too.
+                        let sourceBefore = try? Data(contentsOf: source)
                         try fm.removeItem(at: source)
+                        reportFileChange(before: sourceBefore, url: source, path: operation.path, deleted: true)
                     }
                 }
                 readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
@@ -3123,6 +3161,7 @@ final class LocalToolExecutor {
             case .add:
                 try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try change.newContent.write(to: url, atomically: true, encoding: .utf8)
+                reportFileChange(before: nil, url: url, path: operation.path)
                 readFiles[url.standardizedFileURL.path] = Self.modificationDate(of: url)
                 Self.notifyFileChangedOnDisk(url)
             }

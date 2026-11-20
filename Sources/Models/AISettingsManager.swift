@@ -767,6 +767,27 @@ class AISettingsManager: ObservableObject {
     @AppStorage("aiChatTokenLimitRetry") var chatTokenLimitRetryEnabled: Bool = true {
         willSet { objectWillChange.send() }
     }
+    /// When a draft holds a credential-shaped secret (an API key, a private
+    /// key, a URL with an embedded password), sending stops and shows a
+    /// redacted review card first; each finding can be kept in the clear one
+    /// by one. On by default: the cost is one card when a secret is about to
+    /// leave the Mac, and nothing otherwise.
+    @AppStorage("aiChatRedactSecretsBeforeSending") var redactSecretsBeforeSending: Bool = true {
+        willSet { objectWillChange.send() }
+    }
+    /// The `code__execute` tool: a restricted JavaScript interpreter the
+    /// model can compose its other tools through. Off by default — the
+    /// direct tools cover the common cases, and this is additive when on.
+    @AppStorage("aiChatCodeModeEnabled") var codeModeEnabled: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+    /// JavaScript compute seconds one `code__execute` script may use. Not
+    /// wall clock: waiting on a tool (or an approval card) does not count.
+    @AppStorage("aiChatCodeModeComputeSeconds") var codeModeComputeSeconds: Int = 20 {
+        willSet { objectWillChange.send() }
+    }
+
+    var effectiveCodeModeComputeSeconds: Int { min(max(codeModeComputeSeconds, 1), 120) }
 
     static let automaticChatMaxTokens = 16_384
     /// Upper bound for the cap and its retries.
@@ -832,6 +853,14 @@ class AISettingsManager: ObservableObject {
     @AppStorage("generationSource") private var generationSourceString: String = ModelSource.openAI.rawValue
     @AppStorage("completionSource") private var completionSourceString: String = ModelSource.local.rawValue
     @AppStorage("embeddingSource") private var embeddingSourceString: String = ModelSource.local.rawValue
+
+    /// Chat recall vectors older than this many days are compressed to int8
+    /// (about a quarter of the size), in memory and on disk — cosine ranking
+    /// tolerates it, and old passages are the rarely-searched ones. 0 keeps
+    /// every vector at full precision.
+    @AppStorage("embeddingPreserveDays") var embeddingPreserveDays: Int = 7 {
+        willSet { objectWillChange.send() }
+    }
 
     /// Legacy key for backward compatibility — migrated into generationSource on first access.
     @AppStorage("aiProvider") private var legacyProviderString: String = ""
