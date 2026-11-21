@@ -372,6 +372,96 @@ final class MCPOAuthFlowTests: XCTestCase {
         XCTAssertNil(MCPOAuthDiscovery.resourceMetadataURL(fromWWWAuthenticate: "Bearer realm=\"x\""))
         XCTAssertNil(MCPOAuthDiscovery.resourceMetadataURL(fromWWWAuthenticate: ""))
     }
+
+    func testLocalHostCoversLoopbackAndPrivateRangesOnly() {
+        for host in ["localhost", "127.0.0.1", "::1", "[::1]", "10.1.2.3", "192.168.0.10", "172.16.5.4", "172.31.255.1", "169.254.1.1", "printer.local"] {
+            XCTAssertTrue(MCPOAuthDiscovery.isLocalHost(host), "\(host) should be local")
+        }
+        for host in ["example.com", "prddpkmitvqt001.vistaprint.net", "8.8.8.8", "172.32.0.1", "172.15.0.1", "192.169.1.1", ""] {
+            XCTAssertFalse(MCPOAuthDiscovery.isLocalHost(host), "\(host) should not be local")
+        }
+        XCTAssertFalse(MCPOAuthDiscovery.isLocalHost(nil))
+    }
+
+    /// An internal server reached over plain http (no certificate) signs in on its own
+    /// host; a plain-http sign-in page on a different host is still refused.
+    func testHttpSignInIsAllowedOnlyOnTheMCPServersOwnOrigin() {
+        let resource = URL(string: "http://prddpkmitvqt001.vistaprint.net/mcp")!
+        XCTAssertTrue(MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(
+            URL(string: "http://prddpkmitvqt001.vistaprint.net/McpOAuth/Authorize")!, resource: resource))
+        XCTAssertTrue(MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(
+            URL(string: "http://PRDDPKMITVQT001.vistaprint.net:80/McpOAuth/Authorize")!, resource: resource),
+            "host case and an explicit default port are the same origin")
+        XCTAssertTrue(MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(
+            URL(string: "https://cimpress.auth0.com/authorize")!, resource: resource), "https is always fine")
+
+        XCTAssertFalse(MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(
+            URL(string: "http://evil.example.com/authorize")!, resource: resource), "another host over http")
+        XCTAssertFalse(MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(
+            URL(string: "http://prddpkmitvqt001.vistaprint.net:8080/authorize")!, resource: resource), "another port")
+        XCTAssertFalse(MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(
+            URL(string: "http://auth.example.com/authorize")!,
+            resource: URL(string: "https://mcp.example.com/mcp")!), "https server, http sign-in elsewhere")
+    }
+
+    // MARK: HTTP sign-ins end to end
+
+    func testSignInCompletesOnAnHttpServerThatIsItsOwnAuthorizationServer() async throws {
+        let base = "http://vqt.corp.example"
+        let (_, flow) = makeServer(answer: { authorizationURL in
+            let items = URLComponents(url: authorizationURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func value(_ name: String) -> String { items.first { $0.name == name }?.value ?? "" }
+            return URL(string: "\(value("redirect_uri"))?code=the-code&state=\(value("state"))")
+        }, mutate: { server in
+            server.issuer = URL(string: base)!
+            server.authorizationURL = URL(string: "\(base)/McpOAuth/Authorize")!
+            server.tokenURL = URL(string: "\(base)/token")!
+            server.registrationURL = URL(string: "\(base)/register")!
+        })
+        let resource = URL(string: "\(base)/mcp")!
+        let endpoint = try await flow.discover(resource: resource)
+        let credentials = try await flow.signIn(serverName: "vqt", resource: resource, endpoint: endpoint, existingClient: nil)
+        XCTAssertEqual(credentials.accessToken, "access-1")
+    }
+
+    /// The same http MCP server must not hand its sign-in to a different plain-http host.
+    func testHttpSignInOnAnotherHostIsRefusedBeforeTheBrowserOpens() async throws {
+        var browserOpened = false
+        let (_, flow) = makeServer(answer: { _ in browserOpened = true; return nil }, mutate: { server in
+            server.issuer = URL(string: "http://auth.other.example")!
+            server.authorizationURL = URL(string: "http://auth.other.example/authorize")!
+            server.tokenURL = URL(string: "http://auth.other.example/token")!
+            server.registrationURL = URL(string: "http://auth.other.example/register")!
+        })
+        let resource = URL(string: "http://vqt.corp.example/mcp")!
+        let endpoint = try await flow.discover(resource: resource)
+        do {
+            _ = try await flow.signIn(serverName: "vqt", resource: resource, endpoint: endpoint, existingClient: nil)
+            XCTFail("an http sign-in on another host must be refused")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("not https"), error.localizedDescription)
+        }
+        XCTAssertFalse(browserOpened)
+    }
+
+    /// With the server's `allowInsecure` on, the same http sign-in on another host completes.
+    func testAllowInsecureLetsHttpSignInUseAnotherHost() async throws {
+        let (_, flow) = makeServer(answer: { authorizationURL in
+            let items = URLComponents(url: authorizationURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func value(_ name: String) -> String { items.first { $0.name == name }?.value ?? "" }
+            return URL(string: "\(value("redirect_uri"))?code=the-code&state=\(value("state"))")
+        }, mutate: { server in
+            server.issuer = URL(string: "http://auth.other.example")!
+            server.authorizationURL = URL(string: "http://auth.other.example/authorize")!
+            server.tokenURL = URL(string: "http://auth.other.example/token")!
+            server.registrationURL = URL(string: "http://auth.other.example/register")!
+        })
+        flow.allowInsecure = true
+        let resource = URL(string: "http://vqt.corp.example/mcp")!
+        let endpoint = try await flow.discover(resource: resource)
+        let credentials = try await flow.signIn(serverName: "vqt", resource: resource, endpoint: endpoint, existingClient: nil)
+        XCTAssertEqual(credentials.accessToken, "access-1")
+    }
 }
 
 // MARK: - Storage

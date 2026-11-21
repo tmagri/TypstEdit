@@ -30,6 +30,9 @@ final class FakeMCPServer: URLProtocol, @unchecked Sendable {
     /// Legacy SSE: the open GET stream to push replies into.
     nonisolated(unsafe) private static var streamClient: (URLProtocol, URLProtocolClient)?
     nonisolated(unsafe) private static var legacyMode = false
+    /// Streamable HTTP: answer a standalone GET with an event stream, so a
+    /// test can push a server notification the way a real server would.
+    nonisolated(unsafe) private static var streamableStream = false
 
     static var received: [Received] { lock.withLock { _received } }
 
@@ -39,7 +42,14 @@ final class FakeMCPServer: URLProtocol, @unchecked Sendable {
             _respond = respond
             streamClient = nil
             legacyMode = false
+            streamableStream = false
         }
+    }
+
+    /// A Streamable HTTP fake that also serves the standalone GET stream.
+    static func resetStreaming(respond: @escaping (Received) -> Reply) {
+        reset(respond: respond)
+        lock.withLock { streamableStream = true }
     }
 
     /// Switches the fake to the legacy HTTP+SSE transport.
@@ -80,9 +90,9 @@ final class FakeMCPServer: URLProtocol, @unchecked Sendable {
             headers: request.allHTTPHeaderFields ?? [:],
             json: json
         )
-        let (respond, legacy) = Self.lock.withLock { () -> (((Received) -> Reply)?, Bool) in
+        let (respond, legacy, streamable) = Self.lock.withLock { () -> (((Received) -> Reply)?, Bool, Bool) in
             Self._received.append(entry)
-            return (Self._respond, Self.legacyMode)
+            return (Self._respond, Self.legacyMode, Self.streamableStream)
         }
 
         if legacy, entry.method == "GET" {
@@ -93,6 +103,16 @@ final class FakeMCPServer: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             Self.lock.withLock { Self.streamClient = (self, client!) }
             client?.urlProtocol(self, didLoad: Data(": keep-alive\n\nevent: endpoint\ndata: /messages?session=abc\n\n".utf8))
+            return  // Stays open until stopLoading.
+        }
+
+        if streamable, entry.method == "GET" {
+            // The standalone Streamable HTTP stream: open, announce nothing,
+            // and stay open so a test can push notifications into it.
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                                           headerFields: ["Content-Type": "text/event-stream"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            Self.lock.withLock { Self.streamClient = (self, client!) }
             return  // Stays open until stopLoading.
         }
 
@@ -313,6 +333,217 @@ final class MCPStreamableHTTPTests: XCTestCase {
             XCTFail("expected sessionExpired")
         } catch MCPError.sessionExpired {
             // expected
+        }
+    }
+
+    // MARK: Tool-list changes and pagination
+
+    /// A server that declares `tools.listChanged` gets the standalone GET
+    /// stream, and a notification pushed down it re-reads the catalogue.
+    ///
+    /// This is the whole point of the change: without the stream the
+    /// notification has nowhere to arrive, and without the re-read the model
+    /// keeps seeing the catalogue from the handshake.
+    func testToolListChangeNotificationRefreshesCatalogue() async throws {
+        // The fake's responder runs on a CFNetwork thread, not the main
+        // actor, so everything it reads must be Sendable and pre-built.
+        final class Catalogue: @unchecked Sendable {
+            private let lock = NSLock()
+            private var version = 0
+            var current: Int {
+                get { lock.withLock { version } }
+                set { lock.withLock { version = newValue } }
+            }
+            /// The `tools/list` reply for each version, rendered up front.
+            var replies: [Int: Data] = [:]
+        }
+        let catalogue = Catalogue()
+        for (version, names) in [(0, ["echo"]), (1, ["echo", "added_later"])] {
+            let tools: [[String: Any]] = names.map {
+                ["name": $0, "description": $0, "inputSchema": ["type": "object"]]
+            }
+            catalogue.replies[version] = FakeMCPServer.json(["tools": tools])
+        }
+
+        FakeMCPServer.resetStreaming { request in
+            guard let json = request.json else { return .init(status: 400) }
+            guard let id = json["id"], let method = json["method"] as? String else {
+                return .init(status: 202, headers: [:], body: Data())
+            }
+            switch method {
+            case "initialize":
+                // The flag is what earns the GET stream.
+                return .init(body: FakeMCPServer.json(["jsonrpc": "2.0", "id": id, "result": [
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": ["tools": ["listChanged": true]],
+                    "serverInfo": ["name": "changing", "version": "1"]
+                ]]))
+            case "tools/list":
+                let tools = catalogue.replies[catalogue.current] ?? Data("{}".utf8)
+                let body = Data(#"{"jsonrpc":"2.0","id":"#.utf8) + Data("\(id)".utf8)
+                    + Data(#","result":"#.utf8) + tools + Data("}".utf8)
+                return .init(body: body)
+            default:
+                return .init(body: FakeMCPServer.json(["jsonrpc": "2.0", "id": id, "error": ["code": -32601, "message": "nope"]]))
+            }
+        }
+
+        let client = MCPClient(config: remoteConfig(), urlSession: FakeMCPServer.session())
+        var announced = 0
+        client.onToolsChanged = { announced += 1 }
+        try await client.start()
+        defer { client.stop() }
+        XCTAssertTrue(client.serverAnnouncesToolChanges, "the flag should be read from capabilities")
+
+        let before = try await client.listTools()
+        XCTAssertEqual(before.map(\.name), ["echo"])
+
+        // The server gains a tool and says so, the way a real one would.
+        // The GET stream opens asynchronously after the handshake, so wait
+        // for it: a push into no stream is silently dropped by the fake.
+        try await waitUntil { FakeMCPServer.received.contains { $0.method == "GET" } }
+        catalogue.current = 1
+        FakeMCPServer.push(event: "message", data: FakeMCPServer.json([
+            "jsonrpc": "2.0", "method": "notifications/tools/list_changed"
+        ]))
+        try await waitUntil { announced > 0 }
+
+        // Re-reading is what the manager does on the notification; here the
+        // client is driven directly so the assertion is on the catalogue.
+        let after = try await client.listTools()
+        XCTAssertEqual(after.map(\.name), ["echo", "added_later"])
+        XCTAssertTrue(FakeMCPServer.received.contains { $0.method == "GET" },
+                      "a listChanged server must get the standalone stream")
+    }
+
+    /// A server that did not promise to announce changes gets no stream: the
+    /// GET would cost a connection for a message that is never sent.
+    func testNoStreamWithoutTheFlag() async throws {
+        FakeMCPServer.resetStreaming { request in
+            guard let json = request.json else { return .init(status: 400) }
+            guard let id = json["id"] else { return .init(status: 202, headers: [:], body: Data()) }
+            return .init(body: FakeMCPServer.json(FakeMCPServer.standardResult(for: json)!))
+        }
+        let client = MCPClient(config: remoteConfig(), urlSession: FakeMCPServer.session())
+        try await client.start()
+        try await Task.sleep(for: .milliseconds(250))
+        defer { client.stop() }
+
+        XCTAssertFalse(client.serverAnnouncesToolChanges)
+        XCTAssertFalse(FakeMCPServer.received.contains { $0.method == "GET" })
+    }
+
+    /// A notification with no handler still must not be read as the reply to
+    /// a pending request.
+    func testNotificationIsNotMistakenForARequest() async throws {
+        FakeMCPServer.reset { request in
+            guard let json = request.json, let id = json["id"] else {
+                return .init(status: 202, headers: [:], body: Data())
+            }
+            // A notification with no id rides ahead of the real answer.
+            let note = FakeMCPServer.json(["jsonrpc": "2.0", "method": "notifications/tools/list_changed"])
+            let answer = FakeMCPServer.json(FakeMCPServer.standardResult(for: json)!)
+            var body = Data("data: ".utf8) + note + Data("\n\n".utf8)
+            body += Data("data: ".utf8) + answer + Data("\n\n".utf8)
+            return .init(headers: ["Content-Type": "text/event-stream"], body: body)
+        }
+        let client = MCPClient(config: remoteConfig(), urlSession: FakeMCPServer.session())
+        try await client.start()
+        defer { client.stop() }
+        let output = try await client.callTool(name: "echo", arguments: ["text": "still works"])
+        XCTAssertEqual(output, "echo: still works")
+    }
+
+    /// `tools/list` is paginated, and dropping the tail looks exactly like a
+    /// server that never had those tools.
+    func testPaginatedToolListIsReadToTheEnd() async throws {
+        FakeMCPServer.reset { request in
+            guard let json = request.json, let id = json["id"] else {
+                return .init(status: 202, headers: [:], body: Data())
+            }
+            if json["method"] as? String == "tools/list" {
+                let cursor = (json["params"] as? [String: Any])?["cursor"] as? String
+                switch cursor {
+                case nil:
+                    return .init(body: FakeMCPServer.json(["jsonrpc": "2.0", "id": id, "result": [
+                        "tools": [["name": "one", "description": "1", "inputSchema": ["type": "object"]]],
+                        "nextCursor": "page2"
+                    ]]))
+                case "page2":
+                    return .init(body: FakeMCPServer.json(["jsonrpc": "2.0", "id": id, "result": [
+                        "tools": [["name": "two", "description": "2", "inputSchema": ["type": "object"]]],
+                        "nextCursor": "page3"
+                    ]]))
+                default:
+                    return .init(body: FakeMCPServer.json(["jsonrpc": "2.0", "id": id, "result": [
+                        "tools": [["name": "three", "description": "3", "inputSchema": ["type": "object"]]]
+                    ]]))
+                }
+            }
+            return .init(body: FakeMCPServer.json(FakeMCPServer.standardResult(for: json)!))
+        }
+        let client = MCPClient(config: remoteConfig(), urlSession: FakeMCPServer.session())
+        try await client.start()
+        defer { client.stop() }
+        let tools = try await client.listTools()
+        XCTAssertEqual(tools.map(\.name), ["one", "two", "three"])
+    }
+
+    /// A server that repeats its cursor must not spin forever.
+    func testRepeatedCursorEndsTheLoop() async throws {
+        FakeMCPServer.reset { request in
+            guard let json = request.json, let id = json["id"] else {
+                return .init(status: 202, headers: [:], body: Data())
+            }
+            if json["method"] as? String == "tools/list" {
+                return .init(body: FakeMCPServer.json(["jsonrpc": "2.0", "id": id, "result": [
+                    "tools": [["name": "loop", "description": "", "inputSchema": ["type": "object"]]],
+                    "nextCursor": "same"
+                ]]))
+            }
+            return .init(body: FakeMCPServer.json(FakeMCPServer.standardResult(for: json)!))
+        }
+        let client = MCPClient(config: remoteConfig(), urlSession: FakeMCPServer.session())
+        try await client.start()
+        defer { client.stop() }
+        let tools = try await client.listTools()
+        XCTAssertEqual(tools.map(\.name), ["loop"])
+        // Two round trips: the opening page and one with the repeated cursor.
+        XCTAssertEqual(FakeMCPServer.received.filter { $0.json?["method"] as? String == "tools/list" }.count, 2)
+    }
+
+    /// A server that answers 405 offers no GET stream, and that refusal must
+    /// not fail the handshake or be retried on every reconnect.
+    func testStreamRefusalDoesNotFailTheHandshake() async throws {
+        FakeMCPServer.reset { request in
+            if request.method == "GET" { return .init(status: 405) }
+            guard let json = request.json else { return .init(status: 400) }
+            guard let id = json["id"] else { return .init(status: 202, headers: [:], body: Data()) }
+            if json["method"] as? String == "initialize" {
+                return .init(body: FakeMCPServer.json(["jsonrpc": "2.0", "id": id, "result": [
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": ["tools": ["listChanged": true]],
+                    "serverInfo": ["name": "closed", "version": "1"]
+                ]]))
+            }
+            return .init(body: FakeMCPServer.json(FakeMCPServer.standardResult(for: json)!))
+        }
+        let client = MCPClient(config: remoteConfig(), urlSession: FakeMCPServer.session())
+        try await client.start()
+        defer { client.stop() }
+
+        XCTAssertTrue(client.isRunning)
+        let tools = try await client.listTools()
+        XCTAssertEqual(tools.map(\.name), ["echo"])
+    }
+
+    /// Waits for a condition the fake pushed asynchronously, without sleeping
+    /// a fixed span that would flake on a loaded machine.
+    private func waitUntil(timeout: TimeInterval = 3, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() > deadline { XCTFail("condition not met within \(timeout)s") ; return }
+            try await Task.sleep(for: .milliseconds(20))
         }
     }
 }

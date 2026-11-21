@@ -13,6 +13,15 @@ enum MCPError: LocalizedError {
     /// A remote server refused the Authorization header set in the server's
     /// own config. Browser sign-in can't replace a fixed token, so it isn't tried.
     case headerTokenRejected(host: String)
+    /// A remote server over plain http on a non-local host, without `allowInsecure`.
+    case insecureConnectionNotAllowed(host: String)
+    /// The server accepted the connection but never answered the handshake.
+    ///
+    /// Without this the request sat on its continuation until the user hit
+    /// Stop, so a server that starts but is not an MCP server looked like a
+    /// chat that had hung. `detail` is whatever the process wrote to its own
+    /// error stream, which is usually the whole explanation.
+    case timedOut(method: String, seconds: Int, detail: String)
     /// A remote server answered with another non-success status.
     case httpStatus(Int, String)
     /// A Streamable HTTP server no longer knows the session id we sent. The
@@ -33,6 +42,24 @@ enum MCPError: LocalizedError {
             return "\(host) refused the connection (HTTP \(status)): it needs sign-in, and TypstEdit couldn't complete it. Use Sign in… on that server in Settings → MCP. If the service offers an API token instead, add it there as a header: Authorization: Bearer ${keychain:name}."
         case .headerTokenRejected(let host):
             return "\(host) refused the Authorization header set for this server: the token is probably expired or wrong. Get a new token from the service and update it in the Keychain. Sign in… isn't used while the server has its own Authorization header."
+        case .insecureConnectionNotAllowed(let host):
+            return "\(host) is reached over plain http, which isn't encrypted, so TypstEdit won't connect to it. If this is an internal server without a certificate, edit it in Settings → MCP and turn on \"Allow insecure connection\"."
+        case .timedOut(let method, let seconds, let detail):
+            // Say which method went unanswered, how long it waited, and quote
+            // the server's own complaint when it made one. A bare "timed out"
+            // sends the user looking at the wrong program.
+            var message = "The MCP server did not answer \(method) within \(seconds) seconds."
+            if !detail.isEmpty {
+                message += " It wrote: \(detail)"
+            } else {
+                // The common cause, and one a config cannot show: many tools
+                // ship a launcher that is not the server, and the server only
+                // starts behind a subcommand (`typstedit mcp`, `server start`).
+                // A launcher like that opens its own window and waits for a
+                // person, which looks exactly like a hang from here.
+                message += " The command started but said nothing, which usually means it is not the server itself: check whether it needs a subcommand in its arguments."
+            }
+            return message
         case .httpStatus(let status, let body):
             return body.isEmpty
                 ? "The MCP server answered HTTP \(status)."
@@ -68,7 +95,11 @@ enum MCPEnvironmentResolver {
     private static let placeholder = try! NSRegularExpression(pattern: #"\$?\{(env|keychain):([^}]+)\}"#)
 
     static func resolve(_ raw: String) -> String {
-        resolve(raw, environment: ProcessInfo.processInfo.environment, keychain: MCPKeychain.read(key:))
+        resolve(
+            raw,
+            environment: ProcessInfo.processInfo.environment,
+            keychain: MCPSecrets.placeholderValue(for:)
+        )
     }
 
     /// The substitution itself, with its lookups injectable for tests. A
@@ -107,11 +138,28 @@ enum MCPEnvironmentResolver {
     }
 }
 
-/// Minimal Keychain wrapper so project-scoped MCP server definitions can
-/// reference `${keychain:name}` instead of embedding a literal secret in a
-/// file that might get committed to git.
+/// The macOS Keychain, for `${keychain:name}` placeholders a person set up by
+/// hand.
+///
+/// TypstEdit's own credentials are **not** stored here any more: they live in
+/// `MCPSecrets`, because an ad-hoc-signed build changes its code hash on every
+/// rebuild and macOS then asks for the item again (see that type for the whole
+/// story). This type is only the fallback a `mcp.json` placeholder still
+/// resolves through, and `MCPSecrets` reads it at most once per key per launch.
+///
+/// Writes stay here for that same hand-set-up case; nothing in TypstEdit calls
+/// them on its own any more.
 enum MCPKeychain {
     private static let service = "com.tmagri.TypstEdit.MCP"
+
+    /// The three answers a read can give. "No such item" and "the user said
+    /// no" are different, and the import reports them differently: one is
+    /// nothing to do, the other is a question that may be asked again.
+    enum Probe: Equatable {
+        case found(String)
+        case missing
+        case refused
+    }
 
     static func read(key: String) -> String? {
         var query: [String: Any] = [
@@ -125,6 +173,34 @@ enum MCPKeychain {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    /// Turns a plain `read` closure into a `Probe`, for the import path.
+    ///
+    /// `nil` is ambiguous — a missing item and a dismissed dialog both look
+    /// like it — so existence is checked separately, with attributes only.
+    /// That check returns no secret material, so it asks nothing, which is
+    /// what makes "not there" distinguishable from "there, but refused".
+    static func probe(
+        key: String,
+        read: (String) -> String?,
+        exists: (String) -> Bool
+    ) -> Probe {
+        if let value = read(key) { return .found(value) }
+        return exists(key) ? .refused : .missing
+    }
+
+    /// Whether an item for `key` exists, without reading its secret.
+    static func exists(key: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess
     }
 
     static func write(key: String, value: String) {
@@ -171,6 +247,20 @@ final class MCPClient {
     private(set) var instructions: String?
     /// The protocol version the handshake settled on.
     private(set) var protocolVersion: String?
+    /// Whether the server said, in its `initialize` reply, that it will
+    /// announce tool changes (`capabilities.tools.listChanged`).
+    ///
+    /// A server that leaves the flag out may still change its tools, but it
+    /// has promised not to say so, so TypstEdit neither holds a stream open
+    /// for the announcement nor expects one.
+    private(set) var serverAnnouncesToolChanges = false
+    /// Called when the server announced that its tool list changed.
+    ///
+    /// `MCPManager` uses this to re-read the catalogue, so the model's next
+    /// turn declares a tool the server just added instead of calling one it
+    /// just removed. Fired on the main actor, synchronously from the inbound
+    /// message; the handler is responsible for not blocking on the network.
+    var onToolsChanged: (@MainActor () -> Void)?
 
     private let urlSession: URLSession
     /// Tokens for this server, in the Keychain.
@@ -189,6 +279,10 @@ final class MCPClient {
     /// The send behind each pending request, so a Stop can abort an HTTP
     /// request that is still streaming its reply.
     private var inflightSends: [Int: Task<Void, Never>] = [:]
+    /// The reply deadline behind each pending request, for the methods
+    /// `timeoutSeconds(for:)` bounds. Cancelled when the reply arrives, so an
+    /// answered request never fires a late timeout.
+    private var inflightTimeouts: [Int: Task<Void, Never>] = [:]
 
     /// One session for every remote server (see `MCPHTTPSessions`).
     static let sharedURLSession: URLSession = MCPHTTPSessions.shared
@@ -199,7 +293,12 @@ final class MCPClient {
         oauthStore: MCPOAuthStore = MCPOAuthStore()
     ) {
         self.config = config
-        self.urlSession = urlSession
+        // A server that opted out of transport security gets the session that skips
+        // certificate checks. Only the default session is swapped, so a test's own session
+        // is never replaced.
+        self.urlSession = (config.allowInsecure && urlSession === MCPClient.sharedURLSession)
+            ? MCPHTTPSessions.insecure
+            : urlSession
         self.oauthStore = oauthStore
     }
 
@@ -245,6 +344,17 @@ final class MCPClient {
             let negotiated = (result["protocolVersion"] as? String) ?? requested
             protocolVersion = negotiated
             transport.didNegotiate(protocolVersion: negotiated)
+            // Whether the server will tell us when its tools change. Read
+            // from its capabilities rather than assumed: a server that did
+            // not promise is not required to send the notification, and for
+            // a remote server expecting one would mean holding a stream open
+            // for a message that may never come.
+            if let capabilities = result["capabilities"] as? [String: Any],
+               let tools = capabilities["tools"] as? [String: Any],
+               let listChanged = tools["listChanged"] as? Bool {
+                serverAnnouncesToolChanges = listChanged
+            }
+            transport.didLearnServerCapabilities(toolsListChanged: serverAnnouncesToolChanges)
             // Usage guidance the server's author wrote for the model. It was
             // discarded here before, which left the model to discover each
             // server's quirks by failing a call.
@@ -280,6 +390,9 @@ final class MCPClient {
     @discardableResult
     func signInInteractively(hint: URL? = nil) async throws -> MCPOAuthCredentials {
         guard let resource = MCPServerConfig.remoteURL(config.url) else { throw MCPError.notConfigured }
+        if let refusal = MCPServerConfig.insecureRefusal(for: resource, allowInsecure: config.allowInsecure) {
+            throw refusal
+        }
         let flow = makeFlow()
         if let stored = oauthStore.load(serverName: config.name) {
             if !stored.isExpiring(), stored.expiresAt != nil { return stored }
@@ -321,7 +434,12 @@ final class MCPClient {
     }
 
     private func makeFlow() -> MCPOAuthFlow {
-        MCPOAuthFlow()
+        guard config.allowInsecure else { return MCPOAuthFlow() }
+        // Discovery, registration and token requests must skip certificate checks too, or
+        // a self-signed server could serve tools but never complete a sign-in.
+        let flow = MCPOAuthFlow(http: MCPURLSessionHTTP(session: urlSession))
+        flow.allowInsecure = true
+        return flow
     }
 
     private func makeTransport() throws -> MCPTransport {
@@ -334,6 +452,9 @@ final class MCPClient {
         case .http, .sse:
             guard let url = MCPServerConfig.remoteURL(config.url) else {
                 throw MCPError.notConfigured
+            }
+            if let refusal = MCPServerConfig.insecureRefusal(for: url, allowInsecure: config.allowInsecure) {
+                throw refusal
             }
             let headers = config.headers.mapValues { MCPEnvironmentResolver.resolve($0) }
             let transport: MCPTransport
@@ -377,6 +498,8 @@ final class MCPClient {
         isRunning = false
         for task in inflightSends.values { task.cancel() }
         inflightSends.removeAll()
+        for task in inflightTimeouts.values { task.cancel() }
+        inflightTimeouts.removeAll()
         failAllPending(MCPError.serverDisabled)
     }
 
@@ -388,22 +511,64 @@ final class MCPClient {
 
     // MARK: - Tools
 
+    /// Reads every page of the server's tool catalogue.
+    ///
+    /// `tools/list` is paginated: a reply carries at most one page and names
+    /// the next with `nextCursor`. Reading only the first reply silently
+    /// dropped every tool after the first page, which looks to the model
+    /// exactly like a server that never had them.
+    ///
+    /// The cursor loop is bounded twice: a cursor that comes back a second
+    /// time ends it, so a server that echoes the same value cannot spin
+    /// forever, and `maxToolPages` caps the round trips a single `tools/list`
+    /// costs. Tools are also deduplicated by name, because a looping server
+    /// would otherwise declare the same tool twice.
     @discardableResult
     func listTools() async throws -> [MCPTool] {
-        let response = try await sendRequest(method: "tools/list", params: [:])
-        guard let toolsArray = response["tools"] as? [[String: Any]] else {
-            self.tools = []
-            return []
-        }
+        var collected: [MCPTool] = []
+        var seenNames = Set<String>()
+        var usedCursors = Set<String>()
+        var cursor: String?
         let serverName = config.name
-        let parsed: [MCPTool] = toolsArray.compactMap { entry in
-            guard let name = entry["name"] as? String else { return nil }
-            let description = entry["description"] as? String ?? ""
-            let schema = entry["inputSchema"] as? [String: Any] ?? ["type": "object", "properties": [String: Any]()]
-            return MCPTool(serverName: serverName, name: name, description: description, inputSchema: schema)
+
+        for _ in 0..<Self.maxToolPages {
+            var params: [String: Any] = [:]
+            if let cursor { params["cursor"] = cursor }
+            let response = try await sendRequest(method: "tools/list", params: params)
+
+            if let toolsArray = response["tools"] as? [[String: Any]] {
+                for entry in toolsArray {
+                    guard let tool = Self.tool(from: entry, serverName: serverName),
+                          seenNames.insert(tool.name).inserted else { continue }
+                    collected.append(tool)
+                }
+            }
+
+            guard let next = response["nextCursor"] as? String,
+                  !next.isEmpty,
+                  usedCursors.insert(next).inserted else {
+                self.tools = collected
+                return collected
+            }
+            cursor = next
         }
-        self.tools = parsed
-        return parsed
+
+        // Out of pages. Keep what was read rather than throwing away a usable
+        // catalogue; the cap exists to bound a runaway server, not to fail a
+        // chat because a server has thousands of tools.
+        self.tools = collected
+        return collected
+    }
+
+    /// How many `tools/list` round trips one catalogue read may cost.
+    static let maxToolPages = 50
+
+    /// One `tools/list` entry, or nil when it has no usable name.
+    nonisolated static func tool(from entry: [String: Any], serverName: String) -> MCPTool? {
+        guard let name = entry["name"] as? String, !name.isEmpty else { return nil }
+        let description = entry["description"] as? String ?? ""
+        let schema = entry["inputSchema"] as? [String: Any] ?? ["type": "object", "properties": [String: Any]()]
+        return MCPTool(serverName: serverName, name: name, description: description, inputSchema: schema)
     }
 
     func callTool(name: String, arguments: [String: Any]) async throws -> String {
@@ -577,6 +742,13 @@ final class MCPClient {
                     }
                     self?.inflightSends[id] = nil
                 }
+                if let seconds = timeoutSeconds(for: method, transport: transport) {
+                    inflightTimeouts[id] = Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(seconds))
+                        guard !Task.isCancelled else { return }
+                        self?.timeOutRequest(id: id, method: method, seconds: seconds)
+                    }
+                }
             }
         } onCancel: {
             Task { @MainActor [weak self] in
@@ -585,9 +757,43 @@ final class MCPClient {
         }.value
     }
 
+    /// How long a request may go unanswered before it is reported, per method.
+    ///
+    /// Only the *local* handshake is bounded here, and the narrow scope is the
+    /// point. A stdio server that is not an MCP server at all — the
+    /// `typstedit` shim without its `mcp` argument, an editor's launcher, a
+    /// binary that opened a window — accepts the pipe, writes nothing, and
+    /// exits never. Nothing in the protocol says so: it just sits there. Before
+    /// this, the `initialize` request waited on its continuation forever, so
+    /// the chat showed no progress and looked hung, and the only way out was
+    /// Stop.
+    ///
+    /// A remote server gets no deadline here, because its first request is
+    /// exactly where an interactive sign-in runs (`MCPOAuthFlow.signInTimeout`
+    /// is five minutes) and a user who is reading the consent page must not be
+    /// timed out for it. `tools/call` is never bounded either: a tool may
+    /// legitimately run for minutes, and the chat's own Stop is the way out of
+    /// one.
+    func timeoutSeconds(for method: String, transport: MCPTransport) -> Int? {
+        guard transport is MCPStdioTransport, method == "initialize" else { return nil }
+        return handshakeTimeoutSeconds
+    }
+
+    /// The deadline for a local server's `initialize` reply. A property so a
+    /// test does not have to wait the full 30 seconds to see it fire.
+    var handshakeTimeoutSeconds = 30
+
+    /// Whatever the child wrote to its error stream, for an error message.
+    /// Resolved through the transport rather than stored here, because the
+    /// transport is what owns the process.
+    var serverErrorOutput: String {
+        (transport as? MCPStdioTransport)?.recentErrorOutput ?? ""
+    }
+
     /// Answers a cancelled request locally and tells the server to stop
     /// working on it. Called on the main actor, where `pendingRequests` lives.
     private func cancelRequest(id: Int) {
+        inflightTimeouts.removeValue(forKey: id)?.cancel()
         guard let continuation = pendingRequests.removeValue(forKey: id) else { return }
         inflightSends.removeValue(forKey: id)?.cancel()
         if isRunning {
@@ -599,7 +805,24 @@ final class MCPClient {
         continuation.resume(throwing: CancellationError())
     }
 
+    /// Reports a request the server never answered.
+    ///
+    /// Deliberately *not* a `CancellationError`: the user did not stop
+    /// anything, and the run must report a failed server rather than quietly
+    /// treating it as a stopped chat. A stdio child that is still alive but
+    /// silent is killed here, so it cannot linger holding a pipe for the life
+    /// of the app.
+    private func timeOutRequest(id: Int, method: String, seconds: Int) {
+        guard let continuation = pendingRequests.removeValue(forKey: id) else { return }
+        inflightSends.removeValue(forKey: id)?.cancel()
+        inflightTimeouts.removeValue(forKey: id)
+        let serverSaid = serverErrorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if method == "initialize" { stop() }
+        continuation.resume(throwing: MCPError.timedOut(method: method, seconds: seconds, detail: serverSaid))
+    }
+
     private func failRequest(id: Int, _ error: Error) {
+        inflightTimeouts.removeValue(forKey: id)?.cancel()
         pendingRequests.removeValue(forKey: id)?.resume(throwing: error)
     }
 
@@ -634,10 +857,13 @@ final class MCPClient {
         if let method = json["method"] as? String {
             if let requestID = json["id"] {
                 answerServerRequest(id: requestID, method: method)
+            } else {
+                handleNotification(method: method)
             }
             return
         }
         guard let id = json["id"] as? Int else { return }
+        inflightTimeouts.removeValue(forKey: id)?.cancel()
         guard let continuation = pendingRequests.removeValue(forKey: id) else { return }
 
         if let error = json["error"] as? [String: Any] {
@@ -646,6 +872,23 @@ final class MCPClient {
             continuation.resume(returning: JSONObject(value: result))
         } else {
             continuation.resume(returning: JSONObject(value: [:]))
+        }
+    }
+
+    /// A server notification (a message with a method and no id).
+    ///
+    /// Only tool-list changes matter here: they are the one way a running
+    /// server can tell TypstEdit its catalogue moved. Everything else is
+    /// ignored, as before — TypstEdit declared no capability a server would
+    /// need to send anything else for.
+    private func handleNotification(method: String) {
+        switch method {
+        case "notifications/tools/list_changed":
+            onToolsChanged?()
+        default:
+            // `notifications/message` (logging), `resources/updated` and
+            // friends: TypstEdit subscribes to none of them.
+            break
         }
     }
 
@@ -666,6 +909,8 @@ final class MCPClient {
     private func failAllPending(_ error: Error) {
         let pending = pendingRequests
         pendingRequests.removeAll()
+        for task in inflightTimeouts.values { task.cancel() }
+        inflightTimeouts.removeAll()
         for (_, continuation) in pending {
             continuation.resume(throwing: error)
         }

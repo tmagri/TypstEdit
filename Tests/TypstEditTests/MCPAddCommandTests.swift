@@ -206,3 +206,41 @@ final class MCPAddCommandTests: XCTestCase {
         XCTAssertEqual(server.name, "My")
     }
 }
+
+// MARK: - A launcher is not a server
+
+extension MCPAddCommandTests {
+    /// `typstedit` is a launcher, not the MCP server; the server is
+    /// `typstedit mcp`. Pasting the line TypstEdit's own README gives must keep
+    /// the `mcp` word as an argument.
+    ///
+    /// This is the config that produced the hang: with no argument the shim
+    /// passes plain `typstedit` through, the app opens its window and waits for
+    /// a person, and nothing is ever written to stdout. The `mcp` argument is
+    /// the whole difference between a working server and a process that looks
+    /// hung, so it must survive parsing untouched.
+    func testLauncherSubcommandSurvivesAsAnArgument() throws {
+        let server = try XCTUnwrap(
+            try MCPAddCommand.parse(
+                "claude mcp add --scope user typstedit -- typstedit mcp"
+            ).first
+        )
+        XCTAssertEqual(server.name, "typstedit")
+        XCTAssertEqual(server.transport, .stdio)
+        XCTAssertEqual(server.command, "typstedit")
+        XCTAssertEqual(server.args, ["mcp"],
+                       "dropping `mcp` turns the server into a GUI launch that never answers")
+        XCTAssertTrue(server.isConfigured)
+    }
+
+    /// The same line without `--`, which some clients accept, must behave the
+    /// same way: `typstedit` is the command and `mcp` is its argument, not a
+    /// second positional that gets discarded.
+    func testLauncherSubcommandWithoutSeparator() throws {
+        let server = try XCTUnwrap(
+            try MCPAddCommand.parse("gemini mcp add typstedit typstedit mcp").first
+        )
+        XCTAssertEqual(server.command, "typstedit")
+        XCTAssertEqual(server.args, ["mcp"])
+    }
+}

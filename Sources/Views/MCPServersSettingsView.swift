@@ -86,9 +86,75 @@ struct MCPServersSettingsView: View {
                     } label: {
                         Label("Paste Command…", systemImage: "doc.on.clipboard")
                     }
+                    if scope == .global, let keys = missingSignInKeys, !keys.isEmpty {
+                        Button("Import Sign-ins from Keychain…") {
+                            importFromKeychain(keys)
+                        }
+                        .help("TypstEdit now keeps MCP tokens in \(MCPSecrets.displayPath) instead of the Keychain, so a rebuild stops asking for permission. This copies the tokens already there. macOS asks once per token, and that is the last time.")
+                    }
                 }
                 .padding(.top, 4)
+
+                if let keychainImportStatus {
+                    Text(keychainImportStatus)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+        }
+    }
+
+    /// Shown in orange wherever a server has `allowInsecure` on.
+    static let insecureWarning = "Insecure connection allowed: traffic to this server, including sign-in tokens and tool results, may be unencrypted, and its certificate is not checked. Use only for an internal server you trust."
+
+    /// The one-time import of tokens from the old Keychain, and what it
+    /// reported. `nil` means it has not been run in this window.
+    @State private var keychainImportStatus: String?
+
+    /// The keys an import would try to copy: the OAuth token and registered
+    /// client of every remote server that is not signed in from the file yet.
+    /// Empty when there is nothing to import, so the button stays hidden.
+    private var missingSignInKeys: [String]? {
+        let stored = MCPSecrets.storedKeys()
+        var keys: [String] = []
+        for server in mcpManager.globalServers where server.transport.isRemote {
+            for account in ["oauth:" + server.name, "oauth-client:" + server.name]
+            where !stored.contains(account) {
+                keys.append(account)
+            }
+        }
+        return keys
+    }
+
+    /// Copies what the old Keychain still holds into the file store. The only
+    /// place TypstEdit reads those items, and it only runs because it was
+    /// clicked: each missing one shows macOS's dialog, once.
+    private func importFromKeychain(_ keys: [String]) {
+        keychainImportStatus = "Asking macOS for \(keys.count) item\(keys.count == 1 ? "" : "s")…"
+        Task {
+            let results = await Task.detached(priority: .userInitiated) {
+                MCPSecrets.importLegacy(keys: keys)
+            }.value
+            var imported = 0, missing = 0, refused = 0
+            for outcome in results.values {
+                switch outcome {
+                case .imported: imported += 1
+                case .notFound: missing += 1
+                case .refused: refused += 1
+                case .alreadyStored: break
+                }
+            }
+            var parts: [String] = []
+            if imported > 0 { parts.append("imported \(imported)") }
+            if missing > 0 { parts.append("\(missing) not in the Keychain") }
+            if refused > 0 { parts.append("\(refused) refused") }
+            keychainImportStatus = parts.isEmpty
+                ? "Nothing to import: every sign-in is already in \(MCPSecrets.displayPath)."
+                : "Keychain import: " + parts.joined(separator: ", ")
+                + ". Anything refused or missing needs Sign in… on that server."
+            // The rows read `isSignedIn` from the store, so re-render them.
+            mcpManager.objectWillChange.send()
         }
     }
 
@@ -142,6 +208,13 @@ struct MCPServersSettingsView: View {
                             .font(.caption2)
                             .foregroundColor(.red)
                             .lineLimit(2)
+                    }
+                    if scoped.config.transport.isRemote, scoped.config.allowInsecure {
+                        HStack(alignment: .top, spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange).font(.caption2)
+                            Text(Self.insecureWarning).font(.caption2).foregroundColor(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
 
@@ -257,6 +330,7 @@ private struct MCPServerEditorSheet: View {
     @State private var url: String = ""
     @State private var headersText: String = ""
     @State private var enabled: Bool = true
+    @State private var allowInsecure = false
 
     private var isEditing: Bool {
         if case .edit = mode { return true }
@@ -317,7 +391,23 @@ private struct MCPServerEditorSheet: View {
             } else {
                 TextField("Server URL", text: $url)
                     .textFieldStyle(.roundedBorder)
-                Text("Remote servers speak \(transport == .http ? "Streamable HTTP (MCP 2025-03-26), which is what servers offer today" : "the older HTTP+SSE transport (MCP 2024-11-05)"). A server that answers 401 gets a browser sign-in: TypstEdit discovers the service, registers itself, and keeps the token in the Keychain — never in mcp.json.")
+
+                Toggle("Allow insecure connection (http, or an untrusted certificate)", isOn: $allowInsecure)
+                    .font(.caption)
+                if allowInsecure {
+                    HStack(alignment: .top, spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange).font(.caption2)
+                        Text(MCPServersSettingsView.insecureWarning).font(.caption2).foregroundColor(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if let parsed = MCPServerConfig.remoteURL(url),
+                          MCPServerConfig.insecureRefusal(for: parsed, allowInsecure: false) != nil {
+                    Text("This URL is plain http on a host that isn't this Mac or the LAN. TypstEdit won't connect to it unless you allow an insecure connection.")
+                        .font(.caption2).foregroundColor(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Remote servers speak \(transport == .http ? "Streamable HTTP (MCP 2025-03-26), which is what servers offer today" : "the older HTTP+SSE transport (MCP 2024-11-05)"). A server that answers 401 gets a browser sign-in: TypstEdit discovers the service, registers itself, and keeps the token in \(MCPSecrets.displayPath) — never in mcp.json.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -371,6 +461,7 @@ private struct MCPServerEditorSheet: View {
             url = scoped.config.url ?? ""
             headersText = scoped.config.headers.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
             enabled = scoped.config.enabled
+            allowInsecure = scoped.config.allowInsecure
         }
     }
 
@@ -381,6 +472,7 @@ private struct MCPServerEditorSheet: View {
         config.args = argsText.split(separator: " ").map(String.init)
         config.url = url.trimmingCharacters(in: .whitespacesAndNewlines)
         config.enabled = enabled
+        config.allowInsecure = transport == .stdio ? false : allowInsecure
 
         var env: [String: String] = [:]
         for line in envText.split(separator: "\n") {

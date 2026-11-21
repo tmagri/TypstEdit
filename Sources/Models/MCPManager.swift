@@ -25,9 +25,12 @@ final class MCPManager: ObservableObject {
     /// produce one handshake, not one per call — see `reconnectAndRetry`.
     private var reconnects: [String: Task<Void, Never>] = [:]
     private var peerObserver: NSObjectProtocol?
+    /// Replaces the clients a start builds, so a test can point them at a
+    /// fake transport. Nil in production.
+    var makeClient: ((MCPServerConfig) -> MCPClient)?
 
-    init() {
-        refreshGlobal()
+    init(skipConfigLoad: Bool = false) {
+        if !skipConfigLoad { refreshGlobal() }
         peerObserver = NotificationCenter.default.addObserver(
             forName: .globalAIConfigurationDidChange, object: nil, queue: .main
         ) { [weak self] notification in
@@ -146,7 +149,15 @@ final class MCPManager: ObservableObject {
             return existing
         }
 
-        let client = MCPClient(config: scoped.config)
+        let client = makeClient.map { $0(scoped.config) } ?? MCPClient(config: scoped.config)
+        // A server that adds or removes a tool mid-session says so with
+        // `notifications/tools/list_changed`. Re-read its catalogue then, so
+        // the model's next turn declares what the server has now, rather than
+        // offering a tool that is gone or hiding one that just appeared.
+        client.onToolsChanged = { [weak self, weak client] in
+            guard let self, let client else { return }
+            Task { await self.refreshTools(scoped, client: client) }
+        }
         clients[scoped.id] = client
         do {
             try await client.start()
@@ -156,11 +167,34 @@ final class MCPManager: ObservableObject {
             lastErrors.removeValue(forKey: scoped.id)
             return client
         } catch {
-            lastErrors[scoped.id] = error.localizedDescription
             clients.removeValue(forKey: scoped.id)
             runningServerIDs.remove(scoped.id)
+            toolsByServerID.removeValue(forKey: scoped.id)
+            // The user's Stop is not the server's fault.
+            //
+            // This is the shape the MCP hang is reported in: the handshake
+            // never answered, the user pressed Stop, and the cancellation
+            // was written into `lastErrors` — which Settings and the chat's
+            // Tools menu then showed forever as "Swift.CancellationError
+            // error 1". The server was fine; the start was abandoned.
+            // Recording nothing leaves the row honest ("not running"), and
+            // the next turn simply tries again.
+            guard !Self.isCancellation(error) else { return nil }
+            lastErrors[scoped.id] = error.localizedDescription
             return nil
         }
+    }
+
+    /// Whether a failed start was really the user stopping the run.
+    ///
+    /// Matches the shapes cancellation actually arrives in: the MCP client
+    /// resumes with `CancellationError`, `URLSession` reports
+    /// `URLError.cancelled`, and a task asked to stop may surface either.
+    nonisolated static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return true }
+        return false
     }
 
     func stopClient(id: String) {
@@ -168,6 +202,26 @@ final class MCPManager: ObservableObject {
         clients.removeValue(forKey: id)
         runningServerIDs.remove(id)
         toolsByServerID.removeValue(forKey: id)
+    }
+
+    /// Re-reads one live server's catalogue after it announced a change.
+    ///
+    /// Guarded on identity: a notification can arrive after the client was
+    /// replaced by a reconnect, and the old one's reply must not overwrite the
+    /// new one's list. A failed re-read keeps the previous catalogue and
+    /// records the error — a server whose `tools/list` transiently fails is
+    /// still better used with its last known tools than dropped entirely.
+    func refreshTools(_ scoped: ScopedMCPServer, client: MCPClient) async {
+        guard clients[scoped.id] === client, client.isRunning else { return }
+        do {
+            let tools = try await client.listTools()
+            guard clients[scoped.id] === client else { return }
+            toolsByServerID[scoped.id] = tools
+            lastErrors.removeValue(forKey: scoped.id)
+        } catch {
+            guard clients[scoped.id] === client else { return }
+            lastErrors[scoped.id] = error.localizedDescription
+        }
     }
 
     func stopAll() {

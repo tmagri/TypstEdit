@@ -29,7 +29,19 @@ protocol MCPTransport: AnyObject, Sendable {
     /// The protocol version the `initialize` reply settled on. Streamable
     /// HTTP repeats it on every later request.
     func didNegotiate(protocolVersion: String)
+    /// What the server promised in its `initialize` reply. A transport that
+    /// can only receive unsolicited messages by opening something extra uses
+    /// this to decide whether that is worth doing; see
+    /// `MCPStreamableHTTPTransport.didLearnServerCapabilities`.
+    func didLearnServerCapabilities(toolsListChanged: Bool)
     func close()
+}
+
+extension MCPTransport {
+    /// Default: the transport's existing channel already carries whatever
+    /// the server sends (stdio's stdout, the legacy SSE stream), so there is
+    /// nothing extra to open.
+    func didLearnServerCapabilities(toolsListChanged: Bool) {}
 }
 
 /// A remote transport that can carry an OAuth token and sign in when asked
@@ -94,8 +106,24 @@ final class MCPStdioTransport: MCPTransport {
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stdoutHandle: FileHandle?
+    private var stderrHandle: FileHandle?
     private var stdoutBuffer = Data()
     private var onMessage: MCPMessageSink?
+
+    /// What the child wrote to its error stream, capped. A program that is
+    /// not an MCP server usually explains itself there (`typstedit: no such
+    /// option`, `Usage: …`), so it is the most useful part of a failed
+    /// handshake. Never drained before, which is its own bug: a child that
+    /// filled the pipe buffer blocked forever on its next write.
+    private var errorBuffer = Data()
+    /// What `recentErrorOutput` reports — the tail, since a server that logs
+    /// steadily would otherwise bury the reason under its own noise.
+    var recentErrorOutput: String {
+        String(decoding: errorBuffer, as: UTF8.self)
+    }
+    /// The pipe holds ~64 KB; keeping the last 4 KB is enough to name the
+    /// reason and bounds what a chatty server costs in memory.
+    private static let maxErrorBytes = 4_096
 
     var repliesInline: Bool { false }
 
@@ -126,12 +154,26 @@ final class MCPStdioTransport: MCPTransport {
         process.standardError = stderr
         stdinHandle = stdin.fileHandleForWriting
         stdoutHandle = stdout.fileHandleForReading
+        stderrHandle = stderr.fileHandleForReading
 
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             Task { @MainActor [weak self] in
                 self?.handleIncoming(data)
+            }
+        }
+
+        // Drain stderr. Two reasons, and the second is a real hang: an
+        // undrained pipe blocks the child as soon as it fills (~64 KB), so a
+        // server that logs a lot would stop answering with nothing in the
+        // chat to explain why. The text is also what a failed handshake
+        // quotes back to the user.
+        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            Task { @MainActor [weak self] in
+                self?.appendErrorOutput(data)
             }
         }
 
@@ -162,12 +204,22 @@ final class MCPStdioTransport: MCPTransport {
 
     func close() {
         stdoutHandle?.readabilityHandler = nil
+        stderrHandle?.readabilityHandler = nil
         process?.terminationHandler = nil
         process?.terminate()
         process = nil
         stdinHandle = nil
         stdoutHandle = nil
+        stderrHandle = nil
         onMessage = nil
+    }
+
+    /// Keeps the tail of what the child complained about.
+    private func appendErrorOutput(_ data: Data) {
+        errorBuffer.append(data)
+        if errorBuffer.count > Self.maxErrorBytes {
+            errorBuffer.removeFirst(errorBuffer.count - Self.maxErrorBytes)
+        }
     }
 
     private func handleIncoming(_ data: Data) {
@@ -229,6 +281,15 @@ final class MCPStreamableHTTPTransport: MCPTransport {
     private var sessionID: String?
     private var protocolVersion: String?
     private var onMessage: MCPMessageSink?
+    /// The standalone GET stream, when one is open or being retried.
+    ///
+    /// Not paired with an `onClose` sink on purpose: losing this stream costs
+    /// the notification, not the session — every request still works over
+    /// POST — so it must not report the connection as gone.
+    private var streamTask: Task<Void, Never>?
+    /// Set once the server refused the GET stream, so a reconnect does not
+    /// ask again in the same session.
+    private var serverRefusedStream = false
 
     /// The current access token, when signed in. Read fresh on every
     /// request, so a refresh that happened in between is picked up.
@@ -317,7 +378,81 @@ final class MCPStreamableHTTPTransport: MCPTransport {
         self.protocolVersion = protocolVersion
     }
 
+    /// Opens the standalone GET stream when the server said it will announce
+    /// tool changes. The spec allows one; without it a `list_changed`
+    /// notification has nowhere to arrive, because a POST's reply stream is
+    /// tied to the request that opened it.
+    ///
+    /// Deliberately best-effort: a server that answers 405 does not offer the
+    /// stream, and the tools TypstEdit already listed remain usable. Failure
+    /// here must never fail the handshake.
+    func didLearnServerCapabilities(toolsListChanged: Bool) {
+        guard toolsListChanged, !serverRefusedStream, streamTask == nil else { return }
+        streamTask = Task { [weak self] in
+            await self?.openStream()
+        }
+    }
+
+    /// Holds the GET stream open, reading every message the server sends
+    /// unsolicited. Ends when the stream ends or the transport is closed.
+    private func openStream() async {
+        defer { streamTask = nil }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        // The stream is expected to sit silent between notifications; only a
+        // dead connection should end it.
+        request.timeoutInterval = 86_400
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        if let sessionID { request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id") }
+        if let protocolVersion { request.setValue(protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version") }
+        // An explicit Authorization header in the server config wins, exactly
+        // as it does on POST; otherwise the OAuth token is read fresh.
+        if request.value(forHTTPHeaderField: "Authorization") == nil,
+           let token = accessToken?() {
+            request.setValue(token.authorizationHeader, forHTTPHeaderField: "Authorization")
+        }
+
+        let session = urlSession
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else { return }
+            // 405 is the spec's "this endpoint offers no stream". Remember it
+            // so a reconnect does not repeat a known refusal.
+            if http.statusCode == 405 {
+                serverRefusedStream = true
+                return
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                // A 401 is the client's to handle on its next request; the
+                // stream is not the place to start a sign-in the user has not
+                // seen. Anything else is not worth surfacing either: the
+                // session itself is still usable over POST.
+                if http.statusCode == 401 { serverRefusedStream = true }
+                return
+            }
+            try await MCPHTTP.readEvents(bytes) { [weak self] event in
+                guard event.event == "message", !event.data.isEmpty else { return }
+                await self?.deliver(Data(event.data.utf8))
+            }
+        } catch {
+            // A closed or broken stream costs notifications, not the session.
+            // The next successful reconnect opens a new one.
+        }
+    }
+
+    /// Hands one unsolicited message to the client, which routes it (a
+    /// notification) or answers it (a request, e.g. a ping).
+    private func deliver(_ data: Data) {
+        onMessage?(data)
+    }
+
     func close() {
+        streamTask?.cancel()
+        streamTask = nil
         onMessage = nil
         guard let sessionID else { return }
         self.sessionID = nil
@@ -410,12 +545,13 @@ final class MCPLegacySSETransport: MCPTransport {
                     }
                     throw MCPHTTP.statusError(status: status, body: "", url: baseURL)
                 }
-                try await MCPHTTP.readEvents(bytes) { event in
+                try await MCPHTTP.readEvents(bytes) { [weak self] event in
+                    guard let self else { return }
                     if event.event == "endpoint" {
                         let target = URL(string: event.data.trimmingCharacters(in: .whitespacesAndNewlines), relativeTo: baseURL)?.absoluteURL
-                        await self?.receivedEndpoint(target)
+                        await self.receivedEndpoint(target)
                     } else if event.event == "message", !event.data.isEmpty {
-                        await self?.deliver(Data(event.data.utf8))
+                        await self.deliver(Data(event.data.utf8))
                     }
                 }
                 await self?.streamEnded(MCPError.protocolError("The server closed the event stream."))
@@ -608,7 +744,7 @@ enum MCPHTTP {
     /// ends an SSE event.
     static func readEvents(
         _ bytes: URLSession.AsyncBytes,
-        onEvent: (SSEEvent) async -> Void
+        onEvent: @Sendable (SSEEvent) async -> Void
     ) async throws {
         var parser = SSEParser()
         var line: [UInt8] = []

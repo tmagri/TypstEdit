@@ -135,6 +135,47 @@ struct MCPOAuthEndpoint: Equatable {
 
 /// Where the discovery documents live. Pure URL arithmetic, per spec.
 enum MCPOAuthDiscovery {
+    /// True for a host that is this machine (loopback) or a private/LAN address:
+    /// the hosts where a plain `http://` sign-in is a reasonable choice, because
+    /// there is no network segment for an attacker to sit on. Used to decide
+    /// whether an `http://` authorization endpoint is acceptable (everywhere
+    /// else the sign-in must be `https`).
+    static func isLocalHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]" { return true }
+        // `*.local` is Bonjour/mDNS on the local link.
+        if host.hasSuffix(".local") { return true }
+        // RFC 1918 private ranges and link-local: the LAN, not the internet.
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4 else { return false }
+        switch (octets[0], octets[1]) {
+        case (10, _): return true
+        case (192, 168): return true
+        case (172, 16...31): return true
+        case (169, 254): return true
+        default: return false
+        }
+    }
+
+    /// Whether a sign-in may use `authorizationURL`. Always yes over https. Over plain http,
+    /// only when the page is on this machine or the LAN, or on the same origin (scheme, host,
+    /// port) as the MCP server the user configured over http. In that last case the user has
+    /// already chosen to send this server's tokens in clear text, so a sign-in page on the same
+    /// host adds no new exposure. An http sign-in page on any other host is still refused: it
+    /// would hand the code to a server the user never chose.
+    static func isAcceptableAuthorizationEndpoint(_ authorizationURL: URL, resource: URL) -> Bool {
+        if authorizationURL.scheme?.lowercased() == "https" { return true }
+        if isLocalHost(authorizationURL.host) { return true }
+        return isSameOrigin(authorizationURL, resource)
+    }
+
+    static func isSameOrigin(_ a: URL, _ b: URL) -> Bool {
+        guard let schemeA = a.scheme?.lowercased(), let schemeB = b.scheme?.lowercased(),
+              let hostA = a.host?.lowercased(), let hostB = b.host?.lowercased() else { return false }
+        func port(_ url: URL, _ scheme: String) -> Int? { url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : nil) }
+        return schemeA == schemeB && hostA == hostB && port(a, schemeA) == port(b, schemeB)
+    }
+
     /// `https://host/prefix/path` → `https://host/.well-known/oauth-protected-resource/prefix/path`
     ///
     /// RFC 9728 inserts the well-known segment before the resource's path,
@@ -286,6 +327,34 @@ enum MCPHTTPSessions {
         configuration.waitsForConnectivity = false
         return URLSession(configuration: configuration)
     }()
+
+    /// The session for servers with `allowInsecure` on, and only for those. It accepts any
+    /// server certificate (self-signed, expired, or issued for another name), so it must never
+    /// be used for a server that did not opt in. Plain http needs nothing extra here: the
+    /// policy for that is `MCPServerConfig.insecureRefusal`.
+    static let insecure: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 1_800
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration, delegate: TrustAnyCertificate(), delegateQueue: nil)
+    }()
+
+    /// Accepts the server's certificate without evaluating it. Every other challenge (client
+    /// certificates, HTTP auth) is handled the default way.
+    final class TrustAnyCertificate: NSObject, URLSessionDelegate, Sendable {
+        func urlSession(
+            _ session: URLSession,
+            didReceive challenge: URLAuthenticationChallenge,
+            completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+        ) {
+            guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+                  let trust = challenge.protectionSpace.serverTrust else {
+                completionHandler(.performDefaultHandling, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        }
+    }
 }
 
 /// The HTTP seam, so the whole flow can run against a fake authorization
@@ -328,6 +397,8 @@ final class MCPOAuthFlow {
     /// halves — the browser that visits the URL, and the server that answers
     /// with a redirect — with no network.
     var browser: (@MainActor (URL) async throws -> URL)?
+    /// The server's `allowInsecure`: its sign-in page may then be plain http on any host.
+    var allowInsecure = false
 
     init(
         http: any MCPOAuthHTTP = MCPURLSessionHTTP(),
@@ -464,10 +535,9 @@ final class MCPOAuthFlow {
         endpoint: MCPOAuthEndpoint,
         existingClient: MCPOAuthClient?
     ) async throws -> MCPOAuthCredentials {
-        guard endpoint.authorizationURL.scheme?.lowercased() == "https"
-                || endpoint.authorizationURL.host == "127.0.0.1"
-                || endpoint.authorizationURL.host == "localhost" else {
-            throw MCPOAuthError.discoveryFailed("the authorization endpoint is not https")
+        guard allowInsecure
+                || MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(endpoint.authorizationURL, resource: resource) else {
+            throw MCPOAuthError.discoveryFailed("the authorization endpoint \(endpoint.authorizationURL.host ?? "") is not https, and it is not on the same server as the MCP URL. If you trust it, turn on \"Allow insecure connection\" for this server")
         }
 
         let listener = try MCPLoopbackListener()
@@ -682,8 +752,8 @@ final class MCPOAuthClientStore {
     private let write: (String, String) -> Void
 
     init(
-        read: @escaping (String) -> String? = MCPKeychain.read(key:),
-        write: @escaping (String, String) -> Void = MCPKeychain.write(key:value:)
+        read: @escaping (String) -> String? = MCPSecrets.read(key:),
+        write: @escaping (String, String) -> Void = MCPSecrets.write(key:value:)
     ) {
         self.read = read
         self.write = write
@@ -703,8 +773,9 @@ final class MCPOAuthClientStore {
     }
 }
 
-/// Tokens and the registered client, one entry per MCP server, in the macOS
-/// Keychain. Never in `mcp.json`: that file is meant to be shareable.
+/// Tokens and the registered client, one entry per MCP server, in a file only
+/// this user can read (see `MCPSecrets` for why that is not the Keychain).
+/// Never in `mcp.json`: that file is meant to be shareable.
 @MainActor
 final class MCPOAuthStore {
     let keyPrefix: String
@@ -714,9 +785,9 @@ final class MCPOAuthStore {
 
     init(
         keyPrefix: String = "oauth:",
-        read: @escaping (String) -> String? = MCPKeychain.read(key:),
-        write: @escaping (String, String) -> Void = MCPKeychain.write(key:value:),
-        remove: @escaping (String) -> Void = MCPKeychain.delete(key:)
+        read: @escaping (String) -> String? = MCPSecrets.read(key:),
+        write: @escaping (String, String) -> Void = MCPSecrets.write(key:value:),
+        remove: @escaping (String) -> Void = MCPSecrets.delete(key:)
     ) {
         self.keyPrefix = keyPrefix
         self.read = read

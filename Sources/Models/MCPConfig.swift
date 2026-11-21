@@ -60,6 +60,14 @@ struct MCPServerConfig: Codable, Identifiable, Equatable {
     /// `delete_file`. Empty means "every tool the server advertises".
     var disabledTools: [String] = []
 
+    /// Lets this server be reached without transport security: plain `http://` to any host
+    /// (not only this machine or the LAN), and an `https://` certificate that is self-signed,
+    /// expired or issued for another name. Meant for internal services that have no
+    /// certificate. Off by default. With it off, a remote server over plain http is refused
+    /// unless it is local. Settings shows an orange warning on every server that has it on.
+    /// Ignored for stdio servers.
+    var allowInsecure: Bool = false
+
     var id: String { name }
 
     var isConfigured: Bool {
@@ -88,7 +96,8 @@ struct MCPServerConfig: Codable, Identifiable, Equatable {
         url: String? = nil,
         headers: [String: String] = [:],
         enabled: Bool = true,
-        disabledTools: [String] = []
+        disabledTools: [String] = [],
+        allowInsecure: Bool = false
     ) {
         self.name = name
         self.transport = transport
@@ -99,6 +108,7 @@ struct MCPServerConfig: Codable, Identifiable, Equatable {
         self.headers = headers
         self.enabled = enabled
         self.disabledTools = disabledTools
+        self.allowInsecure = allowInsecure
     }
 }
 
@@ -109,6 +119,7 @@ extension MCPServerConfig {
     private enum LenientKeys: String, CodingKey {
         case name, transport, type, command, args, env, environment, url, headers
         case enabled, disabled, disabledTools
+        case allowInsecure, insecure, allowInsecureConnections
     }
 
     /// Decodes TypstEdit's own entries and the shapes other MCP clients write.
@@ -160,6 +171,21 @@ extension MCPServerConfig {
             self.enabled = true
         }
         disabledTools = try container.decodeIfPresent([String].self, forKey: .disabledTools) ?? []
+        // Absent means off. `insecure` / `allowInsecureConnections` are accepted spellings for a
+        // hand-written mcp.json; TypstEdit itself writes `allowInsecure`.
+        allowInsecure = (try? container.decodeIfPresent(Bool.self, forKey: .allowInsecure))
+            ?? (try? container.decodeIfPresent(Bool.self, forKey: .insecure))
+            ?? (try? container.decodeIfPresent(Bool.self, forKey: .allowInsecureConnections))
+            ?? false
+    }
+
+    /// Why this server may not be connected to as configured, or nil when it may. A remote
+    /// server over plain http on a host that is not this machine or the LAN needs
+    /// `allowInsecure`: the token and every tool result would cross the network unencrypted.
+    static func insecureRefusal(for url: URL, allowInsecure: Bool) -> MCPError? {
+        guard !allowInsecure, url.scheme?.lowercased() == "http",
+              !MCPOAuthDiscovery.isLocalHost(url.host) else { return nil }
+        return .insecureConnectionNotAllowed(host: url.host ?? url.absoluteString)
     }
 }
 

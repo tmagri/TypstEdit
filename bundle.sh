@@ -398,6 +398,21 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
             </dict>
         </dict>
     </array>
+    <!--
+      App Transport Security. ATS is app-wide, so it cannot be relaxed for one MCP server only.
+      It is therefore off at the OS level, and TypstEdit enforces the rule per server instead:
+      a remote MCP server over plain http on a host that is not this machine or the LAN is
+      refused unless that server has "allowInsecure" on (MCPServerConfig.insecureRefusal), and
+      Settings marks every such server with an orange warning. Local networking (Ollama on
+      localhost, a Typst/CAS helper on 127.0.0.1) keeps working, as it does by default.
+      Keep NSAllowsArbitraryLoads on its own: macOS ignores it when NSAllowsLocalNetworking or
+      the other NSAllowsArbitraryLoads* keys are present.
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
 </dict>
 </plist>
 EOF
