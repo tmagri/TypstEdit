@@ -2867,7 +2867,8 @@ final class AIChatManager: ObservableObject {
                 systemTail: systemTail.isEmpty ? nil : systemTail,
                 prompt: openingPrompt,
                 images: pendingImages,
-                maxTokens: settings.chatMaxTokens,
+                maxTokens: settings.effectiveChatMaxTokens,
+                maxTokensCeiling: settings.chatMaxTokensCeiling,
                 maxTurns: settings.effectiveMaxTurns(for: ctx),
                 tools: await availableTools(),
                 repeatCallLimit: settings.effectiveRepeatCallLimit(for: ctx),
@@ -4664,7 +4665,8 @@ final class AIChatManager: ObservableObject {
         return try await service.fetchCompletionWithTools(
             systemPrompt: systemPrompt,
             prompt: prompt,
-            maxTokens: settings.chatMaxTokens,
+            maxTokens: settings.effectiveChatMaxTokens,
+            maxTokensCeiling: settings.chatMaxTokensCeiling,
             maxTurns: turns > 0 ? turns : nil,
             tools: subTools,
             // The repeat guard runs on the same model as the main chat, so

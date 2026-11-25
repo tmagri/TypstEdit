@@ -417,6 +417,21 @@ extension AISettingsManager {
         learnedMaxTokens = updated
     }
 
+    /// Forgets a remembered budget for a model, so the next request starts
+    /// from the user's setting again.
+    ///
+    /// Needed because the store only ever grows: a cap learned from an earlier
+    /// model (a larger window, a different endpoint) that the provider now
+    /// refuses would otherwise be remembered forever, and every new
+    /// conversation would spend a refused request relearning it.
+    func forgetMaxTokens(for ctx: ModelContext) {
+        let key = Self.learnedBudgetKey(for: ctx)
+        guard learnedMaxTokens[key] != nil else { return }
+        var updated = learnedMaxTokens
+        updated.removeValue(forKey: key)
+        learnedMaxTokens = updated
+    }
+
     // MARK: Observed reasoning cost
 
     /// The most hidden-reasoning tokens this model has been observed to spend

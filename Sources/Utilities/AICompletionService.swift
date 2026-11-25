@@ -83,6 +83,23 @@ final class AICompletionService: ObservableObject {
 
     /// Default per-request output budget, in tokens.
     static let defaultMaxTokens = 4_096
+
+    /// The smallest output budget a request may carry.
+    ///
+    /// `max_tokens` has to be a positive integer: a provider answers 0 with
+    /// `max_tokens must be a positive integer` (HTTP 400) before any model
+    /// work happens, so the chat shows a red error and no reply. A 0 reaching
+    /// the wire is never a request for zero output — it is a caller that
+    /// passed an unresolved "automatic" setting straight through — so the
+    /// builders floor it here instead of trusting every call site to resolve
+    /// one.
+    nonisolated static let minimumOutputBudget = 1
+
+    /// An output budget safe to send: never zero or negative.
+    nonisolated static func outputBudget(_ tokens: Int) -> Int {
+        max(tokens, minimumOutputBudget)
+    }
+
     /// The widest output budget a request may widen itself to when a reply is
     /// cut off by `max_tokens`.
     ///
@@ -96,6 +113,11 @@ final class AICompletionService: ObservableObject {
     /// "the budget can be remembered at that size" from disagreeing.
     nonisolated static var maxTokensCeiling: Int { AISettingsManager.learnedMaxTokensCeiling }
 
+    /// How many times one request may lower its cap after the provider refuses
+    /// it. Two covers "the stated cap is still too big for a stricter limit"
+    /// without letting a misclassified error retry forever.
+    nonisolated static let maxCapReductions = 2
+
     /// The failure to report when a reply came back with no visible text.
     ///
     /// A reply cut off at the widest allowed budget gets named for what it is:
@@ -106,9 +128,10 @@ final class AICompletionService: ObservableObject {
     nonisolated static func emptyReplyError(
         meta: AIChatStepMeta,
         budget: Int,
-        attempts: Int
+        attempts: Int,
+        ceiling: Int = AICompletionService.maxTokensCeiling
     ) -> AIError {
-        if meta.hitTokenLimit, budget >= AISettingsManager.learnedMaxTokensCeiling {
+        if meta.hitTokenLimit, budget >= ceiling {
             return .reasoningAteTheBudget(
                 reasoningTokens: meta.usage?.reasoning ?? 0,
                 budget: budget
@@ -134,13 +157,50 @@ final class AICompletionService: ObservableObject {
     /// honest error into a cascade of requests that each end the same way.
     nonisolated static func widenedBudgetAfterCutoff(
         meta: AIChatStepMeta,
-        budget: Int
+        budget: Int,
+        ceiling: Int = AICompletionService.maxTokensCeiling
     ) -> Int? {
-        guard meta.hitTokenLimit, budget < maxTokensCeiling else { return nil }
+        guard meta.hitTokenLimit, budget < ceiling else { return nil }
         let suggested = meta.suggestedBudgetAfterCutoff(currentBudget: budget)
         let target = suggested > budget ? suggested : budget * 2
-        let widened = min(maxTokensCeiling, target)
+        let widened = min(ceiling, target)
         return widened > budget ? widened : nil
+    }
+
+    /// Whether a provider's error means it refused the requested output cap
+    /// (`max_tokens`) as too large — a model with a hard 8,192 cap answers a
+    /// 16,384 request with "max_tokens must be less than 8192".
+    ///
+    /// Kept apart from `isContextOverflow`: the prompt is fine, only the reply
+    /// cap is wrong, so the recovery is to go back to the cap the provider
+    /// last accepted, not to send less of the conversation. Deliberately
+    /// narrow — the words `max_tokens`/`max_completion_tokens`/`output tokens`
+    /// have to appear, so a prompt-too-long message cannot be mistaken for it.
+    nonisolated static func isTokenCapRejection(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        guard !isContextOverflowMessage(message) else { return false }
+        return ["max_tokens", "max_completion_tokens", "max tokens", "maximum tokens", "output tokens", "max_output_tokens"]
+            .contains { lower.contains($0) }
+    }
+
+    /// The output cap a rejection message states, when it states one.
+    ///
+    /// Most providers say the number ("max_tokens must be less than 8192",
+    /// "maximum is 4096"), and using it is exact, where guessing a smaller cap
+    /// costs another refused request per step. Only numbers in a plausible
+    /// range are taken: a message that mentions years or IDs must not be read
+    /// as a cap. "less than N" is exclusive, so it yields N - 1.
+    nonisolated static func statedTokenCap(in message: String) -> Int? {
+        let lower = message.lowercased()
+        let numbers = lower
+            .split(whereSeparator: { !$0.isNumber })
+            .compactMap { Int($0) }
+            .filter { $0 >= 64 && $0 <= 1_000_000 }
+        guard let smallest = numbers.min() else { return nil }
+        let exclusive = lower.contains("less than \(smallest)")
+            || lower.contains("below \(smallest)")
+            || lower.contains("under \(smallest)")
+        return exclusive ? max(1, smallest - 1) : smallest
     }
 
     /// Strips `<think>`/`<thought>` tags some local/open models emit inline
@@ -233,6 +293,11 @@ final class AICompletionService: ObservableObject {
     ///   - prompt: The user turn (the folded transcript, for chat sends).
     ///   - maxTokens: The starting output budget; a reply cut off by
     ///     `max_tokens` is retried with a doubled cap up to `maxTokensCeiling`.
+    ///     Always sent as a positive integer: a 0 is floored rather than
+    ///     passed on, because providers refuse it with HTTP 400.
+    ///   - maxTokensCeiling: The widest cap widening may reach, or `nil` to
+    ///     keep the starting cap fixed (the chat's "Retry a cut-off reply"
+    ///     switch off).
     ///   - maxTurns: Maximum number of model turns (a turn = one model
     ///     request plus any tool calls it makes). `nil` = unlimited.
     ///   - autoContinueUnlimited: Keep auto-continuing stalled/empty replies
@@ -273,6 +338,10 @@ final class AICompletionService: ObservableObject {
         /// again on each round.
         images: [ChatImage] = [],
         maxTokens: Int = AICompletionService.defaultMaxTokens,
+        /// How far a cut-off reply may be widened, or `nil` to keep the cap
+        /// fixed. Defaults to the shared learned-budget ceiling, which is what
+        /// every caller wanted before the setting existed.
+        maxTokensCeiling: Int? = AICompletionService.maxTokensCeiling,
         maxTurns: Int? = 8,
         tools: [MCPTool],
         repeatCallLimit: Int = 2,
@@ -378,7 +447,22 @@ final class AICompletionService: ObservableObject {
         // Starting above the observed peak is what stops the first reply of
         // a new conversation from being cut off at all.
         let reasoningAware = AISettingsManager.shared.reasoningAwareMaxTokens(for: ctx, setting: maxTokens)
-        var currentMaxTokens = max(learnedMaxTokens, reasoningAware ?? learnedMaxTokens)
+        var currentMaxTokens = max(Self.outputBudget(learnedMaxTokens), reasoningAware ?? learnedMaxTokens)
+        /// The largest cap this request may widen to. The caller's number
+        /// (the chat's Reply Size × 4, or nil when retrying is off) wins;
+        /// the shared learned-budget ceiling is only the default. Never below
+        /// the starting cap, so a caller whose learned budget already sits
+        /// above its own ceiling cannot make the loop shrink it.
+        let wideningCeiling = max(maxTokensCeiling ?? Self.maxTokensCeiling, currentMaxTokens)
+        /// The last cap the provider actually accepted. A widened request the
+        /// provider refuses is retried at this number instead of failing the
+        /// turn, which is what Settings promises. `nil` until a request
+        /// succeeds, so a remembered cap the provider no longer honours falls
+        /// back to the caller's own setting rather than to itself.
+        var acceptedMaxTokens: Int? = nil
+        /// How many times this request has lowered its cap after the provider
+        /// refused it. Bounded so a misread error cannot become a loop.
+        var capReductions = 0
         var turns = 0
         var autoContinues = 0
         /// Attempts spent before this turn, handed in by the caller so the
@@ -546,6 +630,38 @@ final class AICompletionService: ObservableObject {
                     throw error
 
                 case .httpError(let status, let body, _):
+                    // The provider refused the *reply cap* itself (a model with
+                    // a hard 8,192 limit answering a 16,384 request): the
+                    // prompt is fine, so send a smaller cap instead of failing
+                    // the turn. This is what Settings promises — "If a
+                    // provider refuses a raised cap, the chat goes back to the
+                    // last cap it accepted".
+                    //
+                    // Bounded: each attempt must strictly lower the cap, and a
+                    // few attempts are the most worth spending. A provider that
+                    // answers 400 for some other reason mentioning tokens
+                    // cannot turn this into a loop.
+                    if Self.isTokenCapRejection(body),
+                       capReductions < Self.maxCapReductions,
+                       !Task.isCancelled {
+                        // Prefer the number the provider stated; then the last
+                        // cap it accepted; then the caller's own setting. Only
+                        // fall back to a blind step down when nothing better
+                        // is on offer.
+                        let stated = Self.statedTokenCap(in: body)
+                        let candidate = stated ?? acceptedMaxTokens ?? maxTokens
+                        let target = Self.outputBudget(min(currentMaxTokens - 1, candidate))
+                        if target < currentMaxTokens {
+                            capReductions += 1
+                            onStatus?("The provider refused the reply cap — retrying at \(target) tokens…")
+                            currentMaxTokens = target
+                            // Forget the cap the provider just refused, so the
+                            // next conversation starts at the smaller one
+                            // instead of re-learning the same refusal.
+                            AISettingsManager.shared.forgetMaxTokens(for: ctx)
+                            continue
+                        }
+                    }
                     // The prompt is over the model's window. Nothing streamed,
                     // so shrink what the loop is carrying and send it again —
                     // the same compression the budget check applies, only
@@ -634,6 +750,10 @@ final class AICompletionService: ObservableObject {
                     AISettingsManager.shared.rememberReasoningUsage(usage.reasoning, for: ctx)
                 }
             }
+            // This cap was accepted, so it is the one to fall back to if a
+            // later widened cap is refused. Tracked after the response, not
+            // before the request: a refusal throws and must not overwrite it.
+            acceptedMaxTokens = currentMaxTokens
 
             switch step {
             case .finalText(let text, _):
@@ -651,7 +771,9 @@ final class AICompletionService: ObservableObject {
                 // auto-continue budget on requests that cannot succeed — that
                 // is what turned one over-budgeted review into four silent
                 // requests and the misleading "the model sent no reply".
-                if let widened = Self.widenedBudgetAfterCutoff(meta: meta, budget: currentMaxTokens) {
+                if let widened = Self.widenedBudgetAfterCutoff(
+                    meta: meta, budget: currentMaxTokens, ceiling: wideningCeiling
+                ) {
                     AISettingsManager.shared.rememberMaxTokens(widened, for: ctx)
                     currentMaxTokens = widened
                     if let reasoning = meta.usage?.reasoning, reasoning > 0 {
@@ -667,7 +789,9 @@ final class AICompletionService: ObservableObject {
                     // reply a fresh request could clear.
                     guard !lastAnswer.isEmpty else {
                         throw Self.emptyReplyError(
-                            meta: meta, budget: currentMaxTokens, attempts: autoContinueStartingDebt + autoContinues
+                            meta: meta, budget: currentMaxTokens,
+                            attempts: autoContinueStartingDebt + autoContinues,
+                            ceiling: wideningCeiling
                         )
                     }
                     return lastAnswer
@@ -693,7 +817,9 @@ final class AICompletionService: ObservableObject {
                 // widest budget is named for what it really is.
                 guard !lastAnswer.isEmpty else {
                     throw Self.emptyReplyError(
-                        meta: meta, budget: currentMaxTokens, attempts: autoContinueStartingDebt + autoContinues
+                        meta: meta, budget: currentMaxTokens,
+                        attempts: autoContinueStartingDebt + autoContinues,
+                        ceiling: wideningCeiling
                     )
                 }
                 return lastAnswer
@@ -734,7 +860,9 @@ final class AICompletionService: ObservableObject {
                     // budget that reasoning ate is reported as such.
                     guard !lastAnswer.isEmpty else {
                         throw Self.emptyReplyError(
-                            meta: finalMeta, budget: currentMaxTokens, attempts: autoContinueStartingDebt + autoContinues
+                            meta: finalMeta, budget: currentMaxTokens,
+                            attempts: autoContinueStartingDebt + autoContinues,
+                            ceiling: wideningCeiling
                         )
                     }
                     return lastAnswer
@@ -1199,13 +1327,14 @@ final class AICompletionService: ObservableObject {
         }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        let budget = outputBudget(maxTokens)
         let body: [String: Any]
         if ctx.isAnthropic {
-            var anthropic = anthropicBody(messages: messages, tools: tools, maxTokens: maxTokens, effort: ctx.reasoningEffort, temperature: ctx.temperature)
+            var anthropic = anthropicBody(messages: messages, tools: tools, maxTokens: budget, effort: ctx.reasoningEffort, temperature: ctx.temperature)
             anthropic["model"] = ctx.model
             body = anthropic
         } else {
-            var openAI = openAIBody(messages: messages, tools: tools, maxTokens: maxTokens, effort: ctx.reasoningEffort, stream: true, temperature: ctx.temperature)
+            var openAI = openAIBody(messages: messages, tools: tools, maxTokens: budget, effort: ctx.reasoningEffort, stream: true, temperature: ctx.temperature)
             openAI["model"] = ctx.model
             body = openAI
         }
@@ -1263,7 +1392,7 @@ final class AICompletionService: ObservableObject {
         var body: [String: Any] = [
             "model": "",  // filled by caller
             "messages": wire,
-            "max_tokens": maxTokens,
+            "max_tokens": outputBudget(maxTokens),
         ]
         // Callers pass the model name through the closure below; keep the
         // builder pure by accepting it separately.
@@ -1381,7 +1510,9 @@ final class AICompletionService: ObservableObject {
         let budget = effort.anthropicBudgetTokens
         var body: [String: Any] = [
             "model": "",
-            "max_tokens": budget > 0 ? max(maxTokens, budget + 1_024) : maxTokens,
+            "max_tokens": budget > 0
+                ? max(outputBudget(maxTokens), budget + 1_024)
+                : outputBudget(maxTokens),
             "messages": wire,
             "stream": true,
         ]
@@ -1427,6 +1558,7 @@ final class AICompletionService: ObservableObject {
     }
 
     private static func makeOneShotBody(ctx: ModelContext, systemPrompt: String, prompt: String, maxTokens: Int) throws -> [String: Any] {
+        let budget = outputBudget(maxTokens)
         switch ctx.source {
         case .gemini:
             var body: [String: Any] = [
@@ -1434,20 +1566,20 @@ final class AICompletionService: ObservableObject {
                     "role": "user",
                     "parts": [["text": prompt]],
                 ]],
-                "generationConfig": ["maxOutputTokens": maxTokens, "temperature": ctx.temperature ?? 1.0],
+                "generationConfig": ["maxOutputTokens": budget, "temperature": ctx.temperature ?? 1.0],
             ]
             if !systemPrompt.isEmpty {
                 body["systemInstruction"] = ["parts": [["text": systemPrompt]]]
             }
             return body
         case .anthropic:
-            var body = anthropicBody(messages: [.user(prompt)], tools: [], maxTokens: maxTokens, effort: ctx.reasoningEffort, temperature: ctx.temperature)
+            var body = anthropicBody(messages: [.user(prompt)], tools: [], maxTokens: budget, effort: ctx.reasoningEffort, temperature: ctx.temperature)
             body["model"] = ctx.model
             body["stream"] = false
             if !systemPrompt.isEmpty { body["system"] = systemPrompt }
             return body
         default:
-            var body = openAIBody(messages: [.user(prompt)], tools: [], maxTokens: maxTokens, effort: ctx.reasoningEffort, stream: false, temperature: ctx.temperature)
+            var body = openAIBody(messages: [.user(prompt)], tools: [], maxTokens: budget, effort: ctx.reasoningEffort, stream: false, temperature: ctx.temperature)
             body["model"] = ctx.model
             return body
         }
@@ -2018,9 +2150,14 @@ final class AICompletionService: ObservableObject {
 
         let settings = AISettingsManager.shared
 
-        // Determine appropriate token ceiling: autocomplete only needs a few tokens
+        // Determine appropriate token ceiling: autocomplete only needs a few
+        // tokens. A 0 or negative explicit cap is read as "unset" rather than
+        // sent: Settings shows 0 as the "automatic" placeholder, and providers
+        // answer `max_tokens: 0` with HTTP 400 ("max_tokens must be a positive
+        // integer") before doing any work. Falling through to the purpose's
+        // default gives a usable reply where sending the 0 would fail outright.
         let effectiveMaxTokens: Int
-        if let explicitTokens = maxTokens {
+        if let explicitTokens = maxTokens, explicitTokens > 0 {
             effectiveMaxTokens = explicitTokens
         } else if purpose == .completion {
             effectiveMaxTokens = settings.completionMaxTokens
