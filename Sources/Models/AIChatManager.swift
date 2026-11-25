@@ -197,8 +197,8 @@ final class AIChatManager: ObservableObject {
 
     /// True for agents owned by `SubscriptionRunner`: an unattended run with
     /// no sprite on screen, no sounds, and no UI-side animation prompts.
-    /// Every path that *shows* Clippy or moves the UI checks this first, so
-    /// a scheduled report never makes him wave at nobody.
+    /// Every path that *shows* the assistant or moves the UI checks this
+    /// first, so a scheduled report never makes it wave at nobody.
     ///
     /// The flag also narrows what the run may do: `requestApproval` refuses
     /// and answers `false` immediately (there is no one to answer a card),
@@ -2235,7 +2235,7 @@ final class AIChatManager: ObservableObject {
         // `@discardableResult`'s answer is the seam; a nil means it landed.
         if let failure = historyStore.save(session) {
             saveFailure = failure
-            errorMessage = "This conversation could not be saved: \(failure). It is still here while Clippy is open, and will be lost when it quits."
+            errorMessage = "This conversation could not be saved: \(failure). It is still here while TypstEdit is open, and will be lost when it quits."
         } else if saveFailure != nil {
             // A later write that landed clears the row: a one-off failure (a
             // full disk emptied, a volume remounted) must not leave a permanent
@@ -3526,7 +3526,7 @@ final class AIChatManager: ObservableObject {
     private var knownSkillIDs: Set<String> = []
     private var knownMCPServerNames: Set<String> = []
 
-    /// The tools Clippy offers: its own local tools + skills + MCP + recall
+    /// The tools the agent offers: its own local tools + skills + MCP + recall
     /// + the agent-harness tools (checklist, delegation, questions), with
     /// every mutating tool withheld while Plan mode is on.
     func availableTools() async -> [MCPTool] {
@@ -3806,7 +3806,7 @@ final class AIChatManager: ObservableObject {
             MCPTool(
                 serverName: "mcp",
                 name: "add_server",
-                description: "Configure an MCP server — a local command (stdio) or a remote http/sse endpoint — so its tools become available in this and every future chat. The exact entry is shown to the user for approval first, and a server with an existing name is replaced only if it is the same one. Configured now: \(known). Use it when the user asks to connect an MCP server; never add one unprompted. To paste a setup line from a README, pass it to `command_line` and Clippy parses it the same way Settings ▸ MCP ▸ Paste Command… does.",
+                description: "Configure an MCP server — a local command (stdio) or a remote http/sse endpoint — so its tools become available in this and every future chat. The exact entry is shown to the user for approval first, and a server with an existing name is replaced only if it is the same one. Configured now: \(known). Use it when the user asks to connect an MCP server; never add one unprompted. To paste a setup line from a README, pass it to `command_line` and TypstEdit parses it the same way Settings ▸ MCP ▸ Paste Command… does.",
                 inputSchema: [
                     "type": "object",
                     "properties": [
@@ -4432,7 +4432,7 @@ final class AIChatManager: ObservableObject {
         FileRevert.plan(messages: session.messages, from: userMessageID)
     }
 
-    /// Restores every file Clippy changed from `userMessageID` on, to how it
+    /// Restores every file the agent changed from `userMessageID` on, to how it
     /// was before. The transcript stays — it is the record of what happened
     /// — but each undone call's row says so, and that line is what the model
     /// reads about it next turn, so it does not assume its edits still stand.
