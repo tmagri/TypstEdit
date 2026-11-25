@@ -67,9 +67,8 @@ final class ParallelToolCallsTests: XCTestCase {
     // MARK: - Grouping
 
     func testConsecutiveSafeCallsFormOneGroup() {
-        let groups = ParallelToolCalls.groups(for: [
-            "project__read_file", "project__read_file", "project__grep_project"
-        ])
+        let names = ["project__read_file", "project__read_file", "project__grep_project"]
+        let groups = ParallelToolCalls.groups(count: names.count) { ParallelToolCalls.isSafe(names[$0]) }
         XCTAssertEqual(groups.count, 1)
         XCTAssertEqual(groups[0].indices, [0, 1, 2])
         XCTAssertTrue(groups[0].isParallel)
@@ -77,9 +76,8 @@ final class ParallelToolCallsTests: XCTestCase {
 
     func testAWriterSplitsTheRoundAndKeepsOrder() {
         // The write must not overtake the read before it, nor the read after.
-        let groups = ParallelToolCalls.groups(for: [
-            "project__read_file", "project__edit_file", "project__read_file", "project__read_file"
-        ])
+        let names = ["project__read_file", "project__edit_file", "project__read_file", "project__read_file"]
+        let groups = ParallelToolCalls.groups(count: names.count) { ParallelToolCalls.isSafe(names[$0]) }
         XCTAssertEqual(groups.map(\.indices), [[0], [1], [2, 3]])
         XCTAssertFalse(groups[0].isParallel)
         XCTAssertFalse(groups[1].isParallel)
@@ -87,13 +85,13 @@ final class ParallelToolCallsTests: XCTestCase {
     }
 
     func testASingleSafeCallIsNotTreatedAsParallel() {
-        let groups = ParallelToolCalls.groups(for: ["project__read_file"])
+        let groups = ParallelToolCalls.groups(count: 1) { _ in true }
         XCTAssertEqual(groups.count, 1)
         XCTAssertFalse(groups[0].isParallel)
     }
 
     func testEmptyRoundProducesNoGroups() {
-        XCTAssertTrue(ParallelToolCalls.groups(for: []).isEmpty)
+        XCTAssertTrue(ParallelToolCalls.groups(count: 0) { _ in true }.isEmpty)
     }
 
     // MARK: - Planning
@@ -101,7 +99,7 @@ final class ParallelToolCallsTests: XCTestCase {
     func testReadFilePlanResolvesInsideTheScope() throws {
         try write("doc.typ", "hello\n")
         let plan = try executor.readOnlyPlan(toolName: "read_file", arguments: ["path": "doc.typ"])
-        guard case .readFile(let url, let label, _, _, let outline, _, _, _, _)? = plan else {
+        guard case .projectReadFile(let url, let label, _, _, let outline, _, _, _, _)? = plan else {
             return XCTFail("expected a readFile plan, got \(String(describing: plan))")
         }
         XCTAssertEqual(label, "doc.typ")
@@ -161,7 +159,7 @@ final class ParallelToolCallsTests: XCTestCase {
             guard case .success(let outcome)? = results[index * 10] else {
                 return XCTFail("missing result for index \(index * 10)")
             }
-            XCTAssertTrue(outcome.output.contains("contents of \(index)"), outcome.output)
+            XCTAssertTrue(outcome.contains("contents of \(index)"), outcome)
         }
     }
 
@@ -218,11 +216,11 @@ final class ParallelToolCallsTests: XCTestCase {
         // A file that exists at plan time but not at read time: the plan is
         // valid, the read fails.
         let missingURL = workDir.appendingPathComponent("ghost.typ")
-        let bad = ReadOnlyToolPlan.readFile(
+        let bad = ReadOnlyToolPlan.projectReadFile(
             url: missingURL,
             label: "ghost.typ",
             offset: nil, limit: nil, outline: false,
-            maxBytes: 1_000_000, defaultLineLimit: 400, maxLineLimit: 2_000
+            maxBytes: 1_000_000, defaultLineLimit: 400, maxLineLimit: 2_000, section: nil
         )
 
         let results = await executor.runReadOnlyBatch([(0, good), (1, bad)])
@@ -241,13 +239,13 @@ final class ParallelToolCallsTests: XCTestCase {
         let results = await executor.runReadOnlyBatch([(0, read), (1, outline), (2, unknown)])
 
         guard case .success(let readOutcome)? = results[0] else { return XCTFail("section read should succeed") }
-        XCTAssertTrue(readOutcome.output.hasPrefix("[section = B — lines 3-6]"), readOutcome.output)
-        XCTAssertTrue(readOutcome.output.contains("b1 text"))
-        XCTAssertFalse(readOutcome.output.contains("c text"))
+        XCTAssertTrue(readOutcome.hasPrefix("[section = B — lines 3-6]"), readOutcome)
+        XCTAssertTrue(readOutcome.contains("b1 text"))
+        XCTAssertFalse(readOutcome.contains("c text"))
 
         guard case .success(let outlineOutcome)? = results[1] else { return XCTFail("section outline should succeed") }
-        XCTAssertTrue(outlineOutcome.output.contains("5-6: == B1"), outlineOutcome.output)
-        XCTAssertFalse(outlineOutcome.output.contains("= C"), outlineOutcome.output)
+        XCTAssertTrue(outlineOutcome.contains("5-6: == B1"), outlineOutcome)
+        XCTAssertFalse(outlineOutcome.contains("= C"), outlineOutcome)
 
         guard case .failure(let message)? = results[2] else { return XCTFail("an unknown section should fail") }
         XCTAssertTrue(message.contains("No heading"), message)
@@ -327,9 +325,10 @@ final class ParallelToolCallsTests: XCTestCase {
         guard case .success(let outcome)? = results[0] else {
             return XCTFail("grep should succeed")
         }
-        XCTAssertTrue(outcome.output.contains("one.typ:1:"), outcome.output)
-        XCTAssertTrue(outcome.output.contains("two.typ:1:"), outcome.output)
+        XCTAssertTrue(outcome.contains("one.typ:1:"), outcome)
+        XCTAssertTrue(outcome.contains("two.typ:1:"), outcome)
         // A grep reads nothing in the read-before-edit sense.
-        XCTAssertNil(outcome.readFilePath)
+        // A grep reads nothing in the read-before-edit sense; the batch
+        // returns plain text, so there is no path to record.
     }
 }

@@ -367,7 +367,7 @@ final class LLMLingua2EngineTests: XCTestCase {
             throw XCTSkip("LLMLingua-2 model not installed — download it in Settings → Typst → Updates")
         }
         let words = "The supplier A ink averaged a colour error of 2.1 , which is below the threshold of 3.0 .".split(separator: " ").map(String.init)
-        let scores = try XCTUnwrap(engine.scoreWords(words), "the Core ML prediction failed")
+        let scores = try XCTUnwrap(engine.scores(for: words), "the Core ML prediction failed")
         XCTAssertEqual(scores.count, words.count)
         XCTAssertGreaterThan(Set(scores.map { ($0 * 1000).rounded() }).count, words.count / 2, "scores are (nearly) uniform: \(scores)")
 
@@ -383,7 +383,7 @@ final class LLMLingua2EngineTests: XCTestCase {
             throw XCTSkip("LLMLingua-2 model not installed — download it in Settings → Typst → Updates")
         }
         let words = (0..<900).map { $0 % 3 == 0 ? "measurement\($0)" : "the" }
-        let scores = try XCTUnwrap(engine.scoreWords(words))
+        let scores = try XCTUnwrap(engine.scores(for: words))
         XCTAssertEqual(scores.count, words.count)
         // The tail (second chunk) is scored too, not left at zero.
         XCTAssertGreaterThan(scores[897], scores[898])
@@ -478,64 +478,10 @@ final class ThinkingReseedTests: XCTestCase {
     Because a closure receives the levels as a spaced integer sequence. The solution is that.
     """
 
-    func testNotesReturnNilForShortThinking() async {
-        let notes = await AICompletionService.thinkingReseedNotes(
-            from: "too short to bother",
-            compressor: HeuristicTokenFilter(),
-            maxChars: 6000
-        )
-        XCTAssertNil(notes)
-    }
-
-    func testNotesCompressAndKeepPivotWords() async throws {
-        let notesResult = await AICompletionService.thinkingReseedNotes(
-            from: longThinking,
-            compressor: HeuristicTokenFilter(),
-            maxChars: 20_000
-        )
-        let notes = try XCTUnwrap(notesResult)
-        XCTAssertLessThan(notes.count, longThinking.count)
-        // Negations and reasoning pivots must survive (thinkingForceTokens).
-        XCTAssertTrue(notes.contains("not"))
-        XCTAssertTrue(notes.contains("Wait") || notes.contains("wait"))
-        XCTAssertTrue(notes.contains("Therefore") || notes.contains("therefore"))
-    }
-
-    func testNotesToleranceKeepsTailAndMarksTruncation() async throws {
-        let notesResult = await AICompletionService.thinkingReseedNotes(
-            from: longThinking + " " + longThinking + " " + longThinking,
-            compressor: HeuristicTokenFilter(),
-            maxChars: 400
-        )
-        let notes = try XCTUnwrap(notesResult)
-        XCTAssertLessThanOrEqual(notes.count, 400 + 40) // tolerance + truncation marker
-        XCTAssertTrue(notes.hasPrefix("…(earlier notes truncated)"))
-        // Tail kept: the concluding reasoning survives.
-        XCTAssertTrue(notes.contains("solution") || notes.contains("closure"))
-    }
-
-    func testReseedStallContinueMessageCarriesNotesAndNumbers() {
-        let message = AICompletionService.reseedStallContinueMessage(
-            idleSeconds: 150, timeoutSeconds: 150,
-            notes: "NOTES_PLACEHOLDER"
-        )
-        XCTAssertTrue(message.contains("150"))
-        XCTAssertTrue(message.contains("NOTES_PLACEHOLDER"))
-        XCTAssertTrue(message.contains("notes"), message)
-        XCTAssertFalse(message.contains("nothing from it was kept"))
-    }
-
-    func testReseedEmptyAnswerNudgeCarriesNotes() {
-        let message = AICompletionService.reseedEmptyAnswerNudgeMessage(notes: "NOTES_PLACEHOLDER")
-        XCTAssertTrue(message.contains("NOTES_PLACEHOLDER"))
-        XCTAssertTrue(message.contains("write the actual answer now"))
-    }
-
-    func testPlainMessagesUnchangedWhenReseedOff() {
-        // The existing builders must stay intact — they're the fallback path.
-        XCTAssertTrue(AICompletionService.stallContinueMessage(idleSeconds: 90, timeoutSeconds: 150).contains("nothing from it was kept"))
-        XCTAssertTrue(AICompletionService.emptyAnswerNudgeMessage(hadReasoning: true).contains("thought that through"))
-    }
+    // The old thinking-reseed layer (thinkingReseedNotes, reseedStall…,
+    // reseedEmptyAnswerNudge…) belonged to the previous engine's text
+    // builders; the current loop words its own continue messages, so those
+    // tests were removed with it. The reseed limit's clamping rule survives.
 
     func testToleranceClamps() {
         let settings = AISettingsManager.shared

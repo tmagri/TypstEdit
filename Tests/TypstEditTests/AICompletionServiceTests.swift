@@ -8,17 +8,6 @@ import XCTest
 /// silently regress.
 final class AICompletionServiceTests: XCTestCase {
 
-    func testNudgeMessageWithoutReasoningAsksForAnAnswerAnyway() {
-        let message = AICompletionService.emptyAnswerNudgeMessage(hadReasoning: false)
-        XCTAssertTrue(message.contains("already found"))
-        XCTAssertTrue(message.contains("couldn't find anything"))
-    }
-
-    func testNudgeMessageWithReasoningMentionsTheThinking() {
-        let message = AICompletionService.emptyAnswerNudgeMessage(hadReasoning: true)
-        XCTAssertTrue(message.contains("thought that through"))
-    }
-
     func testFailureMessageWithoutNudgesOrReasoningSuggestsRephrasing() {
         let message = AICompletionService.emptyAnswerFailureMessage(nudges: 0, hadReasoning: false)
         XCTAssertFalse(message.contains("follow-up attempt"))
@@ -40,133 +29,145 @@ final class AICompletionServiceTests: XCTestCase {
         XCTAssertFalse(message.contains("rephrasing"))
     }
 
-    func testAutoContinueAttemptsClampToSaneBounds() {
-        // A sanity bound: 0 turns the feature off, more than 0 is an attempt
-        // count, and anything larger is capped at 50 — the "Unlimited" toggle
-        // is the explicit way to ask for no cap.
-        XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(0), 0)
-        XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(2), 2)
-        XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(-3), 0)
-        XCTAssertEqual(AICompletionService.clampedAutoContinueAttempts(99), 50)
-        XCTAssertLessThanOrEqual(AICompletionService.clampedAutoContinueAttempts(Int.max), 50)
+    // MARK: - The current engine's empty/overflow wording
+
+    func testAnEmptyReplyErrorNamesTheAttempts() {
+        let error = AICompletionService.emptyReplyError(
+            meta: AIChatStepMeta(finishReason: "stop"),
+            budget: 4_096,
+            attempts: 2
+        )
+        guard case AIError.emptyReply(let attempts) = error else {
+            return XCTFail("expected .emptyReply, got \(error)")
+        }
+        XCTAssertEqual(attempts, 2)
+        XCTAssertTrue(error.localizedDescription.contains("no reply"))
     }
 
-    func testAutoContinueBudgetHonorsTheUnlimitedToggle() {
-        XCTAssertNil(AICompletionService.autoContinueBudget(attempts: 2, unlimited: true))
-        XCTAssertNil(AICompletionService.autoContinueBudget(attempts: 0, unlimited: true))
-        XCTAssertEqual(AICompletionService.autoContinueBudget(attempts: 7, unlimited: false), 7)
-        XCTAssertEqual(AICompletionService.autoContinueBudget(attempts: 0, unlimited: false), 0)
+    func testABudgetEatenByReasoningIsNamedInsteadOfBlamedOnTheModel() {
+        // A reply cut off at the shared ceiling with only hidden reasoning
+        // spent cannot be improved by retrying the same request.
+        let meta = AIChatStepMeta(
+            finishReason: "length",
+            usage: TokenUsage(input: 10, output: 0, reasoning: 32_000)
+        )
+        let error = AICompletionService.emptyReplyError(
+            meta: meta,
+            budget: AISettingsManager.learnedMaxTokensCeiling,
+            attempts: 1
+        )
+        guard case AIError.reasoningAteTheBudget(let tokens, let budget) = error else {
+            return XCTFail("expected .reasoningAteTheBudget, got \(error)")
+        }
+        XCTAssertEqual(tokens, 32_000)
+        XCTAssertEqual(budget, AISettingsManager.learnedMaxTokensCeiling)
+        XCTAssertTrue(error.localizedDescription.contains("hidden reasoning"))
     }
 
-    func testAutoContinueProgressLabelHandlesLimitedAndUnlimited() {
-        XCTAssertEqual(AICompletionService.autoContinueProgressLabel(attempt: 2, maxAttempts: 10), "2 of 10")
-        XCTAssertEqual(AICompletionService.autoContinueProgressLabel(attempt: 3, maxAttempts: nil), "attempt 3, unlimited")
+    func testWideningIsRefusedAtTheCeilingAndBoundedBelowIt() {
+        let cutOff = AIChatStepMeta(finishReason: "length")
+        XCTAssertNil(
+            AICompletionService.widenedBudgetAfterCutoff(
+                meta: cutOff, budget: AISettingsManager.learnedMaxTokensCeiling
+            ),
+            "a reply already at the ceiling cannot grow"
+        )
+        XCTAssertEqual(
+            AICompletionService.widenedBudgetAfterCutoff(meta: cutOff, budget: 4_096),
+            8_192,
+            "with no evidence about the answer, doubling is the fallback"
+        )
+        // A reply that finished is never widened.
+        XCTAssertNil(AICompletionService.widenedBudgetAfterCutoff(
+            meta: AIChatStepMeta(finishReason: "stop"), budget: 4_096
+        ))
     }
 
-    func testEmptyAnswerStatusLineSaysWhatIsHappening() {
-        let line = AICompletionService.emptyAnswerStatusLine(attempt: 2, maxAttempts: 5)
-        XCTAssertTrue(line.contains("Empty reply"), line)
-        XCTAssertTrue(line.contains("2 of 5"), line)
-
-        let unlimited = AICompletionService.emptyAnswerStatusLine(attempt: 7, maxAttempts: nil)
-        XCTAssertTrue(unlimited.contains("attempt 7, unlimited"), unlimited)
+    func testReasoningEvidenceSetsTheWidenedBudget() {
+        // 6,000 reasoning tokens in a 4,096 cap: the cap is what cut it off,
+        // so the suggested budget is the reasoning plus room for an answer.
+        let meta = AIChatStepMeta(
+            finishReason: "length",
+            usage: TokenUsage(input: 10, output: 4_096, reasoning: 6_000)
+        )
+        let suggested = meta.suggestedBudgetAfterCutoff(currentBudget: 4_096)
+        XCTAssertGreaterThanOrEqual(suggested, 6_000)
+        XCTAssertLessThanOrEqual(suggested, 8_192, "never more than doubling in one step")
+        XCTAssertEqual(
+            AICompletionService.widenedBudgetAfterCutoff(meta: meta, budget: 4_096),
+            suggested
+        )
     }
 
-    func testEmptyAnswerStatusNoteDistinguishesReasoningOnlyReplies() {
-        let reasoning = AICompletionService.emptyAnswerStatusNote(attempt: 1, maxAttempts: 5, hadReasoning: true)
-        XCTAssertTrue(reasoning.contains("thinking"), reasoning)
-        XCTAssertTrue(reasoning.contains("1 of 5"), reasoning)
-
-        let silent = AICompletionService.emptyAnswerStatusNote(attempt: 1, maxAttempts: 5, hadReasoning: false)
-        XCTAssertTrue(silent.contains("returned nothing"), silent)
+    func testToolArgumentsMustBeAJSONObject() {
+        XCTAssertTrue(AICompletionService.isValidToolArguments(""))
+        XCTAssertTrue(AICompletionService.isValidToolArguments("{\"a\":1}"))
+        XCTAssertFalse(AICompletionService.isValidToolArguments("{\"a\":"), "cut off mid-object")
+        XCTAssertFalse(AICompletionService.isValidToolArguments("[1,2]"))
     }
 
-    // MARK: - Stall Detection & Auto-Continue
-
-    func testStallContinueMessageTellsTheModelToResume() {
-        let message = AICompletionService.stallContinueMessage(idleSeconds: 150, timeoutSeconds: 150)
-        XCTAssertTrue(message.contains("stalled"), message)
-        XCTAssertTrue(message.contains("150s"), message)
-        XCTAssertTrue(message.contains("final answer"), message)
+    func testACancelledRequestIsRecognisedWhateverShapeItArrivesIn() {
+        XCTAssertTrue(AICompletionService.isCancellation(CancellationError()))
+        XCTAssertTrue(AICompletionService.isCancellation(AIError.cancelled))
+        XCTAssertTrue(AICompletionService.isCancellation(URLError(.cancelled)))
+        XCTAssertFalse(AICompletionService.isCancellation(AIError.noData))
     }
 
-    func testStallStatusNoteShowsProgressAgainstTheBudget() {
-        let note = AICompletionService.stallContinueStatusNote(attempt: 1, maxAttempts: 3, idleSeconds: 150)
-        XCTAssertTrue(note.contains("1 of 3"), note)
-        XCTAssertTrue(note.contains("150s"), note)
-
-        let unlimited = AICompletionService.stallContinueStatusNote(attempt: 2, maxAttempts: nil, idleSeconds: 150)
-        XCTAssertTrue(unlimited.contains("attempt 2, unlimited"), unlimited)
+    func testContextOverflowShrinkStepsDescendFromACacheFriendlyFirstStep() {
+        let steps = AICompletionService.contextOverflowShrinkSteps
+        XCTAssertEqual(steps.count, AICompletionService.maxContextShrinks)
+        XCTAssertEqual(steps, steps.sorted(by: >))
+        XCTAssertTrue(steps.allSatisfy { $0 > 0 && $0 < 1 })
+        XCTAssertGreaterThanOrEqual(steps.first!, 0.5)
+        XCTAssertLessThanOrEqual(steps.last!, 0.25)
     }
 
-    func testStallStatusLineNamesTheSilenceAndAttempt() {
-        let line = AICompletionService.stallStatusLine(attempt: 2, maxAttempts: 4, idleSeconds: 150)
-        XCTAssertTrue(line.contains("150s"), line)
-        XCTAssertTrue(line.contains("2 of 4"), line)
+    func testARateLimitIsNeverClassifiedAsAnOverflow() {
+        // Shrinking would not fix a throttle and would throw context away.
+        let rateLimits = [
+            "HTTP 429: Rate limit reached for gpt-4",
+            "HTTP 429: Too many requests, please slow down",
+            "HTTP 429: Too many tokens per day",
+            "HTTP 429: throttling error",
+        ]
+        for message in rateLimits {
+            XCTAssertFalse(AICompletionService.isContextOverflowMessage(message), message)
+        }
+        XCTAssertTrue(AICompletionService.isContextOverflowMessage("HTTP 400: context_length_exceeded"))
+        XCTAssertTrue(AICompletionService.isContextOverflowMessage("prompt is too long"))
+        XCTAssertFalse(AICompletionService.isContextOverflowMessage("max_tokens must be less than 8192"))
+        XCTAssertFalse(AICompletionService.isContextOverflowMessage(""))
     }
 
-    func testStallFailureMessageWithoutAttemptsPointsAtTheServer() {
-        let message = AICompletionService.stallFailureMessage(attempts: 0, idleSeconds: 150, timeoutSeconds: 150)
-        XCTAssertFalse(message.contains("continue attempt"), message)
-        XCTAssertTrue(message.contains("server"), message)
-        XCTAssertTrue(message.contains("150s"), message)
+    func testTheOverflowStatusLineNamesTheAttempt() {
+        let line = AICompletionService.contextOverflowStatusLine(attempt: 2, total: 3)
+        XCTAssertTrue(line.contains("2 of 3"), line)
+        XCTAssertTrue(line.lowercased().contains("too long"), line)
     }
 
-    func testStallFailureMessageCountsAttemptsWithCorrectPluralization() {
-        let one = AICompletionService.stallFailureMessage(attempts: 1, idleSeconds: 150, timeoutSeconds: 150)
-        XCTAssertTrue(one.contains("1 automatic continue attempt"), one)
-        XCTAssertFalse(one.contains("1 automatic continue attempts"), one)
+    func testAHarnessNoteRidesOnTheNewestToolResult() {
+        var messages: [AIChatMessage] = [
+            .system("sys"),
+            .user("task"),
+            .assistantToolCalls([AIToolCallRequest(id: "a", name: "project__read_file", argumentsJSON: "{}")]),
+            .toolResult(AIToolResult(callID: "a", name: "project__read_file", output: "text")),
+            .assistantText("carry on"),
+        ]
+        // Nothing to attach to after a final answer: the note is dropped.
+        AICompletionService.appendHarnessNote("late note", to: &messages)
+        guard case .assistantText = messages.last else {
+            return XCTFail("the final answer must not be rewritten")
+        }
 
-        let two = AICompletionService.stallFailureMessage(attempts: 2, idleSeconds: 150, timeoutSeconds: 150)
-        XCTAssertTrue(two.contains("2 automatic continue attempts"), two)
-    }
-
-    // MARK: - Connection lost mid-reply (idleSeconds 0 conversion)
-
-    // `requestChatStep` converts a mid-stream transport death into
-    // `stalledResponse(idleSeconds: 0, …)`; the zero is the wording helpers'
-    // cue to describe a cut connection instead of a silent hang.
-
-    func testConnectionLossContinueMessageDescribesTheCut() {
-        let message = AICompletionService.stallContinueMessage(idleSeconds: 0, timeoutSeconds: 150)
-        XCTAssertTrue(message.contains("connection dropped"), message)
-        XCTAssertTrue(message.contains("nothing from it was kept"), message)
-        XCTAssertTrue(message.contains("final answer"), message)
-        // No silent period to report, so no stall numbers either.
-        XCTAssertFalse(message.contains("stalled"), message)
-        XCTAssertFalse(message.contains("150s"), message)
-    }
-
-    func testConnectionLossStatusLineAndNoteNameTheCut() {
-        let line = AICompletionService.stallStatusLine(attempt: 1, maxAttempts: 2, idleSeconds: 0)
-        XCTAssertTrue(line.contains("Connection lost"), line)
-        XCTAssertTrue(line.contains("1 of 2"), line)
-        XCTAssertFalse(line.contains("0s"), line)
-
-        let note = AICompletionService.stallContinueStatusNote(attempt: 1, maxAttempts: 2, idleSeconds: 0)
-        XCTAssertTrue(note.contains("connection dropped"), note)
-    }
-
-    func testConnectionLossFailureMessagePointsAtTheNetwork() {
-        let message = AICompletionService.stallFailureMessage(attempts: 2, idleSeconds: 0, timeoutSeconds: 150)
-        XCTAssertTrue(message.contains("connection dropped"), message)
-        XCTAssertTrue(message.contains("2 automatic continue attempts also failed"), message)
-        XCTAssertTrue(message.contains("network"), message)
-        XCTAssertFalse(message.contains("server may be overloaded"), message)
-    }
-
-    func testStalledResponseErrorDescribesTheSilence() {
-        let error = AIError.stalledResponse(idleSeconds: 150, timeoutSeconds: 150)
-        let description = (error as LocalizedError).errorDescription ?? ""
-        XCTAssertTrue(description.contains("150s"), description)
-        XCTAssertTrue(description.contains("stopped sending output"), description)
-    }
-
-    func testInterruptedReplyPlaceholderIsNeverEmpty() {
-        // It stands in for the abandoned attempt in the transcript, where a
-        // literally empty assistant message breaks providers that require
-        // strict role alternation.
-        XCTAssertFalse(AICompletionService.interruptedReplyPlaceholder
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        // After a tool result, it lands there and the output survives.
+        messages.append(.assistantToolCalls([AIToolCallRequest(id: "b", name: "project__grep_project", argumentsJSON: "{}")]))
+        messages.append(.toolResult(AIToolResult(callID: "b", name: "project__grep_project", output: "2 matches")))
+        AICompletionService.appendHarnessNote(AICompletionService.steerNote("Stop at section two"), to: &messages)
+        guard case .toolResult(let result) = messages.last else {
+            return XCTFail("last message should still be the tool result")
+        }
+        XCTAssertEqual(result.callID, "b")
+        XCTAssertTrue(result.output.contains("2 matches"))
+        XCTAssertTrue(result.output.contains("Stop at section two"))
     }
 }

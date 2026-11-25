@@ -50,6 +50,18 @@ final class AICompletionService: ObservableObject {
         "[STEERING — the user sent this while you were working. Finish your current step, then adjust course to include it. Don't restart what is already done, and don't drop it:]\n\n\(text)"
     }
 
+    /// Appends a harness note (a steer, a turn-budget warning, a loop hint)
+    /// to the newest tool result in a request's history, so the model reads
+    /// it in the same turn that is already running rather than only at the
+    /// next user message. When the history ends in something else — the very
+    /// first round, or after a final answer — there is nothing to attach to
+    /// and the note is dropped; the caller decides what that means.
+    nonisolated static func appendHarnessNote(_ note: String, to messages: inout [AIChatMessage]) {
+        guard case .toolResult(var result) = messages.last else { return }
+        result.output += (result.output.isEmpty ? "" : "\n\n") + note
+        messages[messages.count - 1] = .toolResult(result)
+    }
+
     @Published var isFetching: Bool = false
 
     private init() {}
@@ -1587,9 +1599,193 @@ final class AICompletionService: ObservableObject {
         ].contains { text.contains($0) }
     }
 
-    /// The least a tool result is cut down to, however tight the budget.
-    nonisolated static let minimumKeptToolOutputChars = 6_000
+    /// Whether a *rendered* failure message means "the prompt does not fit
+    /// the window". The live path classifies by status + body
+    /// (`isContextOverflow(status:body:)`); this is for callers that only
+    /// kept the string — the chat's own status lines and the transcript.
+    ///
+    /// A rate limit phrased as "too many tokens" is deliberately **not** an
+    /// overflow: waiting beats shrinking, and shrinking would throw context
+    /// away for nothing.
+    nonisolated static func isContextOverflowMessage(_ message: String) -> Bool {
+        let text = message.lowercased()
+        guard !text.isEmpty else { return false }
+        // A 429 in the rendered text is a throttle, whatever it says about
+        // tokens: waiting beats shrinking, and shrinking throws context away.
+        if text.contains("429")
+            || text.contains("rate limit") || text.contains("too many requests")
+            || text.contains("throttl") || text.contains("per day") {
+            return false
+        }
+        if text.contains("max_tokens must be") { return false }
+        return [
+            "context_length_exceeded", "context window", "context length",
+            "maximum context", "context size", "n_ctx", "prompt is too long",
+            "input is too long", "too many tokens", "prompt exceeds",
+            "maximum input length", "exceeds maximum", "reduce the length",
+            "request_too_large",
+        ].contains { text.contains($0) }
+    }
 
+    /// The budget scales one request tries, largest first, when the prompt
+    /// is refused as too long. The first retry aims just below the refused
+    /// size so the cache prefix and most of the transcript survive; a
+    /// provider that refuses a second time gets a much smaller prompt
+    /// rather than a barely-there trim.
+    nonisolated static var contextOverflowShrinkSteps: [Double] {
+        (0..<maxContextShrinks).map { step in
+            pow(contextShrinkFactor, Double(step + 1))
+        }
+    }
+
+    /// The status line while a refused request is retried. Names the attempt
+    /// so a long recovery does not look like a hang.
+    nonisolated static func contextOverflowStatusLine(attempt: Int, total: Int) -> String {
+        "The prompt is too long for the model's window — shrinking older tool output and retrying (\(attempt) of \(total))…"
+    }
+
+    /// The least a tool result is cut down to, however tight the budget.
+    // MARK: - Tool Input Repair
+
+    /// nested object, or fill an optional field with `null`; without repair
+    /// each of those costs a refused call, a harness note, and a whole extra
+    /// round. Only provably-safe repairs are made, mirroring opencode:
+    /// - a string coerced to number/boolean where the schema declares a
+    ///   plain `number`/`integer`/`boolean` type
+    /// - a stringified JSON object/array parsed where the schema declares a
+    ///   plain `object`/`array` type, then repaired recursively
+    /// - a `null` or empty-object placeholder dropped from an optional,
+    ///   plainly-typed property (only a bare single type provably rejects
+    ///   those; compositions may accept them, so those are left alone)
+    /// - undeclared keys dropped only where the schema sets
+    ///   `additionalProperties: false`
+    ///
+    /// TypstEdit's schemas use none of `$ref`/`$defs`/`prefixItems`/
+    /// `patternProperties`, so those opencode branches are omitted, and the
+    /// recursion is depth-capped the same way. Applied by the chat manager
+    /// (`AIChatManager`) when it has the called tool's input schema;
+    /// unknown tools pass through untouched.
+    nonisolated static func repairToolInput(_ arguments: [String: Any], schema: [String: Any]?) -> [String: Any] {
+        guard let schema, !arguments.isEmpty else { return arguments }
+        let properties = schema["properties"] as? [String: Any] ?? [:]
+        let required = schema["required"] as? [String] ?? []
+        let additionalProperties = (schema["additionalProperties"] as? NSNumber)?.boolValue
+        var repaired = arguments
+        for (key, value) in arguments {
+            // Undeclared keys are only provably unwelcome when the schema
+            // closes the object; anything else may be a dynamic property.
+            guard let property = properties[key] as? [String: Any] else {
+                if additionalProperties == false, !required.contains(key) {
+                    repaired.removeValue(forKey: key)
+                }
+                continue
+            }
+            if placeholder(value, declaredType: property["type"] as? String),
+               plainOptionalType(property, required: required.contains(key)) {
+                repaired.removeValue(forKey: key)
+                continue
+            }
+            let new = repairValue(value, schema: property, depth: 0)
+            if !Self.valuesEquivalent(new, value) {
+                repaired[key] = new
+            }
+        }
+        return repaired
+    }
+
+    /// Repairs one value against its property schema. Returns the input
+    /// unchanged whenever nothing provably applies.
+    private nonisolated static func repairValue(_ value: Any, schema: [String: Any], depth: Int) -> Any {
+        guard depth < 6 else { return value }
+        // A `"type": ["x", "null"]` list unwraps to its single non-null type.
+        var schema = schema
+        if let types = schema["type"] as? [String], types.count == 2, types.contains("null") {
+            schema["type"] = types.first { $0 != "null" }
+        }
+        guard let type = schema["type"] as? String, isPlainType(schema) else { return value }
+
+        if type == "number" || type == "integer" {
+            guard let text = value as? String else { return value }
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            guard let parsed = Double(trimmed), parsed.isFinite else { return value }
+            if type == "integer", parsed != parsed.rounded() { return value }
+            return parsed
+        }
+        if type == "boolean" {
+            guard let text = value as? String else { return value }
+            let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
+            if trimmed == "true" { return true }
+            if trimmed == "false" { return false }
+            return value
+        }
+        if type == "object" {
+            let parsed = (value as? String).flatMap { stringifiedJSONObject($0) } ?? value
+            guard let object = parsed as? [String: Any] else { return value }
+            let properties = schema["properties"] as? [String: Any] ?? [:]
+            var repaired: [String: Any] = [:]
+            for (key, member) in object {
+                if let memberSchema = properties[key] as? [String: Any] {
+                    repaired[key] = repairValue(member, schema: memberSchema, depth: depth + 1)
+                } else {
+                    repaired[key] = member
+                }
+            }
+            return repaired
+        }
+        if type == "array" {
+            let parsed = (value as? String).flatMap { stringifiedJSONArray($0) } ?? value
+            guard let array = parsed as? [Any], let items = schema["items"] as? [String: Any] else { return value }
+            // Every member is repaired against the declared item schema; a
+            // member whose type already matches passes through unchanged.
+            return array.map { repairValue($0, schema: items, depth: depth + 1) }
+        }
+        return value
+    }
+
+    /// True when the schema's declared type is a bare single type with no
+    /// compositions — the only case where `null`/`{}` placeholders are
+    /// provably rejected, and the only case a coercion cannot be wrong.
+    private nonisolated static func isPlainType(_ schema: [String: Any]) -> Bool {
+        for keyword in ["anyOf", "oneOf", "allOf", "enum", "const", "$ref"] where schema[keyword] != nil {
+            return false
+        }
+        return schema["type"] is String
+    }
+
+    private nonisolated static func plainOptionalType(_ schema: [String: Any], required: Bool) -> Bool {
+        !required && isPlainType(schema)
+    }
+
+    /// `null`, or an object with no keys — what cut-off or confused calls
+    /// leave in an optional field. An empty object is only a placeholder
+    /// when the declared type is not itself `object`.
+    private nonisolated static func placeholder(_ value: Any, declaredType: String?) -> Bool {
+        if value is NSNull { return true }
+        if let object = value as? [String: Any], object.isEmpty, declaredType != "object" { return true }
+        return false
+    }
+
+    /// Parses a stringified JSON object (`"{\"a\":1}"` → `["a": 1]`).
+    private nonisolated static func stringifiedJSONObject(_ text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return parsed as? [String: Any]
+    }
+
+    private nonisolated static func stringifiedJSONArray(_ text: String) -> [Any]? {
+        guard let data = text.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return parsed as? [Any]
+    }
+
+    /// JSONSerialization comparisons: NSNumber boxes both booleans and
+    /// numbers, and `20` vs `20.0` compare equal, which is exactly the
+    /// equivalence a repair needs — "changed" means a type or parse happened.
+    private nonisolated static func valuesEquivalent(_ lhs: Any, _ rhs: Any) -> Bool {
+        (lhs as? NSObject) == (rhs as? NSObject)
+    }
+
+    nonisolated static let minimumKeptToolOutputChars = 6_000
     /// Wording of the note left where the middle of a result was cut out.
     nonisolated static let clippedToolOutputPhrase = "omitted from the middle of this result to fit the model's context window"
 

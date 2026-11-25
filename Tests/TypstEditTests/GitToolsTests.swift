@@ -77,8 +77,8 @@ final class GitToolsTests: XCTestCase {
         )).map(\.name))
         let readOnly = all.intersection(GitTools.readOnlyToolNames)
         XCTAssertEqual(readOnly, Set(["git_status", "git_diff", "git_log"]))
-        XCTAssertFalse(AIChatManager.subagentReadOnlyToolNames.contains("git_commit"))
-        XCTAssertFalse(AIChatManager.subagentReadOnlyToolNames.contains("git_push"))
+        XCTAssertFalse(AIChatManager.subagentReadOnlyGitToolNames.contains("git_commit"))
+        XCTAssertFalse(AIChatManager.subagentReadOnlyGitToolNames.contains("git_push"))
     }
 
     // MARK: Read-only tools

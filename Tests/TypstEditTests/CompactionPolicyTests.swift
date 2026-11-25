@@ -8,71 +8,84 @@ import XCTest
 final class CompactionPolicyTests: XCTestCase {
 
     // MARK: - Cut point
+    //
+    // The cut is by *cost*, over *rows*: it keeps the newest `keepTokens`
+    // worth of messages verbatim whatever turn they belong to, so a marathon
+    // turn (one instruction plus hundreds of tool rows) can still fold. The
+    // old rule kept the newest three *turns* whole, which made exactly that
+    // shape uncompactable.
 
-    func testNothingToCompactWithThreeUserTurnsOrFewer() {
-        // The last three exchanges stay verbatim: summarizing them would cost
-        // more context than it saves.
+    func testTheNewestRowIsAlwaysKeptWhateverItCosts() {
         let messages = [
             ChatMessage(role: .user, text: "one"),
-            ChatMessage(role: .assistant, text: "first"),
-            ChatMessage(role: .user, text: "two"),
-            ChatMessage(role: .assistant, text: "second"),
-            ChatMessage(role: .user, text: "three")
+            ChatMessage(role: .assistant, text: String(repeating: "x", count: 200_000))
         ]
-        XCTAssertNil(AIChatManager.compactionCut(in: messages))
+        // The huge newest row is kept even though it alone exceeds the keep
+        // budget — a transcript with nothing kept has no tail to continue
+        // from. Everything older still folds.
+        let cut = AIChatManager.compactionCut(in: messages, keepTokens: 100)
+        XCTAssertEqual(cut?.cutIndex, 1, "only the newest row survives the cut")
+        XCTAssertEqual(cut?.covered.count, 1)
     }
 
-    func testCutIsMadeAtAUserBoundaryKeepingTheLastThree() {
+    func testNothingToCompactWhenEverythingFitsTheKeepBudget() {
         let messages = [
             ChatMessage(role: .user, text: "q1"),
             ChatMessage(role: .assistant, text: "a1"),
             ChatMessage(role: .user, text: "q2"),
             ChatMessage(role: .assistant, text: "a2"),
-            ChatMessage(role: .user, text: "q3"),
-            ChatMessage(role: .assistant, text: "a3"),
-            ChatMessage(role: .user, text: "q4"),
-            ChatMessage(role: .assistant, text: "a4")
         ]
-        let cut = AIChatManager.compactionCut(in: messages)
-        // The cut lands on the *fourth-from-last* user message, so the last
-        // three exchanges (q2…a4) stay verbatim.
-        XCTAssertEqual(cut?.cutIndex, 2)
-        XCTAssertEqual(cut?.covered.count, 2)
+        XCTAssertNil(AIChatManager.compactionCut(in: messages, keepTokens: 15_000))
     }
 
-    func testAlreadyCompactedTurnsDoNotCountAsUserBoundaries() {
-        var messages = [
-            ChatMessage(role: .user, text: "q1"),
-            ChatMessage(role: .assistant, text: "a1"),
-            ChatMessage(role: .user, text: "q2"),
-            ChatMessage(role: .assistant, text: "a2"),
-            ChatMessage(role: .user, text: "q3"),
-            ChatMessage(role: .assistant, text: "a3"),
-            ChatMessage(role: .user, text: "q4"),
-            ChatMessage(role: .assistant, text: "a4")
-        ]
-        messages[0].isCompacted = true
-        // Three live user turns remain, so there is nothing left to summarize.
-        XCTAssertNil(AIChatManager.compactionCut(in: messages))
+    func testTheCutLandsWhereTheKeepBudgetRunsOut() {
+        // Each row is ~1,000 characters (~250 tokens at 4 chars/token).
+        let long = String(repeating: "y", count: 1_000)
+        var messages: [ChatMessage] = []
+        for index in 0..<40 {
+            messages.append(ChatMessage(role: index % 2 == 0 ? .user : .assistant, text: "\(index) " + long))
+        }
+        let cut = AIChatManager.compactionCut(in: messages, keepTokens: 1_000)
+        let cutIndex = try? XCTUnwrap(cut?.cutIndex)
+        XCTAssertNotNil(cut, "40 long rows must not all fit a 1,000-token keep budget")
+        if let cut {
+            XCTAssertGreaterThan(cut.cutIndex, 0)
+            XCTAssertEqual(cut.covered.count, cut.cutIndex, "everything before the cut is covered")
+            XCTAssertGreaterThan(messages.count - cut.cutIndex, 0, "a tail is kept")
+            _ = cutIndex
+        }
     }
 
-    func testCutIsNilWhenOnlyToolRowsPrecedeIt() {
+    func testAMarathonTurnCanBeFolded() throws {
+        // One instruction followed by many tool rows: the mass is the turn,
+        // not the number of turns, so the old turn-based rule found "nothing
+        // old enough to summarize" and the chat sat over budget forever.
+        var messages = [ChatMessage(role: .user, text: "refactor the whole chapter")]
+        for index in 0..<60 {
+            messages.append(ChatMessage(
+                role: .toolCall, toolName: "project__read_file", toolStatus: .succeeded,
+                toolOutput: String(repeating: "z", count: 2_000)
+            ))
+            if index % 20 == 19 {
+                messages.append(ChatMessage(role: .assistant, text: "still working"))
+            }
+        }
+        let cut = try XCTUnwrap(AIChatManager.compactionCut(in: messages, keepTokens: 1_000))
+        XCTAssertGreaterThan(cut.cutIndex, 0)
+        XCTAssertTrue(cut.covered.contains { $0.role == .toolCall }, "the early tool rows fold with the turn")
+        XCTAssertTrue(cut.covered.contains { $0.role == .user }, "the instruction folds into the summary's Objective")
+    }
+
+    func testAJustCompactedTranscriptIsNotCompactedAgain() {
+        // Convergence: a per-round check must not compact the same rows twice.
         let messages = [
-            ChatMessage(role: .user, text: "q1"),
-            ChatMessage(role: .toolCall, toolName: "project__read_file", toolStatus: .succeeded, toolOutput: "x"),
-            ChatMessage(role: .assistant, text: "a1"),
-            ChatMessage(role: .user, text: "q2"),
-            ChatMessage(role: .assistant, text: "a2"),
-            ChatMessage(role: .user, text: "q3"),
-            ChatMessage(role: .assistant, text: "a3"),
-            ChatMessage(role: .user, text: "q4"),
-            ChatMessage(role: .assistant, text: "a4")
+            ChatMessage(role: .user, text: String(repeating: "q", count: 40_000)),
+            ChatMessage(role: .assistant, text: "answer"),
         ]
-        let cut = AIChatManager.compactionCut(in: messages)
-        XCTAssertNotNil(cut)
-        // A tool row is never summarized on its own; the covering slice still
-        // has real user/assistant turns in it.
-        XCTAssertTrue(cut!.covered.contains { $0.role == .user })
+        XCTAssertNil(
+            AIChatManager.compactionCut(in: messages, keepTokens: 15_000),
+            "with nothing folded yet the newest row is kept and there is no tail below it to cut"
+        )
     }
 
     // MARK: - Summarizer input

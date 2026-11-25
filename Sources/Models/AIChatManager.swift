@@ -20,8 +20,25 @@ final class AIChatManager: ObservableObject {
     @Published private(set) var session: ChatSession {
         didSet {
             transcriptRevision &+= 1
+            // `persist()` stamps `updatedAt` on the session, which re-enters
+            // this observer. Without the guard, that is unbounded recursion
+            // (a stack overflow, not a save). The nested call is a no-op by
+            // design: the outer one is already writing.
+            guard !isPersisting else { return }
+            isPersisting = true
+            defer { isPersisting = false }
             persist()
         }
+    }
+    /// Re-entrancy guard for `session.didSet → persist → session.updatedAt`.
+    private var isPersisting = false
+
+    /// Replaces the transcript wholesale, for callers that build a scenario
+    /// rather than talk to a model (tests, and a future import path).
+    /// `append`/`persist` semantics are the same as any other transcript
+    /// change: the revision bumps and the session is saved.
+    func replaceTranscript(_ messages: [ChatMessage]) {
+        session.messages = messages
     }
 
     /// Bumped on every transcript change, so the expensive recall-index
@@ -539,6 +556,33 @@ final class AIChatManager: ObservableObject {
     /// stream far more thinking than answer; the transcript keeps the head
     /// and the tail so it stays honest without growing without bound.
     static let storedReasoningLimit = 60_000
+
+    /// Records one streamed reasoning fragment. The published value follows
+    /// on the next flush (see `scheduleLiveFlush`), so a burst of deltas
+    /// costs one panel update rather than one per token. The callback path
+    /// calls this; it is also the seam a test uses to exercise the throttle
+    /// without a network turn.
+    func appendLiveReasoning(_ piece: String) {
+        liveReasoningBuffer += piece
+        scheduleLiveFlush()
+    }
+
+    /// Records one streamed answer fragment. Same throttle as the reasoning
+    /// stream: the published value follows on the next flush.
+    func appendLiveAnswer(_ piece: String) {
+        liveAnswerBuffer += piece
+        scheduleLiveFlush()
+    }
+
+    /// Publishes the buffered streams immediately, cancelling any scheduled
+    /// flush. The end of a stream calls this so the finished text lands at
+    /// once; a performance test also uses it as the "one publish per token"
+    /// baseline the throttled path is measured against.
+    func flushLiveBuffersNow() {
+        liveFlushTask?.cancel()
+        liveFlushTask = nil
+        flushLiveBuffers()
+    }
 
     /// Publishes the buffered stream at most ~8 times a second. A no-op when
     /// a flush is already scheduled.
@@ -1531,10 +1575,12 @@ final class AIChatManager: ObservableObject {
             return !subagentReadOnlyGitToolNames.contains(name)
         case MachineToolExecutor.shellNamespace:
             return true
-        case MachineToolExecutor.fileNamespace, LocalToolExecutor.pythonNamespace,
-             LocalToolExecutor.screenNamespace:
-            // Python is blocked outright (below); the file/screen tools only
-            // read.
+        case LocalToolExecutor.pythonNamespace:
+            // Python can write anything, anywhere: it is withheld outright in
+            // Plan mode, not case-by-case (the script decides what it does).
+            return true
+        case MachineToolExecutor.fileNamespace, LocalToolExecutor.screenNamespace:
+            // The file and screen tools only read.
             return false
         default:
             return false
@@ -1723,6 +1769,11 @@ final class AIChatManager: ObservableObject {
         // Turn on whatever is installed, so the chat's Tools menu reports
         // real availability instead of everything appearing off.
         seedToolSelections()
+
+        // A conversation restored from disk (or built with a transcript)
+        // states its size at once: the header and the compaction trigger
+        // must not read zero until the next request reports a measurement.
+        refreshContextEstimate()
 
         // The YOLO gate: the gospel's approvals, plus saved "Always allow"
         // rules, plus the safety monitor. `safetyCanAutoApprove` only ever
@@ -2241,8 +2292,7 @@ final class AIChatManager: ObservableObject {
     /// One message waiting for the running turn to finish. It is *not* in the
     /// transcript yet: the model has not seen it, so it must not appear in
     /// history in the order it happened to be typed.
-    struct QueuedMessage: Identifiable, Equatable {
-        let id = UUID()
+    struct QueuedMessage: Identifiable, Equatable {        let id = UUID()
         let text: String
         /// Attachments waiting with the text. A message with images always
         /// queues rather than steering (a steer is a note on a tool result,
@@ -2442,6 +2492,13 @@ final class AIChatManager: ObservableObject {
         }
     }
 
+    /// Adds a message to the queue without starting a turn. The panel's
+    /// "queue this" path; the same thing `send(_:as:.queue)` does, spelled
+    /// for callers that already know no turn is possible.
+    func queueMessage(_ text: String, images: [ChatImage] = []) {
+        pendingQueued.append(QueuedMessage(text: text, images: images))
+    }
+
     /// Moves the oldest queued message into the transcript and returns it, or
     /// nil when nothing is waiting. Removed from the queue *before* its turn
     /// runs, so a Stop mid-turn cannot replay it.
@@ -2480,9 +2537,18 @@ final class AIChatManager: ObservableObject {
         persist()
     }
 
-    /// Drops a queued message without sending it.
+    /// Drops a queued message without sending it, handing its text back to
+    /// the composer. Dropping must never lose what the user wrote — and
+    /// attachments go back too, because an image cannot be retyped.
     func dropQueued(_ id: UUID) {
-        pendingQueued.removeAll { $0.id == id }
+        guard let index = pendingQueued.firstIndex(where: { $0.id == id }) else { return }
+        let message = pendingQueued.remove(at: index)
+        let current = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft = current.isEmpty ? message.text : message.text + "\n\n" + draft
+        if !message.images.isEmpty {
+            let fit = ChatImageLoader.fit(draftImages + message.images)
+            draftImages = fit.accepted
+        }
     }
 
     /// Drains the steering buffer. At a mid-turn boundary every waiting steer
@@ -2739,6 +2805,16 @@ final class AIChatManager: ObservableObject {
         }
         let prompt = buildPrompt()
 
+        // A turn that begins right after a compaction gets the project
+        // passages the summary lost, so "do section 2 next" still has the
+        // text of section 1 to work from. Only the first such turn pays for
+        // it: the next request in this turn carries the context in its
+        // history.
+        var openingPrompt = prompt
+        if let rehydration = await rehydrationBlock(for: userMessage) {
+            openingPrompt += "\n\n" + rehydration
+        }
+
         // Images ride on this turn's opening request: the ones the user sent
         // now, or — on a follow-up text-only turn — those from the most
         // recent image turns, so "now the second table in that screenshot"
@@ -2789,7 +2865,7 @@ final class AIChatManager: ObservableObject {
             let answer = try await service.fetchCompletionWithTools(
                 systemPrompt: halves.stable,
                 systemTail: systemTail.isEmpty ? nil : systemTail,
-                prompt: prompt,
+                prompt: openingPrompt,
                 images: pendingImages,
                 maxTokens: settings.chatMaxTokens,
                 maxTurns: settings.effectiveMaxTurns(for: ctx),
@@ -3048,8 +3124,46 @@ final class AIChatManager: ObservableObject {
     /// one line per call (the model can re-read with its tools if needed),
     /// and turns folded by the context-budget compaction are replaced by
     /// their summary.
-    func buildPrompt() -> String {
-        let history = session.messages.dropLast()  // the new user message is appended last
+    /// Project passages for a turn that starts right after a compaction,
+    /// found from the summary's objective and open items plus the new
+    /// message. `nil` when project search is off or nothing is relevant.
+    ///
+    /// Compaction folds the older turns out of the prompt, so the summary
+    /// keeps the *shape* of the work but loses the passages it quoted. This
+    /// puts the relevant ones back for the first turn after the fold — the
+    /// turn most likely to say "do section 2 next" and need section 1.
+    private func rehydrationBlock(for userText: String) async -> String? {
+        guard settings.chatRecallToolEnabled, let rag = localTools.rag,
+              let summary = session.messages.last(where: { $0.isSummary && !$0.isCompacted }) else { return nil }
+        let query = Self.rehydrationQuery(summary: summary.text, userText: userText)
+        guard case .hits(let chunks) = await rag.searchOutcome(query: query, topK: 4),
+              !chunks.isEmpty else { return nil }
+        return """
+        <project_context source="semantic index" reason="older turns were just summarized">
+        \(LocalToolExecutor.formatSemanticHits(chunks))
+        </project_context>
+        """
+    }
+
+    /// The new message first (it is what the turn is about), then the
+    /// summary's objective and open items. A filtered extract has no
+    /// sections, so only the message is used then.
+    nonisolated static func rehydrationQuery(summary: String, userText: String) -> String {
+        let sections = ["Objective", "Open items"].compactMap { summarySection($0, in: summary) }
+        return String(([userText] + sections).joined(separator: "\n").prefix(1_500))
+    }
+
+    /// The body under "## <name>" in a structured summary, or `nil` when the
+    /// section is missing or says "None".
+    nonisolated static func summarySection(_ name: String, in summary: String) -> String? {
+        guard let heading = summary.range(of: "## \(name)\n") else { return nil }
+        let rest = summary[heading.upperBound...]
+        let body = rest.range(of: "\n## ").map { rest[..<$0.lowerBound] } ?? rest
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed.lowercased() == "none" ? nil : trimmed
+    }
+
+    func buildPrompt() -> String {        let history = session.messages.dropLast()  // the new user message is appended last
         var lines: [String] = []
         var summaryLines: [String] = []
 
@@ -3335,6 +3449,24 @@ final class AIChatManager: ObservableObject {
     /// a toggle; the in-chat Tools menu changes it.
     @Published var selectedMCPServerIDs: Set<String> = []
 
+    /// Skills ticked "on by default" in Settings → AI, filtered to the skills
+    /// that currently exist, so stale IDs from deleted skills are dropped here
+    /// rather than at write time.
+    func defaultSkillIDs() -> Set<String> {
+        Self.filteredDefaultSkillIDs(
+            AISettingsManager.shared.chatDefaultSkillIDs,
+            available: skills.allSkills
+        )
+    }
+
+    /// Pure intersection of the persisted default-skill IDs with the IDs of
+    /// the skills currently available — factored out of `defaultSkillIDs()`
+    /// so the filtering rule is unit-testable without the singletons.
+    static func filteredDefaultSkillIDs(_ defaults: [String], available: [AISkill]) -> Set<String> {
+        let availableIDs = Set(available.map(\.id))
+        return Set(defaults.filter { availableIDs.contains($0) })
+    }
+
     /// Fills the per-chat selections from what is actually installed. Called
     /// at launch and whenever the installed set changes, so a newly added
     /// skill or server is on without the user having to find a toggle — while
@@ -3342,7 +3474,11 @@ final class AIChatManager: ObservableObject {
     func seedToolSelections() {
         let installed = Set(skills.allSkills.map(\.id))
         if selectedSkillIDs.isEmpty {
-            selectedSkillIDs = installed
+            // Nothing chosen yet: honour the per-skill "on by default" ticks,
+            // falling back to everything installed when none are set, so a
+            // first chat is useful without a trip to Settings.
+            let defaults = defaultSkillIDs()
+            selectedSkillIDs = defaults.isEmpty ? installed : defaults
         } else {
             // Keep deliberate choices, but include anything newly installed.
             selectedSkillIDs.formUnion(installed.subtracting(knownSkillIDs))

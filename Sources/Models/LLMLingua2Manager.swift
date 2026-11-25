@@ -400,6 +400,16 @@ final class LLMLingua2Engine: @unchecked Sendable {
         self.tokenizer = WordPieceTokenizer(vocabText: vocabText)
     }
 
+    /// The model's keep-score for each word, one per element. Exposed so a
+    /// test can prove the model actually discriminates (uniform scores still
+    /// compress, just badly) — the production path only needs the text.
+    ///
+    /// `nil` when the model refused the prediction: the caller then falls
+    /// back to the heuristic filter rather than keeping a prefix.
+    func scores(for words: [String]) -> [Double]? {
+        queue.sync { wordScores(words) }
+    }
+
     /// Synchronous compression — call through `LLMLingua2Compressor` (async)
     /// off the main actor.
     func compress(_ text: String, keepRate: Double, forceTokens: [String], isCode: Bool) -> String {
@@ -408,23 +418,15 @@ final class LLMLingua2Engine: @unchecked Sendable {
             let segments = segmentation.segments
             guard segments.count > 3 else { return text }
 
-            // One representative id per word: the word's first subtoken.
             // Word-level filtering means a word is kept or dropped whole —
             // the compressed text stays word-aligned and readable.
-            let representativeIDs: [Int] = segments.map { tokenizer.encodeWord($0.text).first ?? tokenizer.unkID }
-
-            // Score every word (chunked to the model's fixed window).
-            var scores = [Double](repeating: 0, count: segments.count)
-            let window = maxSequenceLength - 2 // CLS + content + SEP
-            var chunkStart = 0
-            while chunkStart < representativeIDs.count {
-                let chunkEnd = min(chunkStart + window, representativeIDs.count)
-                let chunk = Array(representativeIDs[chunkStart..<chunkEnd])
-                let chunkScores = (try? runScores(for: chunk)) ?? []
-                for (offset, score) in chunkScores.enumerated() {
-                    scores[chunkStart + offset] = score
-                }
-                chunkStart = chunkEnd
+            guard let scores = wordScores(segments.map(\.text)) else {
+                // A model that refuses the prediction must not degrade to
+                // "keep the first N words": use the heuristic filter, which
+                // keeps the informative words instead.
+                return HeuristicTokenFilter.compressSync(
+                    text, keepRate: keepRate, forceTokens: forceTokens, isCode: isCode
+                )
             }
 
             // Code safety: rate floor + forced structural words, exactly
@@ -443,8 +445,11 @@ final class LLMLingua2Engine: @unchecked Sendable {
                     || (isCode && HeuristicTokenFilter.structuralTokens.contains(raw)) {
                     forced.insert(index)
                 }
+                // In code, a word carrying syntax is never dropped: losing
+                // `#let` or `..n)` breaks the source (an unclosed bracket),
+                // whatever the classifier thinks of it.
                 if isCode && segment.text.contains(where: { "{}()[]#$=;<>\\".contains($0) }) {
-                    scores[index] += 2.0
+                    forced.insert(index)
                 }
             }
 
@@ -453,45 +458,116 @@ final class LLMLingua2Engine: @unchecked Sendable {
         }
     }
 
-    /// One forward pass over `[CLS] ids [SEP]`; returns keep-logit minus
-    /// drop-logit per content position (first `count` entries).
-    private func runScores(for ids: [Int]) throws -> [Double] {
-        let length = ids.count + 2
-        let inputIDs = Self.array(from: [tokenizer.clsID] + ids + [tokenizer.sepID], length: length)
-        let attentionMask = Self.array(from: Array(repeating: 1, count: length), length: length)
-        let typeIDs = Self.array(from: Array(repeating: 0, count: length), length: length)
-
-        let inputNames = model.modelDescription.inputDescriptionsByName.keys.sorted()
-        guard inputNames.count >= 3 else { return [] }
-        // The conversion script names them input_ids / attention_mask /
-        // token_type_ids; sorted() restores exactly that order. Anything
-        // else is still handled positionally.
-        let input = try MLDictionaryFeatureProvider(dictionary: [
-            inputNames[0]: MLFeatureValue(multiArray: inputIDs),
-            inputNames[1]: MLFeatureValue(multiArray: attentionMask),
-            inputNames[2]: MLFeatureValue(multiArray: typeIDs),
-        ])
-        let output = try model.prediction(from: input)
-
-        let outputNames = model.modelDescription.outputDescriptionsByName.keys.sorted()
-        guard let logits = output.featureValue(for: outputNames[0])?.multiArrayValue,
-              logits.count >= length * 2 else { return [] }
-
-        var result = [Double](repeating: 0, count: ids.count)
-        for position in 0..<ids.count {
-            let drop = logits[position * 2]
-            let keep = logits[position * 2 + 1]
-            result[position] = keep.doubleValue - drop.doubleValue
+    /// Scores each **word** (never splitting one across a chunk) against the
+    /// model's fixed input window, and averages its subtokens' keep-vs-drop
+    /// margin. `nil` when any chunk fails, so the caller can fall back.
+    private func wordScores(_ words: [String]) -> [Double]? {
+        let capacity = maxSequenceLength - 2 // [CLS] … [SEP]
+        let tokens: [[Int]] = words.map { word in
+            let ids = WordPieceTokenizer.basicWords(word).flatMap { tokenizer.encodeWord($0) }
+            return Array((ids.isEmpty ? [tokenizer.unkID] : ids).prefix(capacity))
         }
-        return result
+
+        var scores: [Double] = []
+        scores.reserveCapacity(words.count)
+        var chunk: [[Int]] = []
+        var chunkTokens = 0
+        func flush() -> Bool {
+            guard !chunk.isEmpty else { return true }
+            guard let chunkScores = runChunk(chunk) else { return false }
+            scores += chunkScores
+            chunk = []
+            chunkTokens = 0
+            return true
+        }
+        for wordTokens in tokens {
+            if chunkTokens + wordTokens.count > capacity, !flush() { return nil }
+            chunk.append(wordTokens)
+            chunkTokens += wordTokens.count
+        }
+        return flush() ? scores : nil
     }
 
-    private static func array(from values: [Int], length: Int) -> MLMultiArray {
-        let array = try! MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .int32)
+    /// One prediction over one chunk of whole words.
+    ///
+    /// The published model is exported with a **fixed** sequence length, so
+    /// every call is padded to the shape the model declares and the padding
+    /// is masked out. Building a variable-length array instead makes
+    /// `prediction(from:)` fail — which is exactly how a silent fallback used
+    /// to look like "compression works, badly".
+    private func runChunk(_ words: [[Int]]) -> [Double]? {
+        let content = words.flatMap { $0 }
+        let real = content.count + 2
+        let declared = model.modelDescription.inputDescriptionsByName[Input.ids]?
+            .multiArrayConstraint?.shape.last?.intValue ?? 0
+        let length = declared > 0 ? declared : real
+        guard real <= length else { return nil }
+
+        let padding = length - real
+        let ids = [tokenizer.clsID] + content + [tokenizer.sepID]
+            + Array(repeating: tokenizer.padID, count: padding)
+        let mask = Array(repeating: 1, count: real) + Array(repeating: 0, count: padding)
+        let types = Array(repeating: 0, count: length)
+
+        do {
+            let input = try MLDictionaryFeatureProvider(dictionary: [
+                Input.ids: MLFeatureValue(multiArray: try Self.array(from: ids)),
+                Input.mask: MLFeatureValue(multiArray: try Self.array(from: mask)),
+                Input.types: MLFeatureValue(multiArray: try Self.array(from: types)),
+            ])
+            let output = try model.prediction(from: input)
+            guard let outputName = model.modelDescription.outputDescriptionsByName.keys.sorted().first,
+                  let logits = output.featureValue(for: outputName)?.multiArrayValue else {
+                Self.reportFailure("the model returned no logits")
+                return nil
+            }
+            let hasBatch = logits.shape.count == 3
+            func logit(_ position: Int, _ label: Int) -> Double {
+                let index: [NSNumber] = hasBatch
+                    ? [0, NSNumber(value: position), NSNumber(value: label)]
+                    : [NSNumber(value: position), NSNumber(value: label)]
+                return logits[index].doubleValue
+            }
+            // Label 1 = keep, label 0 = drop (LLMLingua-2's convention).
+            var position = 1 // after [CLS]
+            return words.map { wordTokens in
+                var total = 0.0
+                for _ in wordTokens {
+                    total += logit(position, 1) - logit(position, 0)
+                    position += 1
+                }
+                return total / Double(max(wordTokens.count, 1))
+            }
+        } catch {
+            Self.reportFailure(error.localizedDescription)
+            return nil
+        }
+    }
+
+    private enum Input {
+        static let ids = "input_ids"
+        static let mask = "attention_mask"
+        static let types = "token_type_ids"
+    }
+
+    private static func array(from values: [Int]) throws -> MLMultiArray {
+        let array = try MLMultiArray(shape: [1, NSNumber(value: values.count)], dataType: .int32)
         for (index, value) in values.enumerated() {
             array[index] = NSNumber(value: value)
         }
         return array
+    }
+
+    /// Logged once per launch: a model that silently degrades every
+    /// compression is how a shape mismatch goes unnoticed.
+    private static let failureLock = NSLock()
+    nonisolated(unsafe) private static var didReportFailure = false
+    private static func reportFailure(_ message: String) {
+        failureLock.lock()
+        defer { failureLock.unlock() }
+        guard !didReportFailure else { return }
+        didReportFailure = true
+        NSLog("[LLMLingua2] compression model failed: %@", message)
     }
 }
 

@@ -259,7 +259,18 @@ struct ToolCallRepeatGuard {
         // Harness reads.
         "skill__read", "skill__read_file",
         // Calculator.
-        "calculator__calculate",
+        "calculator__evaluate_math",
+    ]
+    /// Tools that never change what a read would return, so recording one
+    /// must **not** reset the guard. `agent__update_plan` runs in nearly
+    /// every round; treating it as "something happened" would clear the
+    /// history before any read could ever be refused. Anything not tracked
+    /// and not listed here is assumed to have changed state.
+    static let neutralToolNames: Set<String> = [
+        "agent__update_plan", "agent__think", "agent__scratch_read",
+        "agent__scratch_search", "agent__recall", "agent__delegate_task",
+        "agent__delegate_parallel", "agent__job_status", "agent__tool_search",
+        "calculator__evaluate_math",
     ]
     /// Identical runs allowed before a call is refused. 0 turns the guard
     /// off: nothing is labelled or refused.
@@ -326,7 +337,11 @@ struct ToolCallRepeatGuard {
     mutating func record(name: String, argumentsJSON: String, output: String) -> String {
         guard maxIdenticalRuns > 0 else { return output }
         guard isTracked(name) else {
-            history.removeAll()
+            // A neutral tool (a plan update, a scratchpad note, a calculator
+            // run) leaves the reads it saw unchanged, so the history stands.
+            if !Self.neutralToolNames.contains(name) {
+                history.removeAll()
+            }
             return output
         }
         let key = Self.signature(name: name, argumentsJSON: argumentsJSON)

@@ -58,10 +58,15 @@ enum ToolOutputStore {
 
     /// `~/Library/Logs/TypstEdit/Outputs`.
     nonisolated static func directory() -> URL {
+        if let directoryOverride { return directoryOverride }
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library")
         return base.appendingPathComponent("Logs/TypstEdit/Outputs", isDirectory: true)
     }
+
+    /// Where saved outputs go, ahead of the real logs folder. For tests only:
+    /// a test runner must never write into the user's Console archives.
+    nonisolated(unsafe) static var directoryOverride: URL?
 
     /// Clips `text` to `cap`, saving the whole thing when it does not fit.
     ///

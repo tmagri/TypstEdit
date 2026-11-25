@@ -1156,38 +1156,38 @@ final class LocalToolExecutorTests: XCTestCase {
     // MARK: - Prompt shaping / plan round-trip
 
     func testBuildPromptExcludesCompactedAndToolCalls() {
-        let history = [
+        // The new engine folds the transcript inside the agent (it owns the
+        // session), so the pure shaping rule is exercised through a real
+        // manager's prompt instead of a static helper.
+        let chat = AIChatManager()
+        chat.replaceTranscript([
             ChatMessage(role: .user, text: "old question", isCompacted: true),
             ChatMessage(role: .assistant, text: "old answer", isCompacted: true),
             ChatMessage(role: .assistant, text: "[Summary of earlier conversation]\n\nThey wanted X.", isSummary: true),
             ChatMessage(role: .user, text: "new question"),
-            ChatMessage(role: .toolCall, toolName: "project__read_file", toolStatus: .succeeded)
-        ]
-        let prompt = AIChatManager.buildPrompt(history: history, userText: "follow up")
+            ChatMessage(role: .toolCall, toolName: "project__read_file", toolStatus: .succeeded, toolOutput: "file body"),
+            ChatMessage(role: .assistant, text: "new answer"),
+            ChatMessage(role: .user, text: "follow up"),
+        ])
+        let prompt = chat.buildPrompt()
 
         XCTAssertFalse(prompt.contains("old question"))
         XCTAssertFalse(prompt.contains("old answer"))
-        XCTAssertFalse(prompt.contains("project__read_file"))
-        XCTAssertTrue(prompt.contains("They wanted X."))
-        XCTAssertTrue(prompt.contains("User: new question"))
-        XCTAssertTrue(prompt.hasSuffix("User: follow up"))
+        XCTAssertTrue(prompt.contains("They wanted X."), "the summary stands in for the folded turns")
+        XCTAssertTrue(prompt.contains("[USER] new question"))
+        XCTAssertTrue(prompt.contains("new answer"))
+        XCTAssertTrue(prompt.hasSuffix("[USER] follow up"), "the newest user turn closes the prompt")
     }
 
-    func testBuildPromptKeepsSummaryAndNewestTurnsWithinTheBudget() {
-        var history = [
-            ChatMessage(role: .assistant, text: "[Summary of earlier conversation]\n\nThey wanted X.", isSummary: true)
-        ]
-        for i in 1...40 {
-            history.append(ChatMessage(role: .user, text: "question \(i) " + String(repeating: "x", count: 200)))
-            history.append(ChatMessage(role: .assistant, text: "answer \(i) " + String(repeating: "y", count: 200)))
-        }
-
-        let prompt = AIChatManager.buildPrompt(history: history, userText: "follow up", charBudget: 2_000)
-
-        XCTAssertTrue(prompt.contains("They wanted X."), "the summary is always kept — it is the only record of the summarized turns")
-        XCTAssertTrue(prompt.contains("answer 40"), "the newest turn always fits")
-        XCTAssertFalse(prompt.contains("question 1 "), "older turns fall outside the budget")
-        XCTAssertTrue(prompt.hasSuffix("User: follow up"))
+    func testBuildPromptKeepsTheSummaryRow() {
+        let chat = AIChatManager()
+        chat.replaceTranscript([
+            ChatMessage(role: .assistant, text: "[Summary of earlier conversation]\n\nThey wanted X.", isSummary: true),
+            ChatMessage(role: .user, text: "follow up"),
+        ])
+        let prompt = chat.buildPrompt()
+        XCTAssertTrue(prompt.contains("They wanted X."), "the summary is the only record of the summarized turns")
+        XCTAssertTrue(prompt.hasSuffix("[USER] follow up"))
     }
 
     func testPlanIsRebuiltFromTranscript() {

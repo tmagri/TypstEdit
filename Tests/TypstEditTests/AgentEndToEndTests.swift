@@ -58,7 +58,7 @@ final class AgentEndToEndTests: XCTestCase {
         var turns: [[String: Any]] = []
         for prompt in prompts where !stoppedByWatchdog {
             let turnStart = Date()
-            await chat.sendMessage(prompt)
+            await chat.send(prompt)
             let rows = chat.messages.filter { $0.role == .toolCall }
             var statusCounts: [String: Int] = [:]
             for row in rows {

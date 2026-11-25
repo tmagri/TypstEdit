@@ -35,9 +35,9 @@ final class ARIAAssessmentTests: XCTestCase {
 
     func testLogForJudgeListsEachCallOnce() {
         let args = #"{"path":"notes/a.typ"}"#
-        let trace = SafetyTrace(task: "tidy the notes", toolCalls: [
-            SafetyTrace.ToolCall(name: "project__read_file", argumentsJSON: args, status: .succeeded, output: "line one\nline two"),
-            SafetyTrace.ToolCall(name: "project__edit_file", argumentsJSON: args, status: .failed, output: "no match"),
+        let trace = AgentTrace(task: "tidy the notes", toolCalls: [
+            AgentTrace.ToolCall(name: "project__read_file", argumentsJSON: args, status: .succeeded, output: "line one\nline two"),
+            AgentTrace.ToolCall(name: "project__edit_file", argumentsJSON: args, status: .failed, output: "no match"),
         ])
         let log = trace.logForJudge()
         XCTAssertTrue(log.contains("TASK: tidy the notes"))
@@ -48,7 +48,7 @@ final class ARIAAssessmentTests: XCTestCase {
     }
 
     func testLogForJudgeSaysSoWhenNothingRan() {
-        XCTAssertEqual(SafetyTrace().logForJudge(), "(no tool calls)")
+        XCTAssertEqual(AgentTrace().logForJudge(), "(no tool calls)")
     }
 
     func testScoreTitlesAndSymbolsAreDistinct() {

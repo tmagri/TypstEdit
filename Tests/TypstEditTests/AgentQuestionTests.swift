@@ -132,7 +132,7 @@ final class AgentQuestionTests: XCTestCase {
 
     func testQuestionToolIsNotOfferedToTheSubagent() {
         // A subagent has no way to reach the user, so a question would hang.
-        XCTAssertFalse(AIChatManager.subagentReadOnlyToolNames.contains("ask_question"))
+        XCTAssertFalse(AIChatManager.subagentReadOnlyAgentToolNames.contains("ask_question"))
     }
 
     func testQuestionToolMutatesNothingSoPlanModeKeepsIt() {

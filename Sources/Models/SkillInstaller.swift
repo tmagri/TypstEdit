@@ -308,9 +308,32 @@ enum SkillInstaller {
               scheme == "http" || scheme == "https" else {
             throw InstallError.badURL
         }
+        // Only the hosts a skill can actually come from. A generic URL is not
+        // a skill source, and treating it as one made the installer accept
+        // (then fail slowly on) any link the user pasted.
+        guard let host = url.host?.lowercased(),
+              ["github.com", "www.github.com", "codeload.github.com", "registry.npmjs.org"]
+                  .contains(host) else {
+            throw InstallError.badURL
+        }
 
         var spec = SourceSpec()
         if url.pathExtension.lowercased() == "zip" {
+            // GitHub's archive link redirects to codeload; name the real host
+            // up front so a downloader never has to follow a cross-host hop.
+            if host == "github.com" || host == "www.github.com",
+               url.path.contains("/archive/") {
+                let parts = url.path.split(separator: "/").map(String.init).filter { !$0.isEmpty }
+                // /owner/repo/archive/refs/heads/main.zip → codeload/owner/repo/zip/refs/heads/main
+                if parts.count >= 5, parts[2] == "archive", parts[3] == "refs" {
+                    let repo = parts[0] + "/" + parts[1]
+                    // keep `refs/heads/main` in the codeload path
+                    let rest = parts.dropFirst(3).joined(separator: "/")
+                    let withoutZip = rest.hasSuffix(".zip") ? String(rest.dropLast(4)) : rest
+                    spec.archiveURL = URL(string: "https://codeload.github.com/\(repo)/zip/\(withoutZip)")
+                    return spec
+                }
+            }
             spec.archiveURL = url
             return spec
         }
@@ -742,9 +765,9 @@ enum SkillInstaller {
             candidates.append(Candidate(
                 folderURL: folder,
                 name: choice.name.isEmpty
-                    ? (meta["name"].flatMap { $0.isEmpty ? nil : $0 } ?? choice.displayName)
+                    ? (meta["name"].map(Self.unquotedScalar).flatMap { $0.isEmpty ? nil : $0 } ?? choice.displayName)
                     : choice.name,
-                description: meta["description"] ?? "",
+                description: meta["description"].map(Self.unquotedScalar) ?? "",
                 attachmentCount: attachments
             ))
         }
@@ -756,6 +779,18 @@ enum SkillInstaller {
     /// `https://github.com/AminBlg/SimpleEnglish[/tree/main/skills/x]` →
     /// `AminBlg/SimpleEnglish`. A `tree/<ref>/<subpath>` suffix narrows the
     /// search to that subpath, which is how a multi-skill repo pins one.
+    /// A frontmatter scalar with a matching pair of surrounding quotes
+    /// removed, so `name: 'Example'` and `name: "Example"` read as `Example`.
+    static func unquotedScalar(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2,
+              let first = trimmed.first, let last = trimmed.last,
+              (first == "'" && last == "'") || (first == "\"" && last == "\"") else {
+            return trimmed
+        }
+        return String(trimmed.dropFirst().dropLast())
+    }
+
     static func repositorySlug(from url: URL) -> String? {
         let parts = url.path.split(separator: "/").map(String.init).filter { !$0.isEmpty }
         guard parts.count >= 2 else { return nil }
@@ -1059,7 +1094,7 @@ enum SkillInstaller {
                 if basename.lowercased() == wanted { return true }
                 let skillPath = folder.isEmpty ? "SKILL.md" : folder + "/SKILL.md"
                 return readText(skillPath)
-                    .flatMap { parseFrontmatter($0)["name"] }
+                    .flatMap { parseFrontmatter($0)["name"].map(Self.unquotedScalar) }
                     .map { $0.lowercased() == wanted } ?? false
             }
         } else {
@@ -1103,7 +1138,7 @@ enum SkillInstaller {
             }
             let name = (contents.first { $0 == (folder.isEmpty ? "SKILL.md" : folder + "/SKILL.md") })
                 .flatMap { readText($0) }
-                .flatMap { parseFrontmatter($0)["name"] }
+                .flatMap { parseFrontmatter($0)["name"].map(Self.unquotedScalar) }
                 .flatMap { $0.isEmpty ? nil : $0 } ?? ""
             result.append(FolderChoice(folder: folder, name: name, files: contents))
         }
@@ -1185,7 +1220,7 @@ enum SkillInstaller {
         guard let data = try? Data(contentsOf: skillFile),
               let content = String(data: data, encoding: .utf8) else { return nil }
         let meta = parseFrontmatter(content)
-        let name = meta["name"].flatMap { $0.isEmpty ? nil : $0 }
+        let name = meta["name"].map(Self.unquotedScalar).flatMap { $0.isEmpty ? nil : $0 }
             ?? fallbackName.flatMap { $0.isEmpty ? nil : $0 }
             ?? folder.lastPathComponent
         let attachments = (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?
@@ -1193,7 +1228,7 @@ enum SkillInstaller {
         return Candidate(
             folderURL: folder,
             name: name,
-            description: meta["description"] ?? "",
+            description: meta["description"].map(Self.unquotedScalar) ?? "",
             attachmentCount: attachments.count
         )
     }
