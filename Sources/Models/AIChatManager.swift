@@ -3498,12 +3498,21 @@ final class AIChatManager: ObservableObject {
         // Keyed by scoped id (`"global:name"`), matching the Tools menu and
         // `ProjectConfig.enabledMCPServerIDs`. The bare name would select a
         // global and a project server that share one.
-        let servers = Set(enabledMCPServers.map(\.id))
+        //
+        // Read from the manager's own enabled list, not from
+        // `enabledMCPServers`: that property is already filtered by this very
+        // selection, so seeding from it is circular — a fresh chat starts
+        // empty, sees no candidates, and can never turn a server on. That was
+        // the last half of "registration worked, no tools are offered".
+        let servers = Set((mcp?.enabledServers ?? []).map(\.id))
         if selectedMCPServerIDs.isEmpty {
             selectedMCPServerIDs = servers
         } else {
             selectedMCPServerIDs.formUnion(servers.subtracting(knownMCPServerNames))
         }
+        // Same cleanup the skills get: a deleted server must not linger in
+        // the selection and inflate the Tools menu's count.
+        selectedMCPServerIDs.formIntersection(servers)
         knownMCPServerNames = servers
     }
 

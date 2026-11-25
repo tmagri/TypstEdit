@@ -274,7 +274,6 @@ final class AIChatSessionStore: ObservableObject {
         // All stored properties are set, so self can be shared now — the
         // same wiring `register(_:)` does for every later manager.
         attach(manager)
-        managers[manager.id] = manager
         observeActivity(manager)
     }
 

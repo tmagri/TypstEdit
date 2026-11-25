@@ -6,8 +6,8 @@ import XCTest
 ///
 /// The reported shape was "registration worked, but no tools are ever run":
 /// `mcp.json` loaded, the Settings row showed the server, and every chat turn
-/// declared zero MCP tools. Three separate wiring gaps produced that, and each
-/// one alone is enough to hide every server tool:
+/// declared zero MCP tools. Several separate wiring gaps produced that, and
+/// each one alone is enough to hide every server tool:
 ///
 /// 1. `AIChatManager.mcp` was never assigned — the store that owns the
 ///    `ProjectContext` wired `sessionStore` and `context` but not the manager,
@@ -16,13 +16,45 @@ import XCTest
 ///    and `ProjectConfig.enabledMCPServerIDs` write `ScopedMCPServer.id`
 ///    (`"global:name"`), while `enabledMCPServers` and the catalogue lookups
 ///    compared the bare `config.name`.
-/// 3. Seeding ran inside `AIChatManager.init`, before the manager was
-///    attached, so the first pass saw zero servers and selected none.
+/// 3. Seeding read its candidates from `enabledMCPServers` — the property it
+///    had just been filtered by — so a fresh chat started empty, found no
+///    candidates, and could never select a server.
+/// 4. Seeding ran inside `AIChatManager.init`, before the manager was
+///    attached, so even a non-circular seed saw no servers on the first pass.
+///
+/// `MCPConfigStore.configURLOverride` keeps every case on a throwaway file, so
+/// a run never reads or writes the user's real `mcp.json`.
 @MainActor
 final class MCPChatWiringTests: XCTestCase {
 
+    private var configDirectory: URL!
+    private var previousOverride: URL?
+
+    override func setUp() async throws {
+        try await super.setUp()
+        configDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MCPChatWiringTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        previousOverride = MCPConfigStore.configURLOverride
+        MCPConfigStore.configURLOverride = configDirectory.appendingPathComponent("mcp.json")
+    }
+
+    override func tearDown() async throws {
+        MCPConfigStore.configURLOverride = previousOverride
+        if let configDirectory {
+            try? FileManager.default.removeItem(at: configDirectory)
+        }
+        try await super.tearDown()
+    }
+
     private func serverConfig(_ name: String) -> MCPServerConfig {
         MCPServerConfig(name: name, transport: .http, url: "https://\(name).example.com/mcp")
+    }
+
+    /// The fake transport answers every handshake, so a start succeeds without
+    /// a process or a network.
+    private func installFakeTransport(on manager: MCPManager) {
+        manager.makeClient = { MCPClient(config: $0, urlSession: FakeMCPServer.session()) }
     }
 
     /// A chat attached to a window's context sees that context's enabled
@@ -38,9 +70,8 @@ final class MCPChatWiringTests: XCTestCase {
         let context = ProjectContext()
         let server = serverConfig("wired")
         let scoped = ScopedMCPServer(config: server, scope: .global)
-        context.mcp.makeClient = { MCPClient(config: $0, urlSession: FakeMCPServer.session()) }
+        installFakeTransport(on: context.mcp)
         context.mcp.saveServer(server, scope: .global)
-        defer { context.mcp.deleteServer(name: server.name, scope: .global) }
 
         let store = AIChatSessionStore(context: context)
         let chat = store.activeManager
@@ -59,9 +90,10 @@ final class MCPChatWiringTests: XCTestCase {
         XCTAssertTrue(serverTools.allSatisfy { $0.qualifiedName.hasPrefix("\(server.name)__") })
     }
 
-    /// Seeding must run after the manager is attached. Otherwise a fresh chat
-    /// selects nothing and the model is offered no MCP tools even though the
-    /// server is enabled and configured.
+    /// Seeding must run after the manager is attached, and must not ask the
+    /// selection it is computing for its own candidates. Otherwise a fresh
+    /// chat selects nothing and the model is offered no MCP tools even though
+    /// the server is enabled and configured.
     func testAFreshChatSelectsConfiguredServers() async throws {
         FakeMCPServer.reset { request in
             guard let json = request.json, let id = json["id"] else {
@@ -73,9 +105,8 @@ final class MCPChatWiringTests: XCTestCase {
         let context = ProjectContext()
         let server = serverConfig("seeded")
         let scoped = ScopedMCPServer(config: server, scope: .global)
-        context.mcp.makeClient = { MCPClient(config: $0, urlSession: FakeMCPServer.session()) }
+        installFakeTransport(on: context.mcp)
         context.mcp.saveServer(server, scope: .global)
-        defer { context.mcp.deleteServer(name: server.name, scope: .global) }
 
         let store = AIChatSessionStore(context: context)
         XCTAssertEqual(store.activeManager.selectedMCPServerIDs, [scoped.id],
@@ -106,9 +137,8 @@ final class MCPChatWiringTests: XCTestCase {
         var server = serverConfig("batched")
         server.allowConcurrentCalls = true
         let scoped = ScopedMCPServer(config: server, scope: .global)
-        context.mcp.makeClient = { MCPClient(config: $0, urlSession: FakeMCPServer.session()) }
+        installFakeTransport(on: context.mcp)
         context.mcp.saveServer(server, scope: .global)
-        defer { context.mcp.deleteServer(name: server.name, scope: .global) }
 
         let store = AIChatSessionStore(context: context)
         let chat = store.activeManager
@@ -117,5 +147,39 @@ final class MCPChatWiringTests: XCTestCase {
         _ = await chat.availableTools()
         XCTAssertTrue(chat.mcpMayRunConcurrentlyForTesting("\(server.name)__peek"),
                       "a read-only tool on an opted-in server must be allowed to batch")
+    }
+
+    /// The end-to-end path the bug report describes: a tool the model is
+    /// offered can actually be run through the chat's dispatcher.
+    func testAnOfferedServerToolCanBeRun() async throws {
+        FakeMCPServer.reset { request in
+            guard let json = request.json, let id = json["id"] else {
+                return .init(status: 202, headers: [:], body: Data())
+            }
+            if json["method"] as? String == "tools/call" {
+                return .init(body: FakeMCPServer.json([
+                    "jsonrpc": "2.0", "id": id,
+                    "result": ["content": [["type": "text", "text": "ran"]]]
+                ]))
+            }
+            return .init(body: FakeMCPServer.json(FakeMCPServer.standardResult(for: json)!))
+        }
+
+        let context = ProjectContext()
+        let server = serverConfig("callable")
+        let scoped = ScopedMCPServer(config: server, scope: .global)
+        installFakeTransport(on: context.mcp)
+        context.mcp.saveServer(server, scope: .global)
+
+        let store = AIChatSessionStore(context: context)
+        let chat = store.activeManager
+        chat.selectedMCPServerIDs = [scoped.id]
+
+        let tools = await chat.availableTools()
+        let offered = try XCTUnwrap(tools.first { $0.serverName == server.name },
+                                    "the model must be offered the server's tool")
+        let output = await chat.executeToolForTesting(offered.qualifiedName, argumentsJSON: "{}")
+        XCTAssertTrue(output.contains("ran"),
+                      "the offered tool must reach the live server, got: \(output)")
     }
 }

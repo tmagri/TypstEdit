@@ -78,7 +78,7 @@ final class MCPManager: ObservableObject {
     }
 
     private func refreshGlobal() {
-        globalServers = Array(MCPConfigStore.load(from: MCPConfigStore.globalConfigURL()).mcpServers.values)
+        globalServers = Array(MCPConfigStore.load().mcpServers.values)
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
@@ -125,7 +125,10 @@ final class MCPManager: ObservableObject {
             // nobody reads from, like the missing-project fallback below.
             return FileManager.default.temporaryDirectory.appendingPathComponent("typstedit-no-builtin-mcp.json")
         case .global:
-            return MCPConfigStore.globalConfigURL()
+            // `configURL()` honours a test's override and keeps an XCTest run
+            // away from the user's real server list; `globalConfigURL()`
+            // would write through to `~/Library/Application Support`.
+            return MCPConfigStore.configURL()
         case .project:
             guard let projectRoot else {
                 // No active project: fall back to a config nobody reads from,
