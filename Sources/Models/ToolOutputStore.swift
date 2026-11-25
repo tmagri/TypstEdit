@@ -1,182 +1,146 @@
 import Foundation
 
-/// Bounds what one tool call can put into a conversation.
+/// Keeps the full text of an output that was too large to hand the model, and
+/// answers with where it went.
 ///
-/// A single chatty tool can otherwise spend the whole context at once: a
-/// Python script that prints a loop's worth of output, or an MCP server that
-/// returns a whole document from one query. `read_file` has always been paged,
-/// but `run` and MCP tools had no cap at all.
+/// ## Why a file rather than a shorter answer
 ///
-/// The bound is not a plain truncation, which would lose the part the model
-/// needs. Modelled on opencode's `ToolOutput`: the head of the output is
-/// returned inline, and the **complete** text is written to a retained file
-/// named in the marker. The marker hands the model a path inside its own scope,
-/// so it can pull back any missing part with the `read_file` it already knows
-/// (which is itself paged), instead of the output being gone for good.
+/// A tool result used to be cut at a character cap with `[... output truncated
+/// ...]` and nothing else. That loses the data twice: the model cannot see what
+/// was cut, and the only way to get it is to re-run the command — which is why
+/// long transcripts are full of the same `grep` run with narrower arguments
+/// each time. A `grep` that produced 200 KB over a big tree, a `dd` progress
+/// log, a compiler's full warning list: all of it existed for a moment and then
+/// was thrown away.
 ///
-/// Retained files live under `.typstedit/`, which `grep_project` and
-/// `list_files` already skip and the RAG indexer already excludes, so they
-/// never pollute a search or feed back into the conversation as content.
-@MainActor
+/// OpenCode answers this by writing the whole thing to a retained file and
+/// putting the path in the marker the model reads (`tool-output.ts`). The same
+/// shape works here, and TypstEdit already has the tool that pages it back:
+/// `read_file`, with `start_line`/`end_line` to page through it.
+///
+/// ## Where it goes, and why there
+///
+/// `~/Library/Logs/TypstEdit/Outputs`, beside the shell jobs' logs, for the same
+/// reason those live there: a person should be able to find it in Console.app
+/// without knowing TypstEdit's internals, and a file that a chat may still cite
+/// has to outlive the call that wrote it. It is **not** the scratch folder —
+/// that one is per-chat and is deleted with the chat, while an output can be
+/// cited by a later turn of the same chat and by a subagent's report.
+///
+/// Retention is `retention`, pruned opportunistically on write so nothing has
+/// to run a timer for it. Nothing here is a backup: these are working files.
 enum ToolOutputStore {
 
-    /// The most lines returned inline.
-    static let maxLines = 2_000
-    /// The most bytes returned inline. Both limits apply; whichever is hit
-    /// first stops the inline copy.
-    static let maxBytes = 50 * 1024
-    /// Retained files older than this are pruned at launch.
-    static let retentionDays = 7
+    /// One saved output.
+    struct Saved: Equatable {
+        /// Absolute path, for the marker and for `read_file`.
+        let path: String
+        /// How much of it there was, in characters.
+        let totalChars: Int
 
-    /// What the bounds did to one output. Pure, so the rules are testable
-    /// without a project folder or a disk write.
-    struct Summary: Equatable {
-        /// The text to hand back, without any marker.
-        let kept: String
-        /// Lines in the full output.
-        let totalLines: Int
-        /// Lines kept inline.
-        let shownLines: Int
-        /// Total bytes in the full output.
-        let totalBytes: Int
-
-        var truncated: Bool { shownLines < totalLines || kept.utf8.count != totalBytes }
+        /// The marker that replaces the cut text. Stated as a fact about the
+        /// call, never as a suggestion to retry: the data is here, the model
+        /// should read it rather than produce it again.
+        func marker(shown: Int) -> String {
+            "[showing the first \(shown) of \(totalChars) characters — the full output was saved to \(path). Read it with read_file (start_line/end_line to page), or narrow the command. Do not re-run it just to see more.]"
+        }
     }
 
-    /// Applies the bounds to `text`. When nothing is over a limit the whole
-    /// text comes back unchanged and `truncated` is false.
-    static func summarize(
-        _ text: String,
-        maxLines: Int = maxLines,
-        maxBytes: Int = maxBytes
-    ) -> Summary {
-        let totalBytes = text.utf8.count
-        var lines = text.components(separatedBy: "\n")
-        // A trailing newline is the end of the last line, not an extra one.
-        if text.hasSuffix("\n") { lines.removeLast() }
-        let totalLines = lines.count
+    /// Most characters one saved output may hold. A runaway command (`yes`,
+    /// `cat /dev/urandom | xxd`, a 2 GB log) must not fill the disk in one
+    /// call, and past this size the file stops being something a model can
+    /// page usefully anyway.
+    nonisolated static let maxSavedChars = 8_000_000
 
-        guard totalLines > maxLines || totalBytes > maxBytes else {
-            return Summary(kept: text, totalLines: totalLines, shownLines: totalLines, totalBytes: totalBytes)
-        }
+    /// How long a saved output survives. Long enough for a chat to cite it in
+    /// a later turn, short enough that the folder does not grow forever.
+    nonisolated static let retention: TimeInterval = 7 * 24 * 60 * 60
 
-        var kept: [String] = []
-        var bytes = 0
-        for line in lines.prefix(maxLines) {
-            let size = line.utf8.count + (kept.isEmpty ? 0 : 1)
-            if bytes + size > maxBytes { break }
-            kept.append(line)
-            bytes += size
-        }
-        return Summary(
-            kept: kept.joined(separator: "\n"),
-            totalLines: totalLines,
-            shownLines: kept.count,
-            totalBytes: totalBytes
-        )
+    /// `~/Library/Logs/TypstEdit/Outputs`.
+    nonisolated static func directory() -> URL {
+        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library")
+        return base.appendingPathComponent("Logs/TypstEdit/Outputs", isDirectory: true)
     }
 
-    /// Applies the bounds and, when the output had to be cut, retains the full
-    /// text and appends the marker naming it. Text within the limits (the
-    /// overwhelmingly common case) is returned untouched, with no disk write.
+    /// Clips `text` to `cap`, saving the whole thing when it does not fit.
     ///
-    /// With no scope root there is nowhere the model could read a retained
-    /// file back from, so the cut is stated plainly instead of pretending to
-    /// save anything.
-    static func truncate(
-        _ text: String,
-        scope: LocalToolExecutor.Scope,
-        toolName: String
-    ) -> String {
-        let summary = summarize(text)
-        guard summary.truncated else { return text }
-
-        // The kept head is empty only when a single line alone exceeds the
-        // byte cap; say so rather than emitting an empty result.
-        let body = summary.shownLines > 0 ? summary.kept : "(the first line alone is over \(maxBytes) bytes)"
-        let shown = summary.shownLines > 0 ? "lines 1-\(summary.shownLines)" : "0 lines"
-
-        guard let saved = retain(text, scope: scope, toolName: toolName) else {
-            let more = summary.totalLines - summary.shownLines
-            return "\(body)\n\n[showing \(shown) of \(summary.totalLines); \(more) more line\(more == 1 ? "" : "s") were dropped because there is nowhere to save the full output in this scope. Rerun the tool with a narrower target to see the rest.]"
+    /// A cut that fits is returned untouched, so every caller behaves exactly
+    /// as before for ordinary output. When the text is too long:
+    ///
+    /// - it is written to a file under `label`, which is a tool name, so the
+    ///   file is recognisable a week later;
+    /// - the head is returned (the first lines are what a person reads); the
+    ///   tail is not, because unlike a middle clip there is a whole file to
+    ///   page and a head-plus-tail answer invites the model to assume it has
+    ///   everything;
+    /// - if the write fails, the marker says so and stays honest about the
+    ///   data being gone rather than claiming a path that is not there.
+    ///
+    /// `label` is sanitised to a safe path component, exactly as MCP downloads
+    /// are: a tool name from a server is data, not a filename.
+    nonisolated static func clip(_ text: String, to cap: Int, label: String) -> String {
+        guard text.count > cap else { return text }
+        guard let saved = save(text, label: label) else {
+            // No file, so the only honest thing is to say the rest is lost.
+            return String(text.prefix(cap))
+                + "\n[... output truncated at \(cap) characters — the full text could not be saved to disk, so it is not recoverable. Re-run with a narrower filter if you need the rest ...]"
         }
-        return "\(body)\n\n[showing \(shown) of \(summary.totalLines); the full output is saved at \(saved.reference) — read it with read_file if you need the rest.]"
+        return String(text.prefix(cap)) + "\n" + saved.marker(shown: cap)
     }
 
-    /// Where one retained output landed.
-    struct Retained {
-        /// Absolute path on disk.
-        let url: URL
-        /// What the model is told, relative to its scope root so `read_file`
-        /// resolves it the same way as any other path.
-        let reference: String
-    }
-
-    /// Writes `text` to a fresh retained file and returns it, or `nil` when
-    /// there is no scope to write into or the write fails.
-    static func retain(
-        _ text: String,
-        scope: LocalToolExecutor.Scope,
-        toolName: String
-    ) -> Retained? {
-        guard let root = scope.root, let directory = directory(for: root) else { return nil }
-        let name = fileStem(toolName: toolName) + "-" + UUID().uuidString.prefix(8) + ".txt"
-        let url = directory.appendingPathComponent(name, isDirectory: false)
+    /// Writes `text` to a new file and describes it. `nil` when the disk
+    /// refused or the text is past `maxSavedChars`.
+    nonisolated static func save(_ text: String, label: String) -> Saved? {
+        guard text.count <= maxSavedChars else { return nil }
+        let folder = directory()
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+        pruneOld(in: folder)
+        let safe = safeComponent(label)
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let url = folder.appendingPathComponent("\(stamp)-\(safe)-\(UUID().uuidString.prefix(8)).txt")
+        do {
             try text.write(to: url, atomically: true, encoding: .utf8)
         } catch {
             return nil
         }
-        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
-        let filePath = url.standardizedFileURL.resolvingSymlinksInPath().path
-        let reference = filePath.hasPrefix(rootPath + "/")
-            ? String(filePath.dropFirst(rootPath.count + 1))
-            : filePath
-        return Retained(url: url, reference: reference)
+        return Saved(path: url.path, totalChars: text.count)
     }
 
-    /// `<scope>/.typstedit/chat/tool-output` — inside the same `.typstedit/`
-    /// folder the saved conversations use, so a project keeps all of its chat
-    /// state in one place. `read_file` can open these (they are inside the
-    /// scope), while `grep_project` and `list_files` skip `.typstedit`, so a
-    /// retained dump never shows up in a search or a listing.
-    static func directory(for scopeRoot: URL) -> URL? {
-        ProjectSettingsManager.dotFolderURL(for: scopeRoot)
-            .appendingPathComponent("chat/tool-output", isDirectory: true)
-    }
-
-    /// A filename-safe fragment naming the tool that produced the output, so
-    /// a retained file is identifiable at a glance.
-    static func fileStem(toolName: String) -> String {
-        let allowed = toolName.map { character -> Character in
-            character.isLetter || character.isNumber ? character : "-"
+    /// A tool name, `a/b`, or a server's arbitrary string, reduced to one safe
+    /// path component. Same rule as a downloaded file's name.
+    nonisolated static func safeComponent(_ raw: String) -> String {
+        let allowed = raw.map { character -> Character in
+            character.isLetter || character.isNumber || character == "-" || character == "_"
+                ? character : "-"
         }
         let collapsed = String(allowed)
             .split(separator: "-", omittingEmptySubsequences: true)
             .joined(separator: "-")
-        return "tool_" + (collapsed.isEmpty ? "output" : String(collapsed.prefix(40)))
+        return collapsed.isEmpty ? "output" : String(collapsed.prefix(60))
     }
 
-    /// Deletes retained outputs older than `retentionDays`. Called at launch:
-    /// nothing else will, since these files are outside the scope of the
-    /// compiler's and the vector cache's own cleanup.
-    static func pruneStale(scopeRoots: [URL], olderThanDays days: Int = retentionDays) {
-        let cutoff = Date().addingTimeInterval(-Double(days) * 86_400)
-        for root in scopeRoots {
-            guard let directory = directory(for: root),
-                  let entries = try? FileManager.default.contentsOfDirectory(
-                    at: directory,
-                    includingPropertiesForKeys: [.contentModificationDateKey],
-                    options: [.skipsHiddenFiles]
-                  ) else { continue }
-            for entry in entries {
-                let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
-                    .contentModificationDate ?? .distantPast
-                if modified < cutoff {
-                    try? FileManager.default.removeItem(at: entry)
-                }
-            }
+    /// Deletes saved outputs past `retention`. Best effort and silent: this runs
+    /// behind a tool call the user is waiting on.
+    nonisolated static func pruneOld(in folder: URL, now: Date = Date()) {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return }
+        for entry in entries where entry.pathExtension == "txt" {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))
+                .flatMap(\.contentModificationDate)
+            guard let modified, now.timeIntervalSince(modified) > retention else { continue }
+            try? FileManager.default.removeItem(at: entry)
         }
+    }
+
+    /// Removes one saved output, for a chat being deleted.
+    nonisolated static func remove(path: String) {
+        try? FileManager.default.removeItem(atPath: path)
     }
 }

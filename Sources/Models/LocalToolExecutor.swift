@@ -27,6 +27,18 @@ enum LocalToolError: LocalizedError {
     /// Sudo is opted in, but the run would be sandboxed — and `sandbox-exec`
     /// refuses to execute setuid binaries, so sudo could only fail confusingly.
     case elevationBlockedBySandbox
+    /// A credentialed fetch that cannot be approved: nobody is present to
+    /// answer a card (a background run), and the user has not approved this
+    /// site's sign-in in this conversation. Refused outright rather than run
+    /// on the strength of the saved cookies alone.
+    case signedInSiteNotApproved(host: String)
+    /// A saved deny rule refused the call before any card was shown.
+    case blockedByRule(PermissionRule)
+    case shellNotFound
+    /// A shell command asked for sudo. Refused outright: there is no TTY, and
+    /// a shell that can prompt for a root password is a bigger surface than a
+    /// reviewed script that does.
+    case shellElevationRefused
 
     var errorDescription: String? {
         switch self {
@@ -58,6 +70,13 @@ enum LocalToolError: LocalizedError {
             return "This script asks for elevated privileges (sudo), but sudo is disabled for the Python tool. Ask the user to enable \"Allow sudo in Python scripts\" in Settings → AI Chat if they really want this — elevated runs pop a macOS password dialog and must be approved every time, even in YOLO mode."
         case .elevationBlockedBySandbox:
             return "This script asks for elevated privileges (sudo), but the Python sandbox is on — macOS sandbox-exec refuses to run setuid binaries, so sudo cannot work inside the sandbox. Ask the user to turn off \"Sandbox Python runs\" in Settings → AI Chat as well, or to run the elevated command themselves in a real terminal."
+        case .signedInSiteNotApproved(let host):
+            return "Not run: this fetch would send your saved \(host) sign-in, and no one is available to approve that right now. A signed-in fetch needs a human approval the first time in a conversation; without it TypstEdit will not use those cookies. Ask the user to run the fetch in an interactive chat and approve it once."
+        case .blockedByRule(let rule):
+            return "Blocked by the user's saved permission rule (\(rule.summary)). Do not retry this call or work around it; tell the user what you wanted to do, and that they can change the rule in Settings → AI Chat → Permissions."
+        case .shellNotFound: return "No shell was found (/bin/zsh, /bin/bash, /bin/sh)."
+        case .shellElevationRefused:
+            return "This command asks for elevated privileges (sudo), and the shell tool never runs those. Rewrite it without sudo, or ask the user to run the elevated command themselves — project__run with the sudo opt-in is the only path TypstEdit has for a root action, and it shows the whole script for review first."
         }
     }
 }
@@ -904,7 +923,7 @@ final class LocalToolExecutor {
                 throw LocalToolError.invalidArguments("path is required")
             }
             let url = try resolvePath(path)
-            return .readFile(
+            return .projectReadFile(
                 url: url,
                 label: path,
                 offset: Self.intValue(arguments["offset"]),
@@ -928,7 +947,7 @@ final class LocalToolExecutor {
                 let computedEnd = start + max(1, limit) - 1
                 endLine = min(endLine ?? computedEnd, computedEnd)
             }
-            return .getOutline(
+            return .projectOutline(
                 url: url,
                 label: path,
                 startLine: startLine,
@@ -952,7 +971,7 @@ final class LocalToolExecutor {
                 throw LocalToolError.invalidArguments("Invalid regular expression: \(error.localizedDescription)")
             }
             let requestedMax = Self.intValue(arguments["max_results"]) ?? 100
-            return .grep(
+            return .projectGrep(
                 root: root,
                 pattern: pattern,
                 literal: literal,
@@ -975,7 +994,7 @@ final class LocalToolExecutor {
             guard !cleaned.isEmpty, info.files.contains(cleaned) else {
                 throw LocalToolError.fileNotFound(path)
             }
-            return .readSkillFile(
+            return .projectSkillFile(
                 folder: info.folder,
                 skillID: skillID,
                 fileName: cleaned,
@@ -991,12 +1010,15 @@ final class LocalToolExecutor {
         }
     }
 
-    /// Runs one read-only plan. `nonisolated`, so a task group of these
-    /// actually overlaps instead of queueing on the main actor.
-    nonisolated static func runReadOnly(_ plan: ReadOnlyToolPlan) throws -> ReadOnlyToolOutcome {
+    /// Runs one project read-only plan. `nonisolated`, so a concurrent batch
+    /// (see `ReadOnlyToolRunner`) actually overlaps instead of queueing on the
+    /// main actor. Also the plan-case executor for `ReadOnlyToolRunner`'s
+    /// project cases: a batched read answers exactly what a lone one would,
+    /// because both paths run this same code.
+    nonisolated static func runProjectReadOnly(_ plan: ReadOnlyToolPlan) throws -> ReadOnlyToolOutcome {
         switch plan {
-        case .readFile(let url, let label, var offset, var limit, let outline,
-                       let maxBytes, let defaultLineLimit, let maxLineLimit, let section):
+        case .projectReadFile(let url, let label, var offset, var limit, let outline,
+                              let maxBytes, let defaultLineLimit, let maxLineLimit, let section):
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw LocalToolError.fileNotFound(label)
             }
@@ -1032,7 +1054,7 @@ final class LocalToolExecutor {
                 readFileDate: modificationDate(of: url)
             )
 
-        case .getOutline(let url, let label, var startLine, var endLine, let maxBytes, let section):
+        case .projectOutline(let url, let label, var startLine, var endLine, let maxBytes, let section):
             guard FileManager.default.fileExists(atPath: url.path) else {
                 throw LocalToolError.fileNotFound(label)
             }
@@ -1050,8 +1072,8 @@ final class LocalToolExecutor {
                 isOutlineOnly: true
             )
 
-        case .grep(let root, let pattern, let literal, let caseSensitive,
-                   let glob, let maxResults, let noteIfEmpty):
+        case .projectGrep(let root, let pattern, let literal, let caseSensitive,
+                          let glob, let maxResults, let noteIfEmpty):
             let source = literal ? NSRegularExpression.escapedPattern(for: pattern) : pattern
             guard let regex = try? NSRegularExpression(
                 pattern: source,
@@ -1080,8 +1102,8 @@ final class LocalToolExecutor {
             }
             return ReadOnlyToolOutcome(output: output)
 
-        case .readSkillFile(let folder, let skillID, let fileName, let offset, let limit,
-                            let maxBytes, let defaultLineLimit, let maxLineLimit):
+        case .projectSkillFile(let folder, let skillID, let fileName, let offset, let limit,
+                               let maxBytes, let defaultLineLimit, let maxLineLimit):
             // Belt-and-suspenders against traversal even though `fileName`
             // must already match a name listed from this folder.
             let candidate = folder.appendingPathComponent(fileName).standardizedFileURL
@@ -1103,6 +1125,12 @@ final class LocalToolExecutor {
                 defaultLimit: defaultLineLimit,
                 maxLimit: maxLineLimit
             ))
+
+        default:
+            // Only project plans reach this executor — the file/reference/MCP
+            // plans run through `ReadOnlyToolRunner`, and the agent splits the
+            // batch by namespace before it hands either runner its share.
+            throw LocalToolError.invalidArguments("Only project read plans (read_file, grep_project, outline, skill files) run through the project batch.")
         }
     }
 
@@ -1134,18 +1162,20 @@ final class LocalToolExecutor {
         guard !plans.isEmpty else { return [:] }
 
         var results: [Int: ReadOnlyToolResult] = [:]
+        var outcomes: [Int: ReadOnlyToolOutcome] = [:]
         let limit = max(1, ParallelToolCalls.maxConcurrent)
 
-        await withTaskGroup(of: (Int, ReadOnlyToolResult).self) { group in
+        await withTaskGroup(of: (Int, ReadOnlyToolOutcome?, ReadOnlyToolResult).self) { group in
             var next = 0
             var running = 0
 
             func addTask(_ entry: (index: Int, plan: ReadOnlyToolPlan)) {
                 group.addTask {
                     do {
-                        return (entry.index, .success(try Self.runReadOnly(entry.plan)))
+                        let outcome = try Self.runProjectReadOnly(entry.plan)
+                        return (entry.index, outcome, .success(outcome.output))
                     } catch {
-                        return (entry.index, .failure(error.localizedDescription))
+                        return (entry.index, nil, .failure(error.localizedDescription))
                     }
                 }
             }
@@ -1156,7 +1186,8 @@ final class LocalToolExecutor {
                 running += 1
             }
             while let finished = await group.next() {
-                results[finished.0] = finished.1
+                results[finished.0] = finished.2
+                if let outcome = finished.1 { outcomes[finished.0] = outcome }
                 running -= 1
                 if next < plans.count {
                     addTask(plans[next])
@@ -1168,7 +1199,7 @@ final class LocalToolExecutor {
 
         // Apply side effects in the model's order, not completion order.
         for entry in plans.sorted(by: { $0.index < $1.index }) {
-            if case .success(let outcome)? = results[entry.index] {
+            if let outcome = outcomes[entry.index] {
                 applyReadOnlyOutcome(outcome)
             }
         }
@@ -3268,14 +3299,18 @@ final class LocalToolExecutor {
         // A saved sign-in is only replayed when the user has signed in to this
         // exact site. The lookup walks parent domains (signing in at
         // `example.com` covers `wiki.example.com`), but the header is sent
-        // only to that site's own hosts.
-        let cookieHeader = WebSessionStore.shared.cookieHeader(for: url)
-        let approved = await requestApproval(.webFetch(url: url.absoluteString, savedSignInHost: cookieHeader == nil ? nil : WebSessionStore.shared.session(forHost: url.host ?? "")?.host))
+        // only to that site's own hosts. The closure form re-derives the
+        // header per redirect hop, so a redirected request never leaks one
+        // site's cookies to another's host.
+        let savedSignInHost = WebSessionStore.shared.session(forHost: url.host ?? "")?.host
+        let approved = await requestApproval(.webFetch(url: url.absoluteString, savedSignInHost: savedSignInHost))
         guard approved else { throw LocalToolError.approvalDenied }
 
         let page: SafeURLFetcher.FetchedPage
         do {
-            page = try await SafeURLFetcher.fetch(url, timeout: webFetchTimeout, maxBytes: maxWebFetchBytes, cookieHeader: cookieHeader)
+            page = try await SafeURLFetcher.fetch(url, timeout: webFetchTimeout, maxBytes: maxWebFetchBytes) { hopURL in
+                await MainActor.run { WebSessionStore.shared.cookieHeader(for: hopURL) }
+            }
         } catch let error as SafeURLFetcher.FetchError {
             return error.localizedDescription
         } catch {
@@ -3503,11 +3538,7 @@ final class LocalToolExecutor {
         }
 
         if timedOut {
-            let partial = ToolOutputStore.truncate(
-                outText,
-                scope: scope,
-                toolName: "python-run-timeout"
-            )
+            let partial = ToolOutputStore.clip(outText, to: 50_000, label: "python-run-timeout")
             return "Python script timed out after \(Int(timeoutSeconds)) seconds and was terminated.\nPartial stdout:\n\(partial)"
         }
 
@@ -3531,7 +3562,7 @@ final class LocalToolExecutor {
         }
         return result.isEmpty
             ? "(no output)"
-            : ToolOutputStore.truncate(result, scope: scope, toolName: "python-run")
+            : ToolOutputStore.clip(result, to: 50_000, label: "python-run")
     }
 
     private static var sandboxExecPath: String? {

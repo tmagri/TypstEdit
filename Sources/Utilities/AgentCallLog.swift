@@ -5,7 +5,10 @@ import Foundation
 /// is started with `TYPSTEDIT_AGENT_TRACE=/path/to/trace.jsonl`, so it costs
 /// nothing in normal use. Records hold sizes, names and short previews —
 /// never API keys or headers.
-enum AgentTrace {
+///
+/// Named `AgentCallLog` (not `AgentTrace`) because `AgentTrace` is the
+/// safety-check trace in `Sources/Models/AgentTrace.swift`.
+enum AgentCallLog {
     static let environmentKey = "TYPSTEDIT_AGENT_TRACE"
 
     private static let path: String? = {

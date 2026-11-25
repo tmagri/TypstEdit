@@ -104,12 +104,12 @@ struct AIChatView: View {
 
     /// Bumped by the composer's send path. The transcript watches it to jump
     /// to the newest exchange on a real send — deliberately not inferred from
-    /// a new `.user` message, because the goal loop appends user-role
+    /// a new `.user` message, because auto-proceed appends user-role
     /// continuations while the turn is still running, and those are not the
     /// user asking to be taken back to the bottom.
     @State private var scrollToLatestRequest = 0
 
-    /// Height of the transcript's viewport. Cards under it (plan, goal,
+    /// Height of the transcript's viewport. Cards under it (plan, case file,
     /// approval, compaction) come and go mid-run and resize it, which moves
     /// the bottom out of view; a resize re-anchors the follow target.
     @State private var transcriptViewportHeight: CGFloat = 0
@@ -118,8 +118,6 @@ struct AIChatView: View {
     @State private var renameDraft: String = ""
     @State private var actionError: String?
     @State private var showChatHistory = false
-    @State private var showGoalSet = false
-    @State private var goalDraft: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -139,17 +137,17 @@ struct AIChatView: View {
                 disabledState
             } else {
                 transcriptWithFind
-                if let goal = chat.goal {
-                    Divider()
-                    goalBanner(goal)
-                }
-                if let review = chat.ariaReview {
+                if let review = chat.ariaResult {
                     Divider()
                     ariaReviewCard(review)
                 }
                 if !chat.plan.isEmpty {
                     Divider()
                     planCard
+                }
+                if aiSettings.chatCaseFileEnabled, let caseFile = chat.caseFile {
+                    Divider()
+                    CaseFileCard(agent: chat, caseFile: caseFile)
                 }
                 if chat.isCompacting {
                     Divider()
@@ -169,6 +167,10 @@ struct AIChatView: View {
                     Divider()
                     questionCard(question)
                 }
+                if let surface = chat.pendingSurfaceUI {
+                    Divider()
+                    SurfaceCardView(agent: chat, pending: surface)
+                }
                 if let autoProceed = chat.autoProceed {
                     Divider()
                     autoProceedCard(autoProceed)
@@ -176,6 +178,10 @@ struct AIChatView: View {
                 if let reason = chat.autoProceedStoppedReason, !chat.isGenerating {
                     Divider()
                     autoProceedStoppedCard(reason)
+                }
+                if chat.isPaused {
+                    Divider()
+                    pausedStrip
                 }
                 Divider()
                 inputBar
@@ -199,18 +205,6 @@ struct AIChatView: View {
         } message: {
             Text("File writes, edits, Python runs, and permitted Git actions (stage, commit, fetch, pull) will execute without asking you first for this app session. Push always requires your approval. YOLO does not enable Git permissions. The AI remains limited to this project/notebook, and Git tools require the repository root. YOLO turns itself off when TypstEdit restarts.")
         }
-        .alert("Set a Goal", isPresented: $showGoalSet) {
-            TextField("Objective", text: $goalDraft)
-            Button("Cancel", role: .cancel) {}
-            Button("Set & Start") {
-                let draft = goalDraft
-                goalDraft = ""
-                scrollToLatestRequest += 1
-                Task { await chat.armGoal(draft) }
-            }
-        } message: {
-            Text("The AI keeps working toward this objective across replies — a reviewer continues or pauses it after each round. Stop parks it.")
-        }
         .alert("Rename Chat", isPresented: $showRename) {
             TextField("Name", text: $renameDraft)
             Button("Cancel", role: .cancel) {}
@@ -232,8 +226,7 @@ struct AIChatView: View {
         )) {
             Button("Cancel", role: .cancel) { pendingUndo = nil }
             Button("Undo", role: .destructive) {
-                if let pending = pendingUndo {
-                    let outcome = chat.undoFileChanges(from: pending.messageID)
+                if let pending = pendingUndo, let outcome = chat.revertFileChanges(from: pending.messageID) {
                     if !outcome.failed.isEmpty {
                         actionError = "Some files could not be restored: "
                             + outcome.failed.map { "\($0.path) — \($0.reason)" }.joined(separator: "; ")
@@ -317,6 +310,13 @@ struct AIChatView: View {
                     .lineLimit(1)
                     .foregroundColor(chat.estimatedContextTokens > chat.contextBudgetTokens ? .orange : .secondary)
                     .help(contextHelpText)
+                if let cost = sessionCostLabel {
+                    Text(cost)
+                        .font(.caption2.monospacedDigit())
+                        .lineLimit(1)
+                        .foregroundColor(.secondary)
+                        .help(costHelpText)
+                }
                 Button {
                     Task { await chat.compactHistory() }
                 } label: {
@@ -487,12 +487,36 @@ struct AIChatView: View {
     }
 
     /// `0.8k`-style label that never collapses a small non-zero value to `0k`.
+    /// Delegates to `TokenLabel` so the header, the tooltip and Settings all
+    /// spell token counts the same way.
     private static func contextLabel(_ tokens: Int) -> String {
-        if tokens < 1_000 {
-            return "\(max(0, tokens))"
+        TokenLabel.text(tokens)
+    }
+
+    /// The conversation's running cost, when any usage has been priced. A
+    /// provider-reported figure is exact; an estimate from the saved model's
+    /// pricing reads with a "≈", like the context figure does when no
+    /// measurement has arrived yet.
+    private var sessionCostLabel: String? {
+        let usage = chat.sessionUsage
+        guard let cost = usage.costUSD, !usage.isEmpty else { return nil }
+        return (usage.isCostEstimated ? "≈" : "") + CostFormatter.usd(cost)
+    }
+
+    /// Tooltip for the cost figure in the header.
+    private var costHelpText: String {
+        let usage = chat.sessionUsage
+        var text = "This conversation's running cost so far: \(Self.contextLabel(usage.promptTotal)) input"
+        if usage.cacheRead > 0 {
+            text += " (\(Self.contextLabel(usage.cacheRead)) cached)"
         }
-        let thousands = Double(tokens) / 1_000
-        return thousands < 10 ? String(format: "%.1fk", thousands) : "\(Int(thousands.rounded()))k"
+        text += ", \(Self.contextLabel(usage.outputTotal)) output."
+        if let cost = chat.sessionCostUSD {
+            text += usage.isCostEstimated
+                ? " Cost ≈ \(CostFormatter.usd(cost)) (estimated from the model's prices)."
+                : " Cost: \(CostFormatter.usd(cost))."
+        }
+        return text
     }
 
     /// Tooltip for the header's context figure. Spells out whether the number
@@ -511,7 +535,9 @@ struct AIChatView: View {
             }
             totals += ", \(Self.contextLabel(usage.outputTotal)) output."
             if let cost = chat.sessionCostUSD {
-                totals += String(format: " Cost ≈ $%.4f.", cost)
+                totals += usage.isCostEstimated
+                    ? " Cost ≈ \(CostFormatter.usd(cost)) (estimated from the model's prices)."
+                    : " Cost: \(CostFormatter.usd(cost))."
             }
             text += totals
         }
@@ -670,7 +696,16 @@ struct AIChatView: View {
                     if chat.isGenerating {
                         generatingRow.id("generating-indicator")
                     }
-                    if let error = chat.errorMessage {
+                    if let saveFailure = chat.transcriptSaveFailure {
+                        // The transcript could not reach the disk. Distinct
+                        // from a run error: the conversation keeps working,
+                        // but what it says is at risk when the app quits —
+                        // amber rather than red, and not dismissible, because
+                        // it clears itself the next time a write lands (and
+                        // takes precedence over the error row, which the
+                        // engine mirrors it into).
+                        saveFailureRow(saveFailure)
+                    } else if let error = chat.errorMessage {
                         // Dismissible: the banner reports what went wrong but
                         // does not itself stop the conversation — a failed
                         // compaction, for one, leaves the turn running with
@@ -785,12 +820,21 @@ struct AIChatView: View {
                 followBottom(proxy)
             }
             .onChange(of: chat.errorMessage) { _ in followBottom(proxy) }
+            .onChange(of: chat.transcriptSaveFailure) { _ in followBottom(proxy) }
+            .onChange(of: chat.isPaused) { _ in followBottom(proxy) }
             // Streaming updates only grow the live row, so they take the
             // coalesced path: a stream of deltas costs at most one scroll.
             .onChange(of: chat.liveReasoning) { _ in followBottom(proxy) }
+            .onChange(of: chat.liveNarration) { _ in followBottom(proxy) }
+            .onChange(of: chat.parallelWorkers) { _ in followBottom(proxy) }
             .onChange(of: chat.liveStatus) { _ in followBottom(proxy) }
             .onChange(of: chat.autoProceed) { _ in followBottom(proxy) }
             .onChange(of: chat.runningTool) { _ in followBottom(proxy) }
+            // The A2UI form suspends the run on it, so bring it into view the
+            // moment it appears (same rule as the question card).
+            .onChange(of: chat.pendingSurfaceUI?.id) { _ in followBottom(proxy, force: true) }
+            .onChange(of: chat.pendingApproval?.id) { _ in followBottom(proxy, force: true) }
+            .onChange(of: chat.pendingQuestion?.id) { _ in followBottom(proxy, force: true) }
             // A Find step lands on its message, centered, without the live
             // end dragging the viewport away afterwards.
             .onChange(of: findScrollTarget) { target in
@@ -1005,11 +1049,23 @@ struct AIChatView: View {
         let answer = chat.liveAnswer
         let statusText = chat.liveStatus ?? "Thinking…"
         VStack(alignment: .leading, spacing: 6) {
+            // One row per delegate_parallel worker. They cannot share the
+            // reasoning box below: four streams in one buffer tangle together,
+            // and nobody could tell which job stalled.
+            ForEach(chat.parallelWorkers) { worker in
+                parallelWorkerRow(worker)
+            }
+            // The rounds that already finished this turn, zipped: a long
+            // engineering turn narrates before each of its dozens of rounds,
+            // and drawn in full they push the answer being written off screen.
+            if !chat.liveNarration.isEmpty {
+                narrationBox
+            }
             if reasoning.isEmpty {
                 // No thinking to show (or the model doesn't expose any).
                 if let running = chat.runningTool {
                     runningTaskRow(running)
-                } else if answer.isEmpty {
+                } else if answer.isEmpty && chat.parallelWorkers.isEmpty && chat.liveNarration.isEmpty {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text(statusText).font(.caption).foregroundColor(.secondary)
@@ -1028,6 +1084,57 @@ struct AIChatView: View {
         .padding(8)
         .background(Color.secondary.opacity(0.06))
         .cornerRadius(8)
+    }
+
+    /// One `delegate_parallel` worker: what its brief is doing, and (when it
+    /// has streamed any) its reasoning in a zipped disclosure — ported from
+    /// Clippy's live row, which solves the same four-streams-one-buffer
+    /// problem this engine's `parallelWorkers` exists for.
+    @ViewBuilder
+    private func parallelWorkerRow(_ worker: ParallelWorkerState) -> some View {
+        if worker.reasoning.isEmpty {
+            Text("Brief \(worker.index) · \(worker.status)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        } else {
+            DisclosureGroup {
+                ScrollView {
+                    Text(worker.reasoning)
+                        .font(.caption2.monospaced())
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 120)
+            } label: {
+                Text("Brief \(worker.index) · \(worker.status)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+
+    /// The finished rounds' narration of this turn, zipped and capped like
+    /// the reasoning box. The round in flight stays below it, always visible.
+    private var narrationBox: some View {
+        DisclosureGroup {
+            ScrollView {
+                MarkdownText(text: chat.liveNarration, font: .caption2)
+                    .equatable()
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 150)
+            .padding(.top, 2)
+        } label: {
+            Text("Earlier steps (\(chat.liveNarrationStepCount))")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
     }
 
     /// The newest slice of the answer being written. Bounded for the same
@@ -1090,8 +1197,7 @@ struct AIChatView: View {
 
     /// The live row while a tool task runs: what it is and how long it has
     /// been going, so a long build/export/Git call doesn't look like a stuck
-    /// or empty chat. The task's own row in the transcript has the Stop
-    /// button; this row only reports.
+    /// or empty chat.
     private func runningTaskRow(_ running: AIChatManager.RunningTool) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let elapsed = Int(context.date.timeIntervalSince(running.startedAt))
@@ -1104,8 +1210,61 @@ struct AIChatView: View {
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
             }
-            .help("Waiting for this task to finish. Stop it from its row in the transcript.")
+            .help("Waiting for this task to finish. Stop ends the whole run from the composer.")
         }
+    }
+
+    /// The transcript-write failure: what went wrong, in the file layer's own
+    /// words. Not dismissible on purpose — a full disk emptied an hour later
+    /// clears it on its own, and until then the risk must stay visible.
+    private func saveFailureRow(_ failure: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "tray.full.fill").foregroundColor(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("This conversation could not be saved to disk.")
+                    .font(.caption.bold())
+                    .foregroundColor(.orange)
+                Text(failure)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("The conversation stays here while TypstEdit is open, but what it holds will be lost when the app quits if the problem is not fixed.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.10))
+        .cornerRadius(6)
+    }
+
+    /// A paused run: the turn finished and the agent is holding, waiting for
+    /// the user rather than for a clock. Deliberately not an auto-proceed
+    /// countdown — a pause has no round to spend and no reset time to wait
+    /// out, so a "Continuing automatically in…" would be a lie. Ported from
+    /// Clippy's paused strip.
+    private var pausedStrip: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label("Paused — the last instruction finished.", systemImage: "pause.circle")
+                    .font(.caption)
+                Spacer()
+                Button("Resume") {
+                    scrollToLatestRequest += 1
+                    chat.resumeFromPause()
+                }
+                .controlSize(.small)
+                Button("Stop") { chat.stop() }
+                    .controlSize(.small)
+            }
+            Text("Resume carries on from exactly where it stopped. Nothing is re-sent, and the plan and case file are untouched.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(8)
+        .background(Color.accentColor.opacity(0.08))
     }
 
     @ViewBuilder
@@ -1159,7 +1318,7 @@ struct AIChatView: View {
                     Spacer(minLength: 30)
                     VStack(alignment: .trailing, spacing: 6) {
                         if message.hasImages {
-                            ChatImageGridView(images: message.attachments)
+                            ChatImageGridView(images: message.imageAttachments)
                         }
                         if !message.text.isEmpty {
                             Text(message.text)
@@ -1201,6 +1360,20 @@ struct AIChatView: View {
                 }
             case .toolCall:
                 toolCallRow(message)
+            case .screenCapture:
+                // A capture the agent read with OCR: its own card, so the
+                // source of an answer is never ambiguous (ported from Clippy).
+                HStack {
+                    ScreenCaptureRow(message: message)
+                    Spacer(minLength: 30)
+                }
+            case .calculation:
+                // A calculator run — a result, or a drawn chart (ported from
+                // Clippy, which styles math like math rather than as prose).
+                HStack {
+                    CalculationRow(message: message)
+                    Spacer(minLength: 30)
+                }
             }
         }
         .opacity(message.isCompacted ? 0.45 : 1)
@@ -1319,27 +1492,17 @@ struct AIChatView: View {
         .cornerRadius(8)
     }
 
-    /// Elapsed time plus a Stop button for a task that is still running.
-    /// Stopping it ends just this call; the assistant receives a "stopped"
-    /// result and carries on, unlike the panel's full Stop.
+    /// Elapsed time for a task that is still running. The ported engine runs
+    /// one tool at a time inside the turn's own task — there is no per-call
+    /// task to cancel any more, so the composer's Stop (which ends the run,
+    /// and with it this call) is the way to stop a task.
     private func runningToolControls(_ message: ChatMessage) -> some View {
-        HStack(spacing: 6) {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let elapsed = Int(context.date.timeIntervalSince(message.timestamp))
-                Text(AIChatManager.elapsedLabel(elapsed))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundColor(.secondary)
-            }
-            Button {
-                chat.stopTool(messageID: message.id)
-            } label: {
-                Image(systemName: "stop.circle.fill")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Stop this task, aborting it if it is still running, and let the assistant continue without its result")
-            .accessibilityLabel("Stop \(displayName(for: message.toolName ?? "task"))")
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let elapsed = Int(context.date.timeIntervalSince(message.timestamp))
+            Text(AIChatManager.elapsedLabel(elapsed))
+                .font(.caption2.monospacedDigit())
+                .foregroundColor(.secondary)
+                .help("Waiting for this task to finish. Stop ends the whole run from the composer.")
         }
     }
 
@@ -1494,7 +1657,7 @@ struct AIChatView: View {
             HStack(spacing: 8) {
                 Button("Keep going") {
                     scrollToLatestRequest += 1
-                    Task { await chat.keepGoingAfterAutoProceedStop() }
+                    chat.keepGoingAfterAutoProceedStop()
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -1941,6 +2104,142 @@ struct AIChatView: View {
                 .padding(8)
                 .background(Color.black.opacity(0.06))
                 .cornerRadius(6)
+
+            case .runShell(let command):
+                // Ported from Clippy's approval card: a command line is
+                // opaque — `ls` and `rm -rf ~/…` are the same length on a
+                // card — so the whole line is shown verbatim and the card
+                // spells out that YOLO never approves one.
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("$ " + command)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.black.opacity(0.06))
+                        .cornerRadius(6)
+                    Text("Runs as a shell command on this Mac. Read the whole line before approving — YOLO never approves these automatically. (A rule you saved for this exact command can, with “Always allow…” below.)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            case .skillCreate(let name, let description, let bodyPreview):
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Create skill “\(name)”?").font(.subheadline.bold())
+                    if !description.isEmpty {
+                        Text(description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ScrollView {
+                        Text(bodyPreview)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(6)
+                    }
+                    .frame(maxHeight: 160)
+                    .background(Color.black.opacity(0.06))
+                    .cornerRadius(6)
+                    Text("This becomes a reusable skill in \(SkillsManager.globalSkillsDirectory.path) — enabled for this chat and future ones.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            case .skillWriteFile(let skillName, let relativePath, let oldContent, let newContent, let isNewFile, let isSKILLFile):
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isNewFile
+                         ? "Create \(relativePath) in skill “\(skillName)”?"
+                         : "Overwrite \(relativePath) in skill “\(skillName)”?")
+                        .font(.subheadline.bold())
+                    if !isNewFile, isSKILLFile {
+                        // The whole SKILL.md rewritten: the same diff preview
+                        // a project-file edit gets, so the change reads at a
+                        // glance instead of as a wall of text.
+                        diffPreview(old: oldContent, new: newContent)
+                            .frame(maxHeight: 160)
+                    } else {
+                        ScrollView {
+                            Text(newContent)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(6)
+                        }
+                        .frame(maxHeight: 160)
+                        .background(Color.black.opacity(0.06))
+                        .cornerRadius(6)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            case .skillDelete(let skillName, let fileCount):
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash").foregroundColor(.red)
+                        Text("Delete skill “\(skillName)”?").font(.subheadline.bold())
+                    }
+                    Text(fileCount == 0
+                         ? "Its SKILL.md will be removed. This cannot be undone."
+                         : "Its SKILL.md and \(fileCount) attachment\(fileCount == 1 ? "" : "s") will be removed. This cannot be undone.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Deleting a skill is always manual — unlike a project-file write there is no other copy, so YOLO never wipes a skill you may have authored.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            case .mcpServerAdd(let name, let transportLabel, let target, let summary, let replacesExisting):
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "server.rack").foregroundColor(.red)
+                        Text("\(replacesExisting ? "Replace" : "Add") MCP server “\(name)”?").font(.subheadline.bold())
+                    }
+                    Text("\(transportLabel) — \(target)")
+                        .font(.caption.monospaced())
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ScrollView {
+                        Text(summary)
+                            .font(.caption2.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(6)
+                    }
+                    .frame(maxHeight: 140)
+                    .background(Color.black.opacity(0.06))
+                    .cornerRadius(6)
+                    Text("This server's tools become available in this chat and every future one. A local server runs its command on this Mac. Adding or changing a server always asks — YOLO never does it.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            case .mcpServerDelete(let name, let toolCount):
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "server.rack").foregroundColor(.red)
+                        Text("Remove MCP server “\(name)”?").font(.subheadline.bold())
+                    }
+                    Text(toolCount == 0
+                         ? "Its configuration will be deleted. This cannot be undone."
+                         : "Its configuration and \(toolCount) tool\(toolCount == 1 ? "" : "s") will be removed. This cannot be undone.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Removing a server is always manual — YOLO never deletes one.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             // A safety rule can only ever *add* a card that YOLO would have
@@ -1980,8 +2279,10 @@ struct AIChatView: View {
                     Menu("Always allow…") {
                         ForEach(suggestions) { suggestion in
                             Button(suggestion.title) {
-                                PermissionRuleStore.shared.add(suggestion.rule)
-                                chat.resolveApproval(approved: true)
+                                // Saves the rule, approves this call, and
+                                // lets through queued calls the rule now
+                                // covers — see `approvePendingAlways`.
+                                chat.approvePendingAlways(suggestion.rule)
                             }
                         }
                     }
@@ -1990,8 +2291,8 @@ struct AIChatView: View {
                     .font(.caption)
                 }
                 Spacer()
-                Button("Deny") { chat.resolveApproval(approved: false) }
-                Button("Approve") { chat.resolveApproval(approved: true) }
+                Button("Deny") { chat.denyPending() }
+                Button("Approve") { chat.approvePending() }
                     .buttonStyle(.borderedProminent)
             }
         }
@@ -2183,6 +2484,15 @@ struct AIChatView: View {
                     .help("Queue — let the current task finish, then run this as its own turn.")
                 }
                 Button {
+                    chat.togglePause()
+                } label: {
+                    pauseControlGlyph
+                }
+                .buttonStyle(.plain)
+                .disabled(chat.pauseControl == .unavailable)
+                .help(pauseButtonHelp)
+
+                Button {
                     chat.stop()
                 } label: {
                     Image(systemName: "stop.circle.fill").font(.system(size: 24)).foregroundColor(.red)
@@ -2198,6 +2508,37 @@ struct AIChatView: View {
                 .buttonStyle(.plain)
                 .disabled(!hasDraft || chat.pendingApproval != nil)
             }
+        }
+    }
+
+    /// The pause control's glyph, one per state — ported from Clippy's
+    /// composer. A spinner rather than a disabled pause icon for `pausing`:
+    /// the press was accepted and the run is finishing its turn, so the
+    /// control must show work happening, not a dead button.
+    @ViewBuilder
+    private var pauseControlGlyph: some View {
+        switch chat.pauseControl {
+        case .paused:
+            Image(systemName: "play.circle.fill").font(.system(size: 24)).foregroundColor(.accentColor)
+        case .pausing:
+            ProgressView().controlSize(.regular)
+        case .ready, .unavailable:
+            Image(systemName: "pause.circle").font(.system(size: 24)).foregroundColor(.secondary)
+        }
+    }
+
+    /// What the Pause/Resume button says. Every state names what the next
+    /// press does, because the same button does three different things.
+    private var pauseButtonHelp: String {
+        switch chat.pauseControl {
+        case .paused:
+            return "Resume the run from where it stopped"
+        case .pausing:
+            return "Waiting for the current instruction to finish — press again to carry straight on"
+        case .ready:
+            return "Pause after the current instruction finishes"
+        case .unavailable:
+            return "Pause is not available for this run"
         }
     }
 
@@ -2476,7 +2817,6 @@ struct AIChatView: View {
                     ragToggle(iconOnly: iconOnly)
                     skillsMenu(iconOnly: iconOnly)
                     toolsMenu(iconOnly: iconOnly)
-                    goalMenu(iconOnly: iconOnly)
                     Spacer(minLength: 0)
                     planToggle(iconOnly: iconOnly)
                     yoloToggle(iconOnly: iconOnly)
@@ -2493,7 +2833,6 @@ struct AIChatView: View {
                 ragToggle(iconOnly: iconOnly)
                 skillsMenu(iconOnly: iconOnly)
                 toolsMenu(iconOnly: iconOnly)
-                goalMenu(iconOnly: iconOnly)
                 AIModelPickerMenu(feature: .chat, showsName: !iconOnly)
                     .disabled(chat.isGenerating)
                 Spacer(minLength: 0)
@@ -2573,10 +2912,10 @@ struct AIChatView: View {
             }
             Divider()
             Button("Review safety with ARIA…") {
-                Task { await chat.reviewSafetyWithARIA() }
+                Task { await chat.assessSafety() }
             }
-            .disabled(chat.isReviewingSafety || chat.messages.filter { $0.role == .toolCall }.isEmpty)
-            if chat.ariaReview != nil {
+            .disabled(chat.isAssessingSafety || chat.messages.filter { $0.role == .toolCall }.isEmpty)
+            if chat.ariaResult != nil {
                 Button("Clear safety review") { chat.clearARIAReview() }
             }
         } label: {
@@ -2603,108 +2942,6 @@ struct AIChatView: View {
         .help(chat.planMode
               ? "Plan mode is ON — the AI can read, search, and keep its plan checklist current, but cannot edit files, write files, export, run Python, or change Git state. Click to turn off."
               : "Plan mode: the AI explores the project and discusses a plan without touching files. Click to turn on.")
-    }
-
-    /// Goal menu (opencode's `/goal`): arms an objective the chat keeps
-    /// working toward, with pause/resume/clear for the loop it starts.
-    private func goalMenu(iconOnly: Bool) -> some View {
-        Menu {
-            Button("Set goal…") {
-                goalDraft = chat.goal?.objective ?? ""
-                showGoalSet = true
-            }
-            if let goal = chat.goal {
-                switch goal.status {
-                case .active:
-                    Button("Pause goal") { chat.pauseGoal() }
-                    Button("Clear goal", role: .destructive) { chat.clearGoal() }
-                case .paused:
-                    Button("Resume goal") {
-                        scrollToLatestRequest += 1
-                        Task { await chat.resumeGoal() }
-                    }
-                    Button("Clear goal", role: .destructive) { chat.clearGoal() }
-                case .complete:
-                    Button("Clear goal") { chat.clearGoal() }
-                }
-            }
-        } label: {
-            pickerLabel(
-                "Goal",
-                systemImage: "flag.checkered",
-                iconOnly: iconOnly
-            )
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .foregroundColor(goalLabelColor)
-        .help(goalHelpText)
-    }
-
-    private var goalLabelColor: Color {
-        guard let goal = chat.goal else { return .secondary }
-        switch goal.status {
-        case .active: return .accentColor
-        case .complete: return .green
-        case .paused: return .orange
-        }
-    }
-
-    private var goalHelpText: String {
-        guard let goal = chat.goal else {
-            return "Goal mode: set an objective and the AI keeps working toward it across replies — a reviewer continues or pauses it after each round."
-        }
-        switch goal.status {
-        case .active: return "Goal active — the AI keeps working toward it. Click to pause or clear."
-        case .paused: return "Goal paused (\(goal.reason ?? "no reason recorded")). Click to resume or clear."
-        case .complete: return "Goal complete: \(goal.reason ?? ""). Click to clear."
-        }
-    }
-
-    /// The banner row shown while a goal exists — objective, round progress,
-    /// and the reviewer's last word. The checklist card below it is what the
-    /// goal actually drives.
-    private func goalBanner(_ goal: ChatGoal) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "flag.checkered")
-                .foregroundColor(goal.status == .active ? .accentColor : goal.status == .complete ? .green : .orange)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(goalBannerTitle(goal))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                Text(goal.objective)
-                    .font(.caption)
-                    .lineLimit(2)
-                if let reason = goal.reason, !reason.isEmpty {
-                    Text(reason)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                }
-            }
-            Spacer(minLength: 0)
-            if goal.status == .active {
-                Button {
-                    chat.pauseGoal()
-                } label: {
-                    Image(systemName: "pause.circle").font(.caption)
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-                .help("Pause the goal — the loop stops after this reply; resume it from the Goal menu")
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-    }
-
-    private func goalBannerTitle(_ goal: ChatGoal) -> String {
-        switch goal.status {
-        case .active: return "Goal · round \(min(goal.rounds + 1, goal.maxRounds))/\(goal.maxRounds)"
-        case .paused: return "Goal · paused"
-        case .complete: return "Goal · complete"
-        }
     }
 
     private func yoloToggle(iconOnly: Bool) -> some View {
@@ -2734,7 +2971,10 @@ struct AIChatView: View {
         // A send is an explicit "take me to the newest exchange" — it ends
         // manual mode, so the reply that follows is followed live again.
         scrollToLatestRequest += 1
-        Task { await chat.sendMessage(text, images: images) }
+        // While a turn runs, `.steer` joins it (images fall through to the
+        // queue, which gives attachments a turn the model can actually see);
+        // idle, it starts a fresh turn. See `AIChatManager.send(_:images:as:)`.
+        chat.send(text, images: images, as: .steer)
     }
 
     /// Sends the draft to the queue instead of into the running turn. A send
@@ -2749,7 +2989,7 @@ struct AIChatView: View {
         chat.draftImages = []
         attachmentNotice = nil
         scrollToLatestRequest += 1
-        Task { await chat.sendMessage(text, images: images, as: .queue) }
+        chat.send(text, images: images, as: .queue)
     }
 
     /// A secret in the draft stops here (see `SecretRedaction`): the review
@@ -2780,9 +3020,9 @@ struct AIChatView: View {
         attachmentNotice = nil
         scrollToLatestRequest += 1
         if queued && chat.isGenerating {
-            Task { await chat.sendMessage(text, images: images, as: .queue) }
+            chat.send(text, images: images, as: .queue)
         } else {
-            Task { await chat.sendMessage(text, images: images) }
+            chat.send(text, images: images, as: .steer)
         }
     }
 
@@ -3353,6 +3593,1222 @@ struct SecretRedactionReviewCard: View {
             }
         }
         return result
+    }
+}
+
+
+// MARK: - Case File (ported from Clippy's WorkPanel case tab)
+
+/// The open case: the charter (ratified or still a proposal), the done-when
+/// standard, the decisions and claims recorded so far, the trade-study
+/// options, the risks, and the adversarial review's tally — with the drift
+/// warning, the checkpoints menu, and Close case. Ported from Clippy's
+/// `CaseTabContent` and docked as a card, matching the plan card above it.
+struct CaseFileCard: View {
+    @ObservedObject var agent: AIChatManager
+    let caseFile: CaseFile
+
+    @State private var confirmClose = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text.magnifyingglass").foregroundColor(.purple)
+                Text("Case file").font(.caption.bold())
+                methodLine
+                Spacer()
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    phaseStepper
+                    charterBlock
+                    if let drift = caseFile.drift {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Label(drift, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 4)
+                            Button("Dismiss") { agent.dismissCaseDrift() }
+                                .font(.caption2)
+                                .buttonStyle(.borderless)
+                                .help("The work is on track — clear this warning")
+                        }
+                    }
+                    standard
+                    section("Open issues", lines: caseFile.openIssues.map { issue in
+                        "\(issue.id) \(issue.text)" + (issue.needsUser ? " — needs you" : "") + (issue.fromReview ? " — objection" : "")
+                    })
+                    optionsBlock
+                    section("Risks", lines: caseFile.risks.map { risk in
+                        "\(risk.id) [\(risk.status.rawValue)\(risk.isHigh ? ", high" : "")] \(risk.text) — \(risk.likelihood)×\(risk.impact)"
+                            + (risk.mitigation.map { " — mitigation: \($0)" } ?? "")
+                    })
+                    section("Settled", lines: caseFile.settled.filter(\.isInForce).map { "\($0.id) \($0.text) — \($0.reason)" })
+                    section("Claims", lines: caseFile.claims.filter { $0.status != .withdrawn }.map {
+                        "\($0.id) [\($0.status.rawValue)] \($0.claim) — refuted if: \($0.rebuttal)"
+                    })
+                    reviewBlock
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 180)
+            footer
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.purple.opacity(0.06))
+        .confirmationDialog("Close this case?", isPresented: $confirmClose) {
+            Button("Close case", role: .destructive) { agent.closeCase() }
+        } message: {
+            Text("The charter, standard and checkpoints are removed from this chat. The transcript stays.")
+        }
+    }
+
+    /// Method, iteration and budget: the small header line.
+    @ViewBuilder
+    private var methodLine: some View {
+        Text(caseFile.method.name)
+            .font(.caption2.bold())
+            .foregroundColor(.purple)
+            .help(caseFile.method.summary)
+        if caseFile.iteration > 1 || caseFile.charter?.iterationBudget != nil {
+            Text("Iteration \(caseFile.iteration)\(caseFile.charter?.iterationBudget.map { " of \($0)" } ?? "")")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        if let turns = caseFile.charter?.turnBudget {
+            Text("Turns \(caseFile.turnsUsed)/\(turns)")
+                .font(.caption2.monospacedDigit())
+                .foregroundColor(caseFile.budgetExhausted ? .orange : .secondary)
+        }
+        if caseFile.budgetExhausted {
+            Label("Budget spent", systemImage: "hourglass")
+                .font(.caption2)
+                .foregroundColor(.orange)
+                .help("The assistant stops and waits for you to extend the budget or narrow the scope.")
+        }
+    }
+
+    /// Wraps instead of truncating: the docked strip is too narrow for five
+    /// phase names on one line.
+    private var phaseStepper: some View {
+        HStack(spacing: 2) {
+            ForEach(CaseFile.Phase.allCases, id: \.self) { phase in
+                Text(caseFile.title(for: phase))
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .padding(.horizontal, 3)
+                    .padding(.vertical, 1)
+                    .background(phase == caseFile.phase ? Color.purple.opacity(0.25) : Color.clear)
+                    .foregroundColor(phase.index <= caseFile.phase.index ? .primary : .secondary)
+                    .cornerRadius(3)
+            }
+        }
+    }
+
+    /// The charter with its ratify state: a proposal is a working assumption,
+    /// a ratified one is the standard the work is judged against.
+    @ViewBuilder
+    private var charterBlock: some View {
+        if let charter = caseFile.charter {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(charter.objective)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Text(caseFile.charterRatified ? "Ratified" : "Proposed")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background((caseFile.charterRatified ? Color.green : Color.orange).opacity(0.18))
+                        .cornerRadius(4)
+                        .help(caseFile.charterRatified
+                              ? "You approved this charter; the work is judged against it. Changing it asks you first."
+                              : "Not approved yet — the assistant treats it as a working assumption.")
+                }
+                ForEach(Array((charter.definitions.map { "Means: \($0)" }
+                    + charter.constraints.map { "Constraint: \($0)" }
+                    + charter.outOfScope.map { "Out of scope: \($0)" }).enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } else {
+            Text("No charter yet — the assistant is agreeing the goal with you.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    /// The done-when standard: a criterion counts as met only with evidence.
+    @ViewBuilder
+    private var standard: some View {
+        if !caseFile.criteria.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Standard").font(.caption2.bold()).foregroundColor(.purple)
+                ForEach(caseFile.criteria) { criterion in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: criterion.met ? "checkmark.circle.fill" : "circle")
+                            .foregroundColor(criterion.met ? .green : .secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(criterion.id) \(criterion.text)").font(.caption)
+                            if let evidence = criterion.evidence {
+                                Text(evidence).font(.caption2).foregroundColor(.secondary)
+                            }
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The trade study: one row per option, the chosen one marked, with its
+    /// total score when the options were scored.
+    @ViewBuilder
+    private var optionsBlock: some View {
+        if !caseFile.options.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Options").font(.caption2.bold()).foregroundColor(.purple)
+                ForEach(caseFile.options) { option in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: option.status == .chosen ? "star.fill" : (option.status == .rejected ? "xmark.circle" : "circle"))
+                            .foregroundColor(option.status == .chosen ? .yellow : .secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("\(option.id) \(option.title)\(option.scores.isEmpty ? "" : " — \(option.total) pts")")
+                                .font(.caption)
+                                .foregroundColor(option.status == .rejected ? .secondary : .primary)
+                            if !option.summary.isEmpty {
+                                Text(option.summary).font(.caption2).foregroundColor(.secondary)
+                            }
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The last adversarial review: its tally, and the stale items — which
+    /// are the list a re-review will actually work through, so showing them
+    /// is what makes the round's cost visible before it is spent.
+    @ViewBuilder
+    private var reviewBlock: some View {
+        if let review = caseFile.lastReview {
+            let checklist = caseFile.reviewChecklist
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Review").font(.caption2.bold()).foregroundColor(.purple)
+                if checklist.isEmpty {
+                    Text("Last review: \(review.objections) objection\(review.objections == 1 ? "" : "s")\(caseFile.isReviewCurrent ? "" : " (stale — evidence changed since)")")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                } else {
+                    let passed = checklist.filter(\.passed).count
+                    Text("\(passed) of \(checklist.count) checked · \(review.objections) objection\(review.objections == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    ForEach(checklist.filter(\.isStale)) { item in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Image(systemName: "circle.dashed")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                            Text("\(item.id) \(item.kind.label) — \(item.subject)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func section(_ title: String, lines: [String]) -> some View {
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.caption2.bold()).foregroundColor(.purple)
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            if !agent.caseCheckpoints.isEmpty {
+                Menu {
+                    ForEach(agent.caseCheckpoints.reversed()) { checkpoint in
+                        Menu("\(checkpoint.label) · \(checkpoint.date.formatted(date: .omitted, time: .shortened))") {
+                            Button("Restore the case to this point") {
+                                agent.restoreCaseCheckpoint(checkpoint.id)
+                            }
+                            Button("Branch a new chat from here") {
+                                _ = agent.branchFromCaseCheckpoint(checkpoint.id)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Checkpoints", systemImage: "clock.arrow.circlepath")
+                        .font(.caption2)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(agent.isGenerating)
+                .help("Go back to an earlier state of the case, or try another approach in a new chat")
+            }
+            Spacer()
+            Button("Close case") { confirmClose = true }
+                .font(.caption2)
+                .buttonStyle(.borderless)
+                .disabled(agent.isGenerating)
+        }
+    }
+}
+
+// MARK: - A2UI Surface Card (ported from Clippy's ChatView)
+
+/// The `agent__show_ui` form: the rendered A2UI surfaces, with the dismiss
+/// that resumes the suspended tool call. The run is paused until a button is
+/// pressed or the card is dismissed, exactly like the question card.
+struct SurfaceCardView: View {
+    @ObservedObject var agent: AIChatManager
+    let pending: PendingSurfaceUI
+
+    private var surfaces: [A2UIRenderedSurface] {
+        A2UIBuilder.surfaces(of: pending.document)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+            ForEach(surfaces) { surface in
+                A2UISurfaceView(
+                    surface: surface,
+                    onBinding: { path, value in
+                        agent.setSurfaceBinding(value, at: path, on: surface.id)
+                    },
+                    onAction: { surfaceId, componentId, action in
+                        agent.submitSurfaceAction(
+                            surfaceId: surfaceId,
+                            sourceComponentId: componentId,
+                            action: action
+                        )
+                    },
+                    onEffect: { agent.performSurfaceEffect($0) }
+                )
+            }
+            footer
+        }
+        .padding(10)
+        .background(Color(NSColor.controlBackgroundColor))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(accentColor.opacity(0.6), lineWidth: 1)
+        )
+    }
+
+    /// The theme's own primary colour when the model set one, otherwise the
+    /// system accent: a card that names its agent should look like that agent.
+    private var accentColor: Color {
+        guard let rgb = surfaces.first?.theme.rgb else { return .accentColor }
+        return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "rectangle.on.rectangle.angled")
+                .foregroundColor(accentColor)
+            Text(pending.title
+                 ?? pending.agentDisplayName.map { "\($0) asks" }
+                 ?? "The assistant asks")
+                .font(.subheadline.bold())
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Button("Dismiss") { agent.dismissSurfaceUI() }
+                    .controlSize(.small)
+                    .help("Close this form — the assistant will state an assumption and carry on")
+                Spacer()
+            }
+            Text("The run is paused until you press one of the buttons above.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// Draws one surface's component tree. Each case maps a catalog component to
+/// the nearest native control; the enums are handled explicitly so a new
+/// catalog component is a compile error here rather than a silent blank.
+struct A2UISurfaceView: View {
+    let surface: A2UIRenderedSurface
+    let onBinding: (String, A2UIValue) -> Void
+    let onAction: (String, String, A2UIAction) -> Void
+    let onEffect: (A2UIEffect) -> Void
+
+    var body: some View {
+        A2UINodeView(
+            node: surface.root,
+            surfaceId: surface.id,
+            theme: surface.theme,
+            onBinding: onBinding,
+            onAction: onAction,
+            onEffect: onEffect
+        )
+    }
+}
+
+/// One node and, recursively, its children.
+///
+/// `@State` here holds only view-local state (a Modal's disclosure, which tab a
+/// Tabs component is on). Everything that the model can read back lives in the
+/// surface's data model, so a redraw cannot lose an answer.
+struct A2UINodeView: View {
+    let node: A2UINode
+    let surfaceId: String
+    let theme: A2UITheme
+    let onBinding: (String, A2UIValue) -> Void
+    let onAction: (String, String, A2UIAction) -> Void
+    let onEffect: (A2UIEffect) -> Void
+
+    @State private var modalPresented = false
+    @State private var selectedTab = 0
+    @State private var filterText = ""
+
+    private var accent: Color {
+        guard let rgb = theme.rgb else { return .accentColor }
+        return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+
+    var body: some View {
+        switch node {
+        case .text(_, let text, let variant):
+            markdown(text, variant: variant)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+        case .image(_, let url, let description, let fit, let variant):
+            remoteImage(url: url, description: description, fit: fit, variant: variant)
+
+        case .icon(_, let name, let svgPath):
+            // Only the named icons are drawn: an inline SVG path would need a
+            // path parser, and a glyph that is wrong is worse than one that is
+            // absent.
+            if svgPath != nil {
+                Image(systemName: "photo")
+                    .foregroundColor(.secondary)
+                    .help("Inline SVG icons are not drawn")
+            } else {
+                Image(systemName: name).foregroundColor(accent)
+            }
+
+        case .video(_, let url):
+            A2UILinkRow(symbol: "play.rectangle", text: url, url: url)
+
+        case .audio(_, let url, let description):
+            A2UILinkRow(
+                symbol: "waveform",
+                text: description.isEmpty ? url : description,
+                url: url
+            )
+
+        case .divider(_, let axis):
+            if axis == "vertical" {
+                Divider().frame(height: 18)
+            } else {
+                Divider()
+            }
+
+        case .textField(_, let label, let value, let variant, let boundPath, let errors):
+            field(label: label, errors: errors) {
+                if variant == "longText" {
+                    TextField(label.isEmpty ? "Text" : label, text: binding(for: boundPath, current: .string(value), as: .string), axis: .vertical)
+                        .lineLimit(2...6)
+                        .textFieldStyle(.roundedBorder)
+                } else if variant == "obscured" {
+                    SecureField(label.isEmpty ? "Password" : label, text: binding(for: boundPath, current: .string(value), as: .string))
+                        .textFieldStyle(.roundedBorder)
+                } else {
+                    TextField(
+                        label.isEmpty ? "Text" : label,
+                        text: binding(
+                            for: boundPath,
+                            current: .string(value),
+                            as: variant == "number" ? .number : .string
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                }
+            }
+
+        case .checkBox(_, let label, let isOn, let boundPath, let errors):
+            field(label: "", errors: errors) {
+                Toggle(isOn: boolBinding(for: boundPath, current: isOn)) {
+                    Text(label).font(.callout).fixedSize(horizontal: false, vertical: true)
+                }
+                .toggleStyle(.checkbox)
+            }
+
+        case .choicePicker(_, let label, let options, let selected, let multiple, let displayStyle, let filterable, let boundPath, let errors):
+            field(label: label, errors: errors) {
+                choicePicker(
+                    options: options,
+                    selected: selected,
+                    multiple: multiple,
+                    displayStyle: displayStyle,
+                    filterable: filterable,
+                    boundPath: boundPath
+                )
+            }
+
+        case .slider(_, let label, let value, let min, let max, let boundPath, let errors):
+            field(label: label, errors: errors) {
+                HStack(spacing: 8) {
+                    if max > min {
+                        Slider(
+                            value: numberBinding(for: boundPath, current: value),
+                            in: min...max,
+                            step: sliderStep(min: min, max: max)
+                        )
+                    }
+                    Text(A2UIFunctions.formatNumber(
+                        numberBinding(for: boundPath, current: value).wrappedValue,
+                        decimals: nil,
+                        grouping: true,
+                        currency: nil
+                    ))
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                }
+            }
+
+        case .dateTime(_, let label, let value, let enableDate, let enableTime, let min, let max, let boundPath, let errors):
+            field(label: label, errors: errors) {
+                dateTimeInput(
+                    current: value,
+                    enableDate: enableDate,
+                    enableTime: enableTime,
+                    min: min,
+                    max: max,
+                    boundPath: boundPath
+                )
+            }
+
+        case .button(_, let label, let isIconOnly, let variant, let action, let disabled, let disabledReason):
+            button(
+                label: label,
+                isIconOnly: isIconOnly,
+                variant: variant,
+                action: action,
+                disabled: disabled,
+                disabledReason: disabledReason
+            )
+
+        case .row(_, let children, let justify, let align):
+            layout(children: children, axis: .horizontal, justify: justify, align: align)
+
+        case .column(_, let children, let justify, let align):
+            layout(children: children, axis: .vertical, justify: justify, align: align)
+
+        case .list(_, let children, let direction, let align, let listStyle):
+            list(children: children, direction: direction, align: align, listStyle: listStyle)
+
+        case .card(_, let child):
+            childView(child)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(NSColor.textBackgroundColor).opacity(0.5))
+                .cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.25)))
+
+        case .tabs(_, let tabs):
+            tabsView(tabs)
+
+        case .modal(_, let trigger, let content, let opensOnPress):
+            VStack(alignment: .leading, spacing: 8) {
+                if opensOnPress {
+                    // The spec: the trigger "opens the modal when interacted
+                    // with". A trigger with no action of its own would draw a
+                    // dead button, so the whole subtree is made tappable.
+                    childView(trigger)
+                        .contentShape(Rectangle())
+                        .onTapGesture { modalPresented.toggle() }
+                } else {
+                    childView(trigger)
+                }
+                if modalPresented {
+                    childView(content)
+                        .padding(10)
+                        .background(Color(NSColor.controlBackgroundColor))
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.5)))
+                }
+            }
+
+        case .unsupported(_, let type, let note):
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundColor(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(type == "depth" || type == "cycle"
+                         ? "Could not draw this part"
+                         : "Unsupported component: \(type)")
+                        .font(.caption.bold())
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(6)
+            .background(Color.orange.opacity(0.08))
+            .cornerRadius(6)
+        }
+    }
+
+    // MARK: - Children
+
+    private func childView(_ child: A2UINode) -> some View {
+        A2UINodeView(
+            node: child,
+            surfaceId: surfaceId,
+            theme: theme,
+            onBinding: onBinding,
+            onAction: onAction,
+            onEffect: onEffect
+        )
+    }
+
+    @ViewBuilder
+    private func layout(children: [A2UINode], axis: Axis, justify: String, align: String) -> some View {
+        let spacing: CGFloat = 8
+        if axis == .horizontal {
+            // A wrap, not an HStack: a docked chat cannot afford a row that
+            // overflows, and a form's two short fields should sit side by
+            // side until they cannot.
+            A2UIWrapLayout(spacing: spacing, lineSpacing: 6) {
+                ForEach(children) { child in
+                    childView(child)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: justifyAlignment(justify, axis: axis))
+        } else {
+            VStack(alignment: horizontalAlignment(align), spacing: spacing) {
+                ForEach(children) { child in
+                    childView(child)
+                        .frame(maxWidth: .infinity, alignment: justifyAlignment(justify, axis: axis))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: justifyAlignment(justify, axis: axis))
+        }
+    }
+
+    private func justifyAlignment(_ justify: String, axis: Axis) -> Alignment {
+        switch justify {
+        case "center": return .center
+        case "end": return axis == .horizontal ? .trailing : .bottom
+        case "spaceBetween", "spaceAround", "spaceEvenly", "stretch": return .leading
+        default: return axis == .horizontal ? .leading : .top
+        }
+    }
+
+    private func horizontalAlignment(_ align: String) -> HorizontalAlignment {
+        switch align {
+        case "center": return .center
+        case "end": return .trailing
+        default: return .leading
+        }
+    }
+
+    private func list(children: [A2UINode], direction: String, align: String, listStyle: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(children.enumerated()), id: \.element.id) { index, child in
+                HStack(alignment: .top, spacing: 6) {
+                    if direction == "vertical", listStyle != "none" {
+                        Text(listStyle == "ordered" ? "\(index + 1)." : "•")
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .frame(minWidth: 14, alignment: .trailing)
+                    }
+                    childView(child)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func tabsView(_ tabs: [A2UITab]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: $selectedTab) {
+                ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
+                    Text(tab.title.isEmpty ? "Tab \(index + 1)" : tab.title).tag(index)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            if tabs.indices.contains(selectedTab) {
+                childView(tabs[selectedTab].node)
+            }
+        }
+    }
+
+    // MARK: - Leaves
+
+    @ViewBuilder
+    private func markdown(_ text: String, variant: String) -> some View {
+        switch variant {
+        case "h1": MarkdownText(text: text, font: .title2.bold())
+        case "h2": MarkdownText(text: text, font: .title3.bold())
+        case "h3": MarkdownText(text: text, font: .headline)
+        case "h4": MarkdownText(text: text, font: .subheadline.bold())
+        case "h5": MarkdownText(text: text, font: .caption.bold())
+        case "caption": MarkdownText(text: text, font: .caption).foregroundColor(.secondary)
+        default: MarkdownText(text: text, font: .callout)
+        }
+    }
+
+    @ViewBuilder
+    private func remoteImage(url: String, description: String, fit: String, variant: String) -> some View {
+        if let resolved = URL(string: url), resolved.scheme?.hasPrefix("http") == true {
+            AsyncImage(url: resolved) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: contentMode(fit))
+                case .failure:
+                    Label(description.isEmpty ? "Image could not be loaded" : description, systemImage: "photo")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                default:
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(maxHeight: imageHeight(variant))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .accessibilityLabel(description)
+        } else {
+            Label(description.isEmpty ? url : description, systemImage: "photo")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func contentMode(_ fit: String) -> ContentMode {
+        switch fit {
+        case "contain": return .fit
+        case "fill", "cover": return .fill
+        default: return .fit
+        }
+    }
+
+    private func imageHeight(_ variant: String) -> CGFloat? {
+        switch variant {
+        case "icon": return 24
+        case "avatar": return 40
+        case "smallFeature": return 80
+        case "mediumFeature": return 140
+        case "largeFeature": return 220
+        case "header": return 120
+        default: return 140
+        }
+    }
+
+    private func button(
+        label: String,
+        isIconOnly: Bool,
+        variant: String,
+        action: A2UIAction?,
+        disabled: Bool,
+        disabledReason: String?
+    ) -> some View {
+        Button {
+            guard let action else { return }
+            onAction(surfaceId, node.sourceComponentId, action)
+        } label: {
+            if isIconOnly, label.isEmpty {
+                // The child was an Icon, whose resolved name is the SF Symbol
+                // the builder chose. Reading it back off the label is not
+                // possible, so the catalog's neutral one is used rather than a
+                // blank button.
+                Image(systemName: "arrow.right.circle")
+                    .frame(minWidth: 20)
+            } else {
+                Text(label.isEmpty ? (action?.name ?? "Submit") : label)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .modifier(A2UIButtonStyle(variant: variant, accent: accent))
+        .disabled(action == nil || disabled)
+        .help(disabledReason ?? (action == nil ? "This button has no action." : (action.map { "Sends “\($0.name)”" } ?? "")))
+    }
+
+    // MARK: - Inputs
+
+    private func field<Content: View>(
+        label: String,
+        errors: [String],
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if !label.isEmpty {
+                Text(label)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            content()
+            ForEach(errors, id: \.self) { message in
+                Text(message)
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .layoutPriority(1)
+    }
+
+    /// A field's binding writes to the data model as the user types, which is
+    /// the protocol's two-way binding. An unbound field (a literal value and no
+    /// `path`) keeps its text view-locally and is never read back, which is
+    /// what the spec says a literal means.
+    private func binding(for path: String?, current: A2UIValue, as kind: A2UIInputKind) -> Binding<String> {
+        guard let path else {
+            return .constant(current.displayString)
+        }
+        return Binding(
+            get: { current.displayString },
+            set: { onBinding(path, kind.vocabulary($0)) }
+        )
+    }
+
+    private func boolBinding(for path: String?, current: Bool) -> Binding<Bool> {
+        guard let path else { return .constant(current) }
+        return Binding(
+            get: { current },
+            set: { onBinding(path, .bool($0)) }
+        )
+    }
+
+    private func numberBinding(for path: String?, current: Double) -> Binding<Double> {
+        guard let path else { return .constant(current) }
+        return Binding(
+            get: { current },
+            set: { onBinding(path, .number($0)) }
+        )
+    }
+
+    private func sliderStep(min: Double, max: Double) -> Double {
+        let span = max - min
+        if span <= 10 { return 1 }
+        if span <= 100 { return 1 }
+        return (span / 100).rounded()
+    }
+
+    @ViewBuilder
+    private func choicePicker(
+        options: [A2UIOption],
+        selected: [String],
+        multiple: Bool,
+        displayStyle: String,
+        filterable: Bool,
+        boundPath: String?
+    ) -> some View {
+        let visible = filterable && !filterText.isEmpty
+            ? options.filter { $0.label.localizedCaseInsensitiveContains(filterText) }
+            : options
+        VStack(alignment: .leading, spacing: 5) {
+            if filterable {
+                TextField("Filter", text: $filterText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+            }
+            if displayStyle == "chips" {
+                A2UIWrapLayout(spacing: 6, lineSpacing: 6) {
+                    ForEach(visible) { option in
+                        let isSelected = selected.contains(option.value)
+                        Button {
+                            toggle(option.value, selected: selected, multiple: multiple, boundPath: boundPath)
+                        } label: {
+                            Text(option.label)
+                                .font(.caption)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(isSelected ? accent.opacity(0.2) : Color.secondary.opacity(0.1))
+                                .cornerRadius(6)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(isSelected ? accent : Color.secondary.opacity(0.3))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            } else {
+                ForEach(visible) { option in
+                    let isSelected = selected.contains(option.value)
+                    Button {
+                        toggle(option.value, selected: selected, multiple: multiple, boundPath: boundPath)
+                    } label: {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: isSelected
+                                  ? (multiple ? "checkmark.square.fill" : "largecircle.fill.circle")
+                                  : (multiple ? "square" : "circle"))
+                                .foregroundColor(isSelected ? accent : .secondary)
+                            Text(option.label)
+                                .font(.callout)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func toggle(_ value: String, selected: [String], multiple: Bool, boundPath: String?) {
+        guard let boundPath else { return }
+        var next = selected
+        if multiple {
+            if let index = next.firstIndex(of: value) {
+                next.remove(at: index)
+            } else {
+                next.append(value)
+            }
+        } else {
+            next = selected.contains(value) ? [] : [value]
+        }
+        onBinding(boundPath, .array(next.map { .string($0) }))
+    }
+
+    @ViewBuilder
+    private func dateTimeInput(
+        current: String,
+        enableDate: Bool,
+        enableTime: Bool,
+        min: String?,
+        max: String?,
+        boundPath: String?
+    ) -> some View {
+        // The stored form is ISO 8601, as the catalog requires. A date-only
+        // field writes `yyyy-MM-dd`, a time-only one `HH:mm`, and both together
+        // the full timestamp, so the model gets a value it can parse.
+        HStack(spacing: 6) {
+            if enableDate {
+                DatePicker(
+                    "",
+                    selection: dateBinding(current: current, enableTime: enableTime, boundPath: boundPath),
+                    displayedComponents: enableTime ? [.date, .hourAndMinute] : [.date]
+                )
+                .labelsHidden()
+                .datePickerStyle(.compact)
+            } else if enableTime {
+                DatePicker(
+                    "",
+                    selection: timeBinding(current: current, boundPath: boundPath),
+                    displayedComponents: [.hourAndMinute]
+                )
+                .labelsHidden()
+                .datePickerStyle(.compact)
+            } else {
+                Text(current.isEmpty ? "Choose a date" : current)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 0)
+            if let min, !min.isEmpty, let max, !max.isEmpty {
+                Text("\(min) – \(max)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func dateBinding(current: String, enableTime: Bool, boundPath: String?) -> Binding<Date> {
+        let fallback = A2UIFunctions.date(fromISO: current) ?? Date()
+        return Binding(
+            get: { A2UIFunctions.date(fromISO: current) ?? fallback },
+            set: { date in
+                guard let boundPath else { return }
+                let formatter = ISO8601DateFormatter()
+                if enableTime {
+                    formatter.formatOptions = [.withInternetDateTime]
+                    onBinding(boundPath, .string(formatter.string(from: date)))
+                } else {
+                    formatter.formatOptions = [.withFullDate]
+                    formatter.timeZone = .current
+                    onBinding(boundPath, .string(formatter.string(from: date)))
+                }
+            }
+        )
+    }
+
+    private func timeBinding(current: String, boundPath: String?) -> Binding<Date> {
+        let fallback = A2UIFunctions.date(fromISO: current) ?? Date()
+        return Binding(
+            get: { A2UIFunctions.date(fromISO: current) ?? fallback },
+            set: { date in
+                guard let boundPath else { return }
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = "HH:mm"
+                onBinding(boundPath, .string(formatter.string(from: date)))
+            }
+        )
+    }
+}
+
+/// What kind of value an input writes into the data model. A `number` field
+/// stores a number, not the digits as a string, so a `numeric` check on it
+/// works without the model having to coerce.
+enum A2UIInputKind {
+    case string
+    case number
+
+    func vocabulary(_ text: String) -> A2UIValue {
+        switch self {
+        case .string:
+            return .string(text)
+        case .number:
+            // Keep the text while it is not yet a number ("", "-", "1."), so a
+            // half-typed value does not overwrite the field with nothing.
+            if let value = Double(text) { return .number(value) }
+            return .string(text)
+        }
+    }
+}
+
+/// The catalog's three button styles, mapped onto SwiftUI's. A `borderless`
+/// button reads as a link, which is what the catalog means by it.
+struct A2UIButtonStyle: ViewModifier {
+    let variant: String
+    let accent: Color
+
+    func body(content: Content) -> some View {
+        switch variant {
+        case "primary":
+            content
+                .buttonStyle(.borderedProminent)
+                .tint(accent)
+                .controlSize(.small)
+        case "borderless":
+            content
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+        default:
+            content
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+    }
+}
+
+/// A one-line link, for the catalog's `Video` and `AudioPlayer` components,
+/// which this client does not play inline: opening them in the default app is
+/// more useful than a dead player, and keeps the card's height bounded.
+struct A2UILinkRow: View {
+    let symbol: String
+    let text: String
+    let url: String
+
+    var body: some View {
+        Button {
+            guard let resolved = URL(string: url),
+                  let scheme = resolved.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else { return }
+            NSWorkspace.shared.open(resolved)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                Text(text).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
+        }
+        .buttonStyle(.borderless)
+    }
+}
+
+/// A wrapping layout: children sit in a row until the width runs out, then
+/// start a new line. Used for `Row` and for chips, because a docked chat is
+/// narrow and a plain `HStack` would push a form's second column off the edge
+/// where it cannot be reached.
+struct A2UIWrapLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        let rows = arrange(subviews: subviews, maxWidth: maxWidth)
+        let height = rows.reduce(0) { $0 + $1.height } + lineSpacing * CGFloat(max(rows.count - 1, 0))
+        let width = rows.map(\.width).max() ?? 0
+        return CGSize(width: min(width, maxWidth == .infinity ? width : maxWidth), height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = arrange(subviews: subviews, maxWidth: bounds.width)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(ProposedViewSize(width: nil, height: nil))
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y),
+                    proposal: ProposedViewSize(size)
+                )
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Row {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func arrange(subviews: Subviews, maxWidth: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(ProposedViewSize(width: nil, height: nil))
+            let needed = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+            if needed > maxWidth, !current.indices.isEmpty {
+                rows.append(current)
+                current = Row()
+                current.indices = [index]
+                current.width = size.width
+                current.height = size.height
+            } else {
+                current.indices.append(index)
+                current.width = needed
+                current.height = max(current.height, size.height)
+            }
+        }
+        if !current.indices.isEmpty { rows.append(current) }
+        return rows
+    }
+}
+
+// MARK: - Transcript rows for the new message roles (ported from Clippy)
+
+/// A screen capture that was OCR'd: the recognized text, how confident
+/// Vision was, and a copy button — so the model's answer is traceable to
+/// exactly what was read.
+struct ScreenCaptureRow: View {
+    let message: ChatMessage
+    @State private var copied = false
+
+    private var confidencePercent: Int {
+        Int(((message.ocrConfidence ?? 1) * 100).rounded())
+    }
+
+    private var confidenceColor: Color {
+        switch message.ocrConfidence ?? 1 {
+        case ..<0.5: return .red
+        case ..<0.75: return .orange
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Label("Screen capture", systemImage: "text.viewfinder")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("OCR \(confidencePercent)%")
+                    .font(.caption2)
+                    .foregroundColor(confidenceColor)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message.text, forType: .string)
+                    copied = true
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Copy the recognized text")
+            }
+            Text(message.text)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor.opacity(0.35), lineWidth: 1))
+    }
+}
+
+/// A calculator run — a result, or a drawn chart. Rendered with the
+/// calculator's own styling so math reads like math, and with a copy button.
+struct CalculationRow: View {
+    let message: ChatMessage
+    @State private var copied = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Label("Calculator", systemImage: "function")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message.text, forType: .string)
+                    copied = true
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc").font(.caption2)
+                }
+                .buttonStyle(.borderless)
+                .help("Copy the result")
+            }
+
+            if let plot = message.plot {
+                PlotChartView(spec: plot, dark: colorScheme == .dark)
+                    .frame(height: 200)
+            }
+
+            Text(message.text)
+                .font(.body.monospaced())
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(6)
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor.opacity(0.3), lineWidth: 1))
     }
 }
 

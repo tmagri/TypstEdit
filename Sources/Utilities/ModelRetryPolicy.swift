@@ -5,15 +5,14 @@ import Foundation
 /// connection — as opposed to one that will fail the same way every time
 /// (bad credentials, an unknown model, a malformed request).
 ///
-/// Modelled on opencode's `model-retry`: exponential growth capped per gap,
-/// jitter so several chats don't retry in lockstep, and a provider-supplied
-/// `retry-after` treated as a floor rather than an override — a hostile or
-/// buggy header must not park a request for hours, so it is clamped.
+/// Ported from TypstEdit's `ModelRetryPolicy`: exponential growth capped per
+/// gap, jitter so several chats don't retry in lockstep, and a provider-
+/// supplied `retry-after` treated as a floor rather than an override.
 ///
-/// The important restriction is *when* this may be used. A retry re-sends the
-/// whole request, so it is only safe while nothing has been shown to the user
-/// yet: before the HTTP status is known to be 200, and before any streamed
-/// token has been forwarded. Once output exists, resuming is the
+/// The important restriction is *when* this may be used. A retry re-sends
+/// the whole request, so it is only safe while nothing has been shown to the
+/// user yet: before the HTTP status is known to be 200, and before any
+/// streamed token has been forwarded. Once output exists, resuming is the
 /// auto-continue path's job, not this one's.
 enum ModelRetryPolicy {
 

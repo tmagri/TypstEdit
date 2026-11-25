@@ -197,6 +197,19 @@ final class MCPStdioTransport: MCPTransport {
         }
         var line = message
         line.append(0x0A)
+        // One write per message, and never two at once.
+        //
+        // Each JSON-RPC message is exactly one line, so two writes interleaving
+        // would splice them into one unparseable line on the server's stdin.
+        // That cannot happen here: the transport is `@MainActor` and this body
+        // contains no suspension point, so the whole thing — guard and write
+        // together — runs to completion before another sender gets the actor.
+        // Overlap is safe at the protocol level (the client matches replies by
+        // id), and it is safe at the pipe because of this.
+        //
+        // Keep it that way: adding an `await` above the write (waiting on a
+        // lock, a continuation, anything) would open exactly the interleaving
+        // window this comment rules out. `MCPConcurrentCallTests` covers it.
         try stdinHandle.write(contentsOf: line)
     }
 
@@ -217,8 +230,9 @@ final class MCPStdioTransport: MCPTransport {
     /// Keeps the tail of what the child complained about.
     private func appendErrorOutput(_ data: Data) {
         errorBuffer.append(data)
-        if errorBuffer.count > Self.maxErrorBytes {
-            errorBuffer.removeFirst(errorBuffer.count - Self.maxErrorBytes)
+        let overflow = errorBuffer.count - Self.maxErrorBytes
+        if overflow > 0 {
+            errorBuffer.removeFirst(overflow)
         }
     }
 
@@ -234,7 +248,9 @@ final class MCPStdioTransport: MCPTransport {
 
     /// Augments the inherited environment with common install locations so
     /// GUI-launched processes (which don't source `~/.zshrc`) can still find
-    /// `npx`, `uvx`, Homebrew binaries, etc.
+    /// `npx`, `uvx`, Homebrew binaries, etc. — the same PATH problem
+    /// `TypstUpdater.resolveCommandPath` already works around for the typst
+    /// binary.
     private static func resolvedEnvironment(overrides: [String: String]) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let extraPaths = [
@@ -270,9 +286,13 @@ final class MCPStdioTransport: MCPTransport {
 /// negotiated protocol version. Closing sends a best-effort DELETE so the
 /// server can drop the session.
 ///
-/// TypstEdit does not open the optional standalone GET stream for
-/// unsolicited server messages: it advertises no client capabilities (no
-/// sampling, no roots), so a server has nothing to push outside a reply.
+/// A server that announced `tools.listChanged` gets one standalone GET
+/// stream opened after the handshake. Without it there is nowhere for that
+/// notification to arrive: a POST's reply stream belongs to the client
+/// request that opened it, so a server pushes out-of-band messages on the
+/// GET stream instead. The stream is opened only when the server promised
+/// something worth listening for, and a server that answers 405 (the spec's
+/// "I do not offer one") is remembered so no further attempt is made.
 @MainActor
 final class MCPStreamableHTTPTransport: MCPTransport {
     let endpoint: URL
@@ -308,6 +328,8 @@ final class MCPStreamableHTTPTransport: MCPTransport {
 
     func open(onMessage: @escaping MCPMessageSink, onClose: @escaping MCPCloseSink) async throws {
         // Nothing to connect: the first POST (`initialize`) is the handshake.
+        // `onClose` is unused here — a Streamable HTTP session is only ever
+        // lost on a request's own 404, which the client already handles.
         self.onMessage = onMessage
     }
 

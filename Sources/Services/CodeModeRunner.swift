@@ -40,16 +40,56 @@ final class CodeModeRunner {
     /// clock: time spent waiting for a tool (or for the user to approve one)
     /// is not the script's fault.
     nonisolated static let defaultComputeBudget: TimeInterval = 20
-    /// Hard wall-clock cap, every wait included. A script parked on a card
-    /// that can never be answered still ends.
-    nonisolated static let wallClockLimit: TimeInterval = 300
+
+    /// Wall-clock cap for a script that has not touched a tool, in seconds.
+    ///
+    /// The flat 300-second limit this replaces killed a script that was
+    /// legitimately *waiting*: one `file__search` over a big tree, a
+    /// `shell__run` build, or a slow MCP call can each take minutes, and a
+    /// script that awaits three of them in sequence died with "split the work
+    /// into smaller scripts" — advice that could not help, because the work was
+    /// already split and the tool was simply slow.
+    ///
+    /// The cap is now the tool's own bound plus this baseline (see
+    /// `wallClockLimit(forCalls:)`), so the tool's timeout is what ends a slow
+    /// call, not the script's patience.
+    nonisolated static let wallClockBaseLimit: TimeInterval = 300
+
+    /// Extra wall-clock time granted per nested call the script has made.
+    ///
+    /// A tool call's own timeout is the outer bound on how long it may run;
+    /// this is the allowance for it to *be* slow. Nested calls already have
+    /// their own deadlines (shell's 5-3600 s, the file walk's 60 s), so this is
+    /// deliberately generous: it exists to keep a parked script from being
+    /// killed for waiting, not to police the tools.
+    nonisolated static let wallClockPerCallAllowance: TimeInterval = 120
+
+    /// Hard wall-clock cap, every wait included, for a script that has made
+    /// `calls` nested tool calls.
+    ///
+    /// Still finite, and still reached by a script parked on a card that can
+    /// never be answered — an approval the user walked away from.
+    nonisolated static func wallClockLimit(forCalls calls: Int) -> TimeInterval {
+        wallClockBaseLimit + Double(max(0, calls)) * wallClockPerCallAllowance
+    }
+
+    /// The cap a caller that does not know the call count yet should assume.
+    /// Kept for the existing call sites that reason about the limit up front.
+    nonisolated static var wallClockLimit: TimeInterval { wallClockBaseLimit }
+
     /// Most nested tool calls one script may make.
     nonisolated static let maxNestedCalls = 64
     /// Most characters returned to the model. A script that returns a whole
     /// file would defeat the point of running one.
     nonisolated static let maxOutputChars = 24_000
     /// How often the pump wakes to deliver finished tool results.
-    nonisolated static let pollNanoseconds: UInt64 = 3_000_000
+    ///
+    /// This is a `@MainActor` loop, so each tick is a main-thread wakeup for
+    /// the whole life of a script. At the original 3 ms that was ~330 wakeups a
+    /// second — work proportional to the run, on the actor that draws the
+    /// window, for a value nobody can perceive: a tool result delivered 20 ms
+    /// after it finished is indistinguishable from one delivered in 3 ms.
+    nonisolated static let pollNanoseconds: UInt64 = 20_000_000
 
     // MARK: - Shapes
 
@@ -129,9 +169,13 @@ final class CodeModeRunner {
         while true {
             if Task.isCancelled { return stop(records, inFlight) }
 
-            if Date().timeIntervalSince(started) > Self.wallClockLimit {
+            // The cap grows with the calls the script has actually made, so a
+            // slow tool ends by its own timeout rather than by this one. A
+            // script that never calls a tool keeps the baseline.
+            let callLimit = Self.wallClockLimit(forCalls: records.count)
+            if Date().timeIntervalSince(started) > callLimit {
                 return Outcome(
-                    output: "Error: the script ran longer than the \(Int(Self.wallClockLimit))-second wall-clock limit — it is probably waiting on something that never finished. Nothing else was run. Split the work into smaller scripts.",
+                    output: "Error: the script ran longer than its \(Int(callLimit))-second wall-clock limit with \(records.count) tool call\(records.count == 1 ? "" : "s") made — it is waiting on something that never finished. No further calls were run.\(Self.callSummary(records))",
                     calls: records
                 )
             }

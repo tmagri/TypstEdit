@@ -4,7 +4,6 @@ import Security
 enum MCPError: LocalizedError {
     case notConfigured
     case processLaunchFailed(String)
-    case transportNotSupported(MCPTransportType)
     case protocolError(String)
     case toolNotFound(String)
     case serverDisabled
@@ -15,6 +14,11 @@ enum MCPError: LocalizedError {
     case headerTokenRejected(host: String)
     /// A remote server over plain http on a non-local host, without `allowInsecure`.
     case insecureConnectionNotAllowed(host: String)
+    /// A remote server answered with another non-success status.
+    case httpStatus(Int, String)
+    /// A Streamable HTTP server no longer knows the session id we sent. The
+    /// manager reconnects once and retries.
+    case sessionExpired
     /// The server accepted the connection but never answered the handshake.
     ///
     /// Without this the request sat on its continuation until the user hit
@@ -22,17 +26,15 @@ enum MCPError: LocalizedError {
     /// chat that had hung. `detail` is whatever the process wrote to its own
     /// error stream, which is usually the whole explanation.
     case timedOut(method: String, seconds: Int, detail: String)
-    /// A remote server answered with another non-success status.
-    case httpStatus(Int, String)
-    /// A Streamable HTTP server no longer knows the session id we sent. The
-    /// manager reconnects once and retries.
-    case sessionExpired
+    /// The server needs a browser sign-in and this start was not allowed to
+    /// open one. Raised while a reply is being prepared, where waiting for a
+    /// person would hold the whole chat.
+    case signInRequired(server: String)
 
     var errorDescription: String? {
         switch self {
         case .notConfigured: return "MCP server is missing a command or a valid http(s) URL."
         case .processLaunchFailed(let msg): return "Failed to launch MCP server: \(msg)"
-        case .transportNotSupported(let transport): return "\(transport.label) transport is not supported."
         case .protocolError(let msg): return "MCP error: \(msg)"
         case .toolNotFound(let name): return "Tool '\(name)' was not found on this server."
         case .serverDisabled: return "This MCP server is disabled."
@@ -40,10 +42,17 @@ enum MCPError: LocalizedError {
             // Reached when the 401 path could not complete a sign-in: the
             // server publishes no OAuth settings, or the user dismissed it.
             return "\(host) refused the connection (HTTP \(status)): it needs sign-in, and TypstEdit couldn't complete it. Use Sign in… on that server in Settings → MCP. If the service offers an API token instead, add it there as a header: Authorization: Bearer ${keychain:name}."
-        case .headerTokenRejected(let host):
-            return "\(host) refused the Authorization header set for this server: the token is probably expired or wrong. Get a new token from the service and update it in the Keychain. Sign in… isn't used while the server has its own Authorization header."
         case .insecureConnectionNotAllowed(let host):
             return "\(host) is reached over plain http, which isn't encrypted, so TypstEdit won't connect to it. If this is an internal server without a certificate, edit it in Settings → MCP and turn on \"Allow insecure connection\"."
+        case .headerTokenRejected(let host):
+            return "\(host) refused the Authorization header set for this server: the token is probably expired or wrong. Get a new token from the service and update it in the Keychain. Sign in… isn't used while the server has its own Authorization header."
+        case .httpStatus(let status, let body):
+            return body.isEmpty
+                ? "The MCP server answered HTTP \(status)."
+                : "The MCP server answered HTTP \(status): \(body)"
+        case .sessionExpired: return "The MCP server ended the session."
+        case .signInRequired(let server):
+            return "\(server) needs you to sign in again, so its tools were left out of this reply. Use Sign in… on that server in Settings → MCP; TypstEdit does not open a browser in the middle of a reply."
         case .timedOut(let method, let seconds, let detail):
             // Say which method went unanswered, how long it waited, and quote
             // the server's own complaint when it made one. A bare "timed out"
@@ -60,29 +69,12 @@ enum MCPError: LocalizedError {
                 message += " The command started but said nothing, which usually means it is not the server itself: check whether it needs a subcommand in its arguments."
             }
             return message
-        case .httpStatus(let status, let body):
-            return body.isEmpty
-                ? "The MCP server answered HTTP \(status)."
-                : "The MCP server answered HTTP \(status): \(body)"
-        case .sessionExpired: return "The MCP server ended the session."
         }
     }
 }
 
-/// One MCP tool as advertised by `tools/list`, carrying what every provider's
-/// function-calling API needs: a name, a human description, and a JSON
-/// Schema describing its arguments.
-struct MCPTool: Identifiable {
-    let serverName: String
-    let name: String
-    let description: String
-    let inputSchema: [String: Any]
-
-    var id: String { "\(serverName)::\(name)" }
-    /// Flat name used when talking to model providers, since most
-    /// function-calling APIs want a single identifier with no namespacing.
-    var qualifiedName: String { "\(serverName)__\(name)" }
-}
+// `MCPTool` lives in AISupport.swift — one definition shared by the harness,
+// the local tools, skills and MCP servers.
 
 /// Resolves `${env:VAR}` and `${keychain:key}` placeholders in a configured
 /// server's `env` and `headers` values, so `mcp.json` files (which are
@@ -251,8 +243,8 @@ final class MCPClient {
     /// announce tool changes (`capabilities.tools.listChanged`).
     ///
     /// A server that leaves the flag out may still change its tools, but it
-    /// has promised not to say so, so TypstEdit neither holds a stream open
-    /// for the announcement nor expects one.
+    /// has promised not to say so, so TypstEdit neither holds a stream open for
+    /// the announcement nor expects one.
     private(set) var serverAnnouncesToolChanges = false
     /// Called when the server announced that its tool list changed.
     ///
@@ -261,6 +253,11 @@ final class MCPClient {
     /// just removed. Fired on the main actor, synchronously from the inbound
     /// message; the handler is responsible for not blocking on the network.
     var onToolsChanged: (@MainActor () -> Void)?
+
+    /// Whether this client may open the browser to sign in. A silent token
+    /// refresh is always allowed; only the consent page is gated. Off for the
+    /// starts a chat turn makes (see `MCPManager.availableTools`).
+    var allowsInteractiveSignIn = true
 
     private let urlSession: URLSession
     /// Tokens for this server, in the Keychain.
@@ -304,10 +301,10 @@ final class MCPClient {
 
     // MARK: - Lifecycle
 
-    /// The protocol revision TypstEdit asks for. Streamable HTTP is defined
-    /// from 2025-03-26 on, so it asks for a current one; stdio and legacy SSE
-    /// keep asking for 2024-11-05, the revision every server of that kind
-    /// speaks. The server answers with the version it will actually use.
+    /// The protocol revision TypstEdit asks for. Streamable HTTP is defined from
+    /// 2025-03-26 on, so it asks for a current one; stdio and legacy SSE keep
+    /// asking for 2024-11-05, the revision every server of that kind speaks.
+    /// The server answers with the version it will actually use.
     static func requestedProtocolVersion(for transport: MCPTransportType) -> String {
         transport == .http ? "2025-06-18" : "2024-11-05"
     }
@@ -409,12 +406,24 @@ final class MCPClient {
                 }
             }
         }
+        // Past this point only a person can help: the browser opens and the
+        // flow waits up to five minutes for the consent page. That is right
+        // when the user pressed Sign in…, and wrong while a chat reply is
+        // being prepared, where it held the model's request behind each
+        // signed-out server in turn.
+        guard allowsInteractiveSignIn else { throw MCPError.signInRequired(server: config.name) }
         let endpoint = try await flow.discover(resource: resource, resourceMetadataHint: hint)
+        // A hand-registered client's secret is usually a ${keychain:…}
+        // placeholder; resolve it the same way headers are.
+        var preset = config.oauth
+        let resolvedSecret = config.oauth?.clientSecret.map { MCPEnvironmentResolver.resolve($0) }
+        preset?.clientSecret = resolvedSecret
         let credentials = try await flow.signIn(
             serverName: config.name,
             resource: resource,
             endpoint: endpoint,
-            existingClient: MCPOAuthClientStore().load(serverName: config.name)
+            existingClient: MCPOAuthClientStore().load(serverName: config.name),
+            preset: preset
         )
         oauthStore.save(credentials, serverName: config.name)
         MCPOAuthClientStore().save(credentials.client, serverName: config.name)
@@ -568,7 +577,27 @@ final class MCPClient {
         guard let name = entry["name"] as? String, !name.isEmpty else { return nil }
         let description = entry["description"] as? String ?? ""
         let schema = entry["inputSchema"] as? [String: Any] ?? ["type": "object", "properties": [String: Any]()]
-        return MCPTool(serverName: serverName, name: name, description: description, inputSchema: schema)
+        return MCPTool(
+            serverName: serverName,
+            name: name,
+            description: description,
+            inputSchema: schema,
+            annotations: annotations(from: entry["annotations"])
+        )
+    }
+
+    /// Reads a `tools/list` entry's annotations.
+    ///
+    /// Absent fields keep the spec's own defaults (`readOnlyHint: false`,
+    /// `destructiveHint: true`), so an unannotated tool is never treated as
+    /// safe to overlap. A server that sends `annotations` as something other
+    /// than an object is treated the same way.
+    nonisolated static func annotations(from raw: Any?) -> MCPTool.Annotations {
+        guard let object = raw as? [String: Any] else { return MCPTool.Annotations() }
+        var annotations = MCPTool.Annotations()
+        if let readOnly = object["readOnlyHint"] as? Bool { annotations.readOnlyHint = readOnly }
+        if let destructive = object["destructiveHint"] as? Bool { annotations.destructiveHint = destructive }
+        return annotations
     }
 
     func callTool(name: String, arguments: [String: Any]) async throws -> String {
@@ -892,9 +921,9 @@ final class MCPClient {
         }
     }
 
-    /// TypstEdit declares no client capabilities, so the only server request
-    /// it can honour is `ping`. Anything else gets JSON-RPC's "method not
-    /// found" rather than silence, so the server is not left waiting.
+    /// TypstEdit declares no client capabilities, so the only server request it
+    /// can honour is `ping`. Anything else gets JSON-RPC's "method not found"
+    /// rather than silence, so the server is not left waiting.
     private func answerServerRequest(id: Any, method: String) {
         if method == "ping" {
             postInBackground(["jsonrpc": "2.0", "id": id, "result": [String: Any]()])

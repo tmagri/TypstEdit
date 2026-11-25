@@ -32,6 +32,9 @@ struct PermissionRule: Codable, Identifiable, Equatable, Sendable {
         /// Local Git operations that take a per-call approval. Resource:
         /// `stage:<paths>`, `commit:<branch>` or `<operation>:<branch>`.
         case git
+        /// `shell__run`. Resource: the command line exactly as the model
+        /// wrote it, so a rule names one command and nothing else.
+        case shell
 
         var title: String {
             switch self {
@@ -39,6 +42,7 @@ struct PermissionRule: Codable, Identifiable, Equatable, Sendable {
             case .webfetch: return "Fetch a web page"
             case .python: return "Run a Python script"
             case .git: return "Change the Git index or history"
+            case .shell: return "Run a shell command"
             }
         }
 
@@ -49,6 +53,7 @@ struct PermissionRule: Codable, Identifiable, Equatable, Sendable {
             case .webfetch: return "https://en.wikipedia.org/*"
             case .python: return "*  (matches the script's code)"
             case .git: return "stage:*  (or commit:main)"
+            case .shell: return "git status  (matches the command line)"
             }
         }
     }
@@ -122,6 +127,8 @@ enum PermissionRules {
             return (.webfetch, normalizedURL(url))
         case .runPython(let code, _, _):
             return (.python, code)
+        case .runShell(let command):
+            return (.shell, command)
         case .gitStage, .gitCommit, .gitNetwork:
             return (.git, gitResource(for: kind))
         default:
@@ -246,6 +253,19 @@ enum PermissionRules {
             if let colon = resource.firstIndex(of: ":") {
                 let operation = String(resource[..<colon])
                 options.append(PermissionSuggestion(title: "Any \(operation)", rule: rule(escaped(operation) + ":*")))
+            }
+            return options
+        case .shell:
+            // Never a bare `*`: a rule that allows every command is a
+            // root-capable terminal handed to the model, and it is the one
+            // pattern a person writes without thinking. The exact command is
+            // the narrow choice; the program's own name is the broad one
+            // (`git *` still cannot run `rm`).
+            let command = request.resource
+            let program = command.split(separator: " ").first.map(String.init) ?? command
+            var options = [PermissionSuggestion(title: "This exact command", rule: rule(escaped(command)))]
+            if !program.isEmpty, program != command {
+                options.append(PermissionSuggestion(title: "Any `\(program)` command", rule: rule(escaped(program) + " *")))
             }
             return options
         }

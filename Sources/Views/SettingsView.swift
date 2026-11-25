@@ -1200,6 +1200,173 @@ struct AISettingsView: View {
         }
 
         SettingsCard(
+            title: "Engine",
+            icon: "gearshape.2",
+            description: "The agent engine's tool set and loop knobs. Every toggle here only widens or narrows what the assistant may be offered in a chat — anything that changes a file, runs code, or reaches the network is still shown to you for approval first (unless YOLO mode is on for the conversation)."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("File tools (file__find / file__read / file__search / file__hash / file__hex)", isOn: $settings.fileToolEnabled)
+                    .font(.body.weight(.medium))
+                if settings.fileToolEnabled {
+                    Toggle("Let file search descend into network volumes (SMB, NFS, …)", isOn: $settings.fileToolNetworkVolumesEnabled)
+                        .font(.caption)
+                        .padding(.leading, 20)
+                    Text("A walk that reaches a dead share can sit in the kernel for minutes, so allowing it at all is opt-in — and every walk it allows is still time-bounded.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                }
+
+                Divider()
+
+                Toggle("Shell tool (shell__run)", isOn: $settings.shellToolEnabled)
+                    .font(.body.weight(.medium))
+                if settings.shellToolEnabled {
+                    Toggle("Run shell commands under macOS sandbox-exec (no network, writes limited to a scratch folder)", isOn: $settings.shellSandboxEnabled)
+                        .font(.caption)
+                        .padding(.leading, 20)
+                    Text("A shell command is opaque in a way a script is not — `ls` and `rm -rf ~/Documents` look equally short on an approval card — so every run is approved per call, YOLO never automates one, and only an \"Always allow\" rule for that exact command can skip the card.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                }
+
+                Divider()
+
+                Toggle("Batch independent read-only calls in parallel", isOn: $settings.chatParallelReadsEnabled)
+                    .font(.body.weight(.medium))
+                Text("Several reads that never prompt for approval run at the same time instead of one after another; writes, code runs, fetches and MCP tools stay sequential.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Toggle("Recall tool (agent__recall — search the turns compaction folded out of context)", isOn: $settings.chatRecallToolEnabled)
+                    .font(.body.weight(.medium))
+
+                Toggle("Scratchpad (agent__think — a note that survives the context window)", isOn: $settings.chatScratchpadEnabled)
+                    .font(.body.weight(.medium))
+                Text("The tool only writes inside the app's own per-chat folder, and a note to itself is the cheapest context engineering there is.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Divider()
+
+                Toggle("Case file (a charter you ratify, and a standard the result must meet)", isOn: $settings.chatCaseFileEnabled)
+                    .font(.body.weight(.medium))
+                if settings.chatCaseFileEnabled {
+                    Toggle("A verdict needs an adversarial review of the evidence first", isOn: $settings.chatCaseReviewRequired)
+                        .font(.caption)
+                        .padding(.leading, 20)
+
+                    HStack(spacing: 10) {
+                        Text("Check for drift every")
+                            .font(.caption)
+                            .padding(.leading, 20)
+                        TextField("4", value: $settings.chatCaseDriftInterval, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                        Text("finished turns (0 = off)")
+                            .font(.caption)
+                        Spacer()
+                    }
+                    Text("When a chat is about producing something or reaching a conclusion, the assistant proposes a charter — the objective, what its terms mean, the constraints, and the done-when criteria — and you ratify it on a card. The charter stays in its context every turn, decisions are recorded as binding, and a criterion counts as met only with evidence. Changing the charter or overruling a decision always asks you first. Ordinary chats never get a case.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                }
+
+                Divider()
+
+                Toggle("Skill authoring (skill__create, skill__update, skill__add_attachment, skill__delete)", isOn: $settings.skillAuthoringEnabled)
+                    .font(.body.weight(.medium))
+                Text("Creates and writes are approved per call; deleting a skill is always manual — there is no other copy, so YOLO never wipes a skill you may have authored.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Toggle("MCP authoring (mcp__add_server, mcp__remove_server, mcp__set_server_enabled)", isOn: $settings.mcpAuthoringEnabled)
+                    .font(.body.weight(.medium))
+                Text("Every call is approved: adding a server is a standing grant of new tools to every future chat, which is exactly the kind of decision that must not be made silently.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Toggle("Lazy MCP tools (declare server tools only when searched for)", isOn: $settings.mcpToolsDeferred)
+                    .font(.body.weight(.medium))
+                Text("Server tools are not declared with every request; they stay callable through scripts, and a tool-search tool loads the matches so they can be called directly. A much smaller prompt, at the cost of a discovery round before a server tool's first use.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Toggle("Prune chronically unused tools from prompts", isOn: $settings.toolPruningEnabled)
+                    .font(.body.weight(.medium))
+                Text("Tools the conversation never touches stop being declared, based on historical usage — fewer schemas in every request, same abilities on demand.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Text("Parallel workers (delegate_parallel)")
+                        .font(.caption)
+                    TextField("0", value: $settings.chatSubagentConcurrency, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                    Text("at once (0 = off)")
+                        .font(.caption)
+                    Spacer()
+                }
+                Text("How many parallel-delegation workers run at the same time by default. Off by default: this is the one delegation mode that costs the provider several requests per turn. A saved model's own concurrency override wins when set.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                HStack(spacing: 10) {
+                    Text("Provider request slots")
+                        .font(.caption)
+                    TextField("0", value: $settings.chatProviderSlots, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                    Text("served at once (0 = unknown)")
+                        .font(.caption)
+                    Spacer()
+                }
+                Text("What the chat model's server can process concurrently — a local runtime started with four parallel slots reports four. One slot is always kept for the parent chat, so its own turn never queues behind its workers.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Unlock Bypass Permissions", isOn: $settings.bypassPermissionsUnlocked)
+                        .font(.body.weight(.medium))
+                    Text("This is only the first of two switches. The second is a per-conversation toggle in the chat panel itself; the mode is in force only when both are on. Keeping them apart means a stray click in a chat cannot grant the mode on its own — and this unlock turns itself off with TypstEdit like every session-wide setting here.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Button("Reset learned reply budgets") { settings.clearLearnedMaxTokens() }
+                    Text("\(settings.learnedMaxTokens.count) model\(settings.learnedMaxTokens.count == 1 ? "" : "s") have learned caps")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                Text("The engine remembers the largest reply cap each provider accepted (and each model's observed reasoning peak) and starts there instead of over-requesting. Resetting makes the next request ask for the setting above again, and the learning starts over.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 20)
+            }
+        }
+
+        SettingsCard(
             title: "Web Fetch Tool",
             icon: "globe",
             description: "An extra opt-in, like the Python tool. When on, the model may ask to fetch a public web page — the full URL is shown to you for approval on every fetch (worth glancing at: a fetch is also a request the destination server sees). Pages come back as readable text, not raw HTML."

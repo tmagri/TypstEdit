@@ -4631,8 +4631,8 @@ class EditorController: NSObject, ObservableObject {
             )
         } else {
             result = try await AICompletionService.shared.fetchCompletionWithTools(
-                prompt: finalPrompt,
                 systemPrompt: systemPrompt,
+                prompt: finalPrompt,
                 maxTokens: AISettingsManager.shared.maxTokens,
                 tools: tools,
                 onToolCall: { [weak self] qualifiedName, argumentsJSON in

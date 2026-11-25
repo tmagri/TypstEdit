@@ -27,6 +27,17 @@ enum SkillPrompt {
     /// trip's worth.
     static let inlineBodyLimit = 1_600
 
+    /// Ceiling on the *total* body text inlined into the prompt. The per-skill
+    /// rule above is a size test, not a budget: twenty small skills pass it
+    /// individually and still flood the prompt with 32 KB of inline text.
+    /// Once the running total passes this, the rest are deferred like large
+    /// skills — name and description only, one `skill__read` away.
+    ///
+    /// Skills keep their configured order (the manager lists globals before
+    /// builtins, then by name), so what gets inlined is stable from turn to
+    /// turn, which keeps the system prompt cacheable.
+    static let inlineTotalLimit = 12_000
+
     struct Split: Equatable {
         /// Skills whose bodies are written into the prompt.
         var inlined: [String] = []
@@ -40,9 +51,11 @@ enum SkillPrompt {
     /// a SkillsManager.
     static func split(_ skills: [(id: String, body: String)]) -> Split {
         var split = Split()
+        var used = 0
         for skill in skills {
-            if skill.body.count <= inlineBodyLimit {
+            if skill.body.count <= inlineBodyLimit, used + skill.body.count <= inlineTotalLimit {
                 split.inlined.append(skill.id)
+                used += skill.body.count
             } else {
                 split.deferred.append(skill.id)
             }

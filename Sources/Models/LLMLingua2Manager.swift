@@ -373,8 +373,8 @@ private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelega
 
 /// Owns the loaded `MLModel` plus its tokenizer and turns a text into a
 /// compressed text: every word gets a keep/drop score from the model (the
-/// mean keep-minus-drop logit of its subtokens — LLMLingua-2's word-level
-/// scoring), then the shared `TokenSelection` picks the survivors.
+/// logit of its first subtoken — LLMLingua-2's word-level scoring), then the
+/// shared `TokenSelection` picks the survivors.
 ///
 /// Prediction runs serialized on a private queue; the class is marked
 /// `@unchecked Sendable` because the queue *is* the synchronization.
@@ -384,9 +384,8 @@ final class LLMLingua2Engine: @unchecked Sendable {
     private let tokenizer: WordPieceTokenizer
     private let queue = DispatchQueue(label: "com.typstedit.llmlingua2.predict")
 
-    /// BERT's window. The published model is exported with exactly this
-    /// fixed input shape (see Tools/convert_llmlingua2_coreml.py), so every
-    /// call is padded to it; a model with a flexible shape uses it as a cap.
+    /// The model was exported with a fixed sequence length (see
+    /// Tools/convert_llmlingua2_coreml.py), matching BERT's training window.
     private let maxSequenceLength = 512
 
     init(modelAt url: URL, vocabText: String) throws {
@@ -409,12 +408,23 @@ final class LLMLingua2Engine: @unchecked Sendable {
             let segments = segmentation.segments
             guard segments.count > 3 else { return text }
 
+            // One representative id per word: the word's first subtoken.
             // Word-level filtering means a word is kept or dropped whole —
             // the compressed text stays word-aligned and readable.
-            guard let scores = wordScores(segments.map(\.text)) else {
-                // Uniform scores would keep just the first N words, which is
-                // worse than the heuristic filter: use that instead.
-                return HeuristicTokenFilter.compressSync(text, keepRate: keepRate, forceTokens: forceTokens, isCode: isCode)
+            let representativeIDs: [Int] = segments.map { tokenizer.encodeWord($0.text).first ?? tokenizer.unkID }
+
+            // Score every word (chunked to the model's fixed window).
+            var scores = [Double](repeating: 0, count: segments.count)
+            let window = maxSequenceLength - 2 // CLS + content + SEP
+            var chunkStart = 0
+            while chunkStart < representativeIDs.count {
+                let chunkEnd = min(chunkStart + window, representativeIDs.count)
+                let chunk = Array(representativeIDs[chunkStart..<chunkEnd])
+                let chunkScores = (try? runScores(for: chunk)) ?? []
+                for (offset, score) in chunkScores.enumerated() {
+                    scores[chunkStart + offset] = score
+                }
+                chunkStart = chunkEnd
             }
 
             // Code safety: rate floor + forced structural words, exactly
@@ -433,12 +443,8 @@ final class LLMLingua2Engine: @unchecked Sendable {
                     || (isCode && HeuristicTokenFilter.structuralTokens.contains(raw)) {
                     forced.insert(index)
                 }
-                // In code, a word carrying syntax is never dropped: losing
-                // `#let` or `..n)` breaks the source (an unclosed bracket),
-                // whatever the classifier thinks of it. Model logits span
-                // a wide range, so a fixed score bonus can't guarantee this.
                 if isCode && segment.text.contains(where: { "{}()[]#$=;<>\\".contains($0) }) {
-                    forced.insert(index)
+                    scores[index] += 2.0
                 }
             }
 
@@ -447,123 +453,45 @@ final class LLMLingua2Engine: @unchecked Sendable {
         }
     }
 
-    /// Keep scores for whitespace-separated `words`, for tests and
-    /// diagnostics. `nil` when the model can't run.
-    func scoreWords(_ words: [String]) -> [Double]? {
-        queue.sync { wordScores(words) }
+    /// One forward pass over `[CLS] ids [SEP]`; returns keep-logit minus
+    /// drop-logit per content position (first `count` entries).
+    private func runScores(for ids: [Int]) throws -> [Double] {
+        let length = ids.count + 2
+        let inputIDs = Self.array(from: [tokenizer.clsID] + ids + [tokenizer.sepID], length: length)
+        let attentionMask = Self.array(from: Array(repeating: 1, count: length), length: length)
+        let typeIDs = Self.array(from: Array(repeating: 0, count: length), length: length)
+
+        let inputNames = model.modelDescription.inputDescriptionsByName.keys.sorted()
+        guard inputNames.count >= 3 else { return [] }
+        // The conversion script names them input_ids / attention_mask /
+        // token_type_ids; sorted() restores exactly that order. Anything
+        // else is still handled positionally.
+        let input = try MLDictionaryFeatureProvider(dictionary: [
+            inputNames[0]: MLFeatureValue(multiArray: inputIDs),
+            inputNames[1]: MLFeatureValue(multiArray: attentionMask),
+            inputNames[2]: MLFeatureValue(multiArray: typeIDs),
+        ])
+        let output = try model.prediction(from: input)
+
+        let outputNames = model.modelDescription.outputDescriptionsByName.keys.sorted()
+        guard let logits = output.featureValue(for: outputNames[0])?.multiArrayValue,
+              logits.count >= length * 2 else { return [] }
+
+        var result = [Double](repeating: 0, count: ids.count)
+        for position in 0..<ids.count {
+            let drop = logits[position * 2]
+            let keep = logits[position * 2 + 1]
+            result[position] = keep.doubleValue - drop.doubleValue
+        }
+        return result
     }
 
-    /// One keep score per word — the mean keep-minus-drop logit over the
-    /// word's subtokens — or `nil` when any forward pass fails. Words are
-    /// tokenized the way BERT was trained (punctuation split off, then
-    /// WordPiece), so the model sees real text rather than one stand-in
-    /// token per word. Call only on `queue`.
-    private func wordScores(_ words: [String]) -> [Double]? {
-        let capacity = maxSequenceLength - 2 // [CLS] … [SEP]
-        let tokens: [[Int]] = words.map { word in
-            let ids = WordPieceTokenizer.basicWords(word).flatMap { tokenizer.encodeWord($0) }
-            return Array((ids.isEmpty ? [tokenizer.unkID] : ids).prefix(capacity))
-        }
-
-        var scores: [Double] = []
-        scores.reserveCapacity(words.count)
-        var chunk: [[Int]] = []
-        var chunkTokens = 0
-        func flush() -> Bool {
-            guard !chunk.isEmpty else { return true }
-            guard let chunkScores = runChunk(chunk) else { return false }
-            scores += chunkScores
-            chunk = []
-            chunkTokens = 0
-            return true
-        }
-        // Chunks never split a word, so every word is scored in context.
-        for wordTokens in tokens {
-            if chunkTokens + wordTokens.count > capacity, !flush() { return nil }
-            chunk.append(wordTokens)
-            chunkTokens += wordTokens.count
-        }
-        return flush() ? scores : nil
-    }
-
-    /// Feature names the conversion script uses. Matched by name — never
-    /// by sorted position, which would put attention_mask first.
-    private enum Input {
-        static let ids = "input_ids"
-        static let mask = "attention_mask"
-        static let types = "token_type_ids"
-    }
-
-    /// One forward pass over `[CLS] words… [SEP]`, padded to the model's
-    /// fixed length; returns one score per word. Logits are read through
-    /// their strides: Core ML may hand back a non-contiguous buffer (the
-    /// published model's are [16384, 32, 1]), so flat indexing reads garbage.
-    private func runChunk(_ words: [[Int]]) -> [Double]? {
-        let content = words.flatMap { $0 }
-        let real = content.count + 2
-        let declared = model.modelDescription.inputDescriptionsByName[Input.ids]?
-            .multiArrayConstraint?.shape.last?.intValue ?? 0
-        let length = declared > 0 ? declared : real
-        guard real <= length else { return nil }
-
-        let padding = length - real
-        let ids = [tokenizer.clsID] + content + [tokenizer.sepID] + Array(repeating: tokenizer.padID, count: padding)
-        let mask = Array(repeating: 1, count: real) + Array(repeating: 0, count: padding)
-        let types = Array(repeating: 0, count: length)
-
-        do {
-            let input = try MLDictionaryFeatureProvider(dictionary: [
-                Input.ids: MLFeatureValue(multiArray: try Self.array(from: ids)),
-                Input.mask: MLFeatureValue(multiArray: try Self.array(from: mask)),
-                Input.types: MLFeatureValue(multiArray: try Self.array(from: types)),
-            ])
-            let output = try model.prediction(from: input)
-            guard let outputName = model.modelDescription.outputDescriptionsByName.keys.sorted().first,
-                  let logits = output.featureValue(for: outputName)?.multiArrayValue else {
-                Self.reportFailure("the model returned no logits")
-                return nil
-            }
-            let hasBatch = logits.shape.count == 3
-            func logit(_ position: Int, _ label: Int) -> Double {
-                let index: [NSNumber] = hasBatch
-                    ? [0, NSNumber(value: position), NSNumber(value: label)]
-                    : [NSNumber(value: position), NSNumber(value: label)]
-                return logits[index].doubleValue
-            }
-            // Label 1 = keep, label 0 = drop (LLMLingua-2's convention).
-            var position = 1 // after [CLS]
-            return words.map { wordTokens in
-                var total = 0.0
-                for _ in wordTokens {
-                    total += logit(position, 1) - logit(position, 0)
-                    position += 1
-                }
-                return total / Double(max(wordTokens.count, 1))
-            }
-        } catch {
-            Self.reportFailure(error.localizedDescription)
-            return nil
-        }
-    }
-
-    private static func array(from values: [Int]) throws -> MLMultiArray {
-        let array = try MLMultiArray(shape: [1, NSNumber(value: values.count)], dataType: .int32)
+    private static func array(from values: [Int], length: Int) -> MLMultiArray {
+        let array = try! MLMultiArray(shape: [1, NSNumber(value: length)], dataType: .int32)
         for (index, value) in values.enumerated() {
             array[index] = NSNumber(value: value)
         }
         return array
-    }
-
-    /// Logged once per launch: a failing model silently degrading every
-    /// compression is how the original shape mismatch went unnoticed.
-    private static let failureLock = NSLock()
-    nonisolated(unsafe) private static var didReportFailure = false
-    private static func reportFailure(_ message: String) {
-        failureLock.lock()
-        defer { failureLock.unlock() }
-        guard !didReportFailure else { return }
-        didReportFailure = true
-        print("[LLMLingua2] Prediction failed, falling back to the heuristic filter: \(message)")
     }
 }
 

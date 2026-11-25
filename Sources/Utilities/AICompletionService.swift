@@ -1,385 +1,144 @@
 import Foundation
 import Markdown
 
-// MARK: - Precompiled Regexes
-//
-// The Markdown→Typst conversion itself is AST-based (see `TypstMarkupVisitor`
-// below): the document is parsed once with swift-markdown and walked by a
-// visitor that serializes it straight into a single output buffer. The regexes
-// that remain are confined to well-scoped jobs:
-//
-//   * response cleanup (thinking tags, force-code-output extraction)
-//   * the pre-parse extraction pass — code spans, math, backslash escapes and
-//     footnote definitions must be identified BEFORE cmark parses the text,
-//     because cmark either mangles them (smart quotes, emphasis inside math)
-//     or consumes them outright (backslash escapes, reference definitions)
-//   * leaf-level conversion/escaping of plain text runs
-//   * HTML fragments (tag soup has no grammar worth parsing)
-//   * whole-document post-passes carried over from the old pipeline
-
-enum AICompletionRegex {
-    // Response cleanup
-    static let thinkTag = try! NSRegularExpression(pattern: "<think>[\\s\\S]*?<\\/think>", options: [.caseInsensitive])
-    static let thoughtTag = try! NSRegularExpression(pattern: "<thought>[\\s\\S]*?<\\/thought>", options: [.caseInsensitive])
-    static let extractCode = try! NSRegularExpression(pattern: "```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```")
-
-    // Pre-parse extraction
-    // Fenced + inline code: a backtick run, content, and the same run back.
-    static let codeBlock = try! NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)")
-    // Math: $$…$$, $…$, \[…\] or \(…\). The (?<!\\) guards skip escaped dollars,
-    // and the closing `$` must not be glued to an alphanumeric so two
-    // register-style tokens (`$DC10–$DC4F`, `$3DF8/$3E50`, `$FE00–$FE9F`) are
-    // not mis-paired into one math region and run through the LaTeX converter.
-    static let mathBlock = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$(?![A-Za-z0-9])|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
-    // Backslash-escaped ASCII punctuation (the CommonMark escape set). Restored
-    // verbatim so user- or delimitImproperOperators-written escapes like \$ or
-    // \# keep exactly the meaning they had under the old string pipeline.
-    static let backslashEscape = try! NSRegularExpression(pattern: "\\\\[!-/:-@\\[-`{-~]")
-    // Footnote definitions must be pulled out pre-parse: cmark would otherwise
-    // consume `[^id]: text` as a link reference definition and turn every
-    // `[^id]` reference into a plain link instead of a footnote.
-    static let fnDef = try! NSRegularExpression(pattern: "(?m)^\\[\\^([^\\]]+)\\]:[ \\t]*(.*?)(?=\\n\\[\\^|\n\\z|\\z)", options: [.dotMatchesLineSeparators])
-
-    // Leaf-level conversions
-    static let fnRef = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
-    static let fnInline = try! NSRegularExpression(pattern: "(?<!!)\\^\\[([^\\]]+)\\]")
-    static let bareVideo = try! NSRegularExpression(pattern: #"(?m)^[ \t]*(https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch|embed|v|shorts|live)|youtu\.be/|vimeo\.com/)[^\s]+)[ \t]*$"#, options: [.caseInsensitive])
-
-    // Leaf-level escaping
-    static let escapeHtmlTags = try! NSRegularExpression(pattern: "(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>")
-    static let strayBacktick = try! NSRegularExpression(pattern: "(?<!\\\\)`")
-    static let literalDollar = try! NSRegularExpression(pattern: "(?<!\\\\)\\$")
-    static let literalHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[|quote\\[)")
-    static let literalAt = try! NSRegularExpression(pattern: "(?<!\\\\)@")
-    static let technicalUnderscore = try! NSRegularExpression(pattern: "(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])")
-    static let hybridDollarDigit = try! NSRegularExpression(pattern: "(?<!\\\\)\\$(?=\\d)")
-    static let hybridAt = try! NSRegularExpression(pattern: "(?<!\\\\)(?<=[a-zA-Z0-9])@|(?<!\\\\)@(?=\\s)")
-    static let hybridHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!import\\b|include\\b|let\\b|set\\b|show\\b|return\\b|if\\b|else\\b|for\\b|while\\b|context\\b)([A-Za-z][A-Za-z0-9_]*)(?=[,!?;:]|\\.\\s|\\.$)")
-    // A `#` followed by whitespace or end-of-text can't start a Typst expression,
-    // so it's escaped (delimitImproperOperators used to emit these already
-    // escaped and the old pipeline preserved them verbatim).
-    static let hybridStrayHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?=\\s|$)")
-    static let stringLiteral = try! NSRegularExpression(pattern: "\"[^\"]*\"")
-
-    // Whole-document post-passes
-    static let docDot = try! NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+")
-    static let markdownAbbr = try! NSRegularExpression(pattern: "(?m)^\\*\\[([^\\]]+)\\]:")
-
-    // HTML fragments. One tokenizer finds comments/tags; `htmlAttr` pulls
-    // individual attribute values out of a tag's raw text.
-    static let htmlToken = try! NSRegularExpression(pattern: "(?s)<!--.*?-->|<(/?)([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*>")
-    static let htmlAttr = try! NSRegularExpression(pattern: "(?i)\\b(href|align|src|alt|width|height)\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+))")
-
-    // Video IDs
-    static let youtubeID = try! NSRegularExpression(pattern: #"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"#, options: [.caseInsensitive])
-    static let vimeoID = try! NSRegularExpression(pattern: #"(?:player\.)?vimeo\.com/(?:video/)?(\d{6,})"#, options: [.caseInsensitive])
-}
-
-enum AIError: LocalizedError {
-    case invalidURL
-    case noData
-    case parsingError(String)
-    case apiError(String)
-    /// The stream went silent for longer than the stall window — treated as
-    /// a stuck response rather than a hard failure, so the agentic loop can
-    /// auto-continue (see `fetchCompletionWithTools`).
-    case stalledResponse(idleSeconds: Int, timeoutSeconds: Int)
-    /// The stream was stopped because the model kept emitting the same
-    /// passage (see `RepetitionDetector`). `keptText` is the answer up to the
-    /// loop plus one copy of it — empty when the loop was in the reasoning.
-    case repetitionLoop(inReasoning: Bool, unit: String, repeats: Int, keptText: String)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidURL: return "Invalid URL configuration."
-        case .noData: return "No data received from the AI provider."
-        case .parsingError(let details): return "Parsing Error: \(details)"
-        case .apiError(let msg): return msg
-        case .stalledResponse(let idleSeconds, let timeoutSeconds):
-            return "The model stopped sending output for \(idleSeconds)s (stall limit: \(timeoutSeconds)s) and the attempt was abandoned."
-        case .repetitionLoop(let inReasoning, let unit, let repeats, _):
-            return "The model got stuck repeating the same \(inReasoning ? "thought" : "passage") (“\(RepetitionDetector.preview(unit))”, \(repeats)× in a row) and the reply was stopped."
-        }
-    }
-}
-
-/// Distinguishes between chat-based requests (AI Prompt, Refine, test connection)
-/// and inline completion requests (autocomplete). Maps to the corresponding
-/// ModelTask so each purpose can use its own model source and configuration.
-enum AIRequestPurpose {
-    case chat
-    case completion
-
-    var modelTask: ModelTask {
-        switch self {
-        case .chat: return .generation
-        case .completion: return .completion
-        }
-    }
-}
-
-// MARK: - Agentic Tool Calling Types
-
-/// One tool call the model asked to execute, in a provider-neutral shape.
-struct AIToolCallRequest {
-    let id: String
-    /// The tool's `qualifiedName` (`server__tool`), as sent to the provider.
-    let name: String
-    let argumentsJSON: String
-}
-
-/// The result of executing one tool call, fed back to the model.
-struct AIToolResult {
-    let callID: String
-    let name: String
-    let output: String
-}
-
-/// Stops the tool-calling loop from re-running the same read over and over.
-/// One instance lives for one `fetchCompletionWithTools` request.
-///
-/// Only read-only and verification tools are tracked. A repeat still runs, so
-/// the answer is never stale, but when it returns exactly what the previous
-/// identical call returned the result is labelled as a repeat. Once a call has
-/// come back identical `maxIdenticalRuns` times it is no longer executed: the
-/// model gets a note telling it to use what it has. Any call that can change
-/// files (or an unknown MCP tool) clears the history, because re-reading after
-/// an edit is legitimate.
-struct ToolCallRepeatGuard {
-    /// Tools whose identical repeats are pure waste while nothing changes.
-    static let readOnlyToolNames: Set<String> = [
-        "list_files", "read_file", "get_outline", "skim_outline", "find_section", "check_references",
-        "check_writing", "find_repetition", "grep_project", "search_project",
-        "read_skill_file", "web_fetch", "git_status", "git_diff", "git_log", "recall"
-    ]
-    /// Checks and pure conversions. They change nothing on disk, so they don't
-    /// invalidate the history, but an identical repeat with nothing edited in
-    /// between answers a question the model has already had answered — the
-    /// classic validation loop ("compile the clean file again, and again").
-    /// Unlike a read, a compile's output need not be byte-identical across
-    /// runs (a failure names its scratch file, which carries a fresh UUID), so
-    /// for these an identical call counts as a repeat regardless.
-    static let verificationToolNames: Set<String> = [
-        "run_typst_check", "convert_markdown_to_typst", "evaluate_math"
-    ]
-    /// The subset whose whole purpose is confirming that something compiles.
-    /// Only these can make up a "validation loop" round: converting three
-    /// different snippets in a row is real work that produces content, while
-    /// compiling the same untouched file for the fourth time is not.
-    static let checkToolNames: Set<String> = ["run_typst_check"]
-    /// Everything whose identical repeats are tracked.
-    static let trackedToolNames: Set<String> = readOnlyToolNames.union(verificationToolNames)
-    /// Tools that change nothing and aren't tracked: they neither repeat nor
-    /// invalidate the history.
-    static let neutralToolNames: Set<String> = ["update_plan", "delegate_task"]
-    /// Default for the Settings value (`chatRepeatCallLimit`).
-    static let defaultMaxIdenticalRuns = 2
-
-    static let repeatNote = "[Same result as your earlier identical call in this request — nothing has changed. Use what you already have instead of calling it again.]\n"
-
-    /// Label for an identical verification call, whose output may differ in
-    /// cosmetic details (a scratch path) while saying the same thing.
-    static let verificationRepeatNote = "[Same check as your earlier identical call in this request — nothing has been edited since, so it says the same thing. Act on it instead of checking again.]\n"
-
-    /// Identical runs allowed before a call is refused. 0 turns the guard
-    /// off: nothing is labelled or refused.
-    let maxIdenticalRuns: Int
-
-    private var history: [String: (runs: Int, output: String)] = [:]
-
-    init(maxIdenticalRuns: Int = defaultMaxIdenticalRuns) {
-        self.maxIdenticalRuns = max(0, maxIdenticalRuns)
-    }
-
-    /// `project__read_file` → `read_file`.
-    static func baseName(_ qualifiedName: String) -> String {
-        qualifiedName.range(of: "__").map { String(qualifiedName[$0.upperBound...]) } ?? qualifiedName
-    }
-
-    /// Tool name plus arguments with sorted keys, so `{"limit":5,"path":"a"}`
-    /// and `{"path":"a","limit":5}` count as the same call.
-    static func signature(name: String, argumentsJSON: String) -> String {
-        let trimmed = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
-        let canonical: String
-        if trimmed.isEmpty {
-            canonical = "{}"
-        } else if let data = trimmed.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data),
-                  let sorted = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
-                  let string = String(data: sorted, encoding: .utf8) {
-            canonical = string
-        } else {
-            canonical = trimmed
-        }
-        return name + "|" + canonical
-    }
-
-    /// The note to return instead of running the call, or `nil` to run it.
-    func refusal(name: String, argumentsJSON: String) -> String? {
-        let base = Self.baseName(name)
-        guard maxIdenticalRuns > 0,
-              Self.trackedToolNames.contains(base),
-              let entry = history[Self.signature(name: name, argumentsJSON: argumentsJSON)],
-              entry.runs >= maxIdenticalRuns else { return nil }
-        if Self.verificationToolNames.contains(base) {
-            return "Not run: this exact \(base) call already ran \(entry.runs == 1 ? "once" : "\(entry.runs) times") in this request, and nothing has been edited since, so it would say the same thing. Act on what it already told you: fix what it flagged, or write your answer now."
-        }
-        let times = entry.runs == 1 ? "once" : "\(entry.runs) times, with the same result each time,"
-        return "Not run: this exact \(base) call already ran \(times) in this request, and nothing has been edited since, so it would return the same thing. Use what it already returned, read a different range or search for something else, or write your answer now."
-    }
-
-    /// Records a finished call and returns the output to hand the model
-    /// (labelled when it repeats the previous identical call exactly).
-    mutating func record(name: String, argumentsJSON: String, output: String) -> String {
-        guard maxIdenticalRuns > 0 else { return output }
-        let base = Self.baseName(name)
-        if Self.verificationToolNames.contains(base) {
-            // Counted by signature alone: a compiler message may name a fresh
-            // scratch path on every run, so comparing output would miss the
-            // loop entirely.
-            let key = Self.signature(name: name, argumentsJSON: argumentsJSON)
-            if let entry = history[key] {
-                history[key] = (entry.runs + 1, output)
-                return Self.verificationRepeatNote + output
-            }
-            history[key] = (1, output)
-            return output
-        }
-        guard Self.readOnlyToolNames.contains(base) else {
-            if !Self.neutralToolNames.contains(base) {
-                history.removeAll()
-            }
-            return output
-        }
-        let key = Self.signature(name: name, argumentsJSON: argumentsJSON)
-        if let entry = history[key], entry.output == output {
-            history[key] = (entry.runs + 1, output)
-            return Self.repeatNote + output
-        }
-        history[key] = (1, output)
-        return output
-    }
-}
-
-/// A provider-neutral chat message used internally by the tool-calling loop
-/// in `AICompletionService`. Converted to each provider's wire format
-/// immediately before sending (OpenAI-compatible vs. Anthropic shapes differ
-/// enough — system role, tool role vs. tool_result blocks — that a single
-/// shared JSON shape isn't worth forcing).
-enum AIChatMessage {
-    case system(String)
-    /// A user turn, optionally carrying images the user attached to it. Images
-    /// are sent as provider-specific content blocks (`image_url` for
-    /// OpenAI-compatible APIs, a base64 `image` block for Anthropic) on the
-    /// opening turn; the folded history stays text-only.
-    case user(String, images: [ChatImage] = [])
-    case assistantText(String)
-    case assistantToolCalls([AIToolCallRequest])
-    case toolResult(AIToolResult)
-}
-
-/// What one turn of a tool-calling conversation produced. Each case carries
-/// along any reasoning/"thinking" content the provider returned natively
-/// for that turn (e.g. `reasoning_content`), separate from the visible
-/// text/tool calls — `fetchCompletionWithTools` collects these across turns
-/// so the whole exchange's thinking can be shown, not just the last turn's.
-enum AIChatStep {
-    case finalText(String, reasoning: String?)
-    case toolCalls([AIToolCallRequest], reasoning: String?)
-}
-
-/// How a step ended, as the provider reported it. Kept apart from
-/// `AIChatStep` so the step's shape stays the same for every caller.
-struct AIChatStepMeta {
-    /// `finish_reason` (OpenAI-compatible) or `stop_reason` (Anthropic), as sent.
-    var finishReason: String?
-    /// Normalized token accounting for this response, when the provider
-    /// reported any. `nil` for servers that send no `usage` at all — a local
-    /// llama.cpp build, for instance — which is why every reader treats it as
-    /// optional rather than assuming zeros.
-    var usage: TokenUsage?
-
-    /// The prompt's size as the provider counted it. This is the number a
-    /// context estimate should anchor on.
-    var promptTokens: Int? { usage?.promptTotal }
-    var completionTokens: Int? { usage.map(\.outputTotal) }
-
-    /// The reply was cut off by `max_tokens`. Hidden reasoning counts
-    /// against the same budget, so a reasoning model can hit this with no
-    /// visible text at all, or in the middle of a tool call's arguments.
-    var hitTokenLimit: Bool {
-        finishReason == "length" || finishReason == "max_tokens"
-    }
-}
-
-/// Thread-safe record of streaming activity for the stall watchdog. The SSE
-/// parsers run on the main actor, but the watchdog polls from a detached
-/// task, so the "when did we last receive anything" timestamp has to be
-/// shared safely between them.
-private final class StreamActivity: @unchecked Sendable {
-    private let lock = NSLock()
-    private var lastTouch = Date()
-
-    func touch() {
-        lock.lock()
-        lastTouch = Date()
-        lock.unlock()
-    }
-
-    /// True when nothing has arrived for longer than `timeout` seconds.
-    func isStalled(past timeout: TimeInterval) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return Date().timeIntervalSince(lastTouch) >= timeout
-    }
-
-    var secondsSinceTouch: TimeInterval {
-        lock.lock()
-        defer { lock.unlock() }
-        return Date().timeIntervalSince(lastTouch)
-    }
-}
-
-/// Watches one streamed reply for a repetition loop, separately in the
-/// answer and in the reasoning, and throws `.repetitionLoop` to end the
-/// stream once one is found. Lives for one request attempt.
-@MainActor
-private final class StreamLoopGuard {
-    private var text = RepetitionDetector()
-    private var reasoning = RepetitionDetector()
-
-    /// `accumulated` is the whole answer so far, including `piece`.
-    func checkText(_ piece: String, accumulated: String) throws {
-        guard let loop = text.feed(piece) else { return }
-        throw AIError.repetitionLoop(
-            inReasoning: false,
-            unit: loop.unit,
-            repeats: loop.repeats,
-            keptText: RepetitionDetector.keptPrefix(of: accumulated, before: loop)
-        )
-    }
-
-    func checkReasoning(_ piece: String) throws {
-        guard let loop = reasoning.feed(piece) else { return }
-        throw AIError.repetitionLoop(inReasoning: true, unit: loop.unit, repeats: loop.repeats, keptText: "")
-    }
-}
+// Ported from TypstEdit's `AICompletionService.swift`, trimmed to what the
+// Clippy agent needs: one streaming tool-calling loop with the same loop
+// safety machinery (stall watchdog, repetition guard, repeat-call guard,
+// auto-continue, token-limit ceiling), speaking OpenAI-compatible
+// (OpenAI/OpenRouter/Portkey/local), Anthropic, and Gemini (one-shot,
+// tool-less) wire formats.
 
 @MainActor
-class AICompletionService: ObservableObject {
+final class AICompletionService: ObservableObject {
     static let shared = AICompletionService()
+
+    /// Characters per token used by every character-based context estimate.
+    static let charsPerToken = 4
+
+    /// Rounds of "the model keeps calling tools but nothing changes" before
+    /// the loop sends a no-progress redirect note.
+    nonisolated static let defaultNoProgressRoundThreshold = 8
+    /// How many turns remain before the turn budget ends when the loop
+    /// starts warning the model to wrap up.
+    nonisolated static let defaultTurnBudgetWarningRemaining = 3
+
+    /// MCP concurrency answer the active chat agent installs
+    /// (`MCPManager.mayRunConcurrently(qualifiedName:)`). TypstEdit keeps one
+    /// MCPManager per chat, so there is no shared manager to ask; `nil`
+    /// (no active agent) means MCP tools are simply not grouped.
+    nonisolated(unsafe) static var mcpConcurrencyCheck: ((String) -> Bool)? = nil
+
+    /// Whether tool arguments are a JSON object (or empty, which some models
+    /// send for a no-argument call).
+    ///
+    /// A call whose arguments were cut off by the reply cap is not valid JSON.
+    /// The batch and the sequential loop both check this, so an unparseable
+    /// call is never admitted to a batch where its failure would be harder to
+    /// attribute.
+    nonisolated static func isValidToolArguments(_ json: String) -> Bool {
+        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        guard let data = trimmed.data(using: .utf8) else { return false }
+        return (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
+    }
+
+    /// The note attached to a tool result when the user sends steering input
+    /// while a turn is running. Ported from TypstEdit: the model must adjust
+    /// course without restarting completed work and without dropping the
+    /// instruction.
+    nonisolated static func steerNote(_ text: String) -> String {
+        "[STEERING — the user sent this while you were working. Finish your current step, then adjust course to include it. Don't restart what is already done, and don't drop it:]\n\n\(text)"
+    }
 
     @Published var isFetching: Bool = false
 
     private init() {}
 
+    /// Whether an error is really the user cancelling, whatever shape it
+    /// arrived in. `URLSession` throws `URLError.cancelled` when a request is
+    /// cancelled, and some providers' streams fail with a bare
+    /// `NSURLErrorCancelled` wrapped in a plain error. Neither is a
+    /// `CancellationError`, so neither reaches the cancellation catches that
+    /// keep a stopped run from being continued automatically.
+    nonisolated static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let error = error as? AIError, error.isCancellation { return true }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return true }
+        if nsError.domain == NSCocoaErrorDomain, nsError.code == NSUserCancelledError { return true }
+        return false
+    }
+
+    /// Default per-request output budget, in tokens.
+    static let defaultMaxTokens = 4_096
+    /// The widest output budget a request may widen itself to when a reply is
+    /// cut off by `max_tokens`.
+    ///
+    /// This is deliberately the same number `AISettingsManager` clamps a
+    /// learned budget to, and it used to be a smaller one (16,384). That made
+    /// widening impossible for exactly the models that need it most: a
+    /// reasoning model already learned up to 32,768 started *above* 16,384, so
+    /// the `currentMaxTokens < maxTokensCeiling` guard was false on its very
+    /// first cut-off and the reply was never retried with room to write an
+    /// answer. One ceiling, shared, is what keeps "the budget can grow" and
+    /// "the budget can be remembered at that size" from disagreeing.
+    nonisolated static var maxTokensCeiling: Int { AISettingsManager.learnedMaxTokensCeiling }
+
+    /// The failure to report when a reply came back with no visible text.
+    ///
+    /// A reply cut off at the widest allowed budget gets named for what it is:
+    /// the model spent the whole budget on hidden reasoning, and retrying it
+    /// identically would spend the same tokens on the same thinking. Anything
+    /// else is the ordinary empty reply, which a fresh request can plausibly
+    /// clear.
+    nonisolated static func emptyReplyError(
+        meta: AIChatStepMeta,
+        budget: Int,
+        attempts: Int
+    ) -> AIError {
+        if meta.hitTokenLimit, budget >= AISettingsManager.learnedMaxTokensCeiling {
+            return .reasoningAteTheBudget(
+                reasoningTokens: meta.usage?.reasoning ?? 0,
+                budget: budget
+            )
+        }
+        return .emptyReply(attempts: attempts)
+    }
+
+    /// The wider cap to retry a cut-off reply with, or `nil` when it already
+    /// sits at the shared ceiling and cannot grow.
+    ///
+    /// Pure, so the rule is testable without sending a request: `budget` is
+    /// what the cut-off response ran under, and the answer comes from what the
+    /// provider reported rather than a blind doubling.
+    ///
+    /// **A widening must actually widen.** `suggestedBudgetAfterCutoff` floors
+    /// its answer at the cap that just failed, so a response whose reasoning fit
+    /// comfortably inside the cap suggests the identical budget — and retrying
+    /// at that number would re-spend the same tokens and cut off the same way.
+    /// When the evidence gives no better number, doubling is the fallback (the
+    /// old behaviour, used only when there is nothing better to go on); nudging
+    /// the cap up by one token to force progress is worse, because it turns one
+    /// honest error into a cascade of requests that each end the same way.
+    nonisolated static func widenedBudgetAfterCutoff(
+        meta: AIChatStepMeta,
+        budget: Int
+    ) -> Int? {
+        guard meta.hitTokenLimit, budget < maxTokensCeiling else { return nil }
+        let suggested = meta.suggestedBudgetAfterCutoff(currentBudget: budget)
+        let target = suggested > budget ? suggested : budget * 2
+        let widened = min(maxTokensCeiling, target)
+        return widened > budget ? widened : nil
+    }
+
     /// Strips `<think>`/`<thought>` tags some local/open models emit inline
     /// in their content, and returns what was inside them separately rather
-    /// than discarding it — callers surface that as the model's visible
-    /// "thinking" instead of silently dropping it.
+    /// than discarding it.
     private func extractThinking(from text: String) -> (clean: String, reasoning: String?) {
         var cleanText = text
-        let regexes = [AICompletionRegex.thinkTag, AICompletionRegex.thoughtTag]
+        let thinkTag = try! NSRegularExpression(pattern: "<think>[\\s\\S]*?</think>", options: [.caseInsensitive])
+        let thoughtTag = try! NSRegularExpression(pattern: "<thought>[\\s\\S]*?</thought>", options: [.caseInsensitive])
+        let regexes = [thinkTag, thoughtTag]
 
         var captured: [String] = []
         for regex in regexes {
@@ -403,6 +162,1656 @@ class AICompletionService: ObservableObject {
 
         return (cleanText.trimmingCharacters(in: .whitespacesAndNewlines), captured.isEmpty ? nil : captured.joined(separator: "\n\n"))
     }
+
+    // MARK: - One-shot completion
+
+    /// A single request/response round trip (no streaming, no tools).
+    /// Used for Gemini and as the tool-less fallback.
+    func fetchCompletion(
+        prompt: String,
+        systemPrompt: String,
+        maxTokens: Int? = nil,
+        model: ModelContext
+    ) async throws -> String {
+        let ctx = model
+        if !ctx.isLocal && ctx.apiKey.isEmpty {
+            throw AIError.apiError("API Key is missing for \(ctx.source.rawValue)")
+        }
+
+        let body = try Self.makeOneShotBody(ctx: ctx, systemPrompt: systemPrompt, prompt: prompt, maxTokens: maxTokens ?? Self.defaultMaxTokens)
+        let (data, _) = try await Self.postJSON(endpoint: ctx.chatEndpoint, headers: ctx.authHeaders, body: body)
+        let root = try Self.jsonObject(from: data, endpoint: ctx.chatEndpoint)
+
+        switch ctx.source {
+        case .gemini:
+            let text = Self.geminiText(from: root)
+            guard !text.isEmpty else { throw AIError.noData }
+            let (clean, _) = extractThinking(from: text)
+            return clean
+        case .anthropic:
+            let blocks = root["content"] as? [[String: Any]] ?? []
+            let text = blocks.filter { $0["type"] as? String == "text" }
+                .compactMap { $0["text"] as? String }
+                .joined(separator: "\n")
+            guard !text.isEmpty else { throw AIError.noData }
+            let (clean, _) = extractThinking(from: text)
+            return clean
+        default:
+            let choices = root["choices"] as? [[String: Any]] ?? []
+            let message = choices.first?["message"] as? [String: Any]
+            let raw = (message?["content"] as? String) ?? ""
+            let (clean, _) = extractThinking(from: raw)
+            guard !clean.isEmpty else { throw AIError.noData }
+            return clean
+        }
+    }
+
+    // MARK: - Tool-calling loop
+
+    /// Runs a full agentic turn: streams a reply, executes any tool calls it
+    /// asks for, feeds the results back, and repeats until the model produces
+    /// a final answer, the turn budget runs out, or the caller cancels.
+    ///
+    /// - Parameters:
+    ///   - systemPrompt: The system prompt for the whole request.
+    ///   - systemTail: The volatile half of the system prompt (plan
+    ///     checklist, Plan-mode reminder, per-turn hints). Sent after the
+    ///     stable half so a prompt-cache breakpoint between the two keeps the
+    ///     stable prefix cacheable. `nil` = none, as in the subagent call.
+    ///   - prompt: The user turn (the folded transcript, for chat sends).
+    ///   - maxTokens: The starting output budget; a reply cut off by
+    ///     `max_tokens` is retried with a doubled cap up to `maxTokensCeiling`.
+    ///   - maxTurns: Maximum number of model turns (a turn = one model
+    ///     request plus any tool calls it makes). `nil` = unlimited.
+    ///   - autoContinueUnlimited: Keep auto-continuing stalled/empty replies
+    ///     until there is an answer or Stop, ignoring the attempt count.
+    ///   - autoContinueAttemptsUsed: Attempts this *run* has already spent in
+    ///     earlier turns. A turn auto-proceed re-sends used to start its
+    ///     counter at zero, so a budget of 3 with 5 rounds allowed 18
+    ///     requests; the setting says "attempts", so the count belongs to the
+    ///     run and is handed in rather than re-earned.
+    ///   - onAutoContinueUsed: Reports the run's running total whenever an
+    ///     auto-continue is taken, so the caller stays in step even when the
+    ///     loop ends by throwing.
+    ///   - transportRetries: Attempts for requests that fail before anything
+    ///     arrives (rate limit, overloaded endpoint, connection error),
+    ///     re-sent after a jittered backoff. 0 = off.
+    ///   - waitForNetwork: Park a request that failed because the Mac went
+    ///     offline and re-send it when macOS reports a connection again,
+    ///     without consuming a retry attempt.
+    ///   - repetitionGuardEnabled: Stop replies stuck in a repetition loop
+    ///     and continue them via the auto-continue budget.
+    ///   - onToolCall: Called as each tool call starts (qualified name,
+    ///     arguments JSON) so the caller can show live activity.
+    ///   - onToolRefused: A call the loop did not run — an identical repeat
+    ///     the repeat guard refused, or arguments that were invalid.
+    ///   - onReasoningDelta: Streaming reasoning fragments, as they arrive.
+    ///   - onTextDelta: Every visible answer fragment, as it arrives.
+    ///   - onStatus: Live status line ("generating" row); `nil` clears it.
+    ///   - onUsage: Reports each response's token accounting.
+    ///   - executeTool: Runs one tool call.
+    /// - Returns: The model's final answer text.
+    func fetchCompletionWithTools(
+        systemPrompt: String,
+        systemTail: String? = nil,
+        prompt: String,
+        /// Images the user attached to this request's message. They ride on
+        /// the opening user turn only — every later request in the loop is the
+        /// model's own continuation, and re-sending the pixels would bill them
+        /// again on each round.
+        images: [ChatImage] = [],
+        maxTokens: Int = AICompletionService.defaultMaxTokens,
+        maxTurns: Int? = 8,
+        tools: [MCPTool],
+        repeatCallLimit: Int = 2,
+        autoContinueAttempts: Int = 3,
+        autoContinueUnlimited: Bool = false,
+        autoContinueAttemptsUsed: Int = 0,
+        onAutoContinueUsed: (@MainActor (Int) -> Void)? = nil,
+        transportRetries: Int = 3,
+        waitForNetwork: Bool = true,
+        repetitionGuardEnabled: Bool = true,
+        stallTimeoutSeconds: Int = 90,
+        onToolCall: (@MainActor (String, String) -> Void)? = nil,
+        onToolRefused: (@MainActor (String, String, String) -> Void)? = nil,
+        /// Drains any steering input the user sent while this turn was
+        /// running. Called at each tool-round boundary; the returned text is
+        /// attached to the round's newest tool result as a harness note, so
+        /// the model adjusts course without restarting what is already done.
+        onSteer: (@MainActor () -> String?)? = nil,
+        onReasoningDelta: (@MainActor (String) -> Void)? = nil,
+        onTextDelta: (@MainActor (String) -> Void)? = nil,
+        onStatus: (@MainActor (String?) -> Void)? = nil,
+        onUsage: ((TokenUsage) -> Void)? = nil,
+        model: ModelContext,
+        /// Runs a round's safe read-only calls concurrently. The closure is
+        /// given the calls that may overlap, each with its index in the round,
+        /// and returns the output per index. `nil` (or a round with nothing
+        /// eligible) runs everything on the sequential path below.
+        ///
+        /// It is a closure rather than something this service does itself
+        /// because the caller owns the transcript rows and the tool access
+        /// rules — see `ClippyAgent.runParallelReadOnlyCalls`.
+        executeParallel: ParallelReadRunner? = nil,
+        /// Re-pulls the declared tool list. Called after a round in which the
+        /// model ran `agent__tool_search`, so the tools it loaded are declared
+        /// from the next request on. `nil` (the default) keeps the opening
+        /// list for the whole call, which is what every caller wants unless
+        /// it declares tools lazily.
+        reloadTools: (() async -> [MCPTool])? = nil,
+        /// Start a finished read-only call before the reply that asks for it
+        /// has finished streaming, so its work overlaps the model's own
+        /// writing. Off by default: it is a latency win measured per provider,
+        /// and the only shape that can honour it safely today is Anthropic's,
+        /// whose stream marks each tool block's end.
+        ///
+        /// Unlike `executeTool`, this must do the work **without** touching the
+        /// transcript: the round's own walk writes every row, in the model's
+        /// order, after the assistant message that requested the calls exists.
+        /// `nil` — or a result the walk never consumes — means the call simply
+        /// runs normally when the round reaches it.
+        preDispatch: (@MainActor (_ name: String, _ argumentsJSON: String) async -> String?)? = nil,
+        /// Folds the conversation anew after the caller has compacted it, and
+        /// returns the replacement for this call's opening user message — or
+        /// `nil` to leave it alone. Consulted only when a request was refused
+        /// as too long and eliding tool outputs could not shrink it: the mass
+        /// is then the folded transcript itself, which only the caller (which
+        /// owns the transcript) can shrink. OpenCode's overflow ladder does
+        /// the same: after a "too long" rejection the next attempt is built
+        /// over a compacted history.
+        refoldPrompt: (@MainActor () async -> String?)? = nil,
+        executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
+    ) async throws -> String {
+        let ctx = model
+        if !ctx.isLocal && ctx.apiKey.isEmpty {
+            throw AIError.apiError("API Key is missing for \(ctx.source.rawValue)")
+        }
+        guard !ctx.isGemini else {
+            // Gemini's function-calling schema isn't wired up here — fail
+            // clearly rather than silently ignoring the tools.
+            throw AIError.apiError("Tool calling isn't supported for Google Gemini. Choose a different chat source.")
+        }
+
+        isFetching = true
+        defer { isFetching = false }
+        var messages: [AIChatMessage] = [.system(systemPrompt)]
+        if let systemTail, !systemTail.isEmpty {
+            messages.append(.systemTail(systemTail))
+        }
+        messages.append(.user(prompt, images: images))
+        // Where the folded transcript lives, so a mid-call refold (see
+        // `refoldPrompt`) replaces it in place. Tool results always append
+        // after it, so the index never shifts.
+        let promptIndex = messages.count - 1
+        // The declared tool list, which can grow mid-call when the model runs
+        // `agent__tool_search` and `reloadTools` supplies the fresh list.
+        var activeTools = tools
+        // MCP tools that declare `readOnlyHint` (and not `destructiveHint`)
+        // join the repeat guard: re-running an identical read-only server
+        // call is as pure a waste as re-reading a file.
+        var repeatGuard = ToolCallRepeatGuard(
+            maxIdenticalRuns: repeatCallLimit,
+            alsoReadOnlyNames: Set(tools
+                .filter { $0.annotations.readOnlyHint && !$0.annotations.destructiveHint }
+                .map(\.qualifiedName))
+        )
+        // Start from the largest budget this model has ever needed (learned
+        // from a previous request's cut-off retry), floored at the caller's
+        // setting — a reasoning model that burned 8k on hidden thinking
+        // should not relearn that on every new conversation.
+        let learnedMaxTokens = AISettingsManager.shared.effectiveMaxTokens(for: ctx, setting: maxTokens)
+        // Ahead-of-time budgeting from the provider's own numbers: if this
+        // model has been *observed* to spend N tokens on hidden reasoning,
+        // the cap has to clear N before a single word of the answer fits.
+        // Starting above the observed peak is what stops the first reply of
+        // a new conversation from being cut off at all.
+        let reasoningAware = AISettingsManager.shared.reasoningAwareMaxTokens(for: ctx, setting: maxTokens)
+        var currentMaxTokens = max(learnedMaxTokens, reasoningAware ?? learnedMaxTokens)
+        var turns = 0
+        var autoContinues = 0
+        /// Attempts spent before this turn, handed in by the caller so the
+        /// setting is a budget for the run and not a fresh 3 per turn.
+        let autoContinueStartingDebt = max(0, autoContinueAttemptsUsed)
+        var transportAttempt = 0
+        let maxTransport = ModelRetryPolicy.effectiveRetries(transportRetries)
+        let maxAutoContinues = autoContinueUnlimited ? Int.max : max(0, autoContinueAttempts)
+        var lastAnswer = ""
+        /// Index of the newest tool result in this round, so mid-turn steering
+        /// input can be attached to it (`onSteer`).
+        var lastToolResultIndex: Int?
+
+        /// Calls started before the reply finished, keyed by call id.
+        ///
+        /// An Anthropic stream marks each `tool_use` block's end explicitly, so
+        /// a round can begin its first real work while the model is still
+        /// writing. The results land here rather than being appended to the
+        /// transcript: the round's own walk is what writes rows, in the model's
+        /// order, after the assistant message that asked for them exists. A
+        /// pre-dispatch that wrote a row itself would put a tool result ahead
+        /// of the reply that requested it.
+        ///
+        /// Only calls with no side effect the user must see first are started
+        /// early (`preDispatchEligible`): no approval card, no write.
+        var dispatchedEarly: [String: Task<String?, Never>] = [:]
+
+        /// A speculative task must not outlive the call that started it. A
+        /// stream that stalls, is cancelled or dies part way may have left one
+        /// running against a round that will never consume its result; the
+        /// `defer` cancels them, and the walk is the only thing that ever reads
+        /// one.
+        func cancelUnconsumedEarlyCalls() {
+            for (_, task) in dispatchedEarly where !task.isCancelled { task.cancel() }
+            dispatchedEarly.removeAll()
+        }
+        defer { cancelUnconsumedEarlyCalls() }
+
+        /// Starts a finished read-only call before the reply is complete.
+        ///
+        /// Deliberately narrow. Three conditions, all necessary:
+        ///
+        /// - **Anthropic only.** Its stream has a per-block terminator
+        ///   (`content_block_stop`), so the arguments at that point are the
+        ///   whole call. OpenAI-shaped SSE has none — the next call's argument
+        ///   delta can arrive after this one looks finished — so dispatching
+        ///   there would run half-written JSON.
+        /// - **No side effect the user must see first.** No writer, no
+        ///   approval card, no question. A speculative start of a call that
+        ///   would prompt would raise a card before the model had finished
+        ///   explaining why.
+        /// - **Arguments already valid.** A call whose JSON does not parse is
+        ///   the truncated case; starting it would run a fragment.
+        ///
+        /// The result is never delivered from here. It is consumed by the
+        /// round's own walk, in the model's order, which is what keeps the
+        /// transcript honest.
+        var speculativelyStartCall: (@MainActor (String, String, String) -> Void)?
+        if let preDispatch, ctx.isAnthropic {
+            speculativelyStartCall = { id, name, argumentsJSON in
+                guard dispatchedEarly[id] == nil else { return }
+                guard Self.isValidToolArguments(argumentsJSON) else { return }
+                guard Self.preDispatchEligible(name) else { return }
+                guard repeatGuard.refusal(name: name, argumentsJSON: argumentsJSON) == nil else { return }
+                dispatchedEarly[id] = Task { await preDispatch(name, argumentsJSON) }
+            }
+        }
+
+        /// Takes one attempt from the *run's* budget and returns the running
+        /// total, or `nil` when it is spent.
+        ///
+        /// The two places that continue a reply (a stall and an empty answer)
+        /// both draw on this one budget, so a turn cannot spend the setting
+        /// twice over and a re-sent turn cannot start again at zero.
+        func takeAutoContinue() -> Int? {
+            let spent = autoContinueStartingDebt + autoContinues
+            guard spent < maxAutoContinues else { return nil }
+            autoContinues += 1
+            let total = spent + 1
+            onAutoContinueUsed?(total)
+            return total
+        }
+
+        // In-loop context control (gospel): when a verbatim compressor is
+        // configured, old tool results are compressed rather than dropped;
+        // anything still over the budget falls back to digests.
+        // The elision target is the compaction trigger, not the whole window.
+        // The tool results and the folded transcript share one request, and a
+        // budget set at 100% of the window — on a 4-characters-per-token
+        // guess — left nothing for the reply or for a tokenizer denser than
+        // the guess: a long agentic turn of dense tool output walked up to
+        // 262k of a 256k window this way and every request from then on was
+        // refused. The same reserve the compaction trigger keeps for the
+        // answer bounds the request here.
+        let baseCharBudget = CompactionBuffer.trigger(
+            budget: AISettingsManager.shared.effectiveContextBudgetTokens(for: ctx),
+            bufferPercent: AISettingsManager.shared.effectiveCompactionBufferPercent
+        ) * Self.charsPerToken
+        // The tool definitions travel with every request but are not in
+        // `messages`. An MCP server such as Atlassian's offers dozens of
+        // tools with large schemas, so leaving them out under-counted the
+        // prompt by a wide margin.
+        var toolSchemaChars = Self.toolSchemaChars(tools)
+        let compression = await ChatCompressor.resolve(
+            method: AISettingsManager.shared.effectiveCompressionMethod(for: ctx)
+        )
+        // Shrinks each time the server still reports the prompt as too big:
+        // the configured budget is an estimate (4 characters a token is
+        // optimistic for JSON), and a local model may be loaded with a
+        // smaller window than the budget says.
+        var budgetScale = 1.0
+        var contextShrinks = 0
+        func currentCharBudget() -> Int {
+            Self.effectiveCharBudget(base: baseCharBudget, scale: budgetScale, toolSchemaChars: toolSchemaChars)
+        }
+
+        while true {
+            if Task.isCancelled { throw AIError.cancelled }
+
+            await Self.elideOldToolOutputs(
+                in: &messages,
+                charBudget: currentCharBudget(),
+                compressor: compression?.compressor,
+                keepRate: compression?.keepRate ?? 0.5
+            )
+
+            let step: AIChatStep
+            let meta: AIChatStepMeta
+            do {
+                (step, meta) = try await requestChatStep(
+                    messages: messages,
+                    ctx: ctx,
+                    tools: activeTools,
+                    maxTokens: currentMaxTokens,
+                    stallTimeoutSeconds: stallTimeoutSeconds,
+                    repetitionGuardEnabled: repetitionGuardEnabled,
+                    onReasoningDelta: onReasoningDelta,
+                    onTextDelta: onTextDelta,
+                    // A finished read-only call starts while the rest of the
+                    // reply is still streaming, so a round's first real work
+                    // overlaps the model's own writing instead of waiting for
+                    // it. The result is consumed by the round's walk below, in
+                    // the model's order, so nothing about the transcript or the
+                    // approval story changes — only the wall clock.
+                    onToolCallStarted: speculativelyStartCall
+                )
+            } catch let error as AIError {
+                switch error {
+                case .stalledResponse, .repetitionLoop:
+                    // A stalled or looping stream can be auto-continued: ask
+                    // the model to pick up where it stopped.
+                    if let attempt = takeAutoContinue() {
+                        onStatus?(autoContinueUnlimited
+                            ? "Connection problem — asking the model to continue…"
+                            : "Connection problem — asking the model to continue (\(attempt) of \(autoContinueAttempts))…")
+                        if case .repetitionLoop(_, _, _, let keptText) = error, !keptText.isEmpty {
+                            lastAnswer = keptText
+                        }
+                        messages.append(.user("[Your last reply was interrupted before it finished. Continue exactly where you left off, without repeating what you already wrote.]"))
+                        continue
+                    }
+                    if case .repetitionLoop(_, _, _, let keptText) = error, !keptText.isEmpty {
+                        return keptText
+                    }
+                    throw error
+
+                case .httpError(let status, let body, _):
+                    // The prompt is over the model's window. Nothing streamed,
+                    // so shrink what the loop is carrying and send it again —
+                    // the same compression the budget check applies, only
+                    // with less room. Retrying the identical request could
+                    // never succeed, so this is not a transport retry.
+                    if Self.isContextOverflow(status: status, body: body),
+                       contextShrinks < Self.maxContextShrinks, !Task.isCancelled {
+                        contextShrinks += 1
+                        budgetScale *= Self.contextShrinkFactor
+                        onStatus?("The prompt is over the model's window — compacting tool results and retrying (\(contextShrinks) of \(Self.maxContextShrinks))…")
+                        let before = Self.totalChars(messages)
+                        await Self.elideOldToolOutputs(
+                            in: &messages,
+                            charBudget: currentCharBudget(),
+                            compressor: compression?.compressor,
+                            keepRate: compression?.keepRate ?? 0.5
+                        )
+                        // Nothing left to shrink: the conversation itself is
+                        // too big, and sending it again would fail the same
+                        // way. Give the caller one chance to fold the
+                        // transcript over a compaction before reporting the
+                        // provider's error.
+                        if Self.totalChars(messages) >= before {
+                            guard let refoldPrompt,
+                                  let refolded = await refoldPrompt(),
+                                  refolded.count < prompt.count else { throw error }
+                            messages[promptIndex] = .user(refolded, images: images)
+                            onStatus?(nil)
+                            continue
+                        }
+                        onStatus?(nil)
+                        continue
+                    }
+                    // Transport-level retry, safe because nothing streamed:
+                    // rate limit, timeout, or an overloaded endpoint.
+                    guard ModelRetryPolicy.isRetryable(status: status), transportAttempt < maxTransport, !Task.isCancelled else {
+                        // Carry the attempts already spent, so a failure that
+                        // survived the whole budget reads as "the endpoint is
+                        // down" rather than as a first-try error.
+                        throw transportAttempt > 0
+                            ? AIError.httpError(statusCode: status, body: body, retries: transportAttempt)
+                            : error
+                    }
+                    transportAttempt += 1
+                    let delay = ModelRetryPolicy.delay(forAttempt: transportAttempt)
+                    onStatus?(ModelRetryPolicy.statusLine(
+                        attempt: transportAttempt, retries: maxTransport,
+                        delay: delay, reason: ModelRetryPolicy.reason(forStatus: status)
+                    ))
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    onStatus?(nil)
+                    continue
+
+                case .apiError(let message):
+                    // Connection-level URLErrors arrive wrapped here. A lost
+                    // network parks the request (no retry cost); other
+                    // connection problems go through the backoff budget.
+                    guard message.contains("Request failed"), transportAttempt < maxTransport, !Task.isCancelled else {
+                        throw error
+                    }
+                    if waitForNetwork, !NetworkMonitor.shared.isSatisfied {
+                        onStatus?("Network lost — waiting for the connection to come back…")
+                        await NetworkMonitor.shared.waitForPath()
+                        onStatus?(nil)
+                        continue
+                    }
+                    transportAttempt += 1
+                    let delay = ModelRetryPolicy.delay(forAttempt: transportAttempt)
+                    onStatus?("Connection failed — retrying in \(max(1, Int(delay.rounded())))s (attempt \(transportAttempt + 1) of \(maxTransport + 1))…")
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    onStatus?(nil)
+                    continue
+
+                default:
+                    throw error
+                }
+            } catch is CancellationError {
+                throw AIError.cancelled
+            }
+
+            if let usage = meta.usage {
+                onUsage?(usage)
+                // Learn this model's reasoning cost from the provider's own
+                // report, so the next turn can budget for it up front.
+                if usage.reasoning > 0 {
+                    AISettingsManager.shared.rememberReasoningUsage(usage.reasoning, for: ctx)
+                }
+            }
+
+            switch step {
+            case .finalText(let text, _):
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    lastAnswer = trimmed
+                    return trimmed
+                }
+                // Empty reply: either the model spent its budget on reasoning
+                // or it just declined to answer.
+                //
+                // A cut-off at the widest allowed budget is the one shape not
+                // worth re-asking: the cap cannot grow, and the same reasoning
+                // would fill it again. Saying so immediately beats spending the
+                // auto-continue budget on requests that cannot succeed — that
+                // is what turned one over-budgeted review into four silent
+                // requests and the misleading "the model sent no reply".
+                if let widened = Self.widenedBudgetAfterCutoff(meta: meta, budget: currentMaxTokens) {
+                    AISettingsManager.shared.rememberMaxTokens(widened, for: ctx)
+                    currentMaxTokens = widened
+                    if let reasoning = meta.usage?.reasoning, reasoning > 0 {
+                        onStatus?("Reply was cut off — widening the budget to \(widened) tokens (the model used \(reasoning) on reasoning)…")
+                    } else {
+                        onStatus?("Reply was cut off — widening the budget to \(widened) tokens…")
+                    }
+                    continue
+                }
+                if meta.hitTokenLimit {
+                    // Cut off with no room to grow: the budget is the whole
+                    // problem, so report it as that rather than as an empty
+                    // reply a fresh request could clear.
+                    guard !lastAnswer.isEmpty else {
+                        throw Self.emptyReplyError(
+                            meta: meta, budget: currentMaxTokens, attempts: autoContinueStartingDebt + autoContinues
+                        )
+                    }
+                    return lastAnswer
+                }
+                // `maxAutoContinues`, not the raw attempt count: the
+                // "Unlimited attempts" setting is a chat preference, and
+                // ignoring it here made it a half-truth — a stalled reply
+                // continued forever while an empty one gave up after three.
+                if let attempt = takeAutoContinue() {
+                    onStatus?(autoContinueUnlimited
+                        ? "Empty reply — asking again…"
+                        : "Empty reply — asking again (\(attempt) of \(autoContinueAttempts))…")
+                    messages.append(.user("[Your reply arrived empty. Answer the request now.]"))
+                    continue
+                }
+                // Every retry came back empty and there is nothing to hand
+                // back. Returning "" here used to look like a successful turn:
+                // the agent stored a blank assistant row (rendered as "…"),
+                // skipped the plan's outstanding work, and never started
+                // Auto-proceed, because an empty reply is not "unfinished".
+                // Throw instead, so the turn is visibly a failure and the
+                // failure path can offer a continuation. A cut-off at the
+                // widest budget is named for what it really is.
+                guard !lastAnswer.isEmpty else {
+                    throw Self.emptyReplyError(
+                        meta: meta, budget: currentMaxTokens, attempts: autoContinueStartingDebt + autoContinues
+                    )
+                }
+                return lastAnswer
+
+            case .toolCalls(let calls, let intent, _):
+                turns += 1
+                lastToolResultIndex = nil
+                if let maxTurns, maxTurns > 0, turns >= maxTurns {
+                    // Turn budget exhausted: ask for the answer without tools.
+                    onStatus?("Wrap-up — asking for the final answer…")
+                    messages.append(.assistantToolCalls(calls, text: intent))
+                    for call in calls {
+                        messages.append(.toolResult(AIToolResult(
+                            callID: call.id, name: call.name,
+                            output: "Not run: the turn budget ran out. Write your final answer now."
+                        )))
+                    }
+                    messages.append(.user("[Turn budget reached. Stop calling tools and write your final answer now.]"))
+                    let (finalStep, finalMeta) = try await requestChatStep(
+                        messages: messages,
+                        ctx: ctx,
+                        tools: [],
+                        maxTokens: currentMaxTokens,
+                        stallTimeoutSeconds: stallTimeoutSeconds,
+                        repetitionGuardEnabled: repetitionGuardEnabled,
+                        onReasoningDelta: onReasoningDelta,
+                        onTextDelta: onTextDelta
+                    )
+                    if let usage = finalMeta.usage { onUsage?(usage) }
+                    if case .finalText(let text, _) = finalStep,
+                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return text
+                    }
+                    // The wrap-up request also came back empty. A non-empty
+                    // answer from an earlier round is still worth keeping;
+                    // with none, this is a failed turn, not a silent success.
+                    // Named by the wrap-up response's own finish reason, so a
+                    // budget that reasoning ate is reported as such.
+                    guard !lastAnswer.isEmpty else {
+                        throw Self.emptyReplyError(
+                            meta: finalMeta, budget: currentMaxTokens, attempts: autoContinueStartingDebt + autoContinues
+                        )
+                    }
+                    return lastAnswer
+                }
+
+                messages.append(.assistantToolCalls(calls, text: intent))
+
+                // Independent lookups in one reply run at the same time. Only                // calls the harness has cleared for overlap are eligible, and
+                // each is still screened by the repeat guard first, so the
+                // batch sees exactly the calls a sequential round would have
+                // run. Anything the caller declines to batch falls through to
+                // the loop below.
+                //
+                // The batch is chosen by *position*, through
+                // `ParallelToolCalls.parallelGroups`: a run of eligible calls
+                // overlaps, and a call that will not be batched — a writer, a
+                // refused repeat, a call whose arguments were cut off — splits
+                // the round there. Collecting every eligible call in the round
+                // regardless of position used to let a read after a write run
+                // *before* it, which is the one thing batching must never do.
+                //
+                // A group runs when the round reaches it, not in a pre-pass:
+                // running every group up front would reorder a batch that sits
+                // *after* a writer past it, which is the same bug wearing the
+                // other hat.
+                //
+                // The transcript order never changes: each call's result is
+                // appended in the model's order, as the walk below reaches it.
+                var batched: [Int: String] = [:]
+                var groups: [ParallelToolCalls.Group] = []
+                var groupStartingAt: [Int: Int] = [:]
+                if let executeParallel {
+                    func eligible(_ index: Int) -> Bool {
+                        let call = calls[index]
+                        guard Self.isValidToolArguments(call.argumentsJSON) else { return false }
+                        guard repeatGuard.refusal(name: call.name, argumentsJSON: call.argumentsJSON) == nil else {
+                            return false
+                        }
+                        // TypstEdit's own tools answer from a fixed set; an
+                        // MCP tool only overlaps when the user allowed that
+                        // server to and the server annotated the tool
+                        // read-only. TypstEdit keeps one MCPManager per chat,
+                        // so there is no shared manager to ask here — the
+                        // active agent installs its manager's answer through
+                        // `mcpConcurrencyCheck`, and with no chat active MCP
+                        // tools simply do not group.
+                        return ParallelToolCalls.isSafe(call.name)
+                            || (Self.mcpConcurrencyCheck?(call.name) ?? false)
+                    }
+                    groups = ParallelToolCalls.parallelGroups(count: calls.count, isEligible: eligible)
+                    for (position, group) in groups.enumerated() {
+                        if let first = group.indices.first { groupStartingAt[first] = position }
+                    }
+                }
+
+                for (index, call) in calls.enumerated() {
+                    if Task.isCancelled { throw AIError.cancelled }
+
+                    // A call already started while the reply was still
+                    // streaming: take its output here, so the row is written in
+                    // the model's order like every other. The task was started
+                    // by id and cannot have run twice — the walk is the only
+                    // place that consumes it.
+                    if let early = dispatchedEarly.removeValue(forKey: call.id) {
+                        // A `nil` means the pre-dispatch seam declined the call
+                        // (it was not a plan it could build), so it must run
+                        // normally below rather than count as an empty result.
+                        if let output = await early.value {
+                            let recorded = repeatGuard.record(
+                                name: call.name, argumentsJSON: call.argumentsJSON, output: output
+                            )
+                            messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: recorded)))
+                            lastToolResultIndex = messages.count - 1
+                            continue
+                        }
+                    }
+
+                    // A group runs when the walk reaches its first call, so a
+                    // batch that sits after a writer still runs after it.
+                    if let position = groupStartingAt[index], let executeParallel {
+                        let batch = groups[position].indices.map {
+                            ParallelReadCall(
+                                index: $0,
+                                qualifiedName: calls[$0].name,
+                                argumentsJSON: calls[$0].argumentsJSON
+                            )
+                        }
+                        let outputs = await executeParallel(batch)
+                        for (callIndex, output) in outputs { batched[callIndex] = output }
+                        // The guard's history has to record what ran, or the
+                        // next identical call wouldn't be recognised as a repeat.
+                        for entry in batch.sorted(by: { $0.index < $1.index }) {
+                            guard let output = outputs[entry.index] else { continue }
+                            _ = repeatGuard.record(name: entry.qualifiedName, argumentsJSON: entry.argumentsJSON, output: output)
+                        }
+                    }
+
+                    // Already run as part of its group above.
+                    if let output = batched[index] {
+                        messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
+                        lastToolResultIndex = messages.count - 1
+                        continue
+                    }
+
+                    // The repeat guard refuses identical re-reads.
+                    if let note = repeatGuard.refusal(name: call.name, argumentsJSON: call.argumentsJSON) {
+                        onToolRefused?(call.name, call.argumentsJSON, note)
+                        messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: note)))
+                        continue
+                    }
+
+                    onToolCall?(call.name, call.argumentsJSON)
+                    let output: String
+                    do {
+                        output = try await executeTool(call.name, call.argumentsJSON)
+                    } catch is CancellationError {
+                        throw AIError.cancelled
+                    } catch {
+                        output = "Error running \(call.name): \(error.localizedDescription)"
+                    }
+                    let recorded = repeatGuard.record(name: call.name, argumentsJSON: call.argumentsJSON, output: output)
+                    messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: recorded)))
+                    lastToolResultIndex = messages.count - 1
+                }
+                // A `tool_search` call this round may have loaded tools; the
+                // caller's fresh list declares them from the next request on.
+                // Re-pulling only after a search keeps the caller's ledger
+                // (which counts "prompts offered") at one write per round the
+                // way every other turn is.
+                if calls.contains(where: { $0.name == AgentHarnessTools.toolSearchQualifiedName }),
+                   let reloadTools {
+                    activeTools = await reloadTools()
+                    toolSchemaChars = Self.toolSchemaChars(activeTools)
+                }
+                // Steering input sent mid-turn lands on the round's newest
+                // tool result, so it is the freshest instruction the model
+                // reads before its next request (TypstEdit's `onSteer`).
+                if let lastToolResultIndex, let steer = onSteer?(), !steer.isEmpty {
+                    if case .toolResult(var result) = messages[lastToolResultIndex] {
+                        result.output += "\n\n" + Self.steerNote(steer)
+                        messages[lastToolResultIndex] = .toolResult(result)
+                    }
+                    onReasoningDelta?("\n\n[The user sent steering input while you were working — it is attached to the last tool result.]\n\n")
+                }
+                continue
+            }
+        }
+    }
+
+    /// Whether a call may be started before the reply that asks for it has
+    /// finished streaming.
+    ///
+    /// The set is deliberately smaller than `ParallelToolCalls.safeToolNames`.
+    /// That set answers "can this overlap another call?", which allows anything
+    /// read-only — including tools that raise an approval card or wait for the
+    /// user. A speculative start is different: it begins before the model has
+    /// finished saying why, so a card appearing there would interrupt an
+    /// explanation that is still being written. Only tools that read and never
+    /// prompt qualify.
+    nonisolated static func preDispatchEligible(_ qualifiedName: String) -> Bool {
+        switch qualifiedName {
+        case "reference__list_files", "reference__read_file", "reference__grep",
+             "file__find", "file__read", "file__search", "file__hash", "file__hex":
+            return true
+        default:
+            // `web__web_fetch` is excluded because it can ask for approval on a
+            // signed-in request, and `skill__read_file` because it reads an
+            // already-loaded body — starting it early saves nothing.
+            return false
+        }
+    }
+
+    // MARK: - One streamed turn
+
+    /// Requests one model turn (streaming for OpenAI-compatible and
+    /// Anthropic) and returns what it produced plus how it ended.
+    private func requestChatStep(
+        messages: [AIChatMessage],
+        ctx: ModelContext,
+        tools: [MCPTool],
+        maxTokens: Int,
+        stallTimeoutSeconds: Int,
+        repetitionGuardEnabled: Bool = true,
+        onReasoningDelta: (@MainActor (String) -> Void)?,
+        onTextDelta: (@MainActor (String) -> Void)?,
+        /// Called at `content_block_stop` for each finished `tool_use` block on
+        /// an Anthropic stream, so a round's first call can begin before the
+        /// reply is complete. `nil` disables it.
+        onToolCallStarted: (@MainActor (_ id: String, _ name: String, _ argumentsJSON: String) -> Void)? = nil
+    ) async throws -> (AIChatStep, AIChatStepMeta) {
+        if ctx.isGemini {
+            // One-shot path (tools are rejected earlier for Gemini).
+            let systemPrompt = messages.compactMap {
+                switch $0 {
+                case .system(let text), .systemTail(let text): return text
+                default: return nil
+                }
+            }.joined(separator: "\n\n")
+            let userPrompt = messages.compactMap {
+                if case .user(let text, _) = $0 { return text } else { return nil }
+            }.joined(separator: "\n\n")
+            let text = try await fetchCompletion(prompt: userPrompt, systemPrompt: systemPrompt, maxTokens: maxTokens, model: ctx)
+            return (.finalText(text, reasoning: nil), AIChatStepMeta(finishReason: "stop", usage: nil))
+        }
+
+        let activity = StreamActivity()
+        let loopGuard = StreamLoopGuard()
+        let timeout = max(15, TimeInterval(stallTimeoutSeconds))
+
+        // The watchdog races the stream: if nothing has arrived for the
+        // stall window, the parse is abandoned.
+        let watchdog = Task.detached { [activity] () -> TimeInterval? in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if activity.isStalled(past: timeout) {
+                    return activity.secondsSinceTouch
+                }
+            }
+            return nil
+        }
+
+        var textAccumulated = ""
+        var reasoningAccumulated = ""
+        var toolCalls: [AIToolCallRequest] = []
+        var meta = AIChatStepMeta(finishReason: nil, usage: nil)
+
+        func finish() -> (AIChatStep, AIChatStepMeta) {
+            watchdog.cancel()
+            let (clean, inlineThinking) = extractThinking(from: textAccumulated)
+            let reasoning = [reasoningAccumulated, inlineThinking ?? ""]
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            let trimmedReasoning = reasoning.isEmpty ? nil : reasoning
+
+            if !toolCalls.isEmpty {
+                // `clean`, not the raw accumulation: a local model can inline
+                // <think> tags in the text stream, and the intent sentence
+                // that rides the wire must not carry them.
+                let intent = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (.toolCalls(toolCalls, text: intent.isEmpty ? nil : intent, reasoning: trimmedReasoning), meta)
+            }
+            return (.finalText(clean, reasoning: trimmedReasoning), meta)
+        }
+
+        do {
+            let request = try Self.makeStreamRequest(
+                ctx: ctx, messages: messages, tools: tools, maxTokens: maxTokens
+            )
+
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else { throw AIError.noData }
+            guard (200..<300).contains(http.statusCode) else {
+                var errorBody = ""
+                for try await line in bytes.lines {
+                    errorBody += line
+                    errorBody += "\n"
+                }
+                throw AIError.httpError(statusCode: http.statusCode, body: String(errorBody.prefix(1_000)))
+            }
+
+            if ctx.isAnthropic {
+                var blockTools: [Int: (id: String, name: String, json: String)] = [:]
+                for try await line in bytes.lines {
+                    activity.touch()
+                    guard line.hasPrefix("data:") else { continue }
+                    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                    guard let data = payload.data(using: .utf8),
+                          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                    let type = root["type"] as? String ?? ""
+
+                    switch type {
+                    case "message_start":
+                        if let usageDict = (root["message"] as? [String: Any])?["usage"] as? [String: Any] {
+                            meta.usage = TokenUsage.fromAnthropic(usageDict)
+                        }
+                    case "content_block_start":
+                        if let index = root["index"] as? Int,
+                           let block = root["content_block"] as? [String: Any],
+                           block["type"] as? String == "tool_use" {
+                            blockTools[index] = (
+                                block["id"] as? String ?? "tool_\(index)",
+                                block["name"] as? String ?? "unknown",
+                                ""
+                            )
+                        }
+                    case "content_block_delta":
+                        if let index = root["index"] as? Int,
+                           let delta = root["delta"] as? [String: Any] {
+                            switch delta["type"] as? String {
+                            case "text_delta":
+                                let piece = delta["text"] as? String ?? ""
+                                if !piece.isEmpty {
+                                    textAccumulated += piece
+                                    if repetitionGuardEnabled {
+                                        try loopGuard.checkText(piece, accumulated: textAccumulated)
+                                    }
+                                    onTextDelta?(piece)
+                                }
+                            case "thinking_delta":
+                                let piece = delta["thinking"] as? String ?? ""
+                                if !piece.isEmpty {
+                                    reasoningAccumulated += piece
+                                    if repetitionGuardEnabled {
+                                        try loopGuard.checkReasoning(piece)
+                                    }
+                                    onReasoningDelta?(piece)
+                                }
+                            case "input_json_delta":
+                                let piece = delta["partial_json"] as? String ?? ""
+                                if !piece.isEmpty, blockTools[index] != nil {
+                                    blockTools[index]!.json += piece
+                                }
+                            default:
+                                break
+                            }
+                        }
+                    case "content_block_stop":
+                        // Anthropic marks each block's end explicitly, and a
+                        // tool_use block's arguments are complete at that
+                        // point. Handing it to the caller here lets a long
+                        // round start its first real work while the model is
+                        // still writing the rest of the reply — the reply's
+                        // preamble, or the second and third call. OpenAI-shaped
+                        // streams have no per-call terminator (the next call's
+                        // argument delta can still arrive after this one looks
+                        // finished), so this stays Anthropic-only: dispatching
+                        // partial JSON elsewhere would run a call the model
+                        // never finished writing.
+                        if let index = root["index"] as? Int,
+                           let block = blockTools[index],
+                           onToolCallStarted != nil {
+                            onToolCallStarted?(block.id, block.name, block.json.isEmpty ? "{}" : block.json)
+                        }
+                    case "message_delta":
+                        if let delta = root["delta"] as? [String: Any] {
+                            let stop = delta["stop_reason"] as? String
+                            switch stop {
+                            case "max_tokens": meta.finishReason = "length"
+                            case "tool_use": meta.finishReason = "tool_calls"
+                            case "end_turn", "stop_sequence", .some: meta.finishReason = "stop"
+                            case nil: break
+                            }
+                        }
+                        if let usageDict = root["usage"] as? [String: Any] {
+                            let output = (usageDict["output_tokens"] as? NSNumber)?.intValue ?? 0
+                            var usage = meta.usage ?? TokenUsage()
+                            usage.output = max(usage.output, output)
+                            if usage.promptTotal > 0 || usage.outputTotal > 0 { meta.usage = usage }
+                        }
+                    default:
+                        break
+                    }
+                }
+                toolCalls = blockTools.sorted { $0.key < $1.key }.map {
+                    AIToolCallRequest(id: $0.value.id, name: $0.value.name, argumentsJSON: $0.value.json.isEmpty ? "{}" : $0.value.json)
+                }
+                if meta.finishReason == "tool_calls" && !toolCalls.isEmpty {
+                    onTextDelta?("")  // flush any streamed preamble
+                }
+            } else {
+                // OpenAI-compatible SSE.
+                var pendingCalls: [Int: (id: String, name: String, json: String)] = [:]
+                for try await line in bytes.lines {
+                    activity.touch()
+                    guard line.hasPrefix("data:") else { continue }
+                    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                    if payload == "[DONE]" { break }
+                    guard let data = payload.data(using: .utf8),
+                          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+
+                    if let usageDict = root["usage"] as? [String: Any] {
+                        meta.usage = TokenUsage.fromOpenAI(usageDict)
+                    }
+                    guard let choice = (root["choices"] as? [[String: Any]])?.first else { continue }
+                    if let finish = choice["finish_reason"] as? String, meta.finishReason == nil {
+                        meta.finishReason = finish
+                    }
+                    guard let delta = choice["delta"] as? [String: Any] else { continue }
+
+                    let reasoningPiece = (delta["reasoning_content"] as? String)
+                        ?? (delta["reasoning"] as? String) ?? ""
+                    if !reasoningPiece.isEmpty {
+                        reasoningAccumulated += reasoningPiece
+                        if repetitionGuardEnabled {
+                            try loopGuard.checkReasoning(reasoningPiece)
+                        }
+                        onReasoningDelta?(reasoningPiece)
+                    }
+                    if let piece = delta["content"] as? String, !piece.isEmpty {
+                        textAccumulated += piece
+                        if repetitionGuardEnabled {
+                            try loopGuard.checkText(piece, accumulated: textAccumulated)
+                        }
+                        onTextDelta?(piece)
+                    }
+                    if let callDeltas = delta["tool_calls"] as? [[String: Any]] {
+                        meta.finishReason = "tool_calls"
+                        for callDelta in callDeltas {
+                            let index = (callDelta["index"] as? NSNumber)?.intValue ?? 0
+                            var entry = pendingCalls[index] ?? (
+                                callDelta["id"] as? String ?? "call_\(index)",
+                                "unknown",
+                                ""
+                            )
+                            if let id = callDelta["id"] as? String, !id.isEmpty { entry.id = id }
+                            if let function = callDelta["function"] as? [String: Any] {
+                                if let name = function["name"] as? String, !name.isEmpty { entry.name = name }
+                                if let args = function["arguments"] as? String { entry.json += args }
+                            }
+                            pendingCalls[index] = entry
+                        }
+                    }
+                }
+                toolCalls = pendingCalls.sorted { $0.key < $1.key }.map {
+                    AIToolCallRequest(id: $0.value.id, name: $0.value.name, argumentsJSON: $0.value.json.isEmpty ? "{}" : $0.value.json)
+                }
+            }
+
+            return finish()
+        } catch let error as AIError {
+            watchdog.cancel()
+            throw error
+        } catch is CancellationError {
+            watchdog.cancel()
+            throw AIError.cancelled
+        } catch {
+            watchdog.cancel()
+            // A cancel that reached the transport as an ordinary error is
+            // still a cancel. `URLSession` reports a cancelled request as
+            // `URLError.cancelled`, which is neither a `CancellationError` nor
+            // a stall — and both of those paths hand the run to auto-continue.
+            // Stop means the run ends here, whatever shape the transport gave
+            // the ending. Checked before the stall test so that stopping a
+            // *stalled* reply is not mistaken for the stall continuing.
+            if Task.isCancelled || Self.isCancellation(error) {
+                throw AIError.cancelled
+            }
+            // An aborted stream mid-reply counts as a stall, not a failure —
+            // the auto-continue path can pick it up.
+            if activity.secondsSinceTouch > 10 {
+                throw AIError.stalledResponse(idleSeconds: Int(activity.secondsSinceTouch), timeoutSeconds: Int(timeout))
+            }
+            throw AIError.apiError("Request failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Wire format builders
+    private struct ParsedConversation {
+        var system: String = ""
+        var turns: [AIChatMessage] = []
+    }
+
+    private static func makeStreamRequest(
+        ctx: ModelContext, messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int
+    ) throws -> URLRequest {
+        guard let url = URL(string: ctx.chatEndpoint) else { throw AIError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 600
+        for (key, value) in ctx.authHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body: [String: Any]
+        if ctx.isAnthropic {
+            var anthropic = anthropicBody(messages: messages, tools: tools, maxTokens: maxTokens, effort: ctx.reasoningEffort, temperature: ctx.temperature)
+            anthropic["model"] = ctx.model
+            body = anthropic
+        } else {
+            var openAI = openAIBody(messages: messages, tools: tools, maxTokens: maxTokens, effort: ctx.reasoningEffort, stream: true, temperature: ctx.temperature)
+            openAI["model"] = ctx.model
+            body = openAI
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+
+    /// Internal, not private, so tests can assert on the wire shape without
+    /// standing up a server (see `PerModelHarnessTests`).
+    static func openAIBody(messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int, effort: ReasoningEffort, stream: Bool, temperature: Double? = nil) -> [String: Any] {
+        var wire: [[String: Any]] = []
+        for message in messages {
+            switch message {
+            case .system(let text), .systemTail(let text):
+                wire.append(["role": "system", "content": text])
+            case .user(let text, let images):
+                if images.isEmpty {
+                    wire.append(["role": "user", "content": text])
+                } else {
+                    var parts: [[String: Any]] = []
+                    if !text.isEmpty {
+                        parts.append(["type": "text", "text": text])
+                    }
+                    for image in images {
+                        parts.append([
+                            "type": "image_url",
+                            "image_url": ["url": image.dataURL]
+                        ])
+                    }
+                    wire.append(["role": "user", "content": parts])
+                }
+            case .assistantText(let text):
+                wire.append(["role": "assistant", "content": text])
+            case .assistantToolCalls(let calls, let text):
+                wire.append([
+                    "role": "assistant",
+                    // The intent sentence the model wrote beside its calls is
+                    // replayed, not dropped: it is the working memory a small
+                    // model was asked to keep, and a history the model cannot
+                    // read back teaches it the sentences go nowhere.
+                    "content": text ?? "",
+                    "tool_calls": calls.map { call in
+                        [
+                            "id": call.id,
+                            "type": "function",
+                            "function": ["name": call.name, "arguments": call.argumentsJSON]
+                        ]
+                    }
+                ])
+            case .toolResult(let result):
+                wire.append(["role": "tool", "tool_call_id": result.callID, "content": result.output])
+            }
+        }
+
+        var body: [String: Any] = [
+            "model": "",  // filled by caller
+            "messages": wire,
+            "max_tokens": maxTokens,
+        ]
+        // Callers pass the model name through the closure below; keep the
+        // builder pure by accepting it separately.
+        if !tools.isEmpty {
+            body["tools"] = tools.map { tool in
+                [
+                    "type": "function",
+                    "function": [
+                        "name": tool.qualifiedName,
+                        "description": tool.description,
+                        "parameters": tool.inputSchema,
+                    ]
+                ]
+            }
+        }
+        if stream {
+            body["stream"] = true
+            body["stream_options"] = ["include_usage": true]
+        }
+        if let temperature {
+            body["temperature"] = temperature
+        }
+        applyReasoningEffort(effort, toOpenAI: &body, isOpenRouter: false)
+        return body
+    }
+
+    /// Internal, not private, so tests can assert on the wire shape without
+    /// standing up a server (see `PerModelHarnessTests`).
+    static func anthropicBody(messages: [AIChatMessage], tools: [MCPTool], maxTokens: Int, effort: ReasoningEffort, temperature: Double? = nil) -> [String: Any] {
+        var systemBlocks: [[String: Any]] = []
+        // Which system blocks are volatile tails (`systemTail`): the cache
+        // breakpoint goes on the last stable block, *before* any tail, so
+        // a plan update invalidates nothing ahead of it.
+        var systemBlockIsTail: [Bool] = []
+        var wire: [[String: Any]] = []
+        // Merge consecutive tool results into one user message (Anthropic
+        // requires strict alternation, and a round's results arrive together).
+        var pendingToolResults: [[String: Any]] = []
+        func flushToolResults() {
+            guard !pendingToolResults.isEmpty else { return }
+            wire.append(["role": "user", "content": pendingToolResults])
+            pendingToolResults = []
+        }
+
+        for message in messages {
+            switch message {
+            case .system(let text):
+                if !text.isEmpty {
+                    systemBlocks.append(["type": "text", "text": text])
+                    systemBlockIsTail.append(false)
+                }
+            case .systemTail(let text):
+                if !text.isEmpty {
+                    systemBlocks.append(["type": "text", "text": text])
+                    systemBlockIsTail.append(true)
+                }
+            case .user(let text, let images):
+                flushToolResults()
+                var blocks: [[String: Any]] = []
+                // Anthropic reads images placed before the text, and a text
+                // block must be non-empty.
+                for image in images {
+                    blocks.append([
+                        "type": "image",
+                        "source": [
+                            "type": "base64",
+                            "media_type": image.mediaType,
+                            "data": image.base64
+                        ]
+                    ])
+                }
+                if !text.isEmpty {
+                    blocks.append(["type": "text", "text": text])
+                }
+                // An empty user turn (images only, or nothing at all) would be
+                // rejected; keep a placeholder rather than sending zero blocks.
+                if blocks.isEmpty {
+                    blocks.append(["type": "text", "text": "(no text)"])
+                }
+                wire.append(["role": "user", "content": blocks])
+            case .assistantText(let text):
+                flushToolResults()
+                wire.append(["role": "assistant", "content": [[ "type": "text", "text": text ]]])
+            case .assistantToolCalls(let calls, let text):
+                flushToolResults()
+                var blocks: [[String: Any]] = []
+                // The intent sentence rides ahead of the tool_use blocks, the
+                // way it was generated — see the OpenAI builder for why it is
+                // replayed rather than dropped.
+                if let text, !text.isEmpty {
+                    blocks.append(["type": "text", "text": text])
+                }
+                blocks.append(contentsOf: calls.map { call in
+                    [
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": (try? JSONSerialization.jsonObject(with: Data(call.argumentsJSON.utf8))) ?? [:]
+                    ]
+                })
+                if blocks.isEmpty {
+                    blocks = [["type": "text", "text": ""]]
+                }
+                wire.append(["role": "assistant", "content": blocks])
+            case .toolResult(let result):
+                pendingToolResults.append([
+                    "type": "tool_result",
+                    "tool_use_id": result.callID,
+                    "content": result.output,
+                ])
+            }
+        }
+        flushToolResults()
+
+        let budget = effort.anthropicBudgetTokens
+        var body: [String: Any] = [
+            "model": "",
+            "max_tokens": budget > 0 ? max(maxTokens, budget + 1_024) : maxTokens,
+            "messages": wire,
+            "stream": true,
+        ]
+        if !systemBlocks.isEmpty {
+            // Prompt cache breakpoint (pi/Opus-style): the stable blocks —
+            // identity, reference context, tool guidance, skills — are
+            // byte-identical across turns, so marking the last of them
+            // ephemeral lets the provider bill everything up to and
+            // including it as a cache read from the second turn on. A
+            // `systemTail` block follows the breakpoint unmarked, so a plan
+            // update invalidates nothing before it. No tail → the marker
+            // lands on the last block, which is what the one-shot path
+            // (compaction calls) produces.
+            let lastStable = Self.lastStableSystemBlock(isTails: systemBlockIsTail)
+            systemBlocks[lastStable]["cache_control"] = ["type": "ephemeral"]
+            body["system"] = systemBlocks
+        }
+        if !tools.isEmpty {
+            // Second breakpoint on the last tool: the tool definitions are
+            // part of the cached prefix, and Anthropic caches up to the last
+            // marker it sees, so this covers the whole stable scaffolding.
+            body["tools"] = tools.enumerated().map { index, tool in
+                var definition: [String: Any] = [
+                    "name": tool.qualifiedName,
+                    "description": tool.description,
+                    "input_schema": tool.inputSchema,
+                ]
+                if index == tools.count - 1 {
+                    definition["cache_control"] = ["type": "ephemeral"]
+                }
+                return definition
+            }
+        }
+        if budget > 0 {
+            body["thinking"] = ["type": "enabled", "budget_tokens": budget]
+        }
+        // Anthropic's temperature range is 0–1; clamp so a 2.0 chat setting
+        // doesn't 400 the whole request.
+        if let temperature {
+            body["temperature"] = min(1, max(0, temperature))
+        }
+        return body
+    }
+
+    private static func makeOneShotBody(ctx: ModelContext, systemPrompt: String, prompt: String, maxTokens: Int) throws -> [String: Any] {
+        switch ctx.source {
+        case .gemini:
+            var body: [String: Any] = [
+                "contents": [[
+                    "role": "user",
+                    "parts": [["text": prompt]],
+                ]],
+                "generationConfig": ["maxOutputTokens": maxTokens, "temperature": ctx.temperature ?? 1.0],
+            ]
+            if !systemPrompt.isEmpty {
+                body["systemInstruction"] = ["parts": [["text": systemPrompt]]]
+            }
+            return body
+        case .anthropic:
+            var body = anthropicBody(messages: [.user(prompt)], tools: [], maxTokens: maxTokens, effort: ctx.reasoningEffort, temperature: ctx.temperature)
+            body["model"] = ctx.model
+            body["stream"] = false
+            if !systemPrompt.isEmpty { body["system"] = systemPrompt }
+            return body
+        default:
+            var body = openAIBody(messages: [.user(prompt)], tools: [], maxTokens: maxTokens, effort: ctx.reasoningEffort, stream: false, temperature: ctx.temperature)
+            body["model"] = ctx.model
+            return body
+        }
+    }
+
+    // MARK: - Image rejection hint
+
+    /// Appends an actionable note when a provider error reads like a rejected
+    /// image payload. The usual cause after attaching images: the model can't
+    /// read them. Say so in terms the user can act on, instead of leaving a
+    /// raw provider message about "content parts".
+    static func imageRejectionHint(for message: String) -> String {
+        guard looksLikeAnImageRejection(message) else { return message }
+        return message + "\n\nThis model may not accept images. Remove the attachment, or switch to an image-capable model from the chat panel's model menu."
+    }
+
+    /// Whether a provider's error text reads like a rejected image payload.
+    /// Deliberately narrow: only a message that mentions images/content parts
+    /// *and* a rejection word gets the extra hint.
+    static func looksLikeAnImageRejection(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        let mentionsImage = lower.contains("image") || lower.contains("vision") || lower.contains("modalit")
+        let mentionsRejection = lower.contains("not support")
+            || lower.contains("unsupported")
+            || lower.contains("invalid")
+            || lower.contains("cannot")
+            || lower.contains("does not")
+            || lower.contains("content part")
+        return mentionsImage && mentionsRejection
+    }
+
+    private static func postJSON(endpoint: String, headers: [String: String], body: [String: Any]) async throws -> (Data, HTTPURLResponse) {
+        guard let url = URL(string: endpoint) else { throw AIError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 600
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AIError.noData }
+        guard (200..<300).contains(http.statusCode) else {
+            let text = String(data: data, encoding: .utf8) ?? ""
+            throw AIError.apiError("HTTP \(http.statusCode): \(String(text.prefix(600)))")
+        }
+        return (data, http)
+    }
+
+    private static func jsonObject(from data: Data, endpoint: String) throws -> [String: Any] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let text = String(data: data, encoding: .utf8) ?? ""
+            throw AIError.parsingError("Could not parse response from \(endpoint): \(String(text.prefix(300)))")
+        }
+        return root
+    }
+
+    private static func geminiText(from root: [String: Any]) -> String {
+        let candidates = root["candidates"] as? [[String: Any]] ?? []
+        let content = candidates.first?["content"] as? [String: Any]
+        let parts = content?["parts"] as? [[String: Any]] ?? []
+        return parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+    }
+
+    // MARK: - Tool Output Elision
+    // Ported verbatim from TypstEdit's AICompletionService (minus the image
+    // attachments this app doesn't carry).
+
+    /// Prefix stamped onto a tool result that pass 1 of
+    /// `elideOldToolOutputs` compressed verbatim. Both tells the model the
+    /// text below is an information-dense extract, and lets the elision pass
+    /// recognize outputs that must not be filtered a second time.
+    nonisolated static let compressedToolOutputMarker = "[Extract — filler words omitted, kept wording verbatim.]\n"
+
+    /// Characters one message adds to the prompt. Images count by their token
+    /// estimate (4 characters ≈ 1 token, the rule the rest of this budget
+    /// uses), not by base64 length.
+    nonisolated static func charCount(_ message: AIChatMessage) -> Int {
+        switch message {
+        case .system(let t), .systemTail(let t), .assistantText(let t): return t.count
+        case .user(let t, let images):
+            return t.count + images.reduce(0) { $0 + $1.budgetChars }
+        case .assistantToolCalls(let calls, let text):
+            return calls.reduce(0) { $0 + $1.argumentsJSON.count + $1.name.count } + (text?.count ?? 0)
+        case .toolResult(let r): return r.output.count
+        }
+    }
+
+    nonisolated static func totalChars(_ messages: [AIChatMessage]) -> Int {
+        messages.reduce(0) { $0 + charCount($1) }
+    }
+
+    /// What the tool definitions add to every request: name, description and
+    /// the JSON Schema of each tool.
+    nonisolated static func toolSchemaChars(_ tools: [MCPTool]) -> Int {
+        tools.reduce(0) { sum, tool in
+            let schema = JSONSerialization.isValidJSONObject(tool.inputSchema)
+                ? ((try? JSONSerialization.data(withJSONObject: tool.inputSchema))?.count ?? 0)
+                : 0
+            return sum + tool.qualifiedName.count + tool.description.count + schema
+        }
+    }
+
+    /// Never squeezed below this, however small the window: a budget that
+    /// cannot hold even the fixed parts of a prompt is a configuration
+    /// problem, and shrinking to nothing would hide it.
+    nonisolated static let minimumCharBudget = 8_000
+
+    /// Which system block carries the Anthropic prompt-cache breakpoint: the
+    /// last block that is *not* a `systemTail`. Everything up to and
+    /// including that block is byte-identical between turns, so the provider
+    /// can reuse it; a tail after the breakpoint changes freely (plan
+    /// updates) without invalidating the cache. With no stable block the
+    /// last block wins, so a lone system message still gets its cache
+    /// breakpoint (the compaction one-shot path).
+    ///
+    /// Pure and `nonisolated` so the breakpoint rule is testable without
+    /// building a full request body.
+    nonisolated static func lastStableSystemBlock(isTails: [Bool]) -> Int {
+        isTails.lastIndex(where: { !$0 }) ?? isTails.count - 1
+    }
+
+    /// The message budget left once the tool definitions are paid for, after
+    /// `scale` has been applied to the configured budget.
+    nonisolated static func effectiveCharBudget(base: Int, scale: Double, toolSchemaChars: Int) -> Int {
+        max(minimumCharBudget, Int(Double(base) * scale) - toolSchemaChars)
+    }
+
+    /// How many times one request may shrink its budget and be sent again
+    /// after the server says the prompt is over the window, and by how much
+    /// each time.
+    nonisolated static let maxContextShrinks = 3
+    nonisolated static let contextShrinkFactor = 0.6
+
+    /// Whether an HTTP failure means "the prompt does not fit the window",
+    /// as opposed to a bad key, a rate limit or a rejected image. Servers
+    /// word it differently: OpenAI and LM Studio send
+    /// `context_length_exceeded`, Anthropic "prompt is too long", llama.cpp
+    /// mentions `n_ctx` or the context size.
+    nonisolated static func isContextOverflow(status: Int, body: String) -> Bool {
+        guard status == 400 || status == 413 else { return false }
+        let text = body.lowercased()
+        return [
+            "context_length_exceeded", "context window", "context length",
+            "maximum context", "context size", "n_ctx", "prompt is too long",
+            "input is too long", "too many tokens",
+        ].contains { text.contains($0) }
+    }
+
+    /// The least a tool result is cut down to, however tight the budget.
+    nonisolated static let minimumKeptToolOutputChars = 6_000
+
+    /// Wording of the note left where the middle of a result was cut out.
+    nonisolated static let clippedToolOutputPhrase = "omitted from the middle of this result to fit the model's context window"
+
+    /// Cuts `text` to roughly `limit` characters by dropping its middle,
+    /// keeping most of the start and some of the end (a list's paging token
+    /// or a file's last lines live there). A note says what was removed, so
+    /// the model asks for a narrower result instead of assuming it saw it all.
+    nonisolated static func clippingMiddle(_ text: String, to limit: Int, toolName: String) -> String {
+        guard text.count > limit else { return text }
+        let removed = text.count - limit
+        let note = "\n\n[… \(removed) characters \(clippedToolOutputPhrase). Ask \(toolName) for a smaller result — fewer fields, a lower page size, a tighter filter — if you need the rest …]\n\n"
+        let room = max(0, limit - note.count)
+        let head = room * 3 / 4
+        let tail = room - head
+        let clipped = String(text.prefix(head)) + note + String(text.suffix(tail))
+        return clipped.count < text.count ? clipped : text
+    }
+
+    /// Keeps a long tool-calling conversation inside a rough character budget.
+    /// Three passes, cheapest loss first. The two most recent tool results
+    /// are what the model is actively working from, so the first two passes
+    /// leave them alone:
+    ///
+    ///   1. When a compressor is configured (token filter or LLMLingua-2),
+    ///      each large *older* result is compressed *verbatim* — the model
+    ///      keeps roughly `keepRate` of the words, in order, instead of
+    ///      losing everything. Compressed outputs carry a marker so they are
+    ///      never squeezed a second time on a later turn.
+    ///   2. Any remaining overflow replaces older results with a digest,
+    ///      oldest first.
+    ///   3. If the *newest* results alone still overflow — one large search
+    ///      or file read can — the largest is compressed with the same
+    ///      compressor at the rate that would make it fit, then cut down with
+    ///      `clippingMiddle` if that was not enough. Without this the request
+    ///      went out over the window and failed.
+    ///
+    /// This is the in-loop counterpart to the chat's turn-level compaction:
+    /// a single request can easily rack up 20 large `read_file` results
+    /// across turns.
+    static func elideOldToolOutputs(
+        in messages: inout [AIChatMessage],
+        charBudget: Int,
+        compressor: (any PromptCompressor)?,
+        keepRate: Double
+    ) async {
+        var total = totalChars(messages)
+        guard total > charBudget else { return }
+
+        let toolIndices = messages.indices.filter {
+            if case .toolResult = messages[$0] { return true }
+            return false
+        }
+        let protected = Set(toolIndices.suffix(2))
+
+        // Pass 1 — verbatim compression, only while still over budget, so
+        // later (fresher) results keep as much of their content as possible.
+        if let compressor {
+            for index in toolIndices where !protected.contains(index) {
+                guard total > charBudget else { break }
+                guard case .toolResult(let result) = messages[index] else { continue }
+                // Tiny results aren't worth a pass; already-compressed ones
+                // are never squeezed again (repeated filtering would degrade
+                // them turn after turn).
+                guard result.output.count > 800,
+                      !result.output.hasPrefix(Self.compressedToolOutputMarker) else { continue }
+                let isCode = PromptCompression.codeRatio(result.output) > 0.3
+                let compressed = await compressor.compress(
+                    result.output,
+                    keepRate: keepRate,
+                    forceTokens: [],
+                    isCode: isCode
+                )
+                guard compressed.count < result.output.count else { continue }
+                let replacement = Self.compressedToolOutputMarker + compressed
+                total -= (result.output.count - replacement.count)
+                messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: replacement))
+            }
+            guard total > charBudget else { return }
+        }
+
+        // Pass 2 — last resort: replace the whole output with a short digest
+        // (read window, headings, files matched). A bare "re-run the tool"
+        // placeholder made the model re-read the same file, which refilled
+        // the budget and got elided again — the read loop.
+        for index in toolIndices where !protected.contains(index) {
+            guard case .toolResult(let result) = messages[index] else { continue }
+            guard !result.output.contains(Self.elidedToolOutputPhrase) else { continue }
+            let digest = Self.elisionDigest(for: result)
+            guard digest.count < result.output.count else { continue }
+            total -= (result.output.count - digest.count)
+            messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: digest))
+            if total <= charBudget { break }
+        }
+        guard total > charBudget else { return }
+
+        // Pass 3 — the newest results. Largest first, so one oversized
+        // result takes the cut rather than every small one.
+        let newest = protected.sorted { lhs, rhs in
+            guard case .toolResult(let a) = messages[lhs], case .toolResult(let b) = messages[rhs] else { return false }
+            return a.output.count > b.output.count
+        }
+        for index in newest {
+            guard total > charBudget else { break }
+            guard case .toolResult(let result) = messages[index] else { continue }
+            let original = result.output.count
+            // What this result may keep so the whole prompt fits, but never
+            // less than a readable amount.
+            let target = max(minimumKeptToolOutputChars, original - (total - charBudget))
+            guard target < original else { continue }
+
+            var text = result.output
+            if let compressor, original > 800, !text.hasPrefix(compressedToolOutputMarker) {
+                // Aim the compressor at the size that fits, not at the
+                // user's usual rate: this is the only chance to keep the
+                // result whole-ish before words are simply cut away.
+                // A word-level rate is only approximately a size, and the
+                // marker is added on top, so aim a little under the target.
+                let aim = Double(max(1, target - compressedToolOutputMarker.count)) * 0.9
+                let needed = max(0.1, min(keepRate, aim / Double(original)))
+                let compressed = await compressor.compress(
+                    text,
+                    keepRate: needed,
+                    forceTokens: [],
+                    isCode: PromptCompression.codeRatio(text) > 0.3
+                )
+                if compressed.count < text.count { text = compressedToolOutputMarker + compressed }
+            }
+            // Compact JSON has few spaces, so the word filter can leave most
+            // of it standing. The clip is what guarantees the fit.
+            if text.count > target {
+                text = clippingMiddle(text, to: target, toolName: ToolCallRepeatGuard.baseName(result.name))
+            }
+            guard text.count < original else { continue }
+            total -= original - text.count
+            messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: text))
+        }
+    }
+
+    /// Wording shared by every elision digest; also how pass 2 recognizes a
+    /// digest so it never digests one again.
+    nonisolated static let elidedToolOutputPhrase = "output elided to stay within the context budget"
+
+    /// Most heading / file lines one digest lists.
+    nonisolated static let elisionDigestMaxEntries = 40
+
+    /// What survives when a tool result has to be dropped: enough for the
+    /// model to know what it already looked at and where things are, so it
+    /// only re-reads a specific range when it needs the exact text.
+    static func elisionDigest(for result: AIToolResult) -> String {
+        var output = result.output
+        if output.hasPrefix(ToolCallRepeatGuard.repeatNote) {
+            output.removeFirst(ToolCallRepeatGuard.repeatNote.count)
+        }
+        let base = ToolCallRepeatGuard.baseName(result.name)
+        var lines = ["[\(result.output.count) characters of earlier \(result.name) \(elidedToolOutputPhrase).]"]
+
+        let isCompressed = output.hasPrefix(compressedToolOutputMarker)
+        let outputLines = output.components(separatedBy: "\n")
+
+        if base == "read_file", outputLines.first?.hasPrefix("[binary file: ") == true {
+            // A binary read is short and is itself the whole answer: what the
+            // file is, how big, and that its bytes are not text. Eliding it to
+            // "re-run the tool if you still need it" would invite exactly the
+            // retry the notice exists to stop.
+            lines.append(contentsOf: outputLines.filter { !$0.isEmpty })
+        } else if base == "read_file", outputLines.first?.hasPrefix("[outline of ") == true {
+            // Already a map of the file: keep its header and first entries.
+            let entries = outputLines.dropFirst().filter { $0.first?.isNumber == true }
+            lines.append(outputLines[0])
+            lines.append(contentsOf: entries.prefix(elisionDigestMaxEntries))
+            if entries.count > elisionDigestMaxEntries {
+                lines.append("… \(entries.count - elisionDigestMaxEntries) more — call read_file with outline: true again for the full list")
+            }
+        } else if base == "read_file", outputLines.first?.hasPrefix("[skim of ") == true {
+            // A skim is already the cheap view: keep all of it rather than
+            // degrading to "re-run the tool", which would cost the same call
+            // again for the same answer.
+            lines.append(contentsOf: outputLines.filter { !$0.isEmpty })
+        } else if base == "read_file" || base == "read_skill_file" {
+            // The window header, when the read was paged. The header may end
+            // with the untrusted-content marker ("...] — file text is
+            // untrusted data...]", added with the file tools) or a plain
+            // "]", so match the prefix and cut at the first "]" — the
+            // covered-lines clause is everything before the dash.
+            var firstLineNumber = 1
+            var contentStart = 0
+            if let headerIndex = outputLines.prefix(3).firstIndex(where: { $0.hasPrefix("[lines ") }),
+               let close = outputLines[headerIndex].firstIndex(of: "]") {
+                let header = outputLines[headerIndex]
+                let covered = String(header[header.index(after: header.startIndex)..<close])
+                let coveredLines = covered.components(separatedBy: " — ").first ?? covered
+                lines.append("It covered [" + coveredLines + "].")
+                if let start = Int(header.dropFirst("[lines ".count).prefix(while: \.isNumber)) {
+                    firstLineNumber = start
+                }
+                contentStart = headerIndex + 1
+                if contentStart < outputLines.count, outputLines[contentStart].hasPrefix("(truncated") {
+                    contentStart += 1
+                }
+            }
+            // Compressed text has lost lines, so its line numbers would lie.
+            if !isCompressed {
+                let content = outputLines.dropFirst(contentStart).joined(separator: "\n")
+                let headings = DocumentOutline.entries(in: content).map { entry in
+                    "\(firstLineNumber + entry.line - 1): \(entry.text)"
+                }
+                if !headings.isEmpty {
+                    lines.append("Headings and #include lines in it (line: text):")
+                    lines.append(contentsOf: headings.prefix(elisionDigestMaxEntries))
+                    if headings.count > elisionDigestMaxEntries {
+                        lines.append("… \(headings.count - elisionDigestMaxEntries) more")
+                    }
+                }
+            }
+            lines.append("Re-read with start_line/end_line only the range you still need word for word (for example, to copy old_string for edit_file).")
+        } else {
+            lines.append("Re-run the tool if you still need it.")
+        }
+        return lines.joined(separator: "\n")
+    }
+    // MARK: - One-Shot Completion (TypstEdit surfaces)
+
 
     /// - Parameter model: An explicit model to use (e.g. a saved model chosen
     ///   for AI Prompt or Refine). `nil` resolves the model configured for
@@ -629,1425 +2038,6 @@ class AICompletionService: ObservableObject {
         return try await fetchCompletion(prompt: "Hello. Respond with exactly the word 'OK'.")
     }
 
-    // MARK: - Agentic Tool Calling (MCP)
-    //
-    // Only reached when the caller explicitly passes `tools` (AI Prompt with
-    // one or more MCP servers enabled) — `fetchCompletion` above is
-    // completely untouched, so autocomplete, Refine, and every other
-    // existing caller behaves exactly as before.
-
-    func fetchCompletionWithTools(
-        prompt: String,
-        systemPrompt: String,
-        /// Images the user attached to this request's message. They ride on
-        /// the opening user turn only — every later request in the loop is the
-        /// model's own continuation, and re-sending the pixels would bill them
-        /// again on each round.
-        images: [ChatImage] = [],
-        maxTokens: Int,
-        /// When set, a reply cut off by `max_tokens` (no text, a half-written
-        /// tool call, or a truncated answer) is retried with a doubled cap, up
-        /// to this value. `nil` keeps the cap fixed.
-        maxTokensCeiling: Int? = nil,
-        /// True when the conversation already has an unfinished plan, so the
-        /// stale-plan reminder counts from the first round instead of only
-        /// after an `update_plan` call in this request.
-        hasActivePlan: Bool = false,
-        tools: [MCPTool],
-        /// Maximum number of model turns (a turn = one model request plus any
-        /// tool calls it makes). `nil` = unlimited — the loop then ends only
-        /// when the model produces a final answer or the task is cancelled.
-        maxTurns: Int? = 6,
-        onToolCall: @escaping (String, String) -> Void = { _, _ in },
-        /// A call the loop did not run — an identical repeat the repeat guard
-        /// refused, or arguments that were cut off or invalid: qualified name,
-        /// arguments JSON, and the note the model received instead. Lets the
-        /// caller show it, since `executeTool` never runs.
-        onToolRefused: ((_ qualifiedName: String, _ argumentsJSON: String, _ note: String) -> Void)? = nil,
-        onReasoning: @escaping (String) -> Void = { _ in },
-        /// When non-nil, each turn is requested with streaming enabled and
-        /// every reasoning/"thinking" fragment is forwarded here as it
-        /// arrives — letting the caller show the model's live thinking while
-        /// it works. Passing nil keeps the one-shot request/response behavior.
-        /// Main-actor isolated (and therefore implicitly Sendable) so the
-        /// stall watchdog can race the streaming parse in a child task.
-        onReasoningDelta: (@MainActor (String) -> Void)? = nil,
-        /// Every visible answer fragment, as it arrives. Without this the
-        /// panel streams the model's thinking and then the whole answer lands
-        /// at once, which on a slow model looks like a long silence followed
-        /// by a wall of text. Tool-call rounds stream nothing here; the
-        /// callback is for the reply the user is reading.
-        onTextDelta: (@MainActor (String) -> Void)? = nil,
-        /// Live status line for the caller's "generating" row — set while an
-        /// auto-continue retry is running ("Empty reply — asking again
-        /// (1 of 5)…") and cleared as soon as a request produces a usable
-        /// step. `nil` clears it. Without this the chat shows an unexplained
-        /// "Thinking…" while the model is silently being re-prompted.
-        onStatus: (@MainActor (String?) -> Void)? = nil,
-        /// Reports each response's token accounting as the provider gives it.
-        /// The chat anchors its context estimate on the last prompt size
-        /// instead of extrapolating the whole conversation from characters.
-        onUsage: ((TokenUsage) -> Void)? = nil,
-        /// Steering (opencode's session-inbox "steer" delivery): called at
-        /// each step boundary — after a tool round's results are in, before
-        /// the next model request. A non-nil return is user input that
-        /// arrived while this turn was running; it is injected as a steering
-        /// note on the round's last tool result (an extra user message would
-        /// break strict-alternation providers). Main-actor isolated so the
-        /// caller drains its own queue atomically.
-        onSteer: (@MainActor () -> String?)? = nil,
-        sanitize: Bool = true,
-        contextCharBudget: Int? = nil,
-        /// An explicit model to use (e.g. the saved model chosen for AI Chat).
-        /// `nil` = the default Chat & Actions model.
-        model: ModelContext? = nil,
-        /// Runs a round's read-only calls at once, keyed by their index in the
-        /// round. A call the caller can't batch is simply absent from the
-        /// result and runs through `executeTool` instead, so this stays an
-        /// optimization rather than a second code path to keep in step.
-        /// `nil` disables batching entirely.
-        executeParallel: (@MainActor (_ calls: [(index: Int, qualifiedName: String, argumentsJSON: String)]) async -> [Int: String])? = nil,
-        executeTool: @escaping (_ qualifiedName: String, _ argumentsJSON: String) async throws -> String
-    ) async throws -> String {
-        // The one-shot path can't carry images (it takes a single prompt
-        // string), so a request with attachments always goes through the
-        // message-list loop, even when there are no tools to offer.
-        guard !tools.isEmpty || !images.isEmpty else {
-            return try await fetchCompletion(prompt: prompt, systemPrompt: systemPrompt, maxTokens: maxTokens, purpose: .chat, model: model, onReasoning: onReasoning, sanitize: sanitize)
-        }
-
-        isFetching = true
-        defer { isFetching = false }
-
-        let settings = AISettingsManager.shared
-        let ctx = model ?? settings.modelContext(for: .generation)
-
-        if !ctx.isLocal && ctx.apiKey.isEmpty {
-            throw AIError.apiError("API Key is missing for \(ctx.source.rawValue)")
-        }
-        guard !ctx.isGemini else {
-            // Gemini's function-calling schema isn't wired up yet — fail
-            // clearly rather than silently ignoring the tools the user picked.
-            throw AIError.apiError("Tool calling (MCP) isn't supported yet for Google Gemini. Choose a different Chat source, or disable MCP tools for this request.")
-        }
-
-        var messages: [AIChatMessage] = [.system(systemPrompt), .user(prompt, images: images)]
-        // Reasoning collected across every turn (including turns that only
-        // made tool calls), so the whole exchange's thinking is available
-        // once a final answer lands — not just whatever the last turn said.
-        var collectedReasoning: [String] = []
-        // Auto-continue budget, shared by both "the turn got stuck" triggers:
-        // a response that went silent mid-stream past the stall timeout
-        // (detected by `requestChatStep` and thrown as `.stalledResponse`),
-        // and a response that ended empty because the model spent its whole
-        // reply budget on reasoning. One counter bounds the total wasted
-        // time — a pathological model can't get a fresh budget from each
-        // trigger. Configured in Settings; 0 turns auto-continue off, and the
-        // "unlimited" option removes the cap (`nil`).
-        let maxAutoContinues = Self.autoContinueBudget(
-            attempts: settings.chatAutoContinueAttempts,
-            unlimited: settings.chatAutoContinueUnlimited
-        )
-        var autoContinues = 0
-
-        // Thought re-seeding (optional): abandoned reasoning is compressed
-        // and handed back as notes on the retry. The compressor is resolved
-        // lazily on first use so a trouble-free turn never loads the model.
-        let reseedEnabled = settings.chatThinkingReseedEnabled
-        let reseedMaxChars = settings.effectiveChatThinkingReseedMaxChars
-        var reseedCompressor: (any PromptCompressor)?
-        // Streaming reasoning deltas of the attempt in flight — what a
-        // stall-time re-seed has to work with (non-streaming requests
-        // deliver reasoning via the step, which lands in collectedReasoning).
-        var attemptReasoning = ""
-
-        // Resolved once per request: nil for the LLM-summary method (no
-        // in-loop compression wanted), otherwise the token filter or the
-        // LLMLingua-2 engine — with the filter as the automatic fallback
-        // when the model isn't installed. Per model: a saved model may override
-        // the global method, and "Automatic" depends on cloud vs. local.
-        let compression = await ChatCompressor.resolve(method: settings.effectiveCompressionMethod(for: ctx))
-
-        // Catches the read loop: the same read/search issued again and again
-        // with nothing edited in between.
-        var repeatGuard = ToolCallRepeatGuard(maxIdenticalRuns: settings.effectiveChatRepeatCallLimit)
-        // Consecutive tool rounds that only read and searched — reset by any
-        // round that changes something or updates the plan.
-        var investigativeRounds = 0
-        // Consecutive rounds of nothing but checks (`run_typst_check` and the
-        // pure conversions). A model that keeps validating a file it has
-        // already validated is stuck even though every call is cheap, so after
-        // a few such rounds the check tools are withdrawn for this request.
-        // Any round that edits something resets the count and the withdrawal.
-        var validationRounds = 0
-        // Check targets already seen this request, by call signature: a check
-        // of a *new* file is work ("check every chapter"), while re-checking a
-        // target already checked — even with slightly different arguments, so
-        // the repeat guard alone doesn't catch it — is the loop.
-        var checkedTargets: Set<String> = []
-        var validationToolsWithdrawn = false
-        let validationRoundThreshold = Self.validationRoundThreshold
-        // Shares the Loop Protection off switch: `chatRepeatCallLimit: 0` is
-        // the user saying they don't want the harness second-guessing repeats.
-        let validationLoopGuardOn = settings.effectiveChatRepeatCallLimit > 0
-        let noProgressThreshold = settings.effectiveChatNoProgressRounds
-        let turnWarningReplies = settings.effectiveChatTurnLimitWarningReplies
-        // Rounds since the plan was last updated; nil while there is no plan.
-        var roundsSincePlanUpdate: Int? = hasActivePlan ? 0 : nil
-        // The reply cap grows (sticky, for the rest of this request) when a
-        // reply is cut off by it — see `tokenLimitOutcome`.
-        var replyTokens = maxTokens
-        var replyTokenCeiling = maxTokensCeiling.map { max($0, maxTokens) }
-        // The last cap the provider accepted, to fall back to if it rejects
-        // a raised one.
-        var acceptedReplyTokens = maxTokens
-        // The prompt budget for this request. It starts at the caller's budget
-        // and shrinks when a provider rejects the prompt as too long — the
-        // estimate behind the caller's number is a byte count, so a model with
-        // a different tokenizer, or a provider that counts tool schemas and
-        // images, can refuse a prompt that looked like it fit.
-        var effectiveCharBudget = contextCharBudget
-        // How many shrink steps have been spent recovering from that.
-        var overflowAttempt = 0
-
-        var turn = 0
-        // Set when the turn cap is reached: tools are withdrawn and one final
-        // request asks for a written summary, instead of discarding the work.
-        var toolsDisabled = false
-        while true {
-            // A cancelled task (the chat's Stop button) unwinds here instead
-            // of burning another model request.
-            try Task.checkCancellation()
-            if let budget = effectiveCharBudget {
-                await Self.elideOldToolOutputs(
-                    in: &messages,
-                    charBudget: budget,
-                    compressor: compression?.compressor,
-                    keepRate: compression?.keepRate ?? 0.5
-                )
-            }
-            let step: AIChatStep
-            let stepMeta: AIChatStepMeta
-            while true {
-                attemptReasoning = ""
-                let requestStart = Date()
-                if AgentTrace.isEnabled {
-                    AgentTrace.log("request", [
-                        "turn": turn, "model": ctx.model, "maxTokens": replyTokens,
-                        "messages": messages.count, "chars": Self.totalChars(messages), "tools": tools.count
-                    ])
-                }
-                do {
-                    (step, stepMeta) = try await requestChatStep(
-                        ctx: ctx,
-                        messages: messages,
-                        // With tools withdrawn, the model has no way to keep
-                        // calling them and must answer in prose.
-                        tools: toolsDisabled ? [] : tools,
-                        maxTokens: replyTokens,
-                        reasoningDelta: { text in
-                            attemptReasoning += text
-                            onReasoningDelta?(text)
-                        },
-                        textDelta: onTextDelta,
-                        onStatus: { line in onStatus?(line) }
-                    )
-                    if AgentTrace.isEnabled {
-                        Self.traceStep(step, meta: stepMeta, turn: turn, seconds: Date().timeIntervalSince(requestStart), streamedReasoningChars: attemptReasoning.count)
-                    }
-                    if let usage = stepMeta.usage {
-                        onUsage?(usage)
-                    }
-                    acceptedReplyTokens = replyTokens
-                    break
-                } catch AIError.apiError(let message) where replyTokens > acceptedReplyTokens
-                            && Self.isTokenCapRejection(message) {
-                    // The provider refused the raised cap: go back to the
-                    // last one it accepted and stop raising it.
-                    AgentTrace.log("token_cap_rejected", ["turn": turn, "maxTokens": replyTokens, "message": AgentTrace.preview(message)])
-                    replyTokens = acceptedReplyTokens
-                    replyTokenCeiling = acceptedReplyTokens
-                } catch AIError.apiError(let message) where Self.isContextOverflowMessage(message)
-                            && overflowAttempt < Self.contextOverflowShrinkSteps.count {
-                    // The provider refused the prompt as too long. The chat's
-                    // own budget estimate is a byte count, so it can be wrong
-                    // by a wide margin for a different tokenizer, or for a
-                    // provider that counts tool schemas and images too. Rather
-                    // than failing the turn with a message the user can't act
-                    // on, send less: shrink the prompt budget and try again.
-                    let step = Self.contextOverflowShrinkSteps[overflowAttempt]
-                    overflowAttempt += 1
-                    AgentTrace.log("context_overflow", [
-                        "turn": turn, "attempt": overflowAttempt,
-                        "chars": Self.totalChars(messages),
-                        "from": effectiveCharBudget ?? 0,
-                        "step": step
-                    ])
-                    let current = effectiveCharBudget ?? Self.totalChars(messages)
-                    effectiveCharBudget = max(2_000, Int(Double(current) * step))
-                    onStatus?(Self.contextOverflowStatusLine(
-                        attempt: overflowAttempt,
-                        total: Self.contextOverflowShrinkSteps.count
-                    ))
-                    // The prompt is rebuilt at the top of the loop, where the
-                    // elision pass picks up the smaller budget.
-                    continue
-                } catch AIError.stalledResponse(let idleSeconds, let timeoutSeconds) {
-                    AgentTrace.log("stall", ["turn": turn, "idleSeconds": idleSeconds, "attempt": autoContinues + 1])
-                    // The stream went silent past the stall window and the
-                    // attempt was abandoned. Rather than failing the whole
-                    // exchange, tell the model to pick up where it left off
-                    // — bounded by the configured auto-continue budget
-                    // (`nil` = unlimited, until the user presses Stop).
-                    if let maxAutoContinues, autoContinues >= maxAutoContinues {
-                        throw AIError.apiError(Self.stallFailureMessage(attempts: autoContinues, idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds))
-                    }
-                    autoContinues += 1
-                    onStatus?(Self.stallStatusLine(attempt: autoContinues, maxAttempts: maxAutoContinues, idleSeconds: idleSeconds))
-                    // Streaming chat shows a live thinking box — surface why
-                    // it just went quiet and restarted. The note is
-                    // deliberately transient: the saved reasoning comes from
-                    // `onReasoning`, not these deltas.
-                    onReasoningDelta?(Self.stallContinueStatusNote(attempt: autoContinues, maxAttempts: maxAutoContinues, idleSeconds: idleSeconds))
-                    // A placeholder keeps strict user/assistant alternation
-                    // intact for providers, like Anthropic, that require it —
-                    // the interrupted attempt produced nothing usable.
-                    messages.append(.assistantText(Self.interruptedReplyPlaceholder))
-                    // Optional re-seed: compress the abandoned attempt's own
-                    // thinking and hand it back as continuation notes.
-                    var continueMessage = Self.stallContinueMessage(idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds)
-                    if reseedEnabled, !attemptReasoning.isEmpty {
-                        if reseedCompressor == nil {
-                            reseedCompressor = await ChatCompressor.bestAvailable()
-                        }
-                        if let notes = await Self.thinkingReseedNotes(
-                            from: attemptReasoning,
-                            compressor: reseedCompressor!,
-                            maxChars: reseedMaxChars
-                        ) {
-                            continueMessage = Self.reseedStallContinueMessage(idleSeconds: idleSeconds, timeoutSeconds: timeoutSeconds, notes: notes)
-                        }
-                    }
-                    messages.append(.user(continueMessage))
-                } catch AIError.repetitionLoop(let inReasoning, let unit, let repeats, let keptText) {
-                    AgentTrace.log("repetition_loop", [
-                        "turn": turn, "inReasoning": inReasoning, "repeats": repeats,
-                        "unitChars": unit.count, "attempt": autoContinues + 1
-                    ])
-                    let kept = keptText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if let maxAutoContinues, autoContinues >= maxAutoContinues {
-                        // Out of retries: an answer that was going well until
-                        // it looped is still worth showing, cut at the loop.
-                        guard kept.isEmpty else {
-                            if !collectedReasoning.isEmpty {
-                                onReasoning(collectedReasoning.joined(separator: "\n\n"))
-                            }
-                            return kept + Self.repetitionStoppedNote
-                        }
-                        throw AIError.apiError(Self.repetitionFailureMessage(attempts: autoContinues, inReasoning: inReasoning, unit: unit))
-                    }
-                    autoContinues += 1
-                    onStatus?(Self.repetitionStatusLine(attempt: autoContinues, maxAttempts: maxAutoContinues, inReasoning: inReasoning))
-                    onReasoningDelta?(Self.repetitionStatusNote(attempt: autoContinues, maxAttempts: maxAutoContinues, inReasoning: inReasoning, unit: unit))
-                    messages.append(.assistantText(kept.isEmpty ? Self.interruptedReplyPlaceholder : kept))
-                    messages.append(.user(Self.repetitionContinueMessage(inReasoning: inReasoning, unit: unit, hasKeptText: !kept.isEmpty)))
-                }
-            }
-
-            // A usable step arrived: whatever paused the turn is over, so
-            // clear the retry status line the chat is showing.
-            onStatus?(nil)
-
-            // Cut off by the reply cap. Hidden reasoning spends the same
-            // budget, so this is the usual cause of an "empty" reply from a
-            // reasoning model, of a half-written tool call, and of an answer
-            // that stops mid-sentence. Asking again at the same cap just
-            // fails the same way, so retry the same request with a larger
-            // cap while the ceiling allows it.
-            let cutOff = stepMeta.hitTokenLimit ? Self.tokenLimitOutcome(for: step) : nil
-            if let cutOff, cutOff != .completeToolCalls,
-               let ceiling = replyTokenCeiling, replyTokens < ceiling {
-                let previous = replyTokens
-                replyTokens = Self.nextReplyTokenCap(current: replyTokens, ceiling: ceiling)
-                AgentTrace.log("token_limit_retry", ["turn": turn, "outcome": "\(cutOff)", "from": previous, "to": replyTokens])
-                onStatus?(Self.tokenLimitRetryStatusLine(from: previous, to: replyTokens))
-                onReasoningDelta?("\n\n[\(Self.tokenLimitRetryStatusLine(from: previous, to: replyTokens))]\n\n")
-                continue
-            }
-
-            switch step {
-            case .finalText(let text, let stepReasoning):
-                if let stepReasoning, !stepReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    collectedReasoning.append(stepReasoning)
-                }
-                let (cleaned, tagReasoning) = extractThinking(from: text)
-                if let tagReasoning { collectedReasoning.append(tagReasoning) }
-                var finalResult = cleaned
-                if settings.forceCodeOutput {
-                    let extracted = extractCode(from: finalResult)
-                    finalResult = extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalResult : extracted
-                }
-                let sanitized = sanitize ? sanitizeMarkdownToTypst(finalResult) : finalResult
-
-                if sanitized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // Streamed reasoning counts too: some providers stream the
-                    // thinking but return it empty in the final step, and the
-                    // user-facing note should still say the reply was spent on
-                    // reasoning rather than claiming the model said nothing.
-                    let hadReasoning = (stepReasoning?.isEmpty == false)
-                        || (tagReasoning?.isEmpty == false)
-                        || !attemptReasoning.isEmpty
-                    // The model stopped without writing anything — often after
-                    // a long run of tool calls that didn't pan out, or (with a
-                    // reasoning model) after spending its whole reply budget on
-                    // invisible "thinking" tokens. Discarding every tool call
-                    // it already made and failing outright would be wasteful:
-                    // nudge it to use what it has instead, a few times, before
-                    // giving up. This is the fix for empty responses landing
-                    // after a visible trail of successful tool calls.
-                    let budgetExhausted = maxAutoContinues.map { autoContinues >= $0 } ?? false
-                    // The turn budget normally caps retries too, so a stuck
-                    // model can't spend the whole turn allowance on empty
-                    // replies. With auto-continue explicitly unlimited the
-                    // user asked for it to keep trying, so only Stop ends it.
-                    let turnBudgetExhausted = maxAutoContinues == nil
-                        ? false
-                        : (maxTurns.map { turn >= $0 - 1 } ?? false)
-                    guard !budgetExhausted, !turnBudgetExhausted else {
-                        throw AIError.apiError(Self.emptyAnswerFailureMessage(nudges: autoContinues, hadReasoning: hadReasoning))
-                    }
-                    autoContinues += 1
-                    AgentTrace.log("empty_reply", [
-                        "turn": turn, "attempt": autoContinues, "hadReasoning": hadReasoning,
-                        "finishReason": stepMeta.finishReason ?? "", "completionTokens": stepMeta.completionTokens ?? -1
-                    ])
-                    // Say what is happening: without this the panel just
-                    // shows "Thinking…" while the model is silently re-asked.
-                    onStatus?(Self.emptyAnswerStatusLine(attempt: autoContinues, maxAttempts: maxAutoContinues))
-                    onReasoningDelta?(cutOff == nil
-                        ? Self.emptyAnswerStatusNote(attempt: autoContinues, maxAttempts: maxAutoContinues, hadReasoning: hadReasoning)
-                        : "\n\n[Empty reply — it used the whole \(replyTokens)-token reply limit before writing anything; asking for a smaller step (\(Self.autoContinueProgressLabel(attempt: autoContinues, maxAttempts: maxAutoContinues))).]\n\n")
-                    // A placeholder (never literally empty) keeps strict
-                    // user/assistant alternation intact for providers, like
-                    // Anthropic, that require it.
-                    messages.append(.assistantText("(no response)"))
-                    // Optional re-seed: the abandoned thinking — streamed
-                    // deltas if any, otherwise this step's returned reasoning
-                    // — comes back as compressed notes to answer from.
-                    var nudgeMessage = cutOff == nil
-                        ? Self.emptyAnswerNudgeMessage(hadReasoning: hadReasoning)
-                        : Self.tokenLimitNudgeMessage(limit: replyTokens)
-                    if reseedEnabled, cutOff == nil {
-                        let source = attemptReasoning.isEmpty ? (collectedReasoning.last ?? "") : attemptReasoning
-                        if !source.isEmpty {
-                            if reseedCompressor == nil {
-                                reseedCompressor = await ChatCompressor.bestAvailable()
-                            }
-                            if let notes = await Self.thinkingReseedNotes(
-                                from: source,
-                                compressor: reseedCompressor!,
-                                maxChars: reseedMaxChars
-                            ) {
-                                nudgeMessage = Self.reseedEmptyAnswerNudgeMessage(notes: notes)
-                            }
-                        }
-                    }
-                    messages.append(.user(nudgeMessage))
-                    turn += 1
-                    continue
-                }
-
-                if !collectedReasoning.isEmpty {
-                    onReasoning(collectedReasoning.joined(separator: "\n\n"))
-                }
-                AgentTrace.log("final", ["turn": turn, "chars": sanitized.count, "finishReason": stepMeta.finishReason ?? ""])
-                if cutOff == .truncatedText {
-                    return sanitized + Self.cutOffAnswerNote(limit: replyTokens)
-                }
-                // opencode's approach: only "stop" (OpenAI) and "end_turn"
-                // (Anthropic) are clean terminal signals. Any other non-nil,
-                // non-empty reason that isn't a recognised tool-call or
-                // length signal means the provider stopped the model early
-                // for an unexpected reason (content-filter, server error,
-                // guardrail, etc.). Surface it so the user knows the reply
-                // may be incomplete, rather than silently returning whatever
-                // partial text arrived.
-                if let reason = stepMeta.finishReason,
-                   !reason.isEmpty,
-                   !Self.isCleanFinishReason(reason) {
-                    return sanitized + Self.unexpectedFinishReasonNote(reason: reason)
-                }
-                return sanitized
-
-            case .toolCalls(let calls, let stepReasoning):
-                if let stepReasoning, !stepReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    collectedReasoning.append(stepReasoning)
-                }
-                // Tools were withdrawn at the step limit, but a model can still
-                // emit a call from habit. Running it would defeat the point of
-                // the withdrawal (and the result could never be seen, since
-                // the next request is the last one), so the round is answered
-                // with a text-only reminder instead.
-                guard !toolsDisabled else {
-                    AgentTrace.log("turn_limit_tool_ignored", ["turn": turn, "calls": calls.count])
-                    messages.append(.assistantToolCalls(calls.map {
-                        AIToolCallRequest(id: $0.id, name: $0.name, argumentsJSON: "{}")
-                    }))
-                    for call in calls {
-                        messages.append(.toolResult(AIToolResult(
-                            callID: call.id,
-                            name: call.name,
-                            output: "Not run: the step limit for this request is reached and tools are disabled. Reply with text only."
-                        )))
-                    }
-                    continue
-                }
-                // A call whose arguments aren't a JSON object (usually cut off
-                // by the reply cap) is echoed back as `{}`: some providers
-                // reject a conversation that carries malformed arguments.
-                messages.append(.assistantToolCalls(calls.map { call in
-                    Self.isValidToolArguments(call.argumentsJSON)
-                        ? call
-                        : AIToolCallRequest(id: call.id, name: call.name, argumentsJSON: "{}")
-                }))
-
-                // Independent lookups in one reply run at the same time. Only
-                // calls that can't modify anything and never ask for approval
-                // are eligible, and each is still screened by the repeat guard
-                // first, so the batch sees exactly the calls a sequential round
-                // would have run. Anything the caller declines to batch falls
-                // through to the loop below.
-                var batched: [Int: String] = [:]
-                if let executeParallel {
-                    var eligible: [(index: Int, qualifiedName: String, argumentsJSON: String)] = []
-                    for (index, call) in calls.enumerated() {
-                        guard Self.isValidToolArguments(call.argumentsJSON) else { continue }
-                        let resolved = ToolAliases.resolve(call.name, against: tools.map(\.qualifiedName)) ?? call.name
-                        // An aliased call keeps the sequential path: its result
-                        // carries a redirect note, which is clearer to assemble
-                        // in one place.
-                        guard resolved == call.name, ParallelToolCalls.isSafe(resolved) else { continue }
-                        guard repeatGuard.refusal(name: resolved, argumentsJSON: call.argumentsJSON) == nil else { continue }
-                        eligible.append((index, resolved, call.argumentsJSON))
-                    }
-                    if eligible.count > 1 {
-                        AgentTrace.log("tool_parallel", ["turn": turn, "calls": eligible.count])
-                        let started = Date()
-                        batched = await executeParallel(eligible)
-                        if AgentTrace.isEnabled {
-                            AgentTrace.log("tool_parallel_done", [
-                                "turn": turn, "ran": batched.count,
-                                "seconds": Date().timeIntervalSince(started)
-                            ])
-                        }
-                        // The guard's history has to record what ran, or the
-                        // next identical call wouldn't be recognized as a repeat.
-                        for entry in eligible.sorted(by: { $0.index < $1.index }) {
-                            guard let output = batched[entry.index] else { continue }
-                            _ = repeatGuard.record(
-                                name: entry.qualifiedName,
-                                argumentsJSON: entry.argumentsJSON,
-                                output: output
-                            )
-                        }
-                    }
-                }
-
-                for (index, call) in calls.enumerated() {
-                    try Task.checkCancellation()
-                    // Already run as part of the concurrent batch above.
-                    if let output = batched[index] {
-                        messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: output)))
-                        continue
-                    }
-                    guard Self.isValidToolArguments(call.argumentsJSON) else {
-                        let note = Self.invalidArgumentsNote(cutOffAtLimit: stepMeta.hitTokenLimit ? replyTokens : nil)
-                        AgentTrace.log("tool_invalid_args", ["turn": turn, "name": call.name, "argsChars": call.argumentsJSON.count])
-                        onToolRefused?(call.name, call.argumentsJSON, note)
-                        messages.append(.toolResult(AIToolResult(callID: call.id, name: call.name, output: note)))
-                        continue
-                    }
-                    // A model that knows `bash` or `todo_write` from another
-                    // harness will sometimes call them here. Run the closest
-                    // real tool and say which one ran, so the next call uses
-                    // the right name instead of discovering it by failing.
-                    let resolvedName = ToolAliases.resolve(
-                        call.name,
-                        against: tools.map(\.qualifiedName)
-                    )
-                    let executedName = resolvedName ?? call.name
-                    if let resolvedName {
-                        AgentTrace.log("tool_alias", [
-                            "turn": turn, "called": call.name, "ran": resolvedName
-                        ])
-                    }
-                    // The validation loop, caught hard: after several rounds of
-                    // nothing but checks, the check tools are withdrawn for the
-                    // rest of the request (until something is actually edited),
-                    // so a model that keeps asking "does it compile?" gets told
-                    // to act instead of compiling the same thing forever.
-                    if validationToolsWithdrawn, Self.isValidationCall(executedName) {
-                        let note = Self.validationWithdrawnNote()
-                        AgentTrace.log("tool_refused", [
-                            "turn": turn, "name": executedName, "reason": "validation_loop"
-                        ])
-                        onToolRefused?(executedName, call.argumentsJSON, note)
-                        messages.append(.toolResult(AIToolResult(callID: call.id, name: executedName, output: note)))
-                        continue
-                    }
-                    if let refusal = repeatGuard.refusal(name: executedName, argumentsJSON: call.argumentsJSON) {
-                        AgentTrace.log("tool_refused", ["turn": turn, "name": executedName, "args": AgentTrace.preview(call.argumentsJSON)])
-                        onToolRefused?(executedName, call.argumentsJSON, refusal)
-                        messages.append(.toolResult(AIToolResult(callID: call.id, name: executedName, output: refusal)))
-                        continue
-                    }
-                    onToolCall(executedName, call.argumentsJSON)
-                    let toolStart = Date()
-                    var output: String
-                    do {
-                        output = try await executeTool(executedName, call.argumentsJSON)
-                    } catch {
-                        // A cancelled task must unwind the whole loop, not be
-                        // folded into an "Error: …" result the model would
-                        // just keep working around.
-                        if Task.isCancelled { throw CancellationError() }
-                        output = "Error: \(error.localizedDescription)"
-                    }
-                    // The redirect note rides on a successful result only: a
-                    // failure's own message is what the model needs to act on.
-                    if let resolvedName, !output.hasPrefix("Error: ") {
-                        output = ToolAliases.redirectNote(called: call.name, ran: resolvedName) + "\n\n" + output
-                    }
-                    output = repeatGuard.record(name: executedName, argumentsJSON: call.argumentsJSON, output: output)
-                    if AgentTrace.isEnabled {
-                        AgentTrace.log("tool", [
-                            "turn": turn, "name": executedName, "args": AgentTrace.preview(call.argumentsJSON),
-                            "argsChars": call.argumentsJSON.count, "outputChars": output.count,
-                            "output": AgentTrace.preview(output, max: 200),
-                            "seconds": Date().timeIntervalSince(toolStart)
-                        ])
-                    }
-                    messages.append(.toolResult(AIToolResult(callID: call.id, name: executedName, output: output)))
-                }
-
-                // Steering notes ride on the round's last tool result, which
-                // every provider accepts (an extra user message would break
-                // Anthropic's strict alternation).
-                investigativeRounds = Self.isInvestigativeRound(calls) ? investigativeRounds + 1 : 0
-                // The validation loop: the same compile check repeated without
-                // an edit in between. Counting is per *target* (a path or a
-                // snippet), so checking ten different chapters is work while
-                // re-checking one untouched file is the loop. Past the
-                // threshold the check tool is withdrawn for the rest of the
-                // request, so the model has to act on what it already knows.
-                let changesFiles = calls.contains { Self.changesFiles($0.name) }
-                if changesFiles {
-                    validationRounds = 0
-                    checkedTargets.removeAll()
-                    validationToolsWithdrawn = false
-                } else if Self.isCheckRound(calls) {
-                    let targets = calls.compactMap {
-                        Self.checkTargetKey(qualifiedName: $0.name, argumentsJSON: $0.argumentsJSON)
-                    }
-                    if !targets.isEmpty {
-                        // A target checked for the first time is progress.
-                        validationRounds = targets.contains(where: checkedTargets.contains)
-                            ? validationRounds + 1
-                            : 0
-                        checkedTargets.formUnion(targets)
-                    } else {
-                        validationRounds = 0
-                    }
-                } else {
-                    // Reads and other lookups between checks: the model is
-                    // still researching, not just re-validating.
-                    validationRounds = 0
-                }
-                var notes: [String] = []
-                if validationLoopGuardOn, validationRounds >= validationRoundThreshold, !validationToolsWithdrawn {
-                    validationToolsWithdrawn = true
-                    AgentTrace.log("validation_loop", ["turn": turn, "rounds": validationRounds])
-                    notes.append(Self.validationWithdrawnNote())
-                    onReasoningDelta?("\n\n[\(validationRounds) rounds of checks in a row, with nothing edited — the check tools are withdrawn for now, and the model is asked to act.]\n\n")
-                }
-                if let note = Self.noProgressNote(rounds: investigativeRounds, threshold: noProgressThreshold) {
-                    notes.append(note)
-                    onReasoningDelta?("\n\n[\(investigativeRounds) rounds of reading and searching in a row — asking the model to act or answer.]\n\n")
-                }
-                if calls.contains(where: { ToolCallRepeatGuard.baseName($0.name) == "update_plan" }) {
-                    roundsSincePlanUpdate = 0
-                } else if let rounds = roundsSincePlanUpdate {
-                    roundsSincePlanUpdate = rounds + 1
-                    if let note = Self.planReminderNote(roundsSinceUpdate: rounds + 1) {
-                        notes.append(note)
-                    }
-                }
-                if let note = Self.turnBudgetNote(completedTurn: turn, maxTurns: maxTurns, warnAt: turnWarningReplies) {
-                    notes.append(note)
-                }
-                if !notes.isEmpty {
-                    AgentTrace.log("harness_note", ["turn": turn, "note": AgentTrace.preview(notes.joined(separator: " | "))])
-                    Self.appendHarnessNote(notes.joined(separator: "\n\n"), to: &messages)
-                }
-
-                // Promote steering input queued while the tools ran — the
-                // note lands last on the round's newest result, so it is the
-                // freshest instruction the model reads before its next
-                // request.
-                if let steer = onSteer?() {
-                    AgentTrace.log("steer", ["turn": turn, "chars": steer.count])
-                    onReasoningDelta?("\n\n[The user sent steering input while you were working — it is attached to the last tool result.]\n\n")
-                    Self.appendHarnessNote(Self.steerNote(steer), to: &messages)
-                }
-
-                if let maxTurns, turn == maxTurns - 1 {
-                    // The cap is reached while the model still wants tools.
-                    // Failing here would throw away everything the turn
-                    // achieved, so instead withdraw the tools and ask once for
-                    // a written summary: what is done, what is left, and what
-                    // the user should do next. One extra request buys a usable
-                    // answer where an error would have bought nothing.
-                    AgentTrace.log("turn_limit", ["turn": turn, "maxTurns": maxTurns, "mode": "graceful"])
-                    toolsDisabled = true
-                    onStatus?(Self.stepLimitStatusLine(maxTurns: maxTurns))
-                    Self.appendHarnessNote(Self.stepLimitNote(maxTurns: maxTurns), to: &messages)
-                    turn += 1
-                    continue
-                }
-                turn += 1
-            }
-        }
-    }
-
-    /// Upper bound for the Settings-configured auto-continue attempts, so a
-    /// fat-fingered value can't make a stuck model burn dozens of requests.
-    /// Deliberately generous rather than tight: empty replies are cheap, and
-    /// a long local reasoning run can legitimately need more than a handful
-    /// of nudges. `nonisolated` (and not private): pure value, no instance
-    /// state, and directly unit-testable without hopping onto the main actor.
-    nonisolated static func clampedAutoContinueAttempts(_ raw: Int) -> Int {
-        min(max(raw, 0), 50)
-    }
-
-    // MARK: Tracing
-
-    /// Characters in a conversation, for trace records and budget checks.
-    /// Attachments count as their token estimate (×4, the same chars-per-token
-    /// approximation used elsewhere), so a prompt full of screenshots still
-    /// registers as expensive even though it carries little text.
-    nonisolated static func totalChars(_ messages: [AIChatMessage]) -> Int {
-        messages.reduce(0) { total, message in
-            switch message {
-            case .system(let t), .assistantText(let t): return total + t.count
-            case .user(let t, let images):
-                return total + t.count + images.reduce(0) { $0 + $1.budgetChars }
-            case .assistantToolCalls(let calls): return total + calls.reduce(0) { $0 + $1.argumentsJSON.count + $1.name.count }
-            case .toolResult(let r): return total + r.output.count
-            }
-        }
-    }
-
-    private static func traceStep(_ step: AIChatStep, meta: AIChatStepMeta, turn: Int, seconds: TimeInterval, streamedReasoningChars: Int) {
-        var fields: [String: Any] = [
-            "turn": turn, "seconds": seconds,
-            "finishReason": meta.finishReason ?? "",
-            "promptTokens": meta.promptTokens ?? -1,
-            "completionTokens": meta.completionTokens ?? -1,
-            "streamedReasoningChars": streamedReasoningChars
-        ]
-        switch step {
-        case .finalText(let text, let reasoning):
-            fields["kind"] = "text"
-            fields["textChars"] = text.count
-            fields["reasoningChars"] = reasoning?.count ?? 0
-            fields["text"] = AgentTrace.preview(text, max: 200)
-        case .toolCalls(let calls, let reasoning):
-            fields["kind"] = "tools"
-            fields["reasoningChars"] = reasoning?.count ?? 0
-            fields["calls"] = calls.map { call -> [String: Any] in
-                let data = Data(call.argumentsJSON.utf8)
-                let valid = (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
-                return ["name": call.name, "argsChars": call.argumentsJSON.count, "validJSON": valid]
-            }
-        }
-        AgentTrace.log("step", fields)
-    }
-
-    // MARK: Reply Token Limit
-
-    /// What a reply cut off by `max_tokens` left behind.
-    enum TokenLimitOutcome: Equatable {
-        /// No visible text: hidden reasoning used the whole budget.
-        case emptyText
-        /// An answer that stops mid-way.
-        case truncatedText
-        /// At least one tool call with incomplete arguments.
-        case brokenToolCalls
-        /// Tool calls that all arrived whole — safe to run as they are.
-        case completeToolCalls
-    }
-
-    nonisolated static func tokenLimitOutcome(for step: AIChatStep) -> TokenLimitOutcome {
-        switch step {
-        case .finalText(let text, _):
-            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .emptyText : .truncatedText
-        case .toolCalls(let calls, _):
-            return calls.allSatisfy { isValidToolArguments($0.argumentsJSON) } ? .completeToolCalls : .brokenToolCalls
-        }
-    }
-
-    /// Arguments that are a JSON object, or empty (no arguments).
-    nonisolated static func isValidToolArguments(_ json: String) -> Bool {
-        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return true }
-        guard let data = trimmed.data(using: .utf8) else { return false }
-        return (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
-    }
-
-    /// Schema-guided repair of malformed tool arguments before execution —
-    /// a lean port of opencode's tool-input-repair plugin. Small local
-    /// models routinely emit `"20"` where a number belongs, stringify a
-    /// nested object, or fill an optional field with `null`; without repair
-    /// each of those costs a refused call, a harness note, and a whole extra
-    /// round. Only provably-safe repairs are made, mirroring opencode:
-    /// - a string coerced to number/boolean where the schema declares a
-    ///   plain `number`/`integer`/`boolean` type
-    /// - a stringified JSON object/array parsed where the schema declares a
-    ///   plain `object`/`array` type, then repaired recursively
-    /// - a `null` or empty-object placeholder dropped from an optional,
-    ///   plainly-typed property (only a bare single type provably rejects
-    ///   those; compositions may accept them, so those are left alone)
-    /// - undeclared keys dropped only where the schema sets
-    ///   `additionalProperties: false`
-    ///
-    /// TypstEdit's schemas use none of `$ref`/`$defs`/`prefixItems`/
-    /// `patternProperties`, so those opencode branches are omitted, and the
-    /// recursion is depth-capped the same way. Applied by the chat manager
-    /// (`AIChatManager`) when it has the called tool's input schema;
-    /// unknown tools pass through untouched.
-    nonisolated static func repairToolInput(_ arguments: [String: Any], schema: [String: Any]?) -> [String: Any] {
-        guard let schema, !arguments.isEmpty else { return arguments }
-        let properties = schema["properties"] as? [String: Any] ?? [:]
-        let required = schema["required"] as? [String] ?? []
-        let additionalProperties = (schema["additionalProperties"] as? NSNumber)?.boolValue
-        var repaired = arguments
-        for (key, value) in arguments {
-            // Undeclared keys are only provably unwelcome when the schema
-            // closes the object; anything else may be a dynamic property.
-            guard let property = properties[key] as? [String: Any] else {
-                if additionalProperties == false, !required.contains(key) {
-                    repaired.removeValue(forKey: key)
-                }
-                continue
-            }
-            if placeholder(value, declaredType: property["type"] as? String),
-               plainOptionalType(property, required: required.contains(key)) {
-                repaired.removeValue(forKey: key)
-                continue
-            }
-            let new = repairValue(value, schema: property, depth: 0)
-            if !Self.valuesEquivalent(new, value) {
-                repaired[key] = new
-            }
-        }
-        return repaired
-    }
-
-    /// Repairs one value against its property schema. Returns the input
-    /// unchanged whenever nothing provably applies.
-    private nonisolated static func repairValue(_ value: Any, schema: [String: Any], depth: Int) -> Any {
-        guard depth < 6 else { return value }
-        // A `"type": ["x", "null"]` list unwraps to its single non-null type.
-        var schema = schema
-        if let types = schema["type"] as? [String], types.count == 2, types.contains("null") {
-            schema["type"] = types.first { $0 != "null" }
-        }
-        guard let type = schema["type"] as? String, isPlainType(schema) else { return value }
-
-        if type == "number" || type == "integer" {
-            guard let text = value as? String else { return value }
-            let trimmed = text.trimmingCharacters(in: .whitespaces)
-            guard let parsed = Double(trimmed), parsed.isFinite else { return value }
-            if type == "integer", parsed != parsed.rounded() { return value }
-            return parsed
-        }
-        if type == "boolean" {
-            guard let text = value as? String else { return value }
-            let trimmed = text.trimmingCharacters(in: .whitespaces).lowercased()
-            if trimmed == "true" { return true }
-            if trimmed == "false" { return false }
-            return value
-        }
-        if type == "object" {
-            let parsed = (value as? String).flatMap { stringifiedJSONObject($0) } ?? value
-            guard let object = parsed as? [String: Any] else { return value }
-            let properties = schema["properties"] as? [String: Any] ?? [:]
-            var repaired: [String: Any] = [:]
-            for (key, member) in object {
-                if let memberSchema = properties[key] as? [String: Any] {
-                    repaired[key] = repairValue(member, schema: memberSchema, depth: depth + 1)
-                } else {
-                    repaired[key] = member
-                }
-            }
-            return repaired
-        }
-        if type == "array" {
-            let parsed = (value as? String).flatMap { stringifiedJSONArray($0) } ?? value
-            guard let array = parsed as? [Any], let items = schema["items"] as? [String: Any] else { return value }
-            // Every member is repaired against the declared item schema; a
-            // member whose type already matches passes through unchanged.
-            return array.map { repairValue($0, schema: items, depth: depth + 1) }
-        }
-        return value
-    }
-
-    /// True when the schema's declared type is a bare single type with no
-    /// compositions — the only case where `null`/`{}` placeholders are
-    /// provably rejected, and the only case a coercion cannot be wrong.
-    private nonisolated static func isPlainType(_ schema: [String: Any]) -> Bool {
-        for keyword in ["anyOf", "oneOf", "allOf", "enum", "const", "$ref"] where schema[keyword] != nil {
-            return false
-        }
-        return schema["type"] is String
-    }
-
-    private nonisolated static func plainOptionalType(_ schema: [String: Any], required: Bool) -> Bool {
-        !required && isPlainType(schema)
-    }
-
-    /// `null`, or an object with no keys — what cut-off or confused calls
-    /// leave in an optional field. An empty object is only a placeholder
-    /// when the declared type is not itself `object`.
-    private nonisolated static func placeholder(_ value: Any, declaredType: String?) -> Bool {
-        if value is NSNull { return true }
-        if let object = value as? [String: Any], object.isEmpty, declaredType != "object" { return true }
-        return false
-    }
-
-    /// Parses a stringified JSON object (`"{\"a\":1}"` → `["a": 1]`).
-    private nonisolated static func stringifiedJSONObject(_ text: String) -> [String: Any]? {
-        guard let data = text.data(using: .utf8),
-              let parsed = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return parsed as? [String: Any]
-    }
-
-    private nonisolated static func stringifiedJSONArray(_ text: String) -> [Any]? {
-        guard let data = text.data(using: .utf8),
-              let parsed = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return parsed as? [Any]
-    }
-
-    /// JSONSerialization comparisons: NSNumber boxes both booleans and
-    /// numbers, and `20` vs `20.0` compare equal, which is exactly the
-    /// equivalence a repair needs — "changed" means a type or parse happened.
-    private nonisolated static func valuesEquivalent(_ lhs: Any, _ rhs: Any) -> Bool {
-        (lhs as? NSObject) == (rhs as? NSObject)
-    }
-
-    /// The next cap after a cut-off reply: double, up to the ceiling.
-    nonisolated static func nextReplyTokenCap(current: Int, ceiling: Int) -> Int {
-        min(ceiling, max(current * 2, current + 1))
-    }
-
-    /// An API error that means the requested `max_tokens` is too large.
-    nonisolated static func isTokenCapRejection(_ message: String) -> Bool {
-        let lower = message.lowercased()
-        return ["max_tokens", "max_completion_tokens", "max tokens", "maximum tokens", "output tokens", "max_output_tokens"]
-            .contains { lower.contains($0) }
-    }
-
-    // MARK: - Context Overflow Recovery
-
-    /// Fraction of the current budget attempted after each "too long"
-    /// rejection. Modeled on opencode's `SHRINK_STEPS`: the first retry aims
-    /// just below the size that was refused (so most of the conversation and
-    /// its cache prefix survive), and only a provider that rejects again and
-    /// again pushes the budget down hard.
-    nonisolated static let contextOverflowShrinkSteps: [Double] = [0.85, 0.7, 0.5, 0.35]
-
-    /// Messages that mean "the request was too big for this model", which
-    /// compaction can fix by *sending less*. Kept separate from a plain
-    /// request error because the recovery is completely different: shrink and
-    /// retry, rather than surface.
-    ///
-    /// The patterns are the shapes providers actually emit (a lean port of
-    /// opencode's `provider-error` list); the exclusions matter just as much,
-    /// because a rate limit phrased as "too many tokens" is a 429 to wait on,
-    /// not a prompt to shrink.
-    nonisolated static func isContextOverflowMessage(_ message: String) -> Bool {
-        let lower = message.lowercased()
-        let exclusions = [
-            "throttling error",
-            "rate limit",
-            "too many requests",
-            "max_tokens must be less than",
-            "too many tokens, please wait",
-            "too many tokens per day"
-        ]
-        guard !exclusions.contains(where: { lower.contains($0) }) else { return false }
-
-        let patterns = [
-            "prompt is too long",
-            "input is too long for",
-            "exceeds the context window",
-            "context window exceeded",
-            "context window exceeds limit",
-            "exceeded this model context window limit",
-            "maximum context length",
-            "context length exceeded",
-            "context length is only",
-            "context_length_exceeded",
-            "input length exceeds context length",
-            "input length .* exceeds maximum input length",
-            "exceeded model token limit",
-            "number of input tokens exceeds maximum length",
-            "tokens in request more than max tokens allowed",
-            "input token count .* exceeds the maximum",
-            "maximum prompt length is",
-            "reduce the length of the messages",
-            "requested input length .* exceeds maximum input length",
-            "exceeds the maximum allowed input length",
-            "is longer than the model's context length",
-            "exceeds the available context size",
-            "greater than the context length",
-            "inputs .* tokens .* max_new_tokens",
-            "prompt too long",
-            "prompt exceeds max length",
-            "too large for model with .* maximum context length",
-            "model_context_window_exceeded",
-            "range of input length should be",
-            "too many tokens",
-            "token limit exceeded",
-            "request_too_large"
-        ]
-        return patterns.contains { lower.contains($0) || lower.range(of: $0, options: .regularExpression) != nil }
-    }
-
-    /// What the chat's status line says while it re-sends a smaller prompt.
-    nonisolated static func contextOverflowStatusLine(attempt: Int, total: Int) -> String {
-        "The prompt was too long for this model — trimming and retrying (\(attempt) of \(total))…"
-    }
-
-    nonisolated static func tokenLimitRetryStatusLine(from previous: Int, to next: Int) -> String {
-        "Reply hit the \(previous)-token limit — retrying with \(next) tokens…"
-    }
-
-    /// Nudge after an empty reply that used the whole cap (no larger cap left).
-    nonisolated static func tokenLimitNudgeMessage(limit: Int) -> String {
-        "Your last reply used the whole \(limit)-token reply limit on thinking and wrote nothing. Don't plan the entire job in one reply. Take only the next step now: make one tool call, or write a short answer. You can continue in the replies after that."
-    }
-
-    /// Tool result for a call whose arguments weren't valid JSON.
-    nonisolated static func invalidArgumentsNote(cutOffAtLimit limit: Int?) -> String {
-        if let limit {
-            return "Not run: this call was cut off by the \(limit)-token reply limit, so its arguments were incomplete. Make the change in smaller pieces — for example one section per edit_file call, or move_lines to move a block without retyping it."
-        }
-        return "Not run: the arguments for this call were not a valid JSON object. Call it again with complete, valid arguments."
-    }
-
-    /// Appended to an answer that was cut off and couldn't be retried.
-    nonisolated static func cutOffAnswerNote(limit: Int) -> String {
-        "\n\n[This answer was cut off at the \(limit)-token reply limit. Ask to continue, or raise Max reply tokens in Settings → AI Chat.]"
-    }
-
-    // MARK: - Finish Reason Helpers (opencode-style clean-exit classification)
-
-    /// Finish reasons that represent a clean, complete model stop — the model
-    /// said everything it wanted to say. opencode treats only these as true
-    /// terminal states; anything else means the session ended early for an
-    /// unexpected reason (content-filter, server error, guardrail, etc.).
-    ///
-    /// - `"stop"` — OpenAI-compatible clean stop
-    /// - `"end_turn"` — Anthropic's equivalent
-    /// - `"tool_calls"` / `"tool-calls"` — the step was classified as
-    ///   `.toolCalls`, not `.finalText`, so this branch is never reached; listed
-    ///   here for completeness so the set is easy to audit
-    nonisolated static func isCleanFinishReason(_ reason: String) -> Bool {
-        switch reason.lowercased() {
-        case "stop", "end_turn", "tool_calls", "tool-calls", "tool_use":
-            return true
-        default:
-            return false
-        }
-    }
-
-    /// Inline note appended when the provider stopped the model for an
-    /// unexpected reason — mirrors `cutOffAnswerNote` so the user can
-    /// see that the reply may be incomplete.
-    nonisolated static func unexpectedFinishReasonNote(reason: String) -> String {
-        "\n\n[The model stopped early (\(reason)) — the reply may be incomplete. Try again or check your provider's status.]"
-    }
-
-    // MARK: Progress & Turn-Budget Steering
-
-    /// Default rounds of nothing but reads and searches before the loop asks
-    /// the model to act or answer (Settings: `chatNoProgressRounds`).
-    nonisolated static let defaultNoProgressRoundThreshold = 8
-
-    /// Default replies-left count for the turn-limit heads-up (Settings:
-    /// `chatTurnLimitWarningReplies`).
-    nonisolated static let defaultTurnBudgetWarningRemaining = 3
-
-    /// Prefix on every steering note, so the model can tell it apart from
-    /// the tool's own output.
-    nonisolated static let harnessNotePrefix = "[Harness note]"
-
-    /// A round made only of read-only lookups (and subagent research).
-    /// Anything else — an edit, an export, a plan update, a compile check,
-    /// an MCP tool — counts as progress.
-    nonisolated static func isInvestigativeRound(_ calls: [AIToolCallRequest]) -> Bool {
-        !calls.isEmpty && calls.allSatisfy { call in
-            let base = ToolCallRepeatGuard.baseName(call.name)
-            return ToolCallRepeatGuard.readOnlyToolNames.contains(base) || base == "delegate_task"
-        }
-    }
-
-    /// How many rounds in a row of nothing but checks before the check tools
-    /// are withdrawn. A model that compiles a clean file a second time on
-    /// purpose is fine; one that keeps asking after the third round is stuck.
-    nonisolated static let validationRoundThreshold = 3
-
-    /// Whether this call writes anything. Mirrors `ToolCallRepeatGuard`'s rule
-    /// (anything outside its read/verification/neutral sets changes state),
-    /// kept separate so the loop can reset the validation count on an edit
-    /// without duplicating the sets.
-    nonisolated static func changesFiles(_ qualifiedName: String) -> Bool {
-        let base = ToolCallRepeatGuard.baseName(qualifiedName)
-        return !ToolCallRepeatGuard.trackedToolNames.contains(base)
-            && !ToolCallRepeatGuard.neutralToolNames.contains(base)
-    }
-
-    /// What a compile check targets: `path:…` for a real file. `nil` when the
-    /// call is malformed, so it neither counts as progress nor as a repeat.
-    /// Whitespace is trimmed so a re-paste of the same snippet with a trailing
-    /// newline is still the same target.
-    nonisolated static func checkTargetKey(qualifiedName: String, argumentsJSON: String) -> String? {
-        guard ToolCallRepeatGuard.checkToolNames.contains(ToolCallRepeatGuard.baseName(qualifiedName)),
-              let data = argumentsJSON.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        if let path = (object["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !path.isEmpty {
-            return "path:" + path
-        }
-        if let source = object["source"] as? String, !source.isEmpty {
-            // A stable digest keeps the key small without retaining the whole
-            // snippet (and unlike `hashValue`, is reproducible in a test).
-            return "source:\(stableDigest(source.trimmingCharacters(in: .whitespacesAndNewlines)))"
-        }
-        return nil
-    }
-
-    /// FNV-1a over the UTF-8 bytes: a deterministic 64-bit digest, used only to
-    /// compare two checks of a snippet within one request.
-    nonisolated static func stableDigest(_ text: String) -> String {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in text.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x0000_0100_0000_01b3
-        }
-        return String(hash, radix: 16)
-    }
-
-    /// Whether this call is one that the validation-loop withdrawal removes.
-    /// Only the compile check: converting a snippet and evaluating an
-    /// expression both produce something the model needs, so they stay.
-    nonisolated static func isValidationCall(_ qualifiedName: String) -> Bool {
-        ToolCallRepeatGuard.checkToolNames.contains(ToolCallRepeatGuard.baseName(qualifiedName))
-    }
-
-    /// A round made only of compile checks — the only kind that can trip the
-    /// withdrawal. Converting a snippet or evaluating an expression produces
-    /// something (Typst to write, a number to quote), so several in a row is
-    /// real work; compiling the same untouched file again is not.
-    nonisolated static func isCheckRound(_ calls: [AIToolCallRequest]) -> Bool {
-        !calls.isEmpty && calls.allSatisfy {
-            ToolCallRepeatGuard.checkToolNames.contains(ToolCallRepeatGuard.baseName($0.name))
-        }
-    }
-
-    /// What the model gets when a check is refused because the check tools
-    /// have been withdrawn, and the note attached to the round that withdrew
-    /// them. Deliberately concrete about what to do instead — a model stuck in
-    /// this loop is usually trying to raise its confidence, not to learn facts.
-    nonisolated static func validationWithdrawnNote() -> String {
-        "\(harnessNotePrefix) Not run: you have checked the same thing for several rounds in a row without editing anything since, and the check tools are now turned off for this request. Repeating a check cannot change its answer. Do one of these instead: fix what the last check reported with edit_file/write_file, or write your answer now and say what you changed and what is still open. Checking again is only possible after an edit."
-    }
-
-    /// The nudge after `rounds` investigative rounds in a row, or `nil`.
-    /// Repeats every `threshold` rounds; 0 turns it off. Worded without tool
-    /// names, since a read-only subagent gets it too.
-    nonisolated static func noProgressNote(rounds: Int, threshold: Int = defaultNoProgressRoundThreshold) -> String? {
-        guard threshold > 0, rounds > 0, rounds % threshold == 0 else { return nil }
-        return "\(harnessNotePrefix) You have spent \(rounds) rounds in a row reading and searching without changing anything or updating the plan. Decide now: if what you have is enough, write your answer or make the first change. If it isn't, name the one specific thing still missing and get only that — don't re-read what you've already seen."
-    }
-
-    /// A warning when the turn cap is close, or `nil`. `completedTurn` is the
-    /// 0-based turn whose tool calls just ran; the loop allows requests
-    /// 0 ..< maxTurns, and fails if the last one still calls tools.
-    /// `warnAt`: 0 = no warnings, 1 = only the final-reply notice, 2+ = also
-    /// a heads-up when that many replies are left.
-    nonisolated static func turnBudgetNote(
-        completedTurn: Int,
-        maxTurns: Int?,
-        warnAt: Int = defaultTurnBudgetWarningRemaining
-    ) -> String? {
-        guard let maxTurns, warnAt > 0 else { return nil }
-        let remaining = maxTurns - 1 - completedTurn
-        if remaining == 1 {
-            return "\(harnessNotePrefix) Your next reply is the last one this request allows. Tool calls in it will not run and the request will fail, so write your final answer now in plain text: what you did, what you found, and which parts of the user's request are still not done — including any file or section you didn't get to."
-        }
-        if warnAt >= 2, remaining == warnAt, maxTurns > warnAt + 2 {
-            return "\(harnessNotePrefix) Only \(remaining) replies are left in this request. Finish the step you are on and leave room to write your answer. In it, say which parts of the user's request are done and which are not — for example, a file you didn't get to — so the user can ask you to continue."
-        }
-        return nil
-    }
-
-    /// Rounds without an `update_plan` call, while a plan exists, before the
-    /// model is reminded to mark progress. Repeats every this many rounds.
-    nonisolated static let planReminderRounds = 12
-
-    /// The stale-plan reminder, or `nil`. A frozen checklist misleads the
-    /// user about progress, and the plan is what carries into the next turn.
-    nonisolated static func planReminderNote(roundsSinceUpdate rounds: Int, threshold: Int = planReminderRounds) -> String? {
-        guard threshold > 0, rounds > 0, rounds % threshold == 0 else { return nil }
-        return "\(harnessNotePrefix) Your plan was last updated \(rounds) rounds ago. If an item is finished, call update_plan now: mark it completed and set the next one in_progress. The user follows your progress there, and the next turn continues from it."
-    }
-
-    /// The steering note: user input that arrived mid-turn, promoted at a
-    /// step boundary. Rides on the round's last tool result (see
-    /// `appendHarnessNote`), which every provider accepts — an extra user
-    /// message would break Anthropic's strict user/assistant alternation.
-    nonisolated static func steerNote(_ text: String) -> String {
-        "\(harnessNotePrefix) STEERING — the user sent this while you were working. Finish your current step, then adjust course to include it. Don't restart what is already done, and don't drop it:\n\n\(text)"
-    }
-
-    /// The note that withdraws the tools at the turn cap and asks for a
-    /// written summary instead of failing the request.
-    ///
-    /// Modelled on opencode's `MAX_STEPS_PROMPT`: it has to be unambiguous
-    /// that a tool call now counts as a violation, because the model has been
-    /// calling tools freely until this point.
-    nonisolated static func stepLimitNote(maxTurns: Int) -> String {
-        """
-        \(harnessNotePrefix) MAXIMUM STEPS REACHED — this request has used all \(maxTurns) turns, and tools are now disabled. Any tool call you write will not run.
-
-        Reply with text only, and make it useful:
-        1. Say plainly that the step limit for this request was reached.
-        2. Summarize what you actually did: files and line ranges you changed, facts you verified, decisions you made.
-        3. List what is still not done, naming the file or section, in enough detail that you or the user can pick it up next.
-        4. Say what you would do next, in one or two concrete steps.
-        """
-    }
-
-    /// The chat's status line while that final summary is being written.
-    nonisolated static func stepLimitStatusLine(maxTurns: Int) -> String {
-        "Step limit reached after \(maxTurns) turns — asking for a summary of the work instead…"
-    }
-
-    /// Appends `note` to the newest tool result.
-    nonisolated static func appendHarnessNote(_ note: String, to messages: inout [AIChatMessage]) {        guard let index = messages.lastIndex(where: {
-            if case .toolResult = $0 { return true }
-            return false
-        }), case .toolResult(let result) = messages[index] else { return }
-        messages[index] = .toolResult(AIToolResult(
-            callID: result.callID,
-            name: result.name,
-            output: result.output + "\n\n" + note
-        ))
-    }
-
-    /// Resolved auto-continue budget. `nil` = unlimited (keep asking until
-    /// the model answers or the user presses Stop); `0` = auto-continue off;
-    /// otherwise the clamped attempt count.
-    nonisolated static func autoContinueBudget(attempts: Int, unlimited: Bool) -> Int? {
-        unlimited ? nil : clampedAutoContinueAttempts(attempts)
-    }
-
-    /// "(2 of 5)" / "(attempt 2, unlimited)" for status lines and notes.
-    nonisolated static func autoContinueProgressLabel(attempt: Int, maxAttempts: Int?) -> String {
-        if let maxAttempts {
-            return "\(attempt) of \(maxAttempts)"
-        }
-        return "attempt \(attempt), unlimited"
-    }
-
-    /// One-line status for the chat's live generating row while an empty
-    /// reply is being retried.
-    nonisolated static func emptyAnswerStatusLine(attempt: Int, maxAttempts: Int?) -> String {
-        "Empty reply — asking the model to answer again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
-    }
-
-    /// One-line status for the chat's live generating row while a stalled
-    /// attempt is being continued.
-    nonisolated static func stallStatusLine(attempt: Int, maxAttempts: Int?, idleSeconds: Int) -> String {
-        // idleSeconds 0 marks a stream cut by a connection loss (converted in
-        // requestChatStep) rather than a silent hang — phrase it that way.
-        let cause = idleSeconds == 0
-            ? "Connection lost"
-            : "No output for \(idleSeconds)s"
-        return "\(cause) — continuing (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
-    }
-
-    /// Note pushed into the live thinking box when an empty reply is nudged,
-    /// mirroring the stall note so a retry doesn't look like the model simply
-    /// restarted for no reason. Never persisted.
-    nonisolated static func emptyAnswerStatusNote(attempt: Int, maxAttempts: Int?, hadReasoning: Bool) -> String {
-        let reason = hadReasoning
-            ? "it spent the reply on thinking and wrote no answer"
-            : "it returned nothing"
-        return "\n\n[Empty reply — \(reason); asking again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
-    }
-
-    nonisolated static func emptyAnswerNudgeMessage(hadReasoning: Bool) -> String {
-        hadReasoning
-            ? "You thought that through but didn't write an answer — the reply was empty. Using what you already found above, write the actual answer now in plain text."
-            : "That reply came back empty. Using what you've already found above, write the actual answer now in plain text — even if the answer is that you couldn't find anything."
-    }
-
-    /// Transcript message sent after a stalled attempt was abandoned: tells
-    /// the model its previous reply was cut off mid-stream so it resumes
-    /// instead of starting over as if nothing happened.
-    nonisolated static func stallContinueMessage(idleSeconds: Int, timeoutSeconds: Int) -> String {
-        // idleSeconds 0 marks a stream cut by a connection loss rather than a
-        // silent hang — phrase it that way.
-        let cause = idleSeconds == 0
-            ? "was cut off when the connection dropped, and nothing from it was kept"
-            : "stalled — no output arrived for \(idleSeconds)s (limit: \(timeoutSeconds)s) — and nothing from it was kept"
-        return "Your previous reply \(cause). Pick up where you left off: re-issue any tool call you were making, or write your final answer now."
-    }
-
-    /// Placeholder for the abandoned attempt in the transcript, mirroring the
-    /// "(no response)" placeholder used by the empty-answer nudge.
-    nonisolated static let interruptedReplyPlaceholder = "(reply interrupted)"
-
-    /// Note pushed into the live thinking box when a stalled attempt is
-    /// abandoned, so an automatically continued turn doesn't look like the
-    /// model merely started over for no reason. Never persisted — the saved
-    /// reasoning is collected separately.
-    nonisolated static func stallContinueStatusNote(attempt: Int, maxAttempts: Int?, idleSeconds: Int) -> String {
-        // idleSeconds 0 marks a stream cut by a connection loss rather than a
-        // silent hang — phrase it that way.
-        let cause = idleSeconds == 0
-            ? "The connection dropped mid-reply"
-            : "No output for \(idleSeconds)s"
-        return "\n\n[\(cause) — the interrupted attempt was abandoned and automatically continued (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
-    }
-
-    // MARK: Repetition loops
-
-    nonisolated static func repetitionStatusLine(attempt: Int, maxAttempts: Int?, inReasoning: Bool) -> String {
-        "Model was repeating itself\(inReasoning ? " while thinking" : "") — stopped it and asked again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts)))…"
-    }
-
-    /// Pushed into the live thinking box, like the stall note. Never persisted.
-    nonisolated static func repetitionStatusNote(attempt: Int, maxAttempts: Int?, inReasoning: Bool, unit: String) -> String {
-        "\n\n[Stuck in a loop — the \(inReasoning ? "thinking" : "reply") kept repeating “\(RepetitionDetector.preview(unit))”. Stopped and asked again (\(autoContinueProgressLabel(attempt: attempt, maxAttempts: maxAttempts))).]\n\n"
-    }
-
-    /// Sent after a looping attempt. The model sees its own reply up to the
-    /// loop (one copy kept) and is asked for the full answer again, so the
-    /// answer that lands is complete on its own.
-    nonisolated static func repetitionContinueMessage(inReasoning: Bool, unit: String, hasKeptText: Bool) -> String {
-        let quoted = RepetitionDetector.preview(unit, limit: 200)
-        if inReasoning {
-            return "Your thinking got stuck in a loop, repeating the same passage over and over (“\(quoted)”), and was stopped. Don't go over that again. Decide now: make the tool call you need, or write your final answer."
-        }
-        let context = hasKeptText
-            ? "Your reply above was cut where it started repeating"
-            : "Your reply was stopped"
-        return "\(context): it kept emitting the same passage (“\(quoted)”) over and over. Write your complete answer again from the start, and don't repeat any passage. If you were about to call a tool, call it now instead."
-    }
-
-    nonisolated static let repetitionStoppedNote = "\n\n*[Stopped here: the model began repeating the same passage over and over.]*"
-
-    nonisolated static func repetitionFailureMessage(attempts: Int, inReasoning: Bool, unit: String) -> String {
-        var message = "The model got stuck repeating the same \(inReasoning ? "thought" : "passage") (“\(RepetitionDetector.preview(unit))”)"
-        if attempts > 0 {
-            message += " and looped again on \(attempts) automatic retr\(attempts == 1 ? "y" : "ies")"
-        }
-        return message + ". Try rephrasing the request, starting a new chat, or a different model — small local models loop most often."
-    }
-
-    // MARK: Thinking Re-Seeding (interrupted/empty replies)
-
-    /// Keep-rate for compressed thinking notes. Deliberately much higher
-    /// than context compression: reasoning is dense — dropping a negation
-    /// inverts a conclusion — while meeting-style prose tolerates 0.3-0.5.
-    /// `thinkingForceTokens` guards the pivots regardless.
-    nonisolated static let thinkingReseedKeepRate = 0.6
-
-    /// Minimum size of abandoned thinking worth re-seeding. Below this the
-    /// plain nudge/continue message is just as good and costs less.
-    nonisolated static let thinkingReseedMinimumChars = 400
-
-    /// Compresses an abandoned attempt's reasoning into continuation notes.
-    /// Returns nil when there isn't enough thinking to be worth it. The
-    /// tolerance (`maxChars`) is enforced on the tail: the latest reasoning
-    /// state is what a continuation needs, and the task restatement at the
-    /// head is already in the original prompt.
-    nonisolated static func thinkingReseedNotes(
-        from raw: String,
-        compressor: any PromptCompressor,
-        maxChars: Int
-    ) async -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= thinkingReseedMinimumChars else { return nil }
-        let isCode = PromptCompression.codeRatio(trimmed) > 0.35
-        var notes = await compressor.compress(
-            trimmed,
-            keepRate: thinkingReseedKeepRate,
-            forceTokens: PromptCompression.thinkingForceTokens,
-            isCode: isCode
-        )
-        if notes.count > maxChars {
-            notes = "…(earlier notes truncated)\n" + notes.suffix(maxChars)
-        }
-        return notes
-    }
-
-    /// Stall-continue message carrying compressed thinking notes from the
-    /// abandoned attempt — the model resumes from its own (filtered) words
-    /// instead of starting cold.
-    nonisolated static func reseedStallContinueMessage(idleSeconds: Int, timeoutSeconds: Int, notes: String) -> String {
-        """
-        Your previous reply stalled — no output arrived for \(idleSeconds)s (limit: \(timeoutSeconds)s) — and was abandoned. Your compressed thinking notes from that attempt follow below. Treat them as notes: continue from where they leave off, don't repeat them, and re-issue any tool call you were making or write your final answer now.
-
-        \(notes)
-        """
-    }
-
-    /// Empty-answer nudge carrying compressed thinking notes — the model
-    /// spent its whole reply budget on reasoning and never answered; the
-    /// notes let it answer from its own conclusions instead of re-deriving.
-    nonisolated static func reseedEmptyAnswerNudgeMessage(notes: String) -> String {
-        """
-        Your previous reply spent itself on thinking and never wrote an answer. Your compressed thinking notes follow below. Using them, write the actual answer now in plain text — even if the answer is that you couldn't find anything. Don't repeat the notes.
-
-        \(notes)
-        """
-    }
-
-    /// Shown when every auto-continue attempt stalled too. Points at the
-    /// local server rather than the prompt — a stream that keeps going
-    /// silent is a server problem, not a wording problem.
-    nonisolated static func stallFailureMessage(attempts: Int, idleSeconds: Int, timeoutSeconds: Int) -> String {
-        // idleSeconds 0 marks a stream cut by a connection loss rather than a
-        // silent hang — phrase it that way.
-        let connectionLoss = idleSeconds == 0
-        var message = connectionLoss
-            ? "The connection dropped mid-reply"
-            : "The model went silent for \(idleSeconds)s (stall limit: \(timeoutSeconds)s)"
-        if attempts > 0 {
-            let verb = connectionLoss ? "also failed" : "also stalled"
-            message += " and \(attempts) automatic continue attempt\(attempts == 1 ? "" : "s") \(verb)"
-        }
-        message += connectionLoss
-            ? ". The Mac's network may still be unstable — check the connection, then retry."
-            : ". The AI server may be overloaded or hung — check it, retry, or raise the stall timeout in Settings → AI Assistant → AI Chat."
-        return message
-    }
-
     nonisolated static func emptyAnswerFailureMessage(nudges: Int, hadReasoning: Bool) -> String {
         var message = "The AI processed the request but returned an empty response"
         if nudges > 0 {
@@ -2064,556 +2054,6 @@ class AICompletionService: ObservableObject {
 
     /// Prefix stamped onto a tool result that pass 1 of
     /// `elideOldToolOutputs` compressed verbatim. Both tells the model the
-    /// text below is an information-dense extract, and lets the elision pass
-    /// recognize outputs that must not be filtered a second time.
-    nonisolated static let compressedToolOutputMarker = "[Extract — filler words omitted, kept wording verbatim.]\n"
-
-    /// Keeps a long tool-calling conversation inside a rough character budget.
-    /// Two passes over the *oldest* tool results (the two most recent are
-    /// always kept — those are what the model is actively working from):
-    ///
-    ///   1. When a compressor is configured (token filter or LLMLingua-2),
-    ///      each large result is compressed *verbatim* — the model keeps
-    ///      roughly `keepRate` of the words, in order, instead of losing
-    ///      everything. Compressed outputs carry a marker so they are never
-    ///      squeezed a second time on a later turn.
-    ///   2. Any remaining overflow falls back to the original blunt
-    ///      placeholder, oldest first.
-    ///
-    /// This is the in-loop counterpart to the chat's turn-level compaction:
-    /// a single request can easily rack up 20 large `read_file` results
-    /// across turns.
-    /// Internal (not private) so the compression-first elision rules are
-    /// directly testable, like the transcript-shaping helpers above.
-    static func elideOldToolOutputs(
-        in messages: inout [AIChatMessage],
-        charBudget: Int,
-        compressor: (any PromptCompressor)?,
-        keepRate: Double
-    ) async {
-        func charCount(_ message: AIChatMessage) -> Int {
-            switch message {
-            case .system(let t), .assistantText(let t): return t.count
-            // Images are intent, not something elision can shrink; count them
-            // so a screenshot-heavy prompt still registers as over budget.
-            case .user(let t, let images): return t.count + images.reduce(0) { $0 + $1.budgetChars }
-            case .assistantToolCalls(let calls): return calls.reduce(0) { $0 + $1.argumentsJSON.count + $1.name.count }
-            case .toolResult(let r): return r.output.count
-            }
-        }
-
-        var total = messages.reduce(0) { $0 + charCount($1) }
-        guard total > charBudget else { return }
-
-        let toolIndices = messages.indices.filter {
-            if case .toolResult = messages[$0] { return true }
-            return false
-        }
-        let protected = Set(toolIndices.suffix(2))
-
-        // Pass 1 — verbatim compression, only while still over budget, so
-        // later (fresher) results keep as much of their content as possible.
-        if let compressor {
-            for index in toolIndices where !protected.contains(index) {
-                guard total > charBudget else { break }
-                guard case .toolResult(let result) = messages[index] else { continue }
-                // Tiny results aren't worth a pass; already-compressed ones
-                // are never squeezed again (repeated filtering would degrade
-                // them turn after turn).
-                guard result.output.count > 800,
-                      !result.output.hasPrefix(Self.compressedToolOutputMarker) else { continue }
-                let isCode = PromptCompression.codeRatio(result.output) > 0.3
-                let compressed = await compressor.compress(
-                    result.output,
-                    keepRate: keepRate,
-                    forceTokens: [],
-                    isCode: isCode
-                )
-                guard compressed.count < result.output.count else { continue }
-                let replacement = Self.compressedToolOutputMarker + compressed
-                total -= (result.output.count - replacement.count)
-                messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: replacement))
-            }
-            guard total > charBudget else { return }
-        }
-
-        // Pass 2 — last resort: replace the whole output with a short digest
-        // (read window, headings, files matched). A bare "re-run the tool"
-        // placeholder made the model re-read the same file, which refilled
-        // the budget and got elided again — the read loop.
-        for index in toolIndices where !protected.contains(index) {
-            guard case .toolResult(let result) = messages[index] else { continue }
-            guard !result.output.contains(Self.elidedToolOutputPhrase) else { continue }
-            let digest = Self.elisionDigest(for: result)
-            guard digest.count < result.output.count else { continue }
-            total -= (result.output.count - digest.count)
-            messages[index] = .toolResult(AIToolResult(callID: result.callID, name: result.name, output: digest))
-            if total <= charBudget { break }
-        }
-    }
-
-    /// Wording shared by every elision digest; also how pass 2 recognizes a
-    /// digest so it never digests one again.
-    nonisolated static let elidedToolOutputPhrase = "output elided to stay within the context budget"
-
-    /// Most heading / file lines one digest lists.
-    nonisolated static let elisionDigestMaxEntries = 40
-
-    /// What survives when a tool result has to be dropped: enough for the
-    /// model to know what it already looked at and where things are, so it
-    /// only re-reads a specific range when it needs the exact text.
-    nonisolated static func elisionDigest(for result: AIToolResult) -> String {
-        var output = result.output
-        for note in [ToolCallRepeatGuard.repeatNote, ToolCallRepeatGuard.verificationRepeatNote]
-        where output.hasPrefix(note) {
-            output.removeFirst(note.count)
-        }
-        let base = ToolCallRepeatGuard.baseName(result.name)
-        var lines = ["[\(result.output.count) characters of earlier \(result.name) \(elidedToolOutputPhrase).]"]
-
-        let isCompressed = output.hasPrefix(compressedToolOutputMarker)
-        let outputLines = output.components(separatedBy: "\n")
-
-        if (base == "read_file" || base == "get_outline" || base == "skim_outline"),
-           let first = outputLines.first, first.hasPrefix("[outline of ") || first.hasPrefix("[skim of ") {
-            // Already a map of the file: keep its header and first entries
-            // (a skim's previews are dropped — the line ranges are what matter).
-            let entries = outputLines.dropFirst().filter { $0.first?.isNumber == true }
-            lines.append(first)
-            lines.append(contentsOf: entries.prefix(elisionDigestMaxEntries))
-            if entries.count > elisionDigestMaxEntries {
-                let again = base == "read_file" ? "read_file with outline: true" : base
-                lines.append("… \(entries.count - elisionDigestMaxEntries) more — call \(again) again for the full list")
-            }
-        } else if base == "read_file" || base == "read_skill_file" {
-            // The window header, when the read was paged.
-            var firstLineNumber = 1
-            var contentStart = 0
-            if let headerIndex = outputLines.prefix(3).firstIndex(where: { $0.hasPrefix("[lines ") && $0.hasSuffix("]") }) {
-                let header = outputLines[headerIndex]
-                lines.append("It covered " + String(header.dropFirst().dropLast()) + ".")
-                if let start = Int(header.dropFirst("[lines ".count).prefix(while: \.isNumber)) {
-                    firstLineNumber = start
-                }
-                contentStart = headerIndex + 1
-                if contentStart < outputLines.count, outputLines[contentStart].hasPrefix("(truncated") {
-                    contentStart += 1
-                }
-            }
-            // Compressed text has lost lines, so its line numbers would lie.
-            if !isCompressed {
-                let content = outputLines.dropFirst(contentStart).joined(separator: "\n")
-                let headings = DocumentOutline.entries(in: content).map { entry in
-                    "\(firstLineNumber + entry.line - 1): \(entry.text)"
-                }
-                if !headings.isEmpty {
-                    lines.append("Headings and #include lines in it (line: text):")
-                    lines.append(contentsOf: headings.prefix(elisionDigestMaxEntries))
-                    if headings.count > elisionDigestMaxEntries {
-                        lines.append("… \(headings.count - elisionDigestMaxEntries) more")
-                    }
-                }
-            }
-            lines.append("Re-read with offset/limit only the range you still need word for word (for example, to copy old_string for edit_file).")
-        } else if base == "grep_project" {
-            // "path:line: text" → match count per file, in first-seen order.
-            var order: [String] = []
-            var counts: [String: Int] = [:]
-            for line in outputLines {
-                let parts = line.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
-                guard parts.count == 3, Int(parts[1]) != nil else { continue }
-                let path = String(parts[0])
-                if counts[path] == nil { order.append(path) }
-                counts[path, default: 0] += 1
-            }
-            if !order.isEmpty {
-                let listed = order.prefix(elisionDigestMaxEntries).map { "\($0) (\(counts[$0]!))" }
-                lines.append("Matches were in: " + listed.joined(separator: ", ")
-                    + (order.count > elisionDigestMaxEntries ? ", … \(order.count - elisionDigestMaxEntries) more files" : "") + ".")
-            }
-            lines.append("Re-run a narrower search (pattern or glob) if you need the matching lines again.")
-        } else {
-            lines.append("Re-run the tool if you still need it.")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    /// Sends one turn of a tool-calling conversation and returns either the
-    /// model's final text or the tool calls it wants executed next. When
-    /// `reasoningDelta` or `textDelta` is non-nil the request is made with
-    /// `"stream": true` and parsed event-by-event, forwarding fragments as
-    /// they arrive; the returned step is the same either way.
-    ///
-    /// `textDelta` carries the visible answer. Without it the panel shows the
-    /// model's thinking as it streams but the answer lands all at once, which
-    /// on a slow local model looks like nothing is happening for a minute and
-    /// then a whole reply appears.
-    ///
-    /// Retries are confined to the window where nothing has been shown yet:
-    /// a connection failure, or a retryable status (429, 408, 5xx) on the
-    /// response. Once tokens have streamed, re-sending would duplicate output,
-    /// so a mid-stream failure falls through to the stall/auto-continue path
-    /// instead.
-    private func requestChatStep(
-        ctx: ModelContext,
-        messages: [AIChatMessage],
-        tools: [MCPTool],
-        maxTokens: Int,
-        reasoningDelta: (@MainActor (String) -> Void)? = nil,
-        textDelta: (@MainActor (String) -> Void)? = nil,
-        onStatus: (@MainActor (String?) -> Void)? = nil
-    ) async throws -> (AIChatStep, AIChatStepMeta) {
-        let settings = AISettingsManager.shared
-        guard let url = URL(string: ctx.chatEndpoint) else { throw AIError.invalidURL }
-        // In flight until the reply (or stream) is fully read.
-        let activity = ModelServerActivity.shared.begin(url)
-        defer { ModelServerActivity.shared.end(activity) }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = settings.timeoutSeconds
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        for (field, value) in ctx.authHeaders {
-            request.addValue(value, forHTTPHeaderField: field)
-        }
-
-        // Either callback is enough to justify streaming: an answer-only
-        // caller still benefits from the tokens arriving as they are written.
-        let streaming = reasoningDelta != nil || textDelta != nil
-        // A terser answer on the models that accept the hint. Detection lives
-        // in `ModelVerbosity` so an unknown parameter is never sent to a
-        // provider that would reject it with a 400.
-        let verbosity = ModelVerbosity.value(
-            model: ctx.model,
-            source: ctx.source,
-            enabled: AISettingsManager.shared.chatConciseReplies
-        )
-        request.httpBody = ctx.isAnthropic
-            ? try Self.buildAnthropicBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, reasoningEffort: ctx.reasoningEffort)
-            : try Self.buildOpenAIBody(model: ctx.model, maxTokens: maxTokens, messages: messages, tools: tools, stream: streaming, includeReasoning: ctx.source == .openRouter, reasoningEffort: ctx.reasoningEffort, verbosity: verbosity)
-
-        let retries = ModelRetryPolicy.effectiveRetries(settings.chatTransportRetries)
-        // 0-based: `attempt` counts retries already spent, so `attempt < retries`
-        // means "another one is allowed".
-        var attempt = 0
-
-        while true {
-            if !streaming {
-                let data: Data
-                let response: URLResponse
-                do {
-                    (data, response) = try await URLSession.shared.data(for: request)
-                } catch let error as URLError where error.code == .timedOut {
-                    // No complete reply within the request timeout — funnel into
-                    // the same stall recovery as the streaming path below, so a
-                    // hung server costs a continue attempt instead of the turn.
-                    throw AIError.stalledResponse(
-                        idleSeconds: Int(settings.timeoutSeconds),
-                        timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
-                    )
-                } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) {
-                    if Task.isCancelled { throw CancellationError() }
-                    // The Mac going offline is unlike the endpoint failing:
-                    // backoff retries against a dead link burn the whole
-                    // budget inside a minute and then fail the turn anyway.
-                    // Park on the network instead — no retry attempt spent —
-                    // and re-send the moment it comes back.
-                    if settings.chatWaitForNetwork,
-                       Self.shouldWaitForNetworkRestore(code: error.code, networkIsUp: NetworkMonitor.shared.isConnected) {
-                        if try await Self.waitWhileOffline(onStatus: onStatus) { continue }
-                        // The system already reported a path, so the error is
-                        // stale or the monitor briefly disagreed — treat it
-                        // like any other transport failure below, so a
-                        // misleading error can't spin a tight retry loop.
-                    }
-                    guard attempt < retries else { throw error }
-                    attempt += 1
-                    try await Self.waitBeforeRetry(
-                        attempt: attempt,
-                        retries: retries,
-                        retryAfter: nil,
-                        reason: "The connection to the provider failed",
-                        onStatus: onStatus
-                    )
-                    continue
-                } catch {
-                    // A cancelled task can surface as an arbitrary URLSession
-                    // error; normalize it so callers can tell a user-initiated
-                    // stop apart from a real failure.
-                    if Task.isCancelled { throw CancellationError() }
-                    throw error
-                }
-                guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
-
-                guard httpResponse.statusCode == 200 else {
-                    if ModelRetryPolicy.isRetryable(status: httpResponse.statusCode), attempt < retries {
-                        attempt += 1
-                        try await Self.waitBeforeRetry(
-                            attempt: attempt,
-                            retries: retries,
-                            retryAfter: ModelRetryPolicy.retryAfter(from: httpResponse),
-                            reason: ModelRetryPolicy.reason(forStatus: httpResponse.statusCode),
-                            onStatus: onStatus
-                        )
-                        continue
-                    }
-                    throw AIError.apiError(Self.apiErrorMessage(status: httpResponse.statusCode, body: data))
-                }
-
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw AIError.parsingError("Invalid JSON structure returned by provider.")
-                }
-
-                return ctx.isAnthropic ? try Self.parseAnthropicStep(json) : try Self.parseOpenAIStep(json)
-            }
-
-            let (bytes, response): (URLSession.AsyncBytes, URLResponse)
-            do {
-                (bytes, response) = try await URLSession.shared.bytes(for: request)
-            } catch let error as URLError where error.code == .timedOut {
-                // The server never even started responding within the request
-                // timeout — same stall recovery as a mid-stream hang.
-                throw AIError.stalledResponse(
-                    idleSeconds: Int(settings.timeoutSeconds),
-                    timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
-                )
-            } catch let error as URLError where ModelRetryPolicy.isRetryable(urlError: error.code) {
-                if Task.isCancelled { throw CancellationError() }
-                // Same park-until-the-network-returns as the non-streaming
-                // path above: an outage shouldn't cost the turn.
-                if settings.chatWaitForNetwork,
-                   Self.shouldWaitForNetworkRestore(code: error.code, networkIsUp: NetworkMonitor.shared.isConnected) {
-                    if try await Self.waitWhileOffline(onStatus: onStatus) { continue }
-                }
-                guard attempt < retries else { throw error }
-                attempt += 1
-                try await Self.waitBeforeRetry(
-                    attempt: attempt,
-                    retries: retries,
-                    retryAfter: nil,
-                    reason: "The connection to the provider failed",
-                    onStatus: onStatus
-                )
-                continue
-            } catch {
-                // Same normalization as the non-streaming path above.
-                if Task.isCancelled { throw CancellationError() }
-                throw error
-            }
-            guard let httpResponse = response as? HTTPURLResponse else { throw AIError.noData }
-
-            guard httpResponse.statusCode == 200 else {
-                // Read the (small) error body so streamed failures report the
-                // same clean message the non-streaming path produces.
-                let data = await Self.collectBytes(bytes, upTo: 1 << 20)
-                if ModelRetryPolicy.isRetryable(status: httpResponse.statusCode), attempt < retries {
-                    attempt += 1
-                    try await Self.waitBeforeRetry(
-                        attempt: attempt,
-                        retries: retries,
-                        retryAfter: ModelRetryPolicy.retryAfter(from: httpResponse),
-                        reason: ModelRetryPolicy.reason(forStatus: httpResponse.statusCode),
-                        onStatus: onStatus
-                    )
-                    continue
-                }
-                throw AIError.apiError(Self.apiErrorMessage(status: httpResponse.statusCode, body: data))
-            }
-
-            // Connected with a 200: from here a failure is no longer safe to
-            // retry by re-sending, so hand off to the stall/continue path.
-            do {
-                return try await Self.consumeStreamingStep(
-                    bytes: bytes,
-                    ctx: ctx,
-                    settings: settings,
-                    reasoningDelta: reasoningDelta,
-                    textDelta: textDelta
-                )
-            } catch let error as URLError
-                where settings.chatWaitForNetwork && ModelRetryPolicy.isRetryable(urlError: error.code) {
-                // The stream itself died on transport — most often the network
-                // went away mid-reply. Tokens are already on screen, so
-                // re-sending would duplicate them: wait out the outage, then
-                // surface the same recovery a silent stream gets, which
-                // continues the half-delivered reply instead of repeating it.
-                // (`idleSeconds: 0` is the stall wording's cue to describe a
-                // cut connection rather than a silent hang.)
-                if Task.isCancelled { throw CancellationError() }
-                if Self.shouldWaitForNetworkRestore(code: error.code, networkIsUp: NetworkMonitor.shared.isConnected) {
-                    try await Self.waitWhileOffline(onStatus: onStatus)
-                }
-                throw AIError.stalledResponse(
-                    idleSeconds: 0,
-                    timeoutSeconds: Int(Self.effectiveStallTimeout(from: settings.chatStallTimeoutSeconds))
-                )
-            }
-        }
-    }
-
-    /// Sleeps out a retry gap, keeping the chat's status line honest about why
-    /// nothing is arriving.
-    private static func waitBeforeRetry(
-        attempt: Int,
-        retries: Int,
-        retryAfter: TimeInterval?,
-        reason: String,
-        onStatus: (@MainActor (String?) -> Void)?
-    ) async throws {
-        let delay = ModelRetryPolicy.delay(
-            forAttempt: attempt,
-            retryAfter: retryAfter,
-            jitter: Double.random(in: 0.85...1.15)
-        )
-        onStatus?(ModelRetryPolicy.statusLine(attempt: attempt, retries: retries, delay: delay, reason: reason))
-        let nanoseconds = UInt64(max(0, delay) * 1_000_000_000)
-        try await Task.sleep(nanoseconds: nanoseconds)
-        onStatus?(nil)
-    }
-
-    /// Whether a failed connection should park until the network returns
-    /// rather than burn the retry budget: either the error unambiguously says
-    /// the machine is offline, or it could as easily be a dead network as a
-    /// dead endpoint and the system currently reports no path at all.
-    private static func shouldWaitForNetworkRestore(
-        code: URLError.Code,
-        networkIsUp: Bool
-    ) -> Bool {
-        ModelRetryPolicy.isConnectivityLoss(code: code)
-            || (!networkIsUp && ModelRetryPolicy.mayBeConnectivityLoss(code: code))
-    }
-
-    /// Parks the request while the Mac has no network path, keeping the
-    /// chat's status line counting the outage, and returns once a path is
-    /// back. The wait is unbounded — a chat left running overnight resumes
-    /// with the network — costs no retry attempt, and `CancellationError`
-    /// (the chat's Stop button, or the window closing) ends it immediately.
-    ///
-    /// Returns whether it actually waited. `false` means the system already
-    /// reported a path, so the error was stale or the monitor briefly
-    /// disagreed; the caller then falls back to the ordinary budgeted retry
-    /// so a misleading error can't spin a tight retry loop.
-    private static func waitWhileOffline(
-        onStatus: (@MainActor (String?) -> Void)?
-    ) async throws -> Bool {
-        let monitor = NetworkMonitor.shared
-        guard !monitor.isConnected else { return false }
-        onStatus?(ModelRetryPolicy.offlineWaitStatusLine(seconds: 0))
-        var seconds = 0
-        while !Task.isCancelled {
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-            } catch {
-                onStatus?(nil)
-                throw CancellationError()
-            }
-            seconds += 1
-            if monitor.isConnected { break }
-            onStatus?(ModelRetryPolicy.offlineWaitStatusLine(seconds: seconds))
-        }
-        onStatus?(nil)
-        guard !Task.isCancelled else { throw CancellationError() }
-        return true
-    }
-
-    /// A provider error message with the status code kept for diagnostics.
-    /// The body is parsed for the common error shapes; when it has none, the
-    /// status is still the most useful thing to show.
-    private static func apiErrorMessage(status: Int, body: Data) -> String {
-        var message = String(data: body, encoding: .utf8) ?? "Unknown Error"
-        if let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
-            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                message = msg
-            } else if let errorArray = json["error"] as? [[String: Any]],
-                      let first = errorArray.first, let msg = first["message"] as? String {
-                message = msg
-            }
-        }
-        var result = "API Error (\(status)): \(message)"
-        // The usual cause of a rejected request after attaching images: the
-        // model can't read them. Say so in terms the user can act on, instead
-        // of leaving a raw provider message about "content parts".
-        if Self.looksLikeAnImageRejection(message) {
-            result += "\n\nThis model may not accept images. Remove the attachment, or switch to an image-capable model from the chat panel's model menu."
-        }
-        return result
-    }
-
-    /// Whether a provider's error text reads like a rejected image payload.
-    /// Deliberately narrow: only a message that mentions images/content parts
-    /// *and* a rejection word gets the extra hint.
-    nonisolated static func looksLikeAnImageRejection(_ message: String) -> Bool {
-        let lower = message.lowercased()
-        let mentionsImage = lower.contains("image") || lower.contains("vision") || lower.contains("modalit")
-        let mentionsRejection = lower.contains("not support")
-            || lower.contains("unsupported")
-            || lower.contains("invalid")
-            || lower.contains("cannot")
-            || lower.contains("does not")
-            || lower.contains("content part")
-        return mentionsImage && mentionsRejection
-    }
-
-    /// Parses a 200 response's SSE stream, under the stall watchdog. Split
-    /// out of `requestChatStep` so the retry loop above stays readable: this
-    /// part never retries, because tokens may already have reached the user.
-    private static func consumeStreamingStep(
-        bytes: URLSession.AsyncBytes,
-        ctx: ModelContext,
-        settings: AISettingsManager,
-        reasoningDelta: (@MainActor (String) -> Void)?,
-        textDelta: (@MainActor (String) -> Void)?
-    ) async throws -> (AIChatStep, AIChatStepMeta) {
-        // Some local servers stop emitting tokens mid-reply without ever
-        // closing the stream (seen with large reasoning models like Qwen on
-        // slow hardware), which would otherwise leave the chat panel on
-        // "Thinking…" forever. The parse races a watchdog child task that
-        // polls a thread-safe activity clock — touched on every received SSE
-        // line — and throws `.stalledResponse` once the silence passes the
-        // configured stall window. Losing the race cancels the parse (and with
-        // it the underlying URLSession transfer), and `fetchCompletionWithTools`
-        // can auto-continue from there.
-        let stallTimeout = effectiveStallTimeout(from: settings.chatStallTimeoutSeconds)
-        let pollNanoseconds: UInt64 = 1_000_000_000
-        let isAnthropic = ctx.isAnthropic
-        let activity = StreamActivity()
-        let loopGuard = settings.chatRepetitionGuardEnabled ? StreamLoopGuard() : nil
-        return try await withThrowingTaskGroup(of: (AIChatStep, AIChatStepMeta).self) { group in
-            group.addTask {
-                while !Task.isCancelled {
-                    do {
-                        try await Task.sleep(nanoseconds: pollNanoseconds)
-                    } catch {
-                        // Cancelled because the parse won the race — exit
-                        // quietly so the group can return its result.
-                        return (.finalText("", reasoning: nil), AIChatStepMeta())
-                    }
-                    if activity.isStalled(past: stallTimeout) {
-                        throw AIError.stalledResponse(
-                            idleSeconds: Int(activity.secondsSinceTouch),
-                            timeoutSeconds: Int(stallTimeout)
-                        )
-                    }
-                }
-                return (.finalText("", reasoning: nil), AIChatStepMeta())
-            }
-            group.addTask {
-                try await isAnthropic
-                    ? parseAnthropicStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() }, loopGuard: loopGuard)
-                    : parseOpenAIStreamingStep(bytes: bytes, onReasoningDelta: reasoningDelta, onTextDelta: textDelta, onActivity: { activity.touch() }, loopGuard: loopGuard)
-            }
-            guard let first = try await group.next() else { throw AIError.noData }
-            group.cancelAll()
-            return first
-        }
-    }
-
-    /// The stall window actually enforced, with a floor so a zero/negative
-    /// Settings value can't cancel every request the moment it starts.
-    nonisolated private static func effectiveStallTimeout(from configured: Double) -> TimeInterval {
-        max(5.0, configured)
-    }
 
     // MARK: Reasoning effort (provider-specific request parameters)
 
@@ -2697,818 +2137,99 @@ class AICompletionService: ObservableObject {
         body["generationConfig"] = generationConfig
     }
 
-    // MARK: Provider wire-format conversion (OpenAI-compatible)
+}
 
-    private static func buildOpenAIBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, includeReasoning: Bool = false, reasoningEffort: ReasoningEffort = .auto, verbosity: String? = nil) throws -> Data {
-        var wireMessages: [[String: Any]] = []
-        for message in messages {
-            switch message {
-            case .system(let text):
-                wireMessages.append(["role": "system", "content": text])
-            case .user(let text, let images):
-                if images.isEmpty {
-                    wireMessages.append(["role": "user", "content": text])
-                } else {
-                    var parts: [[String: Any]] = []
-                    if !text.isEmpty {
-                        parts.append(["type": "text", "text": text])
-                    }
-                    for image in images {
-                        parts.append([
-                            "type": "image_url",
-                            "image_url": ["url": image.dataURL]
-                        ])
-                    }
-                    wireMessages.append(["role": "user", "content": parts])
-                }
-            case .assistantText(let text):
-                wireMessages.append(["role": "assistant", "content": text])
-            case .assistantToolCalls(let calls):
-                wireMessages.append([
-                    "role": "assistant",
-                    "content": NSNull(),
-                    "tool_calls": calls.map { call in
-                        [
-                            "id": call.id,
-                            "type": "function",
-                            "function": ["name": call.name, "arguments": call.argumentsJSON]
-                        ] as [String: Any]
-                    }
-                ])
-            case .toolResult(let result):
-                wireMessages.append([
-                    "role": "tool",
-                    "tool_call_id": result.callID,
-                    "content": result.output
-                ])
-            }
+
+
+
+// MARK: - Precompiled Regexes
+//
+// The Markdown→Typst conversion itself is AST-based (see `TypstMarkupVisitor`
+// below): the document is parsed once with swift-markdown and walked by a
+// visitor that serializes it straight into a single output buffer. The regexes
+// that remain are confined to well-scoped jobs:
+//
+//   * response cleanup (thinking tags, force-code-output extraction)
+//   * the pre-parse extraction pass — code spans, math, backslash escapes and
+//     footnote definitions must be identified BEFORE cmark parses the text,
+//     because cmark either mangles them (smart quotes, emphasis inside math)
+//     or consumes them outright (backslash escapes, reference definitions)
+//   * leaf-level conversion/escaping of plain text runs
+//   * HTML fragments (tag soup has no grammar worth parsing)
+//   * whole-document post-passes carried over from the old pipeline
+
+enum AICompletionRegex {
+    // Response cleanup
+    static let thinkTag = try! NSRegularExpression(pattern: "<think>[\\s\\S]*?<\\/think>", options: [.caseInsensitive])
+    static let thoughtTag = try! NSRegularExpression(pattern: "<thought>[\\s\\S]*?<\\/thought>", options: [.caseInsensitive])
+    static let extractCode = try! NSRegularExpression(pattern: "```(?:[a-zA-Z]*\\n)?([\\s\\S]*?)```")
+
+    // Pre-parse extraction
+    // Fenced + inline code: a backtick run, content, and the same run back.
+    static let codeBlock = try! NSRegularExpression(pattern: "(?s)(`+).*?(?<!`)\\1(?!`)")
+    // Math: $$…$$, $…$, \[…\] or \(…\). The (?<!\\) guards skip escaped dollars,
+    // and the closing `$` must not be glued to an alphanumeric so two
+    // register-style tokens (`$DC10–$DC4F`, `$3DF8/$3E50`, `$FE00–$FE9F`) are
+    // not mis-paired into one math region and run through the LaTeX converter.
+    static let mathBlock = try! NSRegularExpression(pattern: "(?s)\\$\\$.+?\\$\\$|(?<!\\\\)\\$(?!\\s)[^\\$\\n]+?(?<!\\s)(?<!\\\\)\\$(?![A-Za-z0-9])|(?s)\\\\\\[.+?\\\\\\]|(?s)\\\\\\([^\\n]+?\\\\\\)")
+    // Backslash-escaped ASCII punctuation (the CommonMark escape set). Restored
+    // verbatim so user- or delimitImproperOperators-written escapes like \$ or
+    // \# keep exactly the meaning they had under the old string pipeline.
+    static let backslashEscape = try! NSRegularExpression(pattern: "\\\\[!-/:-@\\[-`{-~]")
+    // Footnote definitions must be pulled out pre-parse: cmark would otherwise
+    // consume `[^id]: text` as a link reference definition and turn every
+    // `[^id]` reference into a plain link instead of a footnote.
+    static let fnDef = try! NSRegularExpression(pattern: "(?m)^\\[\\^([^\\]]+)\\]:[ \\t]*(.*?)(?=\\n\\[\\^|\n\\z|\\z)", options: [.dotMatchesLineSeparators])
+
+    // Leaf-level conversions
+    static let fnRef = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
+    static let fnInline = try! NSRegularExpression(pattern: "(?<!!)\\^\\[([^\\]]+)\\]")
+    static let bareVideo = try! NSRegularExpression(pattern: #"(?m)^[ \t]*(https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch|embed|v|shorts|live)|youtu\.be/|vimeo\.com/)[^\s]+)[ \t]*$"#, options: [.caseInsensitive])
+
+    // Leaf-level escaping
+    static let escapeHtmlTags = try! NSRegularExpression(pattern: "(?i)\\\\?<(?!(?:[a-z0-9_-]+)>)(/?[a-z][a-z0-9]*\\b[^>]*)>")
+    static let strayBacktick = try! NSRegularExpression(pattern: "(?<!\\\\)`")
+    static let literalDollar = try! NSRegularExpression(pattern: "(?<!\\\\)\\$")
+    static let literalHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!link\\(|image\\(|strike\\[|line\\(|table\\(|figure\\(|align\\(|kbd\\[|super\\[|sub\\[|underline\\[|highlight\\[|footnote\\[|quote\\[)")
+    static let literalAt = try! NSRegularExpression(pattern: "(?<!\\\\)@")
+    static let technicalUnderscore = try! NSRegularExpression(pattern: "(?<=[a-zA-Z0-9])_(?=[a-zA-Z0-9])")
+    static let hybridDollarDigit = try! NSRegularExpression(pattern: "(?<!\\\\)\\$(?=\\d)")
+    static let hybridAt = try! NSRegularExpression(pattern: "(?<!\\\\)(?<=[a-zA-Z0-9])@|(?<!\\\\)@(?=\\s)")
+    static let hybridHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?!import\\b|include\\b|let\\b|set\\b|show\\b|return\\b|if\\b|else\\b|for\\b|while\\b|context\\b)([A-Za-z][A-Za-z0-9_]*)(?=[,!?;:]|\\.\\s|\\.$)")
+    // A `#` followed by whitespace or end-of-text can't start a Typst expression,
+    // so it's escaped (delimitImproperOperators used to emit these already
+    // escaped and the old pipeline preserved them verbatim).
+    static let hybridStrayHash = try! NSRegularExpression(pattern: "(?<!\\\\)#(?=\\s|$)")
+    static let stringLiteral = try! NSRegularExpression(pattern: "\"[^\"]*\"")
+
+    // Whole-document post-passes
+    static let docDot = try! NSRegularExpression(pattern: "(?m)^([ \\t]*)[⋅·]+")
+    static let markdownAbbr = try! NSRegularExpression(pattern: "(?m)^\\*\\[([^\\]]+)\\]:")
+
+    // HTML fragments. One tokenizer finds comments/tags; `htmlAttr` pulls
+    // individual attribute values out of a tag's raw text.
+    static let htmlToken = try! NSRegularExpression(pattern: "(?s)<!--.*?-->|<(/?)([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*>")
+    static let htmlAttr = try! NSRegularExpression(pattern: "(?i)\\b(href|align|src|alt|width|height)\\s*=\\s*(\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+))")
+
+    // Video IDs
+    static let youtubeID = try! NSRegularExpression(pattern: #"(?:youtube\.com/(?:watch\?(?:.*&)?v=|embed/|v/|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})"#, options: [.caseInsensitive])
+    static let vimeoID = try! NSRegularExpression(pattern: #"(?:player\.)?vimeo\.com/(?:video/)?(\d{6,})"#, options: [.caseInsensitive])
+}
+
+
+
+/// Distinguishes between chat-based requests (AI Prompt, Refine, test connection)
+/// and inline completion requests (autocomplete). Maps to the corresponding
+/// ModelTask so each purpose can use its own model source and configuration.
+enum AIRequestPurpose {
+    case chat
+    case completion
+
+    var modelTask: ModelTask {
+        switch self {
+        case .chat: return .generation
+        case .completion: return .completion
         }
-
-        var body: [String: Any] = [
-            "model": model,
-            "messages": wireMessages,
-            "max_tokens": maxTokens,
-            "temperature": 0.2,
-            "stream": stream
-        ]
-        // OpenRouter hides reasoning tokens behind an opt-in; without this its
-        // models stream answers but never the thinking. Most other
-        // OpenAI-compatible providers emit `reasoning_content` by default.
-        if stream && includeReasoning {
-            body["reasoning"] = ["enabled": true]
-        }
-        // A configured effort overrides the blanket opt-in above.
-        Self.applyReasoningEffort(reasoningEffort, toOpenAI: &body, isOpenRouter: includeReasoning)
-        // A terser answer, where the model supports the hint. This trims
-        // padding (restatements, closing offers) without changing content, so
-        // it is a direct saving in output tokens on every reply.
-        if let verbosity {
-            body["verbosity"] = verbosity
-        }
-        if !tools.isEmpty {
-            body["tools"] = tools.map { tool in
-                [
-                    "type": "function",
-                    "function": [
-                        "name": tool.qualifiedName,
-                        "description": tool.description,
-                        "parameters": tool.inputSchema
-                    ]
-                ] as [String: Any]
-            }
-        }
-        return try JSONSerialization.data(withJSONObject: body)
-    }
-
-    private static func parseOpenAIStep(_ json: [String: Any]) throws -> (AIChatStep, AIChatStepMeta) {
-        let meta = AIChatStepMeta(
-            finishReason: (json["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String,
-            usage: TokenUsage.fromOpenAI(json["usage"] as? [String: Any])
-        )
-        return (try parseOpenAIStepBody(json), meta)
-    }
-
-    private static func parseOpenAIStepBody(_ json: [String: Any]) throws -> AIChatStep {
-        guard let choices = json["choices"] as? [[String: Any]],
-              let first = choices.first,
-              let message = first["message"] as? [String: Any] else {
-            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                throw AIError.apiError(msg)
-            }
-            throw AIError.parsingError("OpenAI-compatible response missing message.")
-        }
-
-        let reasoning = (message["reasoning_content"] as? String) ?? (message["reasoning"] as? String)
-
-        if let toolCalls = message["tool_calls"] as? [[String: Any]], !toolCalls.isEmpty {
-            let parsed: [AIToolCallRequest] = toolCalls.compactMap { call in
-                guard let id = call["id"] as? String,
-                      let function = call["function"] as? [String: Any],
-                      let name = function["name"] as? String else { return nil }
-                let arguments = function["arguments"] as? String ?? "{}"
-                return AIToolCallRequest(id: id, name: name, argumentsJSON: arguments)
-            }
-            if !parsed.isEmpty { return .toolCalls(parsed, reasoning: reasoning) }
-        }
-
-        return .finalText(message["content"] as? String ?? "", reasoning: reasoning)
-    }
-
-    // MARK: Provider wire-format conversion (Anthropic)
-
-    private static func buildAnthropicBody(model: String, maxTokens: Int, messages: [AIChatMessage], tools: [MCPTool], stream: Bool = false, reasoningEffort: ReasoningEffort = .auto) throws -> Data {
-        var systemText = ""
-        var wireMessages: [[String: Any]] = []
-
-        for message in messages {
-            switch message {
-            case .system(let text):
-                systemText = text
-            case .user(let text, let images):
-                var blocks: [[String: Any]] = []
-                // Anthropic reads images placed before the text, and a text
-                // block must be non-empty.
-                for image in images {
-                    blocks.append([
-                        "type": "image",
-                        "source": [
-                            "type": "base64",
-                            "media_type": image.mediaType,
-                            "data": image.base64
-                        ]
-                    ])
-                }
-                if !text.isEmpty {
-                    blocks.append(["type": "text", "text": text])
-                }
-                // An empty user turn (images only, or nothing at all) would be
-                // rejected; keep a placeholder rather than sending zero blocks.
-                if blocks.isEmpty {
-                    blocks.append(["type": "text", "text": "(no text)"])
-                }
-                wireMessages.append(["role": "user", "content": blocks])
-            case .assistantText(let text):
-                wireMessages.append(["role": "assistant", "content": [["type": "text", "text": text]]])
-            case .assistantToolCalls(let calls):
-                wireMessages.append([
-                    "role": "assistant",
-                    "content": calls.map { call -> [String: Any] in
-                        let argData = Data(call.argumentsJSON.utf8)
-                        let input = (try? JSONSerialization.jsonObject(with: argData)) as? [String: Any] ?? [:]
-                        return ["type": "tool_use", "id": call.id, "name": call.name, "input": input]
-                    }
-                ])
-            case .toolResult(let result):
-                wireMessages.append([
-                    "role": "user",
-                    "content": [["type": "tool_result", "tool_use_id": result.callID, "content": result.output]]
-                ])
-            }
-        }
-
-        var body: [String: Any] = [
-            "model": model,
-            "max_tokens": maxTokens,
-            "system": systemText,
-            "messages": wireMessages
-        ]
-        if stream {
-            body["stream"] = true
-        }
-        Self.applyReasoningEffort(reasoningEffort, toAnthropic: &body)
-        if !tools.isEmpty {
-            body["tools"] = tools.map { tool in
-                ["name": tool.qualifiedName, "description": tool.description, "input_schema": tool.inputSchema]
-            }
-        }
-        return try JSONSerialization.data(withJSONObject: body)
-    }
-
-    private static func parseAnthropicStep(_ json: [String: Any]) throws -> (AIChatStep, AIChatStepMeta) {
-        let meta = AIChatStepMeta(
-            finishReason: json["stop_reason"] as? String,
-            usage: TokenUsage.fromAnthropic(json["usage"] as? [String: Any])
-        )
-        return (try parseAnthropicStepBody(json), meta)
-    }
-
-    private static func parseAnthropicStepBody(_ json: [String: Any]) throws -> AIChatStep {
-        guard let contentArray = json["content"] as? [[String: Any]] else {
-            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                throw AIError.apiError(msg)
-            }
-            throw AIError.parsingError("Anthropic response missing content.")
-        }
-
-        let thinkingBlocks = contentArray.filter { ($0["type"] as? String) == "thinking" }
-        let reasoning = thinkingBlocks.isEmpty ? nil : thinkingBlocks.compactMap { $0["thinking"] as? String }.joined(separator: "\n\n")
-
-        let toolUses = contentArray.filter { ($0["type"] as? String) == "tool_use" }
-        if !toolUses.isEmpty {
-            let calls: [AIToolCallRequest] = toolUses.compactMap { block in
-                guard let id = block["id"] as? String, let name = block["name"] as? String else { return nil }
-                let input = block["input"] as? [String: Any] ?? [:]
-                let argumentsJSON = (try? JSONSerialization.data(withJSONObject: input)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-                return AIToolCallRequest(id: id, name: name, argumentsJSON: argumentsJSON)
-            }
-            return .toolCalls(calls, reasoning: reasoning)
-        }
-
-        let text = contentArray.first(where: { ($0["type"] as? String) == "text" })?["text"] as? String ?? ""
-        return .finalText(text, reasoning: reasoning)
-    }
-
-    /// Reads up to `limit` bytes from a streamed response — used only to
-    /// recover the (small) error body when a streaming request comes back
-    /// with a non-200 status, since the main SSE parsers below assume a
-    /// successful stream of `data:` lines.
-    private static func collectBytes(_ bytes: URLSession.AsyncBytes, upTo limit: Int) async -> Data {
-        var collected = Data()
-        do {
-            for try await byte in bytes {
-                collected.append(byte)
-                if collected.count >= limit { break }
-            }
-        } catch {
-            // Whatever was read before the error is still useful for the message.
-        }
-        return collected
-    }
-
-    // MARK: Provider wire-format conversion (streaming / SSE)
-    //
-    // Only reached when the caller supplies `onReasoningDelta` (currently
-    // just AI Chat): same request the non-streaming path above makes, but
-    // with `"stream": true`, parsed event-by-event so reasoning and answer
-    // fragments reach the UI while the model is still working. Each function
-    // accumulates fragments across the whole response and returns the same
-    // `AIChatStep` shape its non-streaming counterpart does.
-
-    private static func parseOpenAIStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}, loopGuard: StreamLoopGuard? = nil) async throws -> (AIChatStep, AIChatStepMeta) {
-        var text = ""
-        var reasoning = ""
-        var meta = AIChatStepMeta()
-        // Tool-call deltas arrive as fragments keyed by `index`, with id,
-        // name, and argument string each possibly split across many chunks.
-        var fragments: [Int: (id: String, name: String, arguments: String)] = [:]
-
-        for try await line in bytes.lines {
-            onActivity()
-            guard line.hasPrefix("data:") else { continue }
-            let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
-            if payload == "[DONE]" { break }
-            guard let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
-            if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                throw AIError.apiError(msg)
-            }
-            // Usage (when the server sends it) usually rides on the last chunk.
-            if let usage = TokenUsage.fromOpenAI(json["usage"] as? [String: Any]) {
-                meta.usage = usage
-            }
-
-            guard let choice = (json["choices"] as? [[String: Any]])?.first else { continue }
-            if let reason = choice["finish_reason"] as? String, !reason.isEmpty {
-                meta.finishReason = reason
-            }
-            guard let delta = choice["delta"] as? [String: Any] else { continue }
-
-            if let piece = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String), !piece.isEmpty {
-                reasoning += piece
-                onReasoningDelta?(piece)
-                try loopGuard?.checkReasoning(piece)
-            }
-            if let piece = delta["content"] as? String, !piece.isEmpty {
-                text += piece
-                onTextDelta?(piece)
-                try loopGuard?.checkText(piece, accumulated: text)
-            }
-            if let deltas = delta["tool_calls"] as? [[String: Any]] {
-                for fragment in deltas {
-                    let index = fragment["index"] as? Int ?? 0
-                    var entry = fragments[index] ?? ("", "", "")
-                    if let id = fragment["id"] as? String, !id.isEmpty { entry.id = id }
-                    if let function = fragment["function"] as? [String: Any] {
-                        if let name = function["name"] as? String, !name.isEmpty { entry.name = name }
-                        if let piece = function["arguments"] as? String { entry.arguments += piece }
-                    }
-                    fragments[index] = entry
-                }
-            }
-        }
-
-        let calls: [AIToolCallRequest] = fragments.sorted { $0.key < $1.key }.compactMap { _, entry in
-            guard !entry.id.isEmpty, !entry.name.isEmpty else { return nil }
-            return AIToolCallRequest(id: entry.id, name: entry.name, argumentsJSON: entry.arguments.isEmpty ? "{}" : entry.arguments)
-        }
-        let stepReasoning = reasoning.isEmpty ? nil : reasoning
-        if !calls.isEmpty { return (.toolCalls(calls, reasoning: stepReasoning), meta) }
-        return (.finalText(text, reasoning: stepReasoning), meta)
-    }
-
-    private static func parseAnthropicStreamingStep(bytes: URLSession.AsyncBytes, onReasoningDelta: (@MainActor (String) -> Void)?, onTextDelta: (@MainActor (String) -> Void)?, onActivity: @Sendable () -> Void = {}, loopGuard: StreamLoopGuard? = nil) async throws -> (AIChatStep, AIChatStepMeta) {
-        var text = ""
-        var reasoning = ""
-        var meta = AIChatStepMeta()
-        var fragments: [Int: (id: String, name: String, arguments: String)] = [:]
-
-        for try await line in bytes.lines {
-            onActivity()
-            guard line.hasPrefix("data:") else { continue }
-            let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
-            guard let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
-
-            switch json["type"] as? String {
-            case "content_block_start":
-                if let block = json["content_block"] as? [String: Any],
-                   block["type"] as? String == "tool_use",
-                   let id = block["id"] as? String,
-                   let name = block["name"] as? String,
-                   let index = json["index"] as? Int {
-                    fragments[index] = (id, name, "")
-                }
-            case "content_block_delta":
-                guard let delta = json["delta"] as? [String: Any] else { continue }
-                switch delta["type"] as? String {
-                case "thinking_delta":
-                    if let piece = delta["thinking"] as? String, !piece.isEmpty {
-                        reasoning += piece
-                        onReasoningDelta?(piece)
-                        try loopGuard?.checkReasoning(piece)
-                    }
-                case "text_delta":
-                    if let piece = delta["text"] as? String, !piece.isEmpty {
-                        text += piece
-                        onTextDelta?(piece)
-                        try loopGuard?.checkText(piece, accumulated: text)
-                    }
-                case "input_json_delta":
-                    if let piece = delta["partial_json"] as? String, let index = json["index"] as? Int {
-                        fragments[index]?.arguments += piece
-                    }
-                default:
-                    break
-                }
-            case "message_start":
-                // Anthropic reports input tokens (and the cache fields) here,
-                // output tokens later in `message_delta`. Build the usage in
-                // two halves rather than overwriting it.
-                if let usage = TokenUsage.fromAnthropic((json["message"] as? [String: Any])?["usage"] as? [String: Any]) {
-                    var merged = meta.usage ?? TokenUsage()
-                    merged.input = usage.input
-                    merged.cacheRead = usage.cacheRead
-                    merged.cacheWrite = usage.cacheWrite
-                    merged.reportedCostUSD = usage.reportedCostUSD
-                    meta.usage = merged
-                }
-            case "message_delta":
-                if let reason = (json["delta"] as? [String: Any])?["stop_reason"] as? String {
-                    meta.finishReason = reason
-                }
-                if let output = (json["usage"] as? [String: Any])?["output_tokens"] as? Int {
-                    var merged = meta.usage ?? TokenUsage()
-                    merged.output = output
-                    meta.usage = merged
-                }
-            case "error":
-                if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                    throw AIError.apiError(msg)
-                }
-            default:
-                break
-            }
-        }
-
-        let calls: [AIToolCallRequest] = fragments.sorted { $0.key < $1.key }.compactMap { _, entry in
-            guard !entry.id.isEmpty, !entry.name.isEmpty else { return nil }
-            return AIToolCallRequest(id: entry.id, name: entry.name, argumentsJSON: entry.arguments.isEmpty ? "{}" : entry.arguments)
-        }
-        let stepReasoning = reasoning.isEmpty ? nil : reasoning
-        if !calls.isEmpty { return (.toolCalls(calls, reasoning: stepReasoning), meta) }
-        return (.finalText(text, reasoning: stepReasoning), meta)
-    }
-
-    // MARK: - Markdown → Typst conversion (AST pipeline)
-
-    /// Converts Markdown (from AI output or pasted text) into Typst markup.
-    ///
-    /// Pipeline:
-    ///   1. Pre-parse extraction — code spans, math, backslash escapes and
-    ///      footnote definitions are lifted out of the raw text and replaced
-    ///      with placeholder tokens, so cmark can neither mangle nor consume
-    ///      them.
-    ///   2. `Document(parsing:)` — a single CommonMark parse (smart punctuation
-    ///      disabled so Typst strings and `--` survive verbatim).
-    ///   3. `TypstMarkupVisitor` — one traversal serializes the AST into Typst.
-    ///   4. Document-level post-passes carried over from the old pipeline.
-    nonisolated func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
-        var work = text.replacingOccurrences(of: "\r\n", with: "\n")
-
-        // Translate literal documentation space characters (⋅ or ·) at line
-        // starts into real spaces BEFORE parsing — several Markdown fixtures use
-        // them as visible indentation for nested list items, and they must be
-        // real indentation by the time cmark builds the list structure. (The old
-        // pipeline ran this pass before its list-marker rewrites for the same
-        // reason.)
-        do {
-            let processed = NSMutableString(string: work)
-            for match in AICompletionRegex.docDot.matches(in: work, options: [], range: NSRange(0..<processed.length)).reversed() {
-                let replaced = processed.substring(with: match.range)
-                    .replacingOccurrences(of: "⋅", with: " ")
-                    .replacingOccurrences(of: "·", with: " ")
-                processed.replaceCharacters(in: match.range, with: replaced)
-            }
-            work = processed as String
-        }
-
-        // --- 1. PRE-PARSE EXTRACTION ---
-        //
-        // Each extracted region is replaced by a placeholder token built from
-        // private-use Unicode scalars: cmark treats them as ordinary text that
-        // no Markdown syntax (emphasis, tables, fences…) can bind to, and the
-        // AST walk expands them back at the exact leaf position they came from.
-
-        // Pick marker scalars guaranteed absent from the input so real text can
-        // never be mistaken for a token.
-        let markers = PlaceholderMarkers(for: work)
-        // Indices are base-15 digits, so a token's VS digit run can be longer
-        // than one — the scan must consume ALL of it (`+`), or a multi-digit
-        // token would decode as its low digit and strand the rest in the text.
-        let scan = try! NSRegularExpression(
-            pattern: "[\(markers.codeText)\(markers.mathText)\(markers.escapeText)\(markers.typstText)][\(PlaceholderMarkers.vsStartText)-\(PlaceholderMarkers.vsEndText)]+"
-        )
-
-        // 1e (first, so its regions stay whole): hybrid `.note` Typst regions.
-        //     A line whose first non-space character is `#` opens a Typst code
-        //     region that continues while bracket depth is unclosed. cmark's
-        //     indented-code-block rule otherwise shreds any 4+-space-indented
-        //     line following a blank line, breaking multi-line function bodies
-        //     inside the generated `.typ`. Runs before the other extractions so
-        //     backticks, `$math$` and `\escapes` inside Typst code stay intact.
-        var typstRegions: [String] = []
-        if isHybrid {
-            let extracted = Self.extractTypstRegions(work, marker: markers.typst)
-            typstRegions = extracted.regions
-            if !typstRegions.isEmpty {
-                work = extracted.text
-            }
-        }
-
-        // 1a. Fenced + inline code. Must be extracted before math so `$`-pairing
-        //     can never see (or pair) dollars inside code spans.
-        var codeRegions: [String] = []
-        do {
-            let processed = NSMutableString(string: work)
-            let matches = AICompletionRegex.codeBlock.matches(in: work, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                codeRegions.append(processed.substring(with: match.range))
-                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.code, index: codeRegions.count - 1))
-            }
-            work = processed as String
-        }
-
-        // 1b. Math ($$…$$, $…$, \[…\], \(…\)). The LaTeX payload is converted to
-        //     Typst math up front; expansion wraps it in `$ … $`.
-        var mathRegions: [(raw: String, typst: String)] = []
-        do {
-            let processed = NSMutableString(string: work)
-            let matches = AICompletionRegex.mathBlock.matches(in: work, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let raw = processed.substring(with: match.range)
-                let latex = Self.strippedMathDelimiters(raw)
-                mathRegions.append((raw, LyxToTypstConverter.convertLatexMathToTypst(latex)))
-                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.math, index: mathRegions.count - 1))
-            }
-            work = processed as String
-        }
-
-        // 1c. Backslash-escaped punctuation (\$, \#, \{…). cmark consumes these
-        //     escapes, but the old pipeline preserved them verbatim — and the
-        //     `.note` pre-pass (`delimitImproperOperators`) relies on that. Lift
-        //     them out and restore them verbatim at their leaf position.
-        var escapeRegions: [String] = []
-        do {
-            let processed = NSMutableString(string: work)
-            let matches = AICompletionRegex.backslashEscape.matches(in: work, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                escapeRegions.append(processed.substring(with: match.range))
-                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.escape, index: escapeRegions.count - 1))
-            }
-            work = processed as String
-        }
-
-        // 1d. Footnote definitions (`[^id]: text`). cmark would eat these as
-        //     link reference definitions; removing them up front leaves the
-        //     `[^id]` references as literal text that the leaf converter turns
-        //     into `#footnote[…]` carrying the stored body.
-        var footnoteDefs: [String: String] = [:]
-        do {
-            let processed = NSMutableString(string: work)
-            let matches = AICompletionRegex.fnDef.matches(in: work, options: [], range: NSRange(0..<processed.length))
-            for match in matches.reversed() {
-                let id = processed.substring(with: match.range(at: 1))
-                let body = processed.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-                footnoteDefs[id] = body
-                processed.replaceCharacters(in: match.range, with: "")
-            }
-            work = processed as String
-        }
-
-        // --- 2. PARSE ---
-        // Smart punctuation must stay off: it would rewrite "…" into curly
-        // quotes and `--` into dashes, corrupting Typst strings in `.note` files.
-        let document = Document(parsing: work, options: [.disableSmartOpts, .disableSourcePosOpts])
-
-        // --- 3. WALK ---
-        var visitor = TypstMarkupVisitor(
-            isHybrid: isHybrid,
-            codeRegions: codeRegions,
-            mathRegions: mathRegions,
-            escapeRegions: escapeRegions,
-            typstRegions: typstRegions,
-            footnoteDefs: footnoteDefs,
-            markers: markers,
-            placeholderScan: scan
-        )
-        var result = visitor.visit(document)
-
-        // --- 4. POST-PASSES (document level, carried over from the old pipeline) ---
-
-        // Escape Markdown abbreviation definitions (`*[Abbr]: …`).
-        result = Self.replace(AICompletionRegex.markdownAbbr, in: result, template: "\\\\*[$1]:")
-
-        // Un-escape characters inside Typst string parameters — string literals
-        // don't process markup escapes, so `\_` there is a literal backslash.
-        do {
-            let processed = NSMutableString(string: result)
-            for match in AICompletionRegex.stringLiteral.matches(in: result, options: [], range: NSRange(0..<processed.length)).reversed() {
-                let unescaped = processed.substring(with: match.range)
-                    .replacingOccurrences(of: "\\_", with: "_")
-                    .replacingOccurrences(of: "\\*", with: "*")
-                    .replacingOccurrences(of: "\\#", with: "#")
-                    .replacingOccurrences(of: "\\`", with: "`")
-                processed.replaceCharacters(in: match.range, with: unescaped)
-            }
-            result = processed as String
-        }
-
-        return result
-    }
-
-    /// Strips the surrounding math delimiters ($$, $, \[…\], \(…\)) from an
-    /// extracted math region, leaving the raw LaTeX payload.
-    nonisolated private static func strippedMathDelimiters(_ raw: String) -> String {
-        if raw.hasPrefix("$$") && raw.hasSuffix("$$") && raw.count >= 4 {
-            return String(raw.dropFirst(2).dropLast(2))
-        }
-        if raw.hasPrefix("\\[") && raw.hasSuffix("\\]") && raw.count >= 4 {
-            return String(raw.dropFirst(2).dropLast(2))
-        }
-        if raw.hasPrefix("\\(") && raw.hasSuffix("\\)") && raw.count >= 4 {
-            return String(raw.dropFirst(2).dropLast(2))
-        }
-        if raw.hasPrefix("$") && raw.hasSuffix("$") && raw.count >= 2 {
-            return String(raw.dropFirst(1).dropLast(1))
-        }
-        return raw
-    }
-
-    /// Helper to safely apply a precompiled regex replacement.
-    nonisolated private static func replace(_ regex: NSRegularExpression, in s: String, template: String) -> String {
-        regex.stringByReplacingMatches(in: s, options: [], range: NSRange(0..<(s as NSString).length), withTemplate: template)
-    }
-
-    // MARK: - Video Link Helpers
-
-    /// Extracts the 11-character video ID from any common YouTube URL shape:
-    /// `youtube.com/watch?v=ID`, `youtu.be/ID`, `youtube.com/embed/ID`,
-    /// `youtube.com/shorts/ID`, `m.youtube.com/...`, etc.
-    /// Returns nil if `url` doesn't look like a YouTube link.
-    /// True when `line`'s leading `#` is Typst code the hybrid escaper would
-    /// preserve (so the line can open an extraction region): `#let`, `#show`,
-    /// `#{…}`, `#table(`, `#obj.field`. False for ATX headings (`## h2`),
-    /// stray hashes (`# note`) and hashtag-shaped text (`#refs,`) — those the
-    /// hybrid escaper escapes, so they stay Markdown. Mirrors
-    /// `AICompletionRegex.hybridHash`'s punctuation lookahead.
-    nonisolated static func isTypstRegionOpener(_ line: String) -> Bool {
-        let trimmed = line.drop { $0 == " " || $0 == "\t" }
-        guard trimmed.first == "#" else { return false }
-        let after = trimmed.dropFirst()
-        guard let next = after.first else { return false }  // lone "#" → stray
-        if next == " " || next == "\t" || next == "#" { return false }  // stray / ATX
-        guard next.isLetter else { return true }  // `#{`, `#(`, `#3`, `#"` → code
-        // Ident run; inspect what follows it (hybridHash's lookahead set).
-        var rest = after
-        while let c = rest.first, c.isLetter || c.isNumber || c == "_" {
-            rest = rest.dropFirst()
-        }
-        guard let follower = rest.first else { return true }  // `#ident` → kept
-        if ",!?;:".contains(follower) { return false }  // hashtag punctuation
-        if follower == "." {
-            let afterDot = rest.dropFirst().first
-            if afterDot == nil || afterDot == " " || afterDot == "\t" { return false }
-            return true  // `#obj.field` → code
-        }
-        return true
-    }
-
-    /// Finds where live Typst code regions start and end in `text`: a region
-    /// opens where `isTypstRegionOpener` holds and continues while its bracket
-    /// depth is unclosed. Depth counting respects `"strings"` (with `\"`
-    /// escapes), `//` line comments and `/* */` block comments. Fenced code
-    /// blocks are skipped wholesale. Returns inclusive line indices.
-    ///
-    /// Single source of truth for region boundaries: both the hybrid
-    /// sanitizer's region extraction (`extractTypstRegions`) and the `.note`
-    /// operator-delimiting pre-pass (`TypstCompiler.delimitImproperOperators`)
-    /// call it, so they can never disagree about what is live Typst code. Such
-    /// a disagreement escaped `>=` inside a `#show` block (`\>=` is invalid in
-    /// code mode), which cascaded into ~4,000 compile errors — and that
-    /// diagnostic flood is what filled the stderr pipe and froze Save.
-    nonisolated static func typstRegionLineSpans(in text: String) -> [(start: Int, end: Int)] {
-        let lines = text.components(separatedBy: "\n")
-        var spans: [(start: Int, end: Int)] = []
-        var index = 0
-        var insideFence = false
-        let regionLineCap = 500
-
-        while index < lines.count {
-            let line = lines[index]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            // Fenced code blocks are Markdown, not live Typst — skip wholesale.
-            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
-                insideFence.toggle()
-                index += 1
-                continue
-            }
-            guard !insideFence else {
-                index += 1
-                continue
-            }
-
-            // Region opener: the complement of the hybrid escaper's escape set.
-            guard isTypstRegionOpener(line) else {
-                index += 1
-                continue
-            }
-            let hashIndex = line.firstIndex(of: "#")!
-
-            // Walk forward line by line, tracking depth until it returns to zero
-            // (or the 500-line safety cap so one unbalanced brace can't swallow
-            // the document).
-            var depth = 0
-            var inString = false
-            var inBlockComment = false
-            var end = index
-            while true {
-                let lineText = lines[end]
-                var pos = (end == index) ? hashIndex : lineText.startIndex
-                var inLineComment = false
-                while pos < lineText.endIndex {
-                    let ch = lineText[pos]
-                    if inLineComment { break }
-                    if inString {
-                        if ch == "\\" {
-                            pos = lineText.index(after: pos)   // skip escaped char
-                        } else if ch == "\"" {
-                            inString = false
-                        }
-                    } else if inBlockComment {
-                        if ch == "*" {
-                            let next = lineText.index(after: pos)
-                            if next < lineText.endIndex, lineText[next] == "/" {
-                                inBlockComment = false
-                                pos = lineText.index(after: pos)
-                            }
-                        }
-                    } else {
-                        switch ch {
-                        case "\"":
-                            inString = true
-                        case "/":
-                            let next = lineText.index(after: pos)
-                            if next < lineText.endIndex, lineText[next] == "/" {
-                                // Only a comment when it starts the line or
-                                // follows whitespace — `https://` in link text
-                                // must not hide the line's closing brackets
-                                // (an unclosed `[` made the region swallow the
-                                // rest of the note, landing pagebreaks inside
-                                // the link's container).
-                                let isCommentStart = pos == lineText.startIndex
-                                    || lineText[lineText.index(before: pos)] == " "
-                                    || lineText[lineText.index(before: pos)] == "\t"
-                                if isCommentStart {
-                                    inLineComment = true
-                                }
-                            } else if next < lineText.endIndex, lineText[next] == "*" {
-                                inBlockComment = true
-                                pos = lineText.index(after: pos)
-                            }
-                        case "(", "[", "{":
-                            depth += 1
-                        case ")", "]", "}":
-                            depth -= 1
-                        default:
-                            break
-                        }
-                    }
-                    pos = lineText.index(after: pos)
-                }
-                let capped = end + 1 >= min(lines.count, index + regionLineCap)
-                if depth <= 0 || capped {
-                    // A trailing construct opener (`it =>`) whose block brace
-                    // sits on the NEXT line continues the region: Typst itself
-                    // rejects the split (a newline ends the statement) and
-                    // `autoFixBrokenNoteSyntax` joins the two lines before
-                    // compiling, so the region must cover the brace body too.
-                    // Mirrored in `NoteTypstRegions`.
-                    if depth <= 0, !capped, end + 1 < lines.count,
-                       TypstCompiler.isBlockOpenerLine(lines[end].trimmingCharacters(in: .whitespaces)),
-                       lines[end + 1].trimmingCharacters(in: .whitespaces).hasPrefix("{") {
-                        end += 1
-                        continue
-                    }
-                    break
-                }
-                end += 1
-            }
-
-            spans.append((start: index, end: end))
-            // The whole span is settled: continue scanning after its last line.
-            index = end + 1
-        }
-
-        return spans
-    }
-
-    /// Lifts whole Typst code regions out of hybrid `.note` text before the
-    /// CommonMark parse (step 1e). Regions — and their boundaries — come from
-    /// `typstRegionLineSpans`. Extraction is idempotent: re-running on
-    /// already-sanitized text re-extracts the same regions.
-    nonisolated static func extractTypstRegions(_ text: String, marker: Unicode.Scalar) -> (text: String, regions: [String]) {
-        let spans = typstRegionLineSpans(in: text)
-        guard !spans.isEmpty else { return (text, []) }
-
-        var lines = text.components(separatedBy: "\n")
-        var regions: [String] = []
-
-        // Replace spans last-to-first so mutations can't shift the indices of
-        // the spans still to be processed. `position` is the span's document
-        // order, which is the region's placeholder-token index.
-        for (position, span) in spans.enumerated().reversed() {
-            // cmark lazy-continues a column-0 line into a preceding list
-            // item's paragraph, which pulled region tokens (and their
-            // expansions — images, pagebreaks) inside the list container
-            // (typst: "pagebreaks are not allowed inside of containers").
-            // A blank line closes the open block so the token starts fresh.
-            var regionStart = span.start
-            var regionEnd = span.end
-            if regionStart > 0, !lines[regionStart - 1].trimmingCharacters(in: .whitespaces).isEmpty {
-                lines.insert("", at: regionStart)
-                regionStart += 1
-                regionEnd += 1
-            }
-            regions.insert(lines[regionStart...regionEnd].joined(separator: "\n"), at: 0)
-            lines.replaceSubrange(regionStart...regionEnd, with: [PlaceholderMarkers.token(kind: marker, index: position)])
-        }
-
-        return (lines.joined(separator: "\n"), regions)
-    }
-
-    nonisolated static func extractYouTubeID(from url: String) -> String? {
-        // Normalise HTML entities so `&amp;v=` works the same as `&v=`.
-        let cleaned = url.replacingOccurrences(of: "&amp;", with: "&")
-        let nsText = cleaned as NSString
-        guard let match = AICompletionRegex.youtubeID.firstMatch(in: cleaned, options: [], range: NSRange(0..<nsText.length)) else { return nil }
-        return nsText.substring(with: match.range(at: 1))
-    }
-
-    /// Extracts the numeric video ID from a Vimeo URL (`vimeo.com/123456`,
-    /// `player.vimeo.com/video/123456`). Returns nil otherwise.
-    nonisolated static func extractVimeoID(from url: String) -> String? {
-        let nsText = url as NSString
-        guard let match = AICompletionRegex.vimeoID.firstMatch(in: url, options: [], range: NSRange(0..<nsText.length)) else { return nil }
-        return nsText.substring(with: match.range(at: 1))
-    }
-
-    /// Escapes a string for safe inclusion inside a Typst string literal `"..."`.
-    nonisolated static func escapeTypstString(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-         .replacingOccurrences(of: "\"", with: "\\\"")
-    }
-
-    /// Wraps a video URL in a Typst clickable thumbnail embed.
-    /// For YouTube we can derive a free thumbnail from `img.youtube.com`; for other hosts
-    /// we just produce a styled text link with a play marker so the link is still obvious.
-    nonisolated static func videoEmbed(for url: String, alt: String) -> String {
-        let escapedAlt = escapeTypstString(alt)
-        if let ytID = extractYouTubeID(from: url) {
-            let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
-            return "#link(\"\(url)\")[#image(\"\(thumb)\", alt: \"\(escapedAlt)\")]"
-        }
-        // Vimeo doesn't expose a free public thumbnail URL, so render a clearly-clickable
-        // text link instead. The user can swap in their own image if desired.
-        return "#link(\"\(url)\")[▶ \(alt)]"
     }
 }
 
@@ -4356,5 +3077,430 @@ struct TypstMarkupVisitor: MarkupVisitor {
             inner = " " + inner + " "
         }
         return ticks + inner + ticks
+    }
+}
+
+// MARK: - Markdown → Typst conversion (restored from the pre-port service;
+// TypstCompiler, AgentDocumentConverter and AgentCompileService call these.)
+extension AICompletionService {
+    ///
+    /// Pipeline:
+    ///   1. Pre-parse extraction — code spans, math, backslash escapes and
+    ///      footnote definitions are lifted out of the raw text and replaced
+    ///      with placeholder tokens, so cmark can neither mangle nor consume
+    ///      them.
+    ///   2. `Document(parsing:)` — a single CommonMark parse (smart punctuation
+    ///      disabled so Typst strings and `--` survive verbatim).
+    ///   3. `TypstMarkupVisitor` — one traversal serializes the AST into Typst.
+    ///   4. Document-level post-passes carried over from the old pipeline.
+    nonisolated func sanitizeMarkdownToTypst(_ text: String, isHybrid: Bool = false) -> String {
+        var work = text.replacingOccurrences(of: "\r\n", with: "\n")
+
+        // Translate literal documentation space characters (⋅ or ·) at line
+        // starts into real spaces BEFORE parsing — several Markdown fixtures use
+        // them as visible indentation for nested list items, and they must be
+        // real indentation by the time cmark builds the list structure. (The old
+        // pipeline ran this pass before its list-marker rewrites for the same
+        // reason.)
+        do {
+            let processed = NSMutableString(string: work)
+            for match in AICompletionRegex.docDot.matches(in: work, options: [], range: NSRange(0..<processed.length)).reversed() {
+                let replaced = processed.substring(with: match.range)
+                    .replacingOccurrences(of: "⋅", with: " ")
+                    .replacingOccurrences(of: "·", with: " ")
+                processed.replaceCharacters(in: match.range, with: replaced)
+            }
+            work = processed as String
+        }
+
+        // --- 1. PRE-PARSE EXTRACTION ---
+        //
+        // Each extracted region is replaced by a placeholder token built from
+        // private-use Unicode scalars: cmark treats them as ordinary text that
+        // no Markdown syntax (emphasis, tables, fences…) can bind to, and the
+        // AST walk expands them back at the exact leaf position they came from.
+
+        // Pick marker scalars guaranteed absent from the input so real text can
+        // never be mistaken for a token.
+        let markers = PlaceholderMarkers(for: work)
+        // Indices are base-15 digits, so a token's VS digit run can be longer
+        // than one — the scan must consume ALL of it (`+`), or a multi-digit
+        // token would decode as its low digit and strand the rest in the text.
+        let scan = try! NSRegularExpression(
+            pattern: "[\(markers.codeText)\(markers.mathText)\(markers.escapeText)\(markers.typstText)][\(PlaceholderMarkers.vsStartText)-\(PlaceholderMarkers.vsEndText)]+"
+        )
+
+        // 1e (first, so its regions stay whole): hybrid `.note` Typst regions.
+        //     A line whose first non-space character is `#` opens a Typst code
+        //     region that continues while bracket depth is unclosed. cmark's
+        //     indented-code-block rule otherwise shreds any 4+-space-indented
+        //     line following a blank line, breaking multi-line function bodies
+        //     inside the generated `.typ`. Runs before the other extractions so
+        //     backticks, `$math$` and `\escapes` inside Typst code stay intact.
+        var typstRegions: [String] = []
+        if isHybrid {
+            let extracted = Self.extractTypstRegions(work, marker: markers.typst)
+            typstRegions = extracted.regions
+            if !typstRegions.isEmpty {
+                work = extracted.text
+            }
+        }
+
+        // 1a. Fenced + inline code. Must be extracted before math so `$`-pairing
+        //     can never see (or pair) dollars inside code spans.
+        var codeRegions: [String] = []
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.codeBlock.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                codeRegions.append(processed.substring(with: match.range))
+                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.code, index: codeRegions.count - 1))
+            }
+            work = processed as String
+        }
+
+        // 1b. Math ($$…$$, $…$, \[…\], \(…\)). The LaTeX payload is converted to
+        //     Typst math up front; expansion wraps it in `$ … $`.
+        var mathRegions: [(raw: String, typst: String)] = []
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.mathBlock.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let raw = processed.substring(with: match.range)
+                let latex = Self.strippedMathDelimiters(raw)
+                mathRegions.append((raw, LyxToTypstConverter.convertLatexMathToTypst(latex)))
+                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.math, index: mathRegions.count - 1))
+            }
+            work = processed as String
+        }
+
+        // 1c. Backslash-escaped punctuation (\$, \#, \{…). cmark consumes these
+        //     escapes, but the old pipeline preserved them verbatim — and the
+        //     `.note` pre-pass (`delimitImproperOperators`) relies on that. Lift
+        //     them out and restore them verbatim at their leaf position.
+        var escapeRegions: [String] = []
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.backslashEscape.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                escapeRegions.append(processed.substring(with: match.range))
+                processed.replaceCharacters(in: match.range, with: PlaceholderMarkers.token(kind: markers.escape, index: escapeRegions.count - 1))
+            }
+            work = processed as String
+        }
+
+        // 1d. Footnote definitions (`[^id]: text`). cmark would eat these as
+        //     link reference definitions; removing them up front leaves the
+        //     `[^id]` references as literal text that the leaf converter turns
+        //     into `#footnote[…]` carrying the stored body.
+        var footnoteDefs: [String: String] = [:]
+        do {
+            let processed = NSMutableString(string: work)
+            let matches = AICompletionRegex.fnDef.matches(in: work, options: [], range: NSRange(0..<processed.length))
+            for match in matches.reversed() {
+                let id = processed.substring(with: match.range(at: 1))
+                let body = processed.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                footnoteDefs[id] = body
+                processed.replaceCharacters(in: match.range, with: "")
+            }
+            work = processed as String
+        }
+
+        // --- 2. PARSE ---
+        // Smart punctuation must stay off: it would rewrite "…" into curly
+        // quotes and `--` into dashes, corrupting Typst strings in `.note` files.
+        let document = Document(parsing: work, options: [.disableSmartOpts, .disableSourcePosOpts])
+
+        // --- 3. WALK ---
+        var visitor = TypstMarkupVisitor(
+            isHybrid: isHybrid,
+            codeRegions: codeRegions,
+            mathRegions: mathRegions,
+            escapeRegions: escapeRegions,
+            typstRegions: typstRegions,
+            footnoteDefs: footnoteDefs,
+            markers: markers,
+            placeholderScan: scan
+        )
+        var result = visitor.visit(document)
+
+        // --- 4. POST-PASSES (document level, carried over from the old pipeline) ---
+
+        // Escape Markdown abbreviation definitions (`*[Abbr]: …`).
+        result = Self.replace(AICompletionRegex.markdownAbbr, in: result, template: "\\\\*[$1]:")
+
+        // Un-escape characters inside Typst string parameters — string literals
+        // don't process markup escapes, so `\_` there is a literal backslash.
+        do {
+            let processed = NSMutableString(string: result)
+            for match in AICompletionRegex.stringLiteral.matches(in: result, options: [], range: NSRange(0..<processed.length)).reversed() {
+                let unescaped = processed.substring(with: match.range)
+                    .replacingOccurrences(of: "\\_", with: "_")
+                    .replacingOccurrences(of: "\\*", with: "*")
+                    .replacingOccurrences(of: "\\#", with: "#")
+                    .replacingOccurrences(of: "\\`", with: "`")
+                processed.replaceCharacters(in: match.range, with: unescaped)
+            }
+            result = processed as String
+        }
+
+        return result
+    }
+
+    /// Strips the surrounding math delimiters ($$, $, \[…\], \(…\)) from an
+    /// extracted math region, leaving the raw LaTeX payload.
+    nonisolated private static func strippedMathDelimiters(_ raw: String) -> String {
+        if raw.hasPrefix("$$") && raw.hasSuffix("$$") && raw.count >= 4 {
+            return String(raw.dropFirst(2).dropLast(2))
+        }
+        if raw.hasPrefix("\\[") && raw.hasSuffix("\\]") && raw.count >= 4 {
+            return String(raw.dropFirst(2).dropLast(2))
+        }
+        if raw.hasPrefix("\\(") && raw.hasSuffix("\\)") && raw.count >= 4 {
+            return String(raw.dropFirst(2).dropLast(2))
+        }
+        if raw.hasPrefix("$") && raw.hasSuffix("$") && raw.count >= 2 {
+            return String(raw.dropFirst(1).dropLast(1))
+        }
+        return raw
+    }
+
+    /// Helper to safely apply a precompiled regex replacement.
+    nonisolated private static func replace(_ regex: NSRegularExpression, in s: String, template: String) -> String {
+        regex.stringByReplacingMatches(in: s, options: [], range: NSRange(0..<(s as NSString).length), withTemplate: template)
+    }
+
+    // MARK: - Video Link Helpers
+
+    /// Extracts the 11-character video ID from any common YouTube URL shape:
+    /// `youtube.com/watch?v=ID`, `youtu.be/ID`, `youtube.com/embed/ID`,
+    /// `youtube.com/shorts/ID`, `m.youtube.com/...`, etc.
+    /// Returns nil if `url` doesn't look like a YouTube link.
+    /// True when `line`'s leading `#` is Typst code the hybrid escaper would
+    /// preserve (so the line can open an extraction region): `#let`, `#show`,
+    /// `#{…}`, `#table(`, `#obj.field`. False for ATX headings (`## h2`),
+    /// stray hashes (`# note`) and hashtag-shaped text (`#refs,`) — those the
+    /// hybrid escaper escapes, so they stay Markdown. Mirrors
+    /// `AICompletionRegex.hybridHash`'s punctuation lookahead.
+    nonisolated static func isTypstRegionOpener(_ line: String) -> Bool {
+        let trimmed = line.drop { $0 == " " || $0 == "\t" }
+        guard trimmed.first == "#" else { return false }
+        let after = trimmed.dropFirst()
+        guard let next = after.first else { return false }  // lone "#" → stray
+        if next == " " || next == "\t" || next == "#" { return false }  // stray / ATX
+        guard next.isLetter else { return true }  // `#{`, `#(`, `#3`, `#"` → code
+        // Ident run; inspect what follows it (hybridHash's lookahead set).
+        var rest = after
+        while let c = rest.first, c.isLetter || c.isNumber || c == "_" {
+            rest = rest.dropFirst()
+        }
+        guard let follower = rest.first else { return true }  // `#ident` → kept
+        if ",!?;:".contains(follower) { return false }  // hashtag punctuation
+        if follower == "." {
+            let afterDot = rest.dropFirst().first
+            if afterDot == nil || afterDot == " " || afterDot == "\t" { return false }
+            return true  // `#obj.field` → code
+        }
+        return true
+    }
+
+    /// Finds where live Typst code regions start and end in `text`: a region
+    /// opens where `isTypstRegionOpener` holds and continues while its bracket
+    /// depth is unclosed. Depth counting respects `"strings"` (with `\"`
+    /// escapes), `//` line comments and `/* */` block comments. Fenced code
+    /// blocks are skipped wholesale. Returns inclusive line indices.
+    ///
+    /// Single source of truth for region boundaries: both the hybrid
+    /// sanitizer's region extraction (`extractTypstRegions`) and the `.note`
+    /// operator-delimiting pre-pass (`TypstCompiler.delimitImproperOperators`)
+    /// call it, so they can never disagree about what is live Typst code. Such
+    /// a disagreement escaped `>=` inside a `#show` block (`\>=` is invalid in
+    /// code mode), which cascaded into ~4,000 compile errors — and that
+    /// diagnostic flood is what filled the stderr pipe and froze Save.
+    nonisolated static func typstRegionLineSpans(in text: String) -> [(start: Int, end: Int)] {
+        let lines = text.components(separatedBy: "\n")
+        var spans: [(start: Int, end: Int)] = []
+        var index = 0
+        var insideFence = false
+        let regionLineCap = 500
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Fenced code blocks are Markdown, not live Typst — skip wholesale.
+            if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
+                insideFence.toggle()
+                index += 1
+                continue
+            }
+            guard !insideFence else {
+                index += 1
+                continue
+            }
+
+            // Region opener: the complement of the hybrid escaper's escape set.
+            guard isTypstRegionOpener(line) else {
+                index += 1
+                continue
+            }
+            let hashIndex = line.firstIndex(of: "#")!
+
+            // Walk forward line by line, tracking depth until it returns to zero
+            // (or the 500-line safety cap so one unbalanced brace can't swallow
+            // the document).
+            var depth = 0
+            var inString = false
+            var inBlockComment = false
+            var end = index
+            while true {
+                let lineText = lines[end]
+                var pos = (end == index) ? hashIndex : lineText.startIndex
+                var inLineComment = false
+                while pos < lineText.endIndex {
+                    let ch = lineText[pos]
+                    if inLineComment { break }
+                    if inString {
+                        if ch == "\\" {
+                            pos = lineText.index(after: pos)   // skip escaped char
+                        } else if ch == "\"" {
+                            inString = false
+                        }
+                    } else if inBlockComment {
+                        if ch == "*" {
+                            let next = lineText.index(after: pos)
+                            if next < lineText.endIndex, lineText[next] == "/" {
+                                inBlockComment = false
+                                pos = lineText.index(after: pos)
+                            }
+                        }
+                    } else {
+                        switch ch {
+                        case "\"":
+                            inString = true
+                        case "/":
+                            let next = lineText.index(after: pos)
+                            if next < lineText.endIndex, lineText[next] == "/" {
+                                // Only a comment when it starts the line or
+                                // follows whitespace — `https://` in link text
+                                // must not hide the line's closing brackets
+                                // (an unclosed `[` made the region swallow the
+                                // rest of the note, landing pagebreaks inside
+                                // the link's container).
+                                let isCommentStart = pos == lineText.startIndex
+                                    || lineText[lineText.index(before: pos)] == " "
+                                    || lineText[lineText.index(before: pos)] == "\t"
+                                if isCommentStart {
+                                    inLineComment = true
+                                }
+                            } else if next < lineText.endIndex, lineText[next] == "*" {
+                                inBlockComment = true
+                                pos = lineText.index(after: pos)
+                            }
+                        case "(", "[", "{":
+                            depth += 1
+                        case ")", "]", "}":
+                            depth -= 1
+                        default:
+                            break
+                        }
+                    }
+                    pos = lineText.index(after: pos)
+                }
+                let capped = end + 1 >= min(lines.count, index + regionLineCap)
+                if depth <= 0 || capped {
+                    // A trailing construct opener (`it =>`) whose block brace
+                    // sits on the NEXT line continues the region: Typst itself
+                    // rejects the split (a newline ends the statement) and
+                    // `autoFixBrokenNoteSyntax` joins the two lines before
+                    // compiling, so the region must cover the brace body too.
+                    // Mirrored in `NoteTypstRegions`.
+                    if depth <= 0, !capped, end + 1 < lines.count,
+                       TypstCompiler.isBlockOpenerLine(lines[end].trimmingCharacters(in: .whitespaces)),
+                       lines[end + 1].trimmingCharacters(in: .whitespaces).hasPrefix("{") {
+                        end += 1
+                        continue
+                    }
+                    break
+                }
+                end += 1
+            }
+
+            spans.append((start: index, end: end))
+            // The whole span is settled: continue scanning after its last line.
+            index = end + 1
+        }
+
+        return spans
+    }
+
+    /// Lifts whole Typst code regions out of hybrid `.note` text before the
+    /// CommonMark parse (step 1e). Regions — and their boundaries — come from
+    /// `typstRegionLineSpans`. Extraction is idempotent: re-running on
+    /// already-sanitized text re-extracts the same regions.
+    nonisolated static func extractTypstRegions(_ text: String, marker: Unicode.Scalar) -> (text: String, regions: [String]) {
+        let spans = typstRegionLineSpans(in: text)
+        guard !spans.isEmpty else { return (text, []) }
+
+        var lines = text.components(separatedBy: "\n")
+        var regions: [String] = []
+
+        // Replace spans last-to-first so mutations can't shift the indices of
+        // the spans still to be processed. `position` is the span's document
+        // order, which is the region's placeholder-token index.
+        for (position, span) in spans.enumerated().reversed() {
+            // cmark lazy-continues a column-0 line into a preceding list
+            // item's paragraph, which pulled region tokens (and their
+            // expansions — images, pagebreaks) inside the list container
+            // (typst: "pagebreaks are not allowed inside of containers").
+            // A blank line closes the open block so the token starts fresh.
+            var regionStart = span.start
+            var regionEnd = span.end
+            if regionStart > 0, !lines[regionStart - 1].trimmingCharacters(in: .whitespaces).isEmpty {
+                lines.insert("", at: regionStart)
+                regionStart += 1
+                regionEnd += 1
+            }
+            regions.insert(lines[regionStart...regionEnd].joined(separator: "\n"), at: 0)
+            lines.replaceSubrange(regionStart...regionEnd, with: [PlaceholderMarkers.token(kind: marker, index: position)])
+        }
+
+        return (lines.joined(separator: "\n"), regions)
+    }
+
+    nonisolated static func extractYouTubeID(from url: String) -> String? {
+        // Normalise HTML entities so `&amp;v=` works the same as `&v=`.
+        let cleaned = url.replacingOccurrences(of: "&amp;", with: "&")
+        let nsText = cleaned as NSString
+        guard let match = AICompletionRegex.youtubeID.firstMatch(in: cleaned, options: [], range: NSRange(0..<nsText.length)) else { return nil }
+        return nsText.substring(with: match.range(at: 1))
+    }
+
+    /// Extracts the numeric video ID from a Vimeo URL (`vimeo.com/123456`,
+    /// `player.vimeo.com/video/123456`). Returns nil otherwise.
+    nonisolated static func extractVimeoID(from url: String) -> String? {
+        let nsText = url as NSString
+        guard let match = AICompletionRegex.vimeoID.firstMatch(in: url, options: [], range: NSRange(0..<nsText.length)) else { return nil }
+        return nsText.substring(with: match.range(at: 1))
+    }
+
+    /// Escapes a string for safe inclusion inside a Typst string literal `"..."`.
+    nonisolated static func escapeTypstString(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    /// Wraps a video URL in a Typst clickable thumbnail embed.
+    /// For YouTube we can derive a free thumbnail from `img.youtube.com`; for other hosts
+    /// we just produce a styled text link with a play marker so the link is still obvious.
+    nonisolated static func videoEmbed(for url: String, alt: String) -> String {
+        let escapedAlt = escapeTypstString(alt)
+        if let ytID = extractYouTubeID(from: url) {
+            let thumb = "https://img.youtube.com/vi/\(ytID)/hqdefault.jpg"
+            return "#link(\"\(url)\")[#image(\"\(thumb)\", alt: \"\(escapedAlt)\")]"
+        }
+        // Vimeo doesn't expose a free public thumbnail URL, so render a clearly-clickable
+        // text link instead. The user can swap in their own image if desired.
+        return "#link(\"\(url)\")[▶ \(alt)]"
     }
 }

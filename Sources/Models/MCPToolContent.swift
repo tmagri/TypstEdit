@@ -47,8 +47,8 @@ enum MCPToolContent {
     /// Strict base64, tolerating only line breaks and spaces (some servers
     /// wrap at 76 columns). `.ignoreUnknownCharacters` is not used: it turns
     /// a server that sent raw bytes instead of base64 into a silently
-    /// corrupt file rather than an error. The MCP spec requires base64 for
-    /// binary contents, so a reply of raw bytes is a server bug, not data.
+    /// corrupt file rather than an error. DPKVPT did exactly that, by
+    /// assigning raw bytes to the C# SDK's already-base64 `Blob`.
     static func decodeBase64(_ string: String) -> Data? {
         let compact = string.filter { !$0.isWhitespace }
         guard !compact.isEmpty else { return nil }
