@@ -163,6 +163,12 @@ final class AIChatManager: ObservableObject {
         await executeTool(qualifiedName: qualifiedName, argumentsJSON: argumentsJSON)
     }
 
+    /// The batch-eligibility answer, so a test can pin that it reads the
+    /// catalogue under the same scoped key the tools are stored with.
+    func mcpMayRunConcurrentlyForTesting(_ qualifiedName: String) -> Bool {
+        mcpMayRunConcurrently(qualifiedName)
+    }
+
     /// The post-turn auto-proceed decision without a model request, so the
     /// "Stop means stop" rule can be pinned deterministically instead of
     /// waiting out a real countdown.
@@ -3489,7 +3495,10 @@ final class AIChatManager: ObservableObject {
         // enabled count and the Tools menu cannot drift.
         selectedSkillIDs.formIntersection(installed)
 
-        let servers = Set(enabledMCPServers.map(\.config.name))
+        // Keyed by scoped id (`"global:name"`), matching the Tools menu and
+        // `ProjectConfig.enabledMCPServerIDs`. The bare name would select a
+        // global and a project server that share one.
+        let servers = Set(enabledMCPServers.map(\.id))
         if selectedMCPServerIDs.isEmpty {
             selectedMCPServerIDs = servers
         } else {
@@ -3504,7 +3513,11 @@ final class AIChatManager: ObservableObject {
     /// No injected manager (a standalone agent) means no MCP at all.
     var enabledMCPServers: [ScopedMCPServer] {
         guard let mcp else { return [] }
-        return mcp.enabledServers.filter { selectedMCPServerIDs.contains($0.config.name) }
+        // Selected by `ScopedMCPServer.id` (`"global:name"`), the same key the
+        // Tools menu writes and `ProjectConfig.enabledMCPServerIDs` stores: a
+        // global and a project server may share a name, and the bare name
+        // would toggle both at once.
+        return mcp.enabledServers.filter { selectedMCPServerIDs.contains($0.id) }
     }
 
     /// Whether an MCP tool may join a concurrent read-only batch: the
@@ -3518,7 +3531,8 @@ final class AIChatManager: ObservableObject {
         let serverName = qualifiedName.components(separatedBy: "__").first ?? ""
         guard let scoped = mcp.enabledServers.first(where: { $0.config.name == serverName }),
               scoped.config.allowConcurrentCalls else { return false }
-        return mcp.toolsByServerID[serverName]?.first(where: { $0.qualifiedName == qualifiedName })?
+        // `toolsByServerID` is keyed by scoped id, not by the bare name.
+        return mcp.toolsByServerID[scoped.id]?.first(where: { $0.qualifiedName == qualifiedName })?
             .annotations.mayRunConcurrently ?? false
     }
 
@@ -4237,21 +4251,21 @@ final class AIChatManager: ObservableObject {
                 guard let mcp else {
                     throw LocalToolError.invalidArguments("MCP is not available in this conversation (no server manager injected).")
                 }
-                guard var server = mcp.allServers.first(where: { $0.config.name == name })?.config else {
+                guard var scoped = mcp.allServers.first(where: { $0.config.name == name }) else {
                     throw LocalToolError.invalidArguments(
                         "No MCP server named \"\(name)\". Configured: \(mcp.allServers.map(\.config.name).sorted().joined(separator: ", "))"
                     )
                 }
-                guard server.enabled != enabled else {
+                guard scoped.config.enabled != enabled else {
                     output = "\"\(name)\" is already \(enabled ? "enabled" : "disabled")."
                     break
                 }
-                server.enabled = enabled
-                mcp.saveServer(server, scope: .global)
+                scoped.config.enabled = enabled
+                mcp.saveServer(scoped.config, scope: scoped.scope)
                 seedToolSelections()
                 output = "\(enabled ? "Enabled" : "Disabled") MCP server \"\(name)\"."
-                if !enabled, selectedMCPServerIDs.contains(name) {
-                    selectedMCPServerIDs.remove(name)
+                if !enabled {
+                    selectedMCPServerIDs.remove(scoped.id)
                 }
 
             case "mcp__remove_server":
@@ -4267,14 +4281,14 @@ final class AIChatManager: ObservableObject {
                         "No MCP server named \"\(name)\". Configured: \(mcp.allServers.map(\.config.name).sorted().joined(separator: ", "))"
                     )
                 }
-                let toolCount = mcp.toolsByServerID[name]?.count ?? 0
+                let toolCount = mcp.toolsByServerID[server.id]?.count ?? 0
                 let approved = await requestApproval(
                     .mcpServerDelete(name: name, toolCount: toolCount),
                     toolCallName: qualifiedName
                 )
                 guard approved else { throw LocalToolError.approvalDenied }
                 mcp.deleteServer(name: name, scope: server.scope)
-                selectedMCPServerIDs.remove(name)
+                selectedMCPServerIDs.remove(server.id)
                 seedToolSelections()
                 output = "Removed MCP server \"\(server.config.name)\" and its tools."
 
@@ -5488,12 +5502,14 @@ final class AIChatManager: ObservableObject {
         mcp.saveServer(candidate, scope: .global)
         seedToolSelections()
         // Turn it on for this chat right away, so the tools it offers are
-        // usable without another trip to Settings.
-        selectedMCPServerIDs.insert(candidate.name)
-        let tools = mcp.toolsByServerID[candidate.name]?.map(\.name) ?? []
+        // usable without another trip to Settings. Selections are keyed by
+        // scoped id, and `saveServer` above wrote to the global scope.
+        let added = ScopedMCPServer(config: candidate, scope: .global)
+        selectedMCPServerIDs.insert(added.id)
+        let tools = mcp.toolsByServerID[added.id]?.map(\.name) ?? []
         var reply = "\(existing == nil ? "Added" : "Replaced") MCP server \"\(candidate.name)\" (\(candidate.transport.label))."
         if tools.isEmpty {
-            if let error = mcp.lastErrors[candidate.name] {
+            if let error = mcp.lastErrors[added.id] {
                 reply += " It did not start: \(error)"
             } else {
                 reply += " Its tools appear the next time the chat connects."

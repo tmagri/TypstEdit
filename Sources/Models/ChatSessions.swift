@@ -273,17 +273,33 @@ final class AIChatSessionStore: ObservableObject {
         self.context = context
         // All stored properties are set, so self can be shared now — the
         // same wiring `register(_:)` does for every later manager.
-        manager.sessionStore = self
-        manager.context = context
+        attach(manager)
+        managers[manager.id] = manager
+        observeActivity(manager)
     }
 
     /// Ownership + the callback wiring: the manager is kept alive here and
     /// its `persist()` calls land in `chatSessionDidUpdate`.
     private func register(_ manager: AIChatManager) {
-        manager.sessionStore = self
-        manager.context = context
+        attach(manager)
         managers[manager.id] = manager
         observeActivity(manager)
+    }
+
+    /// Hands a conversation its window's collaborators. `mcp` is injected here
+    /// rather than in `AIChatManager.init` because the store owns the
+    /// `ProjectContext`: without it every chat's `mcp` stayed nil, so no MCP
+    /// tool was ever declared and live server calls failed with "MCP is not
+    /// connected in this conversation".
+    ///
+    /// `seedToolSelections()` runs again afterwards because the agent seeds
+    /// its selections in its own init, before this attachment — with no
+    /// manager, that first pass saw zero servers and selected none.
+    private func attach(_ manager: AIChatManager) {
+        manager.sessionStore = self
+        manager.context = context
+        manager.mcp = context?.mcp
+        manager.seedToolSelections()
     }
 
     /// Feeds the session-list activity monitor from one conversation's
