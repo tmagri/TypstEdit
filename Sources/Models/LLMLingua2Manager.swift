@@ -373,8 +373,8 @@ private final class ProgressDownloadDelegate: NSObject, URLSessionDownloadDelega
 
 /// Owns the loaded `MLModel` plus its tokenizer and turns a text into a
 /// compressed text: every word gets a keep/drop score from the model (the
-/// mean keep-minus-drop logit of its subtokens — LLMLingua-2's word-level
-/// scoring), then the shared `TokenSelection` picks the survivors.
+/// logit of its first subtoken — LLMLingua-2's word-level scoring), then the
+/// shared `TokenSelection` picks the survivors.
 ///
 /// Prediction runs serialized on a private queue; the class is marked
 /// `@unchecked Sendable` because the queue *is* the synchronization.
@@ -384,9 +384,8 @@ final class LLMLingua2Engine: @unchecked Sendable {
     private let tokenizer: WordPieceTokenizer
     private let queue = DispatchQueue(label: "com.typstedit.llmlingua2.predict")
 
-    /// BERT's window. The published model is exported with exactly this
-    /// fixed input shape (see Tools/convert_llmlingua2_coreml.py), so every
-    /// call is padded to it; a model with a flexible shape uses it as a cap.
+    /// The model was exported with a fixed sequence length (see
+    /// Tools/convert_llmlingua2_coreml.py), matching BERT's training window.
     private let maxSequenceLength = 512
 
     init(modelAt url: URL, vocabText: String) throws {
@@ -401,6 +400,16 @@ final class LLMLingua2Engine: @unchecked Sendable {
         self.tokenizer = WordPieceTokenizer(vocabText: vocabText)
     }
 
+    /// The model's keep-score for each word, one per element. Exposed so a
+    /// test can prove the model actually discriminates (uniform scores still
+    /// compress, just badly) — the production path only needs the text.
+    ///
+    /// `nil` when the model refused the prediction: the caller then falls
+    /// back to the heuristic filter rather than keeping a prefix.
+    func scores(for words: [String]) -> [Double]? {
+        queue.sync { wordScores(words) }
+    }
+
     /// Synchronous compression — call through `LLMLingua2Compressor` (async)
     /// off the main actor.
     func compress(_ text: String, keepRate: Double, forceTokens: [String], isCode: Bool) -> String {
@@ -412,9 +421,12 @@ final class LLMLingua2Engine: @unchecked Sendable {
             // Word-level filtering means a word is kept or dropped whole —
             // the compressed text stays word-aligned and readable.
             guard let scores = wordScores(segments.map(\.text)) else {
-                // Uniform scores would keep just the first N words, which is
-                // worse than the heuristic filter: use that instead.
-                return HeuristicTokenFilter.compressSync(text, keepRate: keepRate, forceTokens: forceTokens, isCode: isCode)
+                // A model that refuses the prediction must not degrade to
+                // "keep the first N words": use the heuristic filter, which
+                // keeps the informative words instead.
+                return HeuristicTokenFilter.compressSync(
+                    text, keepRate: keepRate, forceTokens: forceTokens, isCode: isCode
+                )
             }
 
             // Code safety: rate floor + forced structural words, exactly
@@ -435,8 +447,7 @@ final class LLMLingua2Engine: @unchecked Sendable {
                 }
                 // In code, a word carrying syntax is never dropped: losing
                 // `#let` or `..n)` breaks the source (an unclosed bracket),
-                // whatever the classifier thinks of it. Model logits span
-                // a wide range, so a fixed score bonus can't guarantee this.
+                // whatever the classifier thinks of it.
                 if isCode && segment.text.contains(where: { "{}()[]#$=;<>\\".contains($0) }) {
                     forced.insert(index)
                 }
@@ -447,17 +458,9 @@ final class LLMLingua2Engine: @unchecked Sendable {
         }
     }
 
-    /// Keep scores for whitespace-separated `words`, for tests and
-    /// diagnostics. `nil` when the model can't run.
-    func scoreWords(_ words: [String]) -> [Double]? {
-        queue.sync { wordScores(words) }
-    }
-
-    /// One keep score per word — the mean keep-minus-drop logit over the
-    /// word's subtokens — or `nil` when any forward pass fails. Words are
-    /// tokenized the way BERT was trained (punctuation split off, then
-    /// WordPiece), so the model sees real text rather than one stand-in
-    /// token per word. Call only on `queue`.
+    /// Scores each **word** (never splitting one across a chunk) against the
+    /// model's fixed input window, and averages its subtokens' keep-vs-drop
+    /// margin. `nil` when any chunk fails, so the caller can fall back.
     private func wordScores(_ words: [String]) -> [Double]? {
         let capacity = maxSequenceLength - 2 // [CLS] … [SEP]
         let tokens: [[Int]] = words.map { word in
@@ -477,7 +480,6 @@ final class LLMLingua2Engine: @unchecked Sendable {
             chunkTokens = 0
             return true
         }
-        // Chunks never split a word, so every word is scored in context.
         for wordTokens in tokens {
             if chunkTokens + wordTokens.count > capacity, !flush() { return nil }
             chunk.append(wordTokens)
@@ -486,18 +488,13 @@ final class LLMLingua2Engine: @unchecked Sendable {
         return flush() ? scores : nil
     }
 
-    /// Feature names the conversion script uses. Matched by name — never
-    /// by sorted position, which would put attention_mask first.
-    private enum Input {
-        static let ids = "input_ids"
-        static let mask = "attention_mask"
-        static let types = "token_type_ids"
-    }
-
-    /// One forward pass over `[CLS] words… [SEP]`, padded to the model's
-    /// fixed length; returns one score per word. Logits are read through
-    /// their strides: Core ML may hand back a non-contiguous buffer (the
-    /// published model's are [16384, 32, 1]), so flat indexing reads garbage.
+    /// One prediction over one chunk of whole words.
+    ///
+    /// The published model is exported with a **fixed** sequence length, so
+    /// every call is padded to the shape the model declares and the padding
+    /// is masked out. Building a variable-length array instead makes
+    /// `prediction(from:)` fail — which is exactly how a silent fallback used
+    /// to look like "compression works, badly".
     private func runChunk(_ words: [[Int]]) -> [Double]? {
         let content = words.flatMap { $0 }
         let real = content.count + 2
@@ -507,7 +504,8 @@ final class LLMLingua2Engine: @unchecked Sendable {
         guard real <= length else { return nil }
 
         let padding = length - real
-        let ids = [tokenizer.clsID] + content + [tokenizer.sepID] + Array(repeating: tokenizer.padID, count: padding)
+        let ids = [tokenizer.clsID] + content + [tokenizer.sepID]
+            + Array(repeating: tokenizer.padID, count: padding)
         let mask = Array(repeating: 1, count: real) + Array(repeating: 0, count: padding)
         let types = Array(repeating: 0, count: length)
 
@@ -546,6 +544,12 @@ final class LLMLingua2Engine: @unchecked Sendable {
         }
     }
 
+    private enum Input {
+        static let ids = "input_ids"
+        static let mask = "attention_mask"
+        static let types = "token_type_ids"
+    }
+
     private static func array(from values: [Int]) throws -> MLMultiArray {
         let array = try MLMultiArray(shape: [1, NSNumber(value: values.count)], dataType: .int32)
         for (index, value) in values.enumerated() {
@@ -554,8 +558,8 @@ final class LLMLingua2Engine: @unchecked Sendable {
         return array
     }
 
-    /// Logged once per launch: a failing model silently degrading every
-    /// compression is how the original shape mismatch went unnoticed.
+    /// Logged once per launch: a model that silently degrades every
+    /// compression is how a shape mismatch goes unnoticed.
     private static let failureLock = NSLock()
     nonisolated(unsafe) private static var didReportFailure = false
     private static func reportFailure(_ message: String) {
@@ -563,7 +567,7 @@ final class LLMLingua2Engine: @unchecked Sendable {
         defer { failureLock.unlock() }
         guard !didReportFailure else { return }
         didReportFailure = true
-        print("[LLMLingua2] Prediction failed, falling back to the heuristic filter: \(message)")
+        NSLog("[LLMLingua2] compression model failed: %@", message)
     }
 }
 

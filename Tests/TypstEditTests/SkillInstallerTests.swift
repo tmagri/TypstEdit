@@ -5,13 +5,13 @@ import XCTest
 final class SkillInstallerTests: XCTestCase {
     func testParsesRepositoryAndTreeLinks() throws {
         let repository = try SkillInstaller.parseSource("owner/repo")
-        XCTAssertEqual(repository.repository, "owner/repo")
+        XCTAssertEqual(repository.slug, "owner/repo")
         XCTAssertNil(repository.subpath)
 
         let tree = try SkillInstaller.parseSource(
             "https://github.com/owner/repo/tree/main/skills/example"
         )
-        XCTAssertEqual(tree.repository, "owner/repo")
+        XCTAssertEqual(tree.slug, "owner/repo")
         XCTAssertEqual(tree.branch, "main")
         XCTAssertEqual(tree.subpath, "skills/example")
     }
@@ -20,7 +20,7 @@ final class SkillInstallerTests: XCTestCase {
         let source = try SkillInstaller.parseSource(
             "npx -y skills add owner/repo --skill example"
         )
-        XCTAssertEqual(source.repository, "owner/repo")
+        XCTAssertEqual(source.slug, "owner/repo")
         XCTAssertEqual(source.skillName, "example")
     }
 

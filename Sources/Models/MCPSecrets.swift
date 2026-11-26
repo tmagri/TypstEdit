@@ -8,7 +8,7 @@ import Foundation
 /// team identifier), so macOS identifies a build by its code hash. A Keychain
 /// item records which builds may read it, and every rebuild is a hash that is
 /// not on that list, so SecurityAgent shows "TypstEdit wants to use your
-/// confidential information stored in com.tmagri.TypstEdit.MCP" again.
+/// confidential information stored in net.troymagri.clippy.MCP" again.
 /// "Always Allow" only adds the hash in front of you; the next build
 /// invalidates it. Nothing the app can pin survives a rebuild without a
 /// Developer ID, and there is no silent read: the request blocks on that

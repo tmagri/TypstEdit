@@ -8,13 +8,13 @@ import XCTest
 @MainActor
 final class SafetyMonitorTests: XCTestCase {
 
-    private func call(_ name: String, args: [String: String] = [:], status: ChatMessage.ToolStatus = .succeeded, output: String = "ok") -> SafetyTrace.ToolCall {
+    private func call(_ name: String, args: [String: String] = [:], status: ChatMessage.ToolStatus = .succeeded, output: String = "ok") -> AgentTrace.ToolCall {
         let json = (try? JSONSerialization.data(withJSONObject: args)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        return SafetyTrace.ToolCall(name: name, argumentsJSON: json, status: status, output: output)
+        return AgentTrace.ToolCall(name: name, argumentsJSON: json, status: status, output: output)
     }
 
-    private func trace(_ calls: [SafetyTrace.ToolCall]) -> SafetyTrace {
-        SafetyTrace(task: "test", toolCalls: calls)
+    private func trace(_ calls: [AgentTrace.ToolCall]) -> AgentTrace {
+        AgentTrace(task: "test", toolCalls: calls)
     }
 
     override func tearDown() {
@@ -530,7 +530,7 @@ final class SafetyMonitorTests: XCTestCase {
         messages.append(earlier)
         messages.append(ChatMessage(role: .user, text: "now do something else"))
 
-        XCTAssertTrue(SafetyTrace.currentTurnTrace(from: messages).toolCalls.isEmpty,
+        XCTAssertTrue(AgentTrace.currentTurnTrace(from: messages).toolCalls.isEmpty,
                       "a .env read in an earlier turn must not veto this turn's YOLO")
     }
 
@@ -541,7 +541,7 @@ final class SafetyMonitorTests: XCTestCase {
         var write = ChatMessage(role: .toolCall)
         write.toolName = "project__write_file"
         write.toolStatus = .succeeded
-        let trace = SafetyTrace.from(messages: [planCall, write])
+        let trace = AgentTrace.from(messages: [planCall, write])
         XCTAssertEqual(trace.toolCalls.count, 1)
         XCTAssertEqual(trace.toolCalls.first?.name, "project__write_file")
     }

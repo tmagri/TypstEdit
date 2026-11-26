@@ -6,7 +6,10 @@ import Foundation
 /// once it fires: a severity, and the stable id the user sees in Settings.
 /// A user-authored rule (Settings → AI Chat → Safety) is the same value,
 /// built from `UserSafetyRule` instead of code.
-struct SafetyRule: Sendable, Identifiable, Equatable {
+///
+/// Clippy names this type `TraceSafetyRule`; TypstEdit's transcript stores it
+/// as `SafetyRule`, so the alias keeps both spellings working.
+struct TraceSafetyRule: Sendable, Identifiable, Equatable {
     enum Severity: String, Codable, CaseIterable, Sendable {
         case watch
         case alert
@@ -49,10 +52,14 @@ struct SafetyRule: Sendable, Identifiable, Equatable {
         self.detector = detector
     }
 
-    static func == (lhs: SafetyRule, rhs: SafetyRule) -> Bool {
+    static func == (lhs: TraceSafetyRule, rhs: TraceSafetyRule) -> Bool {
         lhs.id == rhs.id
     }
 }
+
+/// TypstEdit's spelling of `TraceSafetyRule`, used by the transcript's
+/// `safetyHits` and the Settings cards.
+typealias SafetyRule = TraceSafetyRule
 
 /// A rule the user wrote in Settings. Stored as JSON in `UserDefaults`, so it
 /// has to be `Codable` and forgiving: an unknown matcher or an invalid regex
@@ -120,7 +127,7 @@ struct UserSafetyRule: Codable, Identifiable, Equatable, Sendable {
     /// The rule as a detector, or `nil` when the rule is incomplete enough
     /// that it would match everything (an empty tool name, a blank pattern).
     /// A half-written rule must never silently veto every call.
-    func makeRule() -> SafetyRule? {
+    func makeRule() -> TraceSafetyRule? {
         let trimmedTool = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
         let detector: AttackDetector
@@ -148,7 +155,7 @@ struct UserSafetyRule: Codable, Identifiable, Equatable, Sendable {
         }
 
         let displayTitle = title.isEmpty ? kind.title : title
-        return SafetyRule(
+        return TraceSafetyRule(
             id: id.uuidString,
             title: displayTitle,
             severity: .alert,
@@ -175,13 +182,18 @@ struct UserSafetyRule: Codable, Identifiable, Equatable, Sendable {
 /// call through. A hit never blocks a tool — it only forces the approval
 /// card that YOLO would otherwise have skipped. The human is still the gate.
 ///
-/// Tool names are TypstEdit's own qualified names (`project__`,
-/// `python__`, `git__`), not Clippy's (`reference__`, `web__`).
+/// Tool names are TypstEdit's own qualified names (`project__`, `python__`,
+/// `git__`), not Clippy's (`reference__`, `web__`, `shell__`). The prefixes
+/// are written out rather than read from `LocalToolExecutor`'s namespace
+/// constants: those are main-actor isolated, and the detectors have to be
+/// usable from a nonisolated context.
 ///
-/// The prefixes are written out rather than read from `LocalToolExecutor`'s
-/// and `GitTools`' `namespace` constants: those are main-actor isolated, and
-/// the detectors have to be usable from a nonisolated context. `Self.assertNamespaces`
-/// in the tests checks they still agree.
+/// The credential rules follow
+/// [huggingface/atif-scan](https://github.com/huggingface/atif-scan): a check
+/// is a name, a severity, a pattern, and the *channels* it reads. The
+/// `_both` combinator below is theirs — a pattern that must find two things
+/// anywhere in the text, in either order — because "a network client and a
+/// `.env` file in the same command" is a conjunction, not a substring.
 enum SafetyMonitor {
 
     /// The `project`/`python`/`git` namespace prefixes, spelled out.
@@ -210,8 +222,6 @@ enum SafetyMonitor {
     /// A file name that looks like it holds a credential.
     private static let secretPathPattern =
         "(id_rsa|id_ed25519|\\.ssh|credentials|\\.env$|secret|token|password|\\.pem$|keychain)"
-
-    // MARK: - Credential shapes
 
     /// Every built-in rule's id, for `SafetyMode.enabledBuiltInRuleIDs`.
     static let allBuiltInRuleIDs: [String] = [
@@ -259,11 +269,11 @@ enum SafetyMonitor {
 
     /// Built-in rules. Each one names a combination that a person should see
     /// before it happens, even in YOLO mode.
-    static var builtInRules: [SafetyRule] {
+    static var builtInRules: [TraceSafetyRule] {
         [
             // MARK: Credential exfiltration (the "safe" mode set)
 
-            SafetyRule(
+            TraceSafetyRule(
                 id: "credential_in_script_to_network",
                 title: "A script holds a key and reaches the network",
                 severity: .alert,
@@ -272,7 +282,7 @@ enum SafetyMonitor {
                     "code": .matches(both(networkClientPattern, credentialPattern))
                 ])
             ),
-            SafetyRule(
+            TraceSafetyRule(
                 id: "credential_in_args_to_network",
                 title: "A key sent to a URL",
                 severity: .alert,
@@ -281,7 +291,7 @@ enum SafetyMonitor {
                     "url": .matches(both(credentialPattern, #"\bhttps?://"#))
                 ])
             ),
-            SafetyRule(
+            TraceSafetyRule(
                 id: "credential_file_then_egress",
                 title: "A secret-looking file was read, then the network was reached",
                 severity: .alert,
@@ -302,7 +312,7 @@ enum SafetyMonitor {
                     )
                 )
             ),
-            SafetyRule(
+            TraceSafetyRule(
                 id: "secret_read_then_git_push",
                 title: "Secret-looking file read, then a Git push",
                 severity: .alert,
@@ -317,7 +327,7 @@ enum SafetyMonitor {
                     .toolsCalled([gitPrefix + "git_push"])
                 )
             ),
-            SafetyRule(
+            TraceSafetyRule(
                 id: "private_key_in_write",
                 title: "A private key is being written to a file",
                 severity: .alert,
@@ -326,7 +336,7 @@ enum SafetyMonitor {
                     "content": .matches(#"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"#)
                 ])
             ),
-            SafetyRule(
+            TraceSafetyRule(
                 id: "output_holds_private_key",
                 title: "Tool output looks like a private key",
                 severity: .alert,
@@ -336,7 +346,7 @@ enum SafetyMonitor {
 
             // MARK: Suspicion-only rules (strict mode)
 
-            SafetyRule(
+            TraceSafetyRule(
                 id: "python_then_egress",
                 title: "Script run, then a network call",
                 severity: .watch,
@@ -346,14 +356,14 @@ enum SafetyMonitor {
                     .toolsCalled(networkTools)
                 )
             ),
-            SafetyRule(
+            TraceSafetyRule(
                 id: "overwriting_write_sweep",
                 title: "Sweep of file writes",
                 severity: .watch,
                 explanation: "This turn is writing files over and over. YOLO can automate one write, not a sweep.",
                 detector: .countToolCalls(projectPrefix + "write_file", threshold: 4)
             ),
-            SafetyRule(
+            TraceSafetyRule(
                 id: "repeated_script_runs",
                 title: "Many script runs in one turn",
                 severity: .watch,
@@ -368,7 +378,7 @@ enum SafetyMonitor {
     ///
     /// A user rule runs in `strict` and `safe` alike: it is the person's own
     /// instruction, so no mode may quietly drop it. `off` drops everything.
-    static func rules(mode: SafetyMode, userRules: [UserSafetyRule]) -> [SafetyRule] {
+    static func rules(mode: SafetyMode, userRules: [UserSafetyRule]) -> [TraceSafetyRule] {
         guard mode.isActive else { return [] }
         let enabled = mode.enabledBuiltInRuleIDs
         let builtIns = builtInRules.filter { enabled.contains($0.id) }
@@ -380,16 +390,16 @@ enum SafetyMonitor {
 
     /// The rules that fired for `trace` under `mode`.
     static func hits(
-        for trace: SafetyTrace,
+        for trace: AgentTrace,
         mode: SafetyMode,
         userRules: [UserSafetyRule]
-    ) -> [SafetyRule] {
+    ) -> [TraceSafetyRule] {
         rules(mode: mode, userRules: userRules).filter { $0.detector(trace) }
     }
 
     /// Whether a trace trips any rule, for `mode`.
     static func isFlagged(
-        _ trace: SafetyTrace,
+        _ trace: AgentTrace,
         mode: SafetyMode,
         userRules: [UserSafetyRule]
     ) -> Bool {
@@ -410,7 +420,7 @@ enum SafetyMonitor {
         kind: PendingApprovalKind,
         yoloMode: Bool,
         rules: [PermissionRule],
-        trace: SafetyTrace,
+        trace: AgentTrace,
         userRules: [UserSafetyRule],
         mode: SafetyMode = .safe
     ) -> Bool {

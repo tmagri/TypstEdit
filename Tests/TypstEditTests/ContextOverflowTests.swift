@@ -83,10 +83,12 @@ final class ContextOverflowTests: XCTestCase {
         XCTAssertLessThanOrEqual(steps.last!, 0.4)
     }
 
-    func testFirstShrinkKeepsMostOfTheConversation() {
-        // The first retry aims just below the refused size, so the cache
-        // prefix and most of the transcript survive.
-        XCTAssertGreaterThanOrEqual(AICompletionService.contextOverflowShrinkSteps.first!, 0.8)
+    func testFirstShrinkIsADeliberateCutNotABarelyThereTrim() {
+        // The engine shrinks by a fixed factor per attempt (0.6³ by the third)
+        // rather than a fine ladder: one honest cut, then the transcript
+        // itself is refolded if that was not enough.
+        XCTAssertEqual(AICompletionService.contextOverflowShrinkSteps.first!,
+                       AICompletionService.contextShrinkFactor)
     }
 
     // MARK: - Status line

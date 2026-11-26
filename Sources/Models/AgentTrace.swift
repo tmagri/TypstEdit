@@ -3,18 +3,15 @@ import Foundation
 /// A snapshot of what the agent has done so far in one turn, shaped so that
 /// safety checks can be written as pure predicates.
 ///
-/// Ported from Clippy's `AgentTrace`, itself the port of SafeAgents' `trace`
-/// dictionary (`safeagents/core/src/evaluation/attack_detection.py`): the same
-/// idea — a detector is a function of (task, tool calls, log) — with the
-/// pieces TypstEdit actually produces. Upstream's `bash_returns_true` and
+/// This is the TypstEdit port of SafeAgents' `trace` dictionary
+/// (`safeagents/core/src/evaluation/attack_detection.py`): the same idea — a
+/// detector is a function of (task, tool calls, log) — with the pieces
+/// TypstEdit actually produces. Upstream's `bash_returns_true` and
 /// `bash_output_contains` are deliberately **not** ported: spawning a shell
 /// script as part of a safety mechanism would add an execution path on a
-/// machine where the Python tool is already sandboxed, so the checks stay
+/// machine where `python__run` is already sandboxed, so the checks stay
 /// purely in-process and side-effect free.
-///
-/// Named `SafetyTrace` rather than `AgentTrace` because `AgentTrace` is
-/// already the opt-in JSONL logger in `Sources/Utilities/AgentTrace.swift`.
-struct SafetyTrace: Sendable, Equatable {
+struct AgentTrace: Sendable, Equatable {
 
     /// One recorded tool call, from the transcript.
     struct ToolCall: Sendable, Equatable {
@@ -61,7 +58,7 @@ struct SafetyTrace: Sendable, Equatable {
     /// - Parameters:
     ///   - messages: The conversation, oldest first.
     ///   - task: The request the turn is answering.
-    static func from(messages: [ChatMessage], task: String = "") -> SafetyTrace {
+    static func from(messages: [ChatMessage], task: String = "") -> AgentTrace {
         let planTool = "\(AgentHarnessTools.namespace)__update_plan"
         let calls = messages.compactMap { message -> ToolCall? in
             guard message.role == .toolCall,
@@ -75,7 +72,7 @@ struct SafetyTrace: Sendable, Equatable {
                 output: message.toolOutput ?? ""
             )
         }
-        return SafetyTrace(task: task, toolCalls: calls)
+        return AgentTrace(task: task, toolCalls: calls)
     }
 
     /// The messages belonging to the turn in progress: the newest user message
@@ -91,8 +88,8 @@ struct SafetyTrace: Sendable, Equatable {
 
     /// A trace of the turn in progress. This is what the safety monitor
     /// evaluates — never the whole conversation.
-    static func currentTurnTrace(from messages: [ChatMessage], task: String = "") -> SafetyTrace {
-        SafetyTrace.from(messages: currentTurn(from: messages), task: task)
+    static func currentTurnTrace(from messages: [ChatMessage], task: String = "") -> AgentTrace {
+        AgentTrace.from(messages: currentTurn(from: messages), task: task)
     }
 
     /// The trace folded into the flat text an LLM judge reads. One line per
@@ -128,19 +125,19 @@ struct SafetyTrace: Sendable, Equatable {
 
 // MARK: - Detectors
 
-/// A named predicate over a `SafetyTrace`. Mirrors SafeAgents'
+/// A named predicate over an `AgentTrace`. Mirrors SafeAgents'
 /// `AttackDetector` type alias, plus a label so a hit can say *which* check
 /// fired instead of just "attack detected".
 struct AttackDetector: Sendable {
     let label: String
-    let test: @Sendable (SafetyTrace) -> Bool
+    let test: @Sendable (AgentTrace) -> Bool
 
-    init(_ label: String, _ test: @escaping @Sendable (SafetyTrace) -> Bool) {
+    init(_ label: String, _ test: @escaping @Sendable (AgentTrace) -> Bool) {
         self.label = label
         self.test = test
     }
 
-    func callAsFunction(_ trace: SafetyTrace) -> Bool { test(trace) }
+    func callAsFunction(_ trace: AgentTrace) -> Bool { test(trace) }
 }
 
 /// A value that a tool argument is checked against. Upstream accepts a Python

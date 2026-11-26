@@ -29,12 +29,22 @@ final class CalculatorToolTests: XCTestCase {
     }
 
     func testSubagentToolsIncludeMathButNoWritersOrRunner() {
-        let names = AIChatManager.subagentReadOnlyToolNames
-        XCTAssertTrue(names.contains(CalculatorTool.name))
-        XCTAssertFalse(names.contains("write_file"))
-        XCTAssertFalse(names.contains("edit_file"))
-        XCTAssertFalse(names.contains("run"))
-        XCTAssertFalse(names.contains("delegate_task"))
+        // The calculator is its own namespace, allowed by name in
+        // `validateToolAccess` — and it must not be reachable through any
+        // other namespace's allowlist.
+        XCTAssertNoThrow(try AIChatManager.validateToolAccess(
+            qualifiedName: "\(CalculatorTool.namespace)__\(CalculatorTool.name)", isSubagent: true
+        ), "a subagent may do math")
+        XCTAssertFalse(AIChatManager.subagentReadOnlyProjectToolNames.contains("run"))
+        for allowed in [AIChatManager.subagentReadOnlyProjectToolNames,
+                        AIChatManager.subagentReadOnlyFileToolNames,
+                        AIChatManager.subagentReadOnlyGitToolNames,
+                        AIChatManager.subagentReadOnlyAgentToolNames] {
+            XCTAssertFalse(allowed.contains("write_file"))
+            XCTAssertFalse(allowed.contains("edit_file"))
+            XCTAssertFalse(allowed.contains("run"))
+            XCTAssertFalse(allowed.contains("delegate_task"))
+        }
     }
 
     func testEvaluationRequiresNoApprovalAndReturnsResult() async throws {

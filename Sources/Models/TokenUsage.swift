@@ -11,10 +11,8 @@ import Foundation
 ///     `output_tokens` **excludes** thinking budget.
 ///
 /// Normalizing here means the rest of the app can add up "how big was the
-/// prompt" without caring which provider answered. `promptTotal` is the
-/// number that matters for the context estimate; `input` is the uncached
-/// part, which is what a cost calculation bills at the full rate.
-struct TokenUsage: Equatable {
+/// prompt" without caring which provider answered.
+struct TokenUsage: Codable, Equatable {
     /// Uncached input tokens.
     var input: Int = 0
     /// Visible output tokens (reasoning excluded).
@@ -25,13 +23,21 @@ struct TokenUsage: Equatable {
     var cacheRead: Int = 0
     /// Input tokens written to the provider's prompt cache.
     var cacheWrite: Int = 0
-    /// What the provider says it charged, when it says so (OpenRouter does).
-    /// `nil` means "unknown" — distinct from a reported zero, which is
-    /// authoritative.
-    var reportedCostUSD: Double?
+    /// What the response cost, in dollars. `nil` means "unknown" — distinct
+    /// from a reported zero. A provider-reported figure (OpenRouter sends
+    /// `usage.cost`) wins over an estimate, and a **reported zero stays
+    /// zero**: a subscription or flat-fee endpoint really charged nothing
+    /// for the request, and showing a catalog estimate instead would
+    /// describe a plan the user is not on. `isCostEstimated` says which
+    /// kind of figure this is, so the interface can show "≈" for one.
+    var costUSD: Double?
+    /// True when `costUSD` was computed from the saved model's pricing
+    /// rather than reported by the provider. A sum is estimated when any
+    /// part of it is.
+    var isCostEstimated: Bool = false
 
     /// Every input token the model was sent, cached or not. This is the size
-    /// of the prompt, which is what a context estimate wants.
+    /// of the prompt.
     var promptTotal: Int { input + cacheRead + cacheWrite }
     /// Every output token, visible or hidden.
     var outputTotal: Int { output + reasoning }
@@ -49,9 +55,10 @@ struct TokenUsage: Equatable {
         lhs.reasoning += rhs.reasoning
         lhs.cacheRead += rhs.cacheRead
         lhs.cacheWrite += rhs.cacheWrite
-        if let cost = rhs.reportedCostUSD {
-            lhs.reportedCostUSD = (lhs.reportedCostUSD ?? 0) + cost
+        if let cost = rhs.costUSD {
+            lhs.costUSD = (lhs.costUSD ?? 0) + cost
         }
+        lhs.isCostEstimated = lhs.isCostEstimated || rhs.isCostEstimated
     }
 
     /// Parses an OpenAI-compatible `usage` object.
@@ -73,7 +80,7 @@ struct TokenUsage: Equatable {
             reasoning: max(0, reasoning),
             cacheRead: cachedPart,
             cacheWrite: 0,
-            reportedCostUSD: doubleValue(usage["cost"])
+            costUSD: doubleValue(usage["cost"])
         )
         // Some servers report only one of the two; keep whatever is there so
         // an anchor is still possible.
@@ -93,7 +100,7 @@ struct TokenUsage: Equatable {
             reasoning: 0,
             cacheRead: max(0, intValue(usage["cache_read_input_tokens"]) ?? 0),
             cacheWrite: max(0, intValue(usage["cache_creation_input_tokens"]) ?? 0),
-            reportedCostUSD: doubleValue(usage["cost"])
+            costUSD: doubleValue(usage["cost"])
         )
         return result.isEmpty ? nil : result
     }
@@ -115,7 +122,97 @@ struct TokenUsage: Equatable {
     }
 }
 
-/// What a model charges, in USD per million tokens.
+/// What one model costs, per million tokens, in dollars.
+///
+/// Shaped after OpenCode's catalog pricing
+/// (`packages/core/src/session/usage.ts`, rates from models.dev): when an
+/// endpoint says nothing about what it charged, the rate list prices the
+/// request. TypstEdit keeps the list on the saved model (Settings → Models →
+/// Pricing, persisted as `ModelPricing` — see the conversion below) rather
+/// than fetching a catalog, so the figure exists offline and the user can
+/// correct a stale rate. A rate left unset contributes nothing — OpenCode's
+/// `finite()` does the same to a missing rate.
+struct TokenPricing: Codable, Equatable, Hashable {
+    var inputUSDPerMillion: Double?
+    var outputUSDPerMillion: Double?
+    var cacheReadUSDPerMillion: Double?
+    var cacheWriteUSDPerMillion: Double?
+
+    var isEmpty: Bool {
+        inputUSDPerMillion == nil && outputUSDPerMillion == nil
+            && cacheReadUSDPerMillion == nil && cacheWriteUSDPerMillion == nil
+    }
+
+    /// What `usage` would have cost at these rates, or `nil` when no rate is
+    /// set at all. Hidden reasoning is billed at the output rate, matching
+    /// the providers' own price pages.
+    func cost(for usage: TokenUsage) -> Double? {
+        guard !isEmpty else { return nil }
+        let perMillion = Double(usage.input) * (inputUSDPerMillion ?? 0)
+            + Double(usage.outputTotal) * (outputUSDPerMillion ?? 0)
+            + Double(usage.cacheRead) * (cacheReadUSDPerMillion ?? 0)
+            + Double(usage.cacheWrite) * (cacheWriteUSDPerMillion ?? 0)
+        return perMillion / 1_000_000
+    }
+}
+
+/// Dollar amounts as every TypstEdit surface writes them.
+///
+/// One formatter, not a `String(format:)` per call site: a conversation's
+/// cost usually sits well under a dollar, where two decimals would show
+/// `$0.00` for real money, so the decimal count follows the magnitude.
+/// Cached per locale — the Settings line renders this in `body`, and
+/// building a `NumberFormatter` on every layout pass is the same trap as
+/// re-chunking a transcript inside a menu body.
+enum CostFormatter {
+    static func usd(_ value: Double, locale: Locale = .current) -> String {
+        // A reported zero is a real answer ("this request was covered"),
+        // so it reads as money rather than collapsing to "$0".
+        let decimals: (min: Int, max: Int)
+        switch value {
+        case 0: decimals = (2, 2)
+        case ..<0.01: decimals = (0, 6)
+        case ..<1: decimals = (2, 4)
+        default: decimals = (2, 2)
+        }
+        return formatter(locale: locale, decimals: decimals).string(from: NSNumber(value: value)) ?? "$\(value)"
+    }
+
+    private static let lock = NSLock()
+    // Guarded by `lock`; `nonisolated(unsafe)` is the compiler's own
+    // suggestion for state behind an external lock.
+    nonisolated(unsafe) private static var cache: [String: NumberFormatter] = [:]
+
+    private static func formatter(locale: Locale, decimals: (min: Int, max: Int)) -> NumberFormatter {
+        let key = "\(locale.identifier)|\(decimals.min)|\(decimals.max)"
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached = cache[key] { return cached }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = "USD"
+        formatter.locale = locale
+        formatter.minimumFractionDigits = decimals.min
+        formatter.maximumFractionDigits = decimals.max
+        cache[key] = formatter
+        return formatter
+    }
+}
+
+/// Token counts as every TypstEdit surface writes them.
+enum TokenLabel {
+    /// `0.8k`-style label that never collapses a small non-zero value to `0k`.
+    static func text(_ tokens: Int) -> String {
+        if tokens < 1_000 {
+            return "\(max(0, tokens))"
+        }
+        let thousands = Double(tokens) / 1_000
+        return thousands < 10 ? String(format: "%.1fk", thousands) : "\(Int(thousands.rounded()))k"
+    }
+}
+
+/// What a saved model charges, in USD per million tokens — the persisted
+/// form (Settings → Models → Pricing, stored on `AIModelProfile`).
 ///
 /// Some models bill by the size of the context they were sent — a long-context
 /// tier costs more per token than a short one — so the tier is a separate
@@ -150,6 +247,19 @@ struct ModelPricing: Equatable, Codable, Hashable {
             + Double(usage.output + usage.reasoning) * output
             + Double(usage.cacheRead) * cacheReadPerMillion
             + Double(usage.cacheWrite) * cacheWritePerMillion) / 1_000_000
+    }
+
+    /// The flat-rate view the cost estimator consumes. The tier prices are
+    /// dropped: `TokenPricing.cost(for:)` prices without a context tier,
+    /// which is the right estimate while the request is small and an
+    /// underestimate once it is not — the "≈" marker covers the rest.
+    var tokenPricing: TokenPricing {
+        TokenPricing(
+            inputUSDPerMillion: inputPerMillion,
+            outputUSDPerMillion: outputPerMillion,
+            cacheReadUSDPerMillion: cacheReadPerMillion,
+            cacheWriteUSDPerMillion: cacheWritePerMillion
+        )
     }
 }
 

@@ -142,6 +142,29 @@ enum ChatImageLoader {
         clipboardImageTypes.lazy.compactMap { pasteboard.data(forType: $0) }.first
     }
 
+    /// Whether a paste from this pasteboard is worth offering at all.
+    ///
+    /// This is not the same question as "is there an image", and it exists
+    /// because `NSTextView` answers the *other* question when it validates
+    /// `paste:`. A macOS screenshot puts a PNG **and no string** on the
+    /// clipboard, so AppKit decides a plain text view has nothing to paste:
+    /// Edit ▸ Paste greys out, and ⌘V is swallowed before it ever reaches the
+    /// view's `paste(_:)` override. Measured on this Mac: `types` were
+    /// `public.png`, `Apple PNG pasteboard type`, `public.tiff`,
+    /// `NeXT TIFF v4.0 pasteboard type`, `string(forType:)` was nil, and
+    /// `validateUserInterfaceItem` returned false. That is why a pasted
+    /// screenshot did nothing, while a file copied in Finder — which *does*
+    /// put a URL AppKit accepts — worked.
+    ///
+    /// Offered means: text (the text view's own paste), a file URL (the
+    /// Finder case), or bytes in one of our image encodings.
+    static func pasteIsWorthOffering(from pasteboard: NSPasteboard) -> Bool {
+        if pasteboard.string(forType: .string)?.isEmpty == false { return true }
+        let types = Set(pasteboard.types ?? [])
+        if types.contains(.fileURL) { return true }
+        return clipboardImageTypes.contains { types.contains($0) }
+    }
+
     /// What `fit` did with the images it was given, for a short inline notice.
     struct FitResult: Equatable {
         var accepted: [ChatImage] = []

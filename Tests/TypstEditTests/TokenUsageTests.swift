@@ -49,7 +49,8 @@ final class TokenUsageTests: XCTestCase {
 
     func testOpenAIReportedCostIsKept() {
         let usage = TokenUsage.fromOpenAI(["prompt_tokens": 5, "completion_tokens": 5, "cost": 0.0123])
-        XCTAssertEqual(usage?.reportedCostUSD ?? -1, 0.0123, accuracy: 1e-9)
+        XCTAssertEqual(usage?.costUSD ?? -1, 0.0123, accuracy: 1e-9)
+        XCTAssertEqual(usage?.isCostEstimated, false, "a provider-reported figure is not an estimate")
     }
 
     // MARK: - Anthropic shape
@@ -110,16 +111,16 @@ final class TokenUsageTests: XCTestCase {
         XCTAssertEqual(total.cacheWrite, 55)
     }
 
-    func testAccumulationSumsReportedCostsButStaysNilWhenNoneReported() {
+    func testAccumulationSumsCostsButStaysNilWhenNoneReported() {
         var total = TokenUsage()
         total += TokenUsage(input: 1)
-        XCTAssertNil(total.reportedCostUSD)
+        XCTAssertNil(total.costUSD)
 
-        total += TokenUsage(input: 1, reportedCostUSD: 0.5)
-        XCTAssertEqual(total.reportedCostUSD ?? -1, 0.5, accuracy: 1e-9)
+        total += TokenUsage(input: 1, costUSD: 0.5)
+        XCTAssertEqual(total.costUSD ?? -1, 0.5, accuracy: 1e-9)
 
-        total += TokenUsage(input: 1, reportedCostUSD: 0.25)
-        XCTAssertEqual(total.reportedCostUSD ?? -1, 0.75, accuracy: 1e-9)
+        total += TokenUsage(input: 1, costUSD: 0.25)
+        XCTAssertEqual(total.costUSD ?? -1, 0.75, accuracy: 1e-9)
     }
 
     // MARK: - Pricing

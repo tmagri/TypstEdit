@@ -65,9 +65,10 @@ enum ScreenOCR {
     /// Runs `screencapture` and returns the image it wrote. Interactive mode
     /// (`-i`) shows the system crosshair; `-x` silences the shutter sound.
     ///
-    /// The app hides for the picture: its own windows are hidden for the grab
-    /// (they would otherwise end up in the shot and sit under the crosshair)
-    /// and brought back once the pixels are in hand — or the user cancelled.
+    /// TypstEdit hides for the picture: the app's own windows are hidden for
+    /// the grab (they would otherwise end up in the shot and sit under the
+    /// crosshair) and brought back once the pixels are in hand — or the
+    /// user cancelled.
     @MainActor
     static func capture(mode: CaptureMode) async throws -> CGImage {
         let url = FileManager.default.temporaryDirectory

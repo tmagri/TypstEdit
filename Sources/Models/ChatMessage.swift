@@ -3,6 +3,12 @@ import Foundation
 /// One entry in an AI Chat transcript. Persisted verbatim (see
 /// `AIChatManager`), so this is deliberately a plain `Codable` value rather
 /// than something tied to the live tool-calling loop's internal types.
+///
+/// The engine was ported from Clippy, so this is Clippy's shape merged with
+/// TypstEdit's: the fields both engines had are identical, TypstEdit's
+/// multi-file `fileChanges` replaced Clippy's single `fileChange`, and the
+/// mascot-only `animationKey` is kept as an (unused) field so old transcripts
+/// keep decoding.
 struct ChatMessage: Identifiable, Codable, Equatable {
     enum Role: String, Codable {
         case user
@@ -10,6 +16,13 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         /// A tool the model called mid-conversation. Rendered as a compact
         /// activity line rather than a normal chat bubble.
         case toolCall
+        /// A screen capture that was OCR'd. Rendered as its own card with the
+        /// recognized text and a thumbnail, so the source of an answer is
+        /// never ambiguous.
+        case screenCapture
+        /// A calculator run — a result, or a drawn chart. Rendered with the
+        /// calculator's own styling so math reads like math.
+        case calculation
     }
 
     enum ToolStatus: String, Codable {
@@ -41,13 +54,6 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     /// before images existed still decode — a missing key reads as "none".
     var images: [ChatImage]? = nil
 
-    /// The attachments, without the optional. Read-only convenience for the
-    /// places that don't care whether the field was ever written.
-    var attachments: [ChatImage] { images ?? [] }
-
-    /// True when this row carries anything an image-capable model will read.
-    var hasImages: Bool { !(images?.isEmpty ?? true) }
-
     /// Captured reasoning/"thinking" content, when the model and provider
     /// expose it (OpenAI-compatible `reasoning_content`/`reasoning` fields,
     /// or inline `<think>`/`<thought>` tags some local/open models emit).
@@ -77,9 +83,146 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     /// Set when this call changed project files on disk: the metadata that
     /// drives the transcript's "Undo file changes" (the pre-images themselves
     /// live in `FileSnapshotStore`). Nil for calls that wrote nothing; a
-    /// batch patch lists every file it touched.
+    /// batch patch lists every file it touched. (Clippy kept a single
+    /// `fileChange` here; TypstEdit's list covers `apply_patch` batches.)
     var fileChanges: [FileChangeRecord]? = nil
+
+    /// Set on `.screenCapture` rows: how sure Vision was, 0…1.
+    var ocrConfidence: Float? = nil
+
+    /// Set on `.calculation` rows that produced a chart: the sampled curve.
+    var plot: CalculatorPlotSpec? = nil
+
+    /// The token and cost accounting for the turn that produced this reply,
+    /// stamped on the turn's final `.assistant` row. A tool-calling turn
+    /// makes several provider requests, so this is the turn's sum, not the
+    /// last request's. Re-entering a conversation rebuilds its running
+    /// totals by summing these rows (`AIChatManager.usageTotal(in:)`), which
+    /// is why the stamp belongs on the message and not in a side file: the
+    /// transcript is the record. `nil` on older rows and on every other
+    /// row kind.
+    var usage: TokenUsage? = nil
+
+    /// The message's attachments, empty when it has none. Callers almost
+    /// always want the array, not the optional.
+    var imageAttachments: [ChatImage] { images ?? [] }
+
+    /// Whether this message carries any attachments.
+    var hasImages: Bool { !imageAttachments.isEmpty }
+
+    /// How the message reads in the folded transcript prompt. Attachment rows
+    /// keep a marker so an image-only message doesn't fold into a bare
+    /// `[USER]`, and the model still knows something was shown earlier in the
+    /// conversation (its pixels ride along only on recent turns — see
+    /// `retainedImages`).
+    var foldedText: String {
+        guard hasImages else { return text }
+        let marker = imageAttachments.count == 1
+            ? "[image attached]"
+            : "[\(imageAttachments.count) images attached]"
+        return text.isEmpty ? marker : "\(marker)\n\(text)"
+    }
+
+    /// One line describing the call for the transcript and the prompt.
+    var toolLabel: String {
+        let qualified = toolName ?? "tool"
+        let name = qualified.range(of: "__").map { String(qualified[$0.upperBound...]) } ?? qualified
+        return name
+    }
+
+    /// The tool's arguments, cut to what a one-line row can show. A write
+    /// call's arguments carry the whole file; a one-line `Text` still lays
+    /// out every character of what it is given, so the row gets a prefix.
+    var toolArgumentsPreview: String? {
+        guard let arguments = toolArgumentsJSON else { return nil }
+        // `prefix` and an index check, not `count`: counting walks the
+        // whole string.
+        let head = arguments.prefix(200)
+        return head.endIndex == arguments.endIndex ? arguments : String(head) + "…"
+    }
+
+    /// The one line of a tool's output the transcript shows under its call.
+    ///
+    /// Computed here, not in the row view: a transcript can hold hundreds of
+    /// tool calls whose outputs run to tens of kilobytes each, and the row
+    /// re-renders with the whole window. Splitting and prefixing in `body`
+    /// meant copying megabytes of output per redraw; this does the work once
+    /// and keeps the result to 120 characters.
+    var toolOutputPreview: String? {
+        guard let output = toolOutput, !output.isEmpty else { return nil }
+        // `prefix` on the collection, before any split: finding the first line
+        // never needs to touch the rest of a 24 KB page.
+        let firstLine = output.prefix { $0 != "\n" }.prefix(120)
+        return "→ " + firstLine
+    }
 }
+
+/// A saved conversation — one JSON file on disk, plus a summary in the
+/// session index. This is Clippy's `ChatSession` unified with TypstEdit's
+/// `ChatSessionRecord`: every TypstEdit field is kept under its persisted
+/// name (`titleIsAutoGenerated`, `goal`) so existing saved chats decode, and
+/// the new-engine fields (`caseFile`, checkpoints, model pin, strategy) are
+/// optional so old files decode without them.
+struct ChatSession: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var title: String = "New chat"
+    var createdAt: Date = Date()
+    var updatedAt: Date = Date()
+    var messages: [ChatMessage] = []
+    /// True while the title came from the fallback/LLM naming rather than a
+    /// user rename — only auto-generated titles get replaced by the model.
+    /// (Clippy stored the inverse as `titleIsCustom`; TypstEdit's on-disk
+    /// name is kept.)
+    var titleIsAutoGenerated: Bool = true
+    /// The task checklist as last shown in the panel (the `update_plan`
+    /// tool). Stored so a plan survives a restart; `nil` in older files,
+    /// where it is rebuilt from the last `update_plan` row instead.
+    var plan: [AgentPlanItem]? = nil
+    /// Whether the conversation is in Plan mode (read-only tools only).
+    /// `nil` in older files, decoded as off — a mode the user switched on
+    /// should survive a restart, the same way the checklist does.
+    var planMode: Bool? = nil
+    /// The armed goal loop of the previous engine, if one was running when
+    /// the chat was saved. Kept for decoding old transcripts; the new engine
+    /// drives continuations through auto-proceed and the case file instead.
+    var goal: ChatGoal? = nil
+    /// The case file of a goal-directed chat (see `CaseFile`): the ratified
+    /// charter, the standard, rulings, issues, claims and phase. `nil` for an
+    /// ordinary chat and in older files.
+    var caseFile: CaseFile? = nil
+    /// Saved moments of the case, oldest first (see `CaseCheckpoint`).
+    var caseCheckpoints: [CaseCheckpoint]? = nil
+    /// The user's labels for this conversation ("Work", "Writing", "🎮").
+    /// Optional so chats saved before labels existed still decode. Normalized
+    /// through `ChatLabel.normalize` when set, so writing a duplicate or a
+    /// blank label is a no-op rather than a second chip.
+    var labels: [String]? = nil
+    /// The saved model profile this conversation uses, pinned at the moment
+    /// the user picked one in the model menu. The outer optional is the
+    /// stored key (`nil` = the field was never written); the inner one is the
+    /// user's explicit "no pin". `nil` = follow the app's chat-defaults
+    /// selection, exactly how a chat behaved before the field existed.
+    var modelProfileID: UUID?? = nil
+    /// How this conversation should be worked (`StrategicStance.id`), from
+    /// the picker beside the composer. `nil` reads as `general`, which is
+    /// exactly how older chats behaved. Per conversation, like the model pin
+    /// and Plan mode: a critique in one chat must not turn another chat
+    /// adversarial.
+    var strategyID: String? = nil
+    /// The reference folder this conversation reads, when it has picked one
+    /// of its own. Unused in TypstEdit for now (the project is the folder);
+    /// kept because the ported read machinery reads it.
+    var referenceFolderPath: String? = nil
+
+    /// The labels as the UI reads them: never nil, already cleaned.
+    var labelList: [String] { labels ?? [] }
+}
+
+/// The on-disk form is the same value — the historical TypstEdit name for
+/// the persisted conversation (one JSON file per session, next to an
+/// `index.json` listing the summaries). The alias keeps the session store
+/// and its import/export code reading exactly as before.
+typealias ChatSessionRecord = ChatSession
 
 /// Typed actions keep publishing approval independent of the displayed label.
 enum GitNetworkAction: String, CaseIterable {
@@ -114,6 +257,11 @@ enum SudoAuthentication: Equatable {
 
 /// What's being asked of the user before a tool call is allowed to proceed.
 /// The chat's agentic loop blocks on this — see `AIChatManager.pendingApproval`.
+///
+/// TypstEdit's editor-tool kinds are merged with the new engine's
+/// machine-tool kinds (`runShell`, skill authoring, MCP authoring). The
+/// macOS personal-data kinds (mail, notes, calendar, shortcuts, scheduled
+/// tasks) are not ported — those tools don't exist here.
 enum PendingApprovalKind {
     case fileWrite(relativePath: String, oldContent: String, newContent: String, isNewFile: Bool)
     /// A precise `edit_file` replacement: the snippets that matched, not the
@@ -132,6 +280,16 @@ enum PendingApprovalKind {
     /// elevated run (probed before the card is shown), so the card never
     /// promises a password dialog that won't appear.
     case runPython(code: String, wantsElevation: Bool, sudoAuthentication: SudoAuthentication = .passwordDialog)
+    /// A shell tool run (`shell__run`). `command` is the command line exactly
+    /// as the model wrote it, which is also what the approval card shows and
+    /// what a saved permission rule matches.
+    ///
+    /// Unlike a script, a command line is opaque: `ls` and `rm -rf ~/…` are
+    /// the same length on a card. That is why a shell run never auto-approves
+    /// in YOLO mode (`canAutoApprove` refuses it), and why the only way to
+    /// skip the card is a saved allow rule for that exact command — which the
+    /// user wrote down themselves.
+    case runShell(command: String)
     /// A `web_fetch` request. The full URL is shown for approval — worth
     /// glancing at the query string, since a fetch is also a request the
     /// destination server sees (a compromised page could try to exfiltrate
@@ -166,16 +324,35 @@ enum PendingApprovalKind {
     /// A network Git action (`git_fetch`/`git_pull`/`git_push`). Shown with
     /// the branch and upstream so a push is never a surprise.
     case gitNetwork(operation: GitNetworkAction, branch: String, upstream: String?)
-    /// A screen capture read by OCR (the `screen__look` tool). Always needs a
-    /// human, YOLO included: pointing the agent's eyes at the desktop is a
+    /// A screen capture read by OCR (the `project__look` tool). Always needs
+    /// a human, YOLO included: pointing the agent's eyes at the desktop is a
     /// privacy decision, not a file edit.
     case screenCapture(scope: String, purpose: String)
+    /// Creating a new skill (`skill__create`). The full SKILL.md is shown,
+    /// like a project-file write: it is the same class of change — a new
+    /// text file in a folder the user owns — so YOLO treats it alike.
+    case skillCreate(name: String, description: String, bodyPreview: String)
+    /// Writing a file inside a skill's folder (`skill__add_attachment` or a
+    /// `skill__update`'s SKILL.md rewrite). `isSKILLFile` says whether the
+    /// shown content is the whole SKILL.md or an attachment.
+    case skillWriteFile(skillName: String, relativePath: String, oldContent: String, newContent: String, isNewFile: Bool, isSKILLFile: Bool)
+    /// Deleting a whole skill (`skill__delete`) — folder and attachments
+    /// included. Always manual: unlike a project-file write there is no
+    /// other copy, so YOLO never wipes a skill the user may have authored.
+    case skillDelete(skillName: String, fileCount: Int)
+    /// Adding an MCP server (`mcp__add_server`), or changing one. The exact
+    /// entry is shown because it is a standing grant: every future chat gets
+    /// whatever tools that server advertises, and a local one runs a command
+    /// on this Mac. Always manual — YOLO never adds one.
+    case mcpServerAdd(name: String, transportLabel: String, target: String, summary: String, replacesExisting: Bool)
+    /// Deleting an MCP server, with everything it contributed.
+    case mcpServerDelete(name: String, toolCount: Int)
 
-    /// Publishing always requires a human review. YOLO can automate local
-    /// commits or permitted pulls, but it must never auto-approve a push.
-    /// The same holds for an elevated Python run: YOLO may auto-approve an
-    /// ordinary script, but never one the user will have to authorize with
-    /// their administrator password.
+    /// Which approvals are never automated. Publishing always requires a
+    /// human review: YOLO can automate local edits and ordinary scripts, but
+    /// it must never auto-approve a push, an elevated Python run, a shell
+    /// command (opaque on a card), a screen capture, a skill deletion, or an
+    /// MCP server change (a standing grant of new tools).
     func canAutoApprove(yoloMode: Bool) -> Bool {
         if case .gitNetwork(let operation, _, _) = self {
             switch operation {
@@ -186,9 +363,24 @@ enum PendingApprovalKind {
         if case .runPython(_, let wantsElevation, _) = self, wantsElevation {
             return false
         }
-        // Looking at the screen is a privacy decision; it always asks.
-        if case .screenCapture = self { return false }
-        return yoloMode
+        switch self {
+        case .screenCapture, .skillDelete, .mcpServerAdd, .mcpServerDelete, .runShell:
+            return false
+        default:
+            return yoloMode
+        }
+    }
+
+    /// Whether a saved "Always allow" rule may skip this kind's card.
+    ///
+    /// Wider than `canAutoApprove`: a shell command is never automated by
+    /// YOLO — the mode is a blanket switch, and a blanket switch over
+    /// opaque command lines is YOLO-for-root — but a rule the user wrote
+    /// for one specific command is a decision about that command. Everything
+    /// YOLO automates is covered too, so the two never disagree.
+    var canBeAllowedByRule: Bool {
+        if case .runShell = self { return true }
+        return canAutoApprove(yoloMode: true)
     }
 
     /// The "Always allow…" rules that could cover this kind of call. Empty
@@ -200,12 +392,17 @@ enum PendingApprovalKind {
     }
 }
 
-struct PendingApproval: Identifiable {
+struct PendingApproval: Identifiable, Hashable {
     let id = UUID()
     let kind: PendingApprovalKind
     let toolCallName: String
     /// Safety rules that fired for this call. Non-empty only when the monitor
     /// held back a card YOLO would otherwise have skipped, so the card can
     /// say why it is being asked instead of looking like YOLO forgot.
-    var safetyHits: [SafetyRule] = []
+    var safetyHits: [TraceSafetyRule] = []
+
+    /// Identity is the id only: the kind carries associated values that
+    /// don't need hashing (the card renders from them, comparisons don't).
+    static func == (lhs: PendingApproval, rhs: PendingApproval) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }

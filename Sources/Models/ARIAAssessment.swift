@@ -114,7 +114,7 @@ enum ARIAAssessment {
 
     /// Runs the judge over a trace and returns its score.
     static func assess(
-        trace: SafetyTrace,
+        trace: AgentTrace,
         model: ModelContext,
         maxLogCharacters: Int = 24_000
     ) async throws -> Result {
@@ -126,9 +126,7 @@ enum ARIAAssessment {
             prompt: "The log content is:\n\(clipped)",
             systemPrompt: systemPrompt,
             maxTokens: 200,
-            purpose: .chat,
-            model: model,
-            sanitize: false
+            model: model
         )
         let (score, parsed) = parseScore(from: answer)
         return Result(

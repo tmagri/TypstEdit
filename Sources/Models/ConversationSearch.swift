@@ -1,14 +1,13 @@
 import Foundation
 
 /// Text search across a conversation — the engine behind the chat's Find
-/// bar (⌘F over the transcript).
+/// bar and the history picker's full-text search.
 ///
 /// Deliberately plain string matching, not the embedding index: finding a
-/// phrase you remember is a "same words" problem, and it has to work
-/// instantly as you type, on every message — including tool output and
-/// reasoning, which have never been embedded. `ConversationRecall` is the
-/// opposite tool — it searches what left the context by meaning, behind the
-/// model's own tool call.
+/// phrase you remember is a "same words" problem, and it has to work before
+/// anything has been embedded, on every message, and instantly as you type.
+/// `ConversationRecall` is the opposite tool — it searches what left the
+/// context by meaning, behind the model's own tool call.
 enum ConversationSearch {
     /// One hit inside a message.
     struct Match: Identifiable, Equatable {
@@ -98,5 +97,38 @@ enum ConversationSearch {
             return index + 1 < matches.count ? matches[index + 1] : matches.first
         }
         return index - 1 >= 0 ? matches[index - 1] : matches.last
+    }
+
+    /// One conversation that matches, with the best snippet to show under
+    /// its title in the history list.
+    struct SessionMatch: Equatable {
+        let sessionID: UUID
+        /// A short window of the message text around the first hit.
+        let snippet: String
+        /// How many hits the query has anywhere in the conversation.
+        let hitCount: Int
+    }
+
+    /// Which conversations contain the query, with a snippet from the first
+    /// hit. Titles are checked too: a chat whose title matches but whose
+    /// messages do not still belongs in the results, with an empty snippet.
+    static func sessionMatches(for query: String, in sessions: [ChatSession]) -> [UUID: SessionMatch] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [:] }
+        var results: [UUID: SessionMatch] = [:]
+        for session in sessions {
+            let hits = matches(for: needle, in: session.messages)
+            if let first = hits.first,
+               let message = session.messages.first(where: { $0.id == first.messageID }) {
+                results[session.id] = SessionMatch(
+                    sessionID: session.id,
+                    snippet: snippet(in: searchableText(of: message), around: first.range),
+                    hitCount: hits.count
+                )
+            } else if session.title.localizedCaseInsensitiveContains(needle) {
+                results[session.id] = SessionMatch(sessionID: session.id, snippet: "", hitCount: 0)
+            }
+        }
+        return results
     }
 }

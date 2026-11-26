@@ -3,10 +3,11 @@ import Foundation
 /// Finds credential-shaped values in text: API keys, tokens, private keys,
 /// and URLs that carry a password.
 ///
-/// A rule that matches the *file name* `.env` catches an honestly-named `.env`
-/// and nothing else — a key pasted straight into a script, or a `.env` renamed
-/// `notes.txt`, goes through untouched. The shapes here are what actually
-/// identify a secret, ported from the `CREDENTIAL` pattern set in
+/// This is the piece my first pass lacked. A rule that matches the *file name*
+/// `.env` catches an honestly-named `.env` and nothing else — a key pasted
+/// straight into a script, or a `.env` renamed `notes.txt`, went through
+/// untouched. The shapes here are what actually identify a secret, ported from
+/// the `CREDENTIAL` pattern set in
 /// [huggingface/atif-scan](https://github.com/huggingface/atif-scan)
 /// (`docs/detectors.md`, `observation.credentials_exposed`), plus the common
 /// provider formats that scanner relies on.
@@ -18,7 +19,7 @@ import Foundation
 ///   model reasoning about GPT-2's vocabulary emits `token: "ĠWARRANT"`) are not
 ///   secrets. atif-scan learned the tokenizer case the hard way; it is ported
 ///   here for the same reason, since a local model discussing tokenizers is a
-///   plausible thing for the assistant to do.
+///   plausible thing for TypstEdit to do.
 /// - **Masking.** The matched value never leaves this type in the clear. A
 ///   finding carries a masked fragment for the approval card, so flagging a
 ///   leaked key never becomes a second copy of the leak.
@@ -67,18 +68,16 @@ enum CredentialScanner {
         /// First few characters plus an ellipsis. Never the whole secret.
         let masked: String
 
-        /// How the approval card names it: "OpenAI-style API key (sk-proj…)".
+        /// How the approval card names it: "OpenAI-style API key (sk-p…)".
         var description: String { "\(kind.displayName) (\(masked))" }
     }
 
     // MARK: - Patterns
 
     /// One provider-shaped pattern. Separate from `Kind` so a kind can have
-    /// more than one spelling (GitHub alone has two). The patterns are
+    /// more than one spelling (GitHub alone has five). The patterns are
     /// compile-time constants with tests that compile every one, so a failure
-    /// here is a programmer error, not a runtime condition. A `secret` group,
-    /// where there is one, is the part `spans(in:)` replaces; the rest of the
-    /// match is context that stays readable.
+    /// here is a programmer error, not a runtime condition.
     private struct Pattern {
         let kind: Kind
         let regex: NSRegularExpression
@@ -94,7 +93,9 @@ enum CredentialScanner {
 
     /// The shapes worth flagging. Deliberately conservative: a pattern that
     /// matches ordinary prose would make `safe` mode unusable, and a mode
-    /// people turn off protects nothing.
+    /// people turn off protects nothing. A `secret` group, where there is
+    /// one, is the part `spans(in:)` replaces; the rest of the match is
+    /// context that stays readable.
     private static let patterns: [Pattern] = [
         // Provider-prefixed keys, the highest-confidence shapes.
         Pattern(.stripeLive, #"\bsk_live_[0-9a-zA-Z]{8,}"#),
@@ -124,7 +125,7 @@ enum CredentialScanner {
     ]
 
     /// Names that mention a secret without being one.
-    private static let awsSecretNameMention = try! NSRegularExpression(
+    private static let awsSecretName = try! NSRegularExpression(
         pattern: #"\baws_secret_access_key\b"#, options: [.caseInsensitive]
     )
 
@@ -207,7 +208,7 @@ enum CredentialScanner {
         // name, not a value, so it is reported separately and only when no
         // value was already found.
         if found.isEmpty {
-            for hit in awsSecretNameMention.matches(in: scanned, options: [], range: range) {
+            for hit in awsSecretName.matches(in: scanned, options: [], range: range) {
                 guard let matchRange = Range(hit.range, in: scanned) else { continue }
                 let value = String(scanned[matchRange])
                 guard !isSuppressed(value) else { continue }
@@ -222,16 +223,6 @@ enum CredentialScanner {
     /// Whether `text` holds anything credential-shaped.
     static func containsCredential(_ text: String) -> Bool {
         !matches(in: text).isEmpty
-    }
-
-    /// Keeps enough to recognise the shape without reproducing the secret.
-    /// Eight characters is the same order atif-scan keeps for its evidence.
-    static func mask(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count > 12 else {
-            return String(trimmed.prefix(3)) + "…"
-        }
-        return String(trimmed.prefix(8)) + "…"
     }
 
     // MARK: - Locating (for redaction)
@@ -323,5 +314,15 @@ enum CredentialScanner {
             return NSRange(location: header.location, length: NSMaxRange(body.range) - header.location)
         }
         return header
+    }
+
+    /// Keeps enough to recognise the shape without reproducing the secret.
+    /// Eight characters is the same order atif-scan keeps for its evidence.
+    static func mask(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 12 else {
+            return String(trimmed.prefix(3)) + "…"
+        }
+        return String(trimmed.prefix(8)) + "…"
     }
 }

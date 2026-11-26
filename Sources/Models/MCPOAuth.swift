@@ -265,8 +265,8 @@ struct MCPOAuthClient: Codable, Equatable, Sendable {
 struct MCPOAuthCredentials: Codable, Equatable, Sendable {
     var accessToken: String
     var refreshToken: String?
-    /// Absolute expiry; nil when the server did not say (treated as usable).
-    var expiresAt: Date?
+    var /// Absolute expiry; nil when the server did not say (treated as usable).
+    expiresAt: Date?
     var tokenType: String
     var scope: String?
     var client: MCPOAuthClient
@@ -484,8 +484,8 @@ final class MCPOAuthFlow {
 
     // MARK: Registration
 
-    /// Registers TypstEdit with the authorization server (RFC 7591), unless
-    /// the caller already has a client registered for this exact redirect URI.
+    /// Registers TypstEdit with the authorization server (RFC 7591), unless the
+    /// caller already has a client registered for this exact redirect URI.
     ///
     /// A server without a registration endpoint is refused before the browser
     /// opens. Sending `client_id=` (empty) instead only reached the server's
@@ -529,20 +529,37 @@ final class MCPOAuthFlow {
     ///
     /// `state` is checked on the redirect: an answer carrying a different
     /// state did not come from this attempt and is refused (CSRF).
+    ///
+    /// `preset` is a client registered by hand (`MCPServerConfig.oauth`): its
+    /// id and secret replace automatic registration, its fixed port must match
+    /// the callback URL registered with it, and its audience/scopes shape the
+    /// token request. Nil keeps automatic registration.
     func signIn(
         serverName: String,
         resource: URL,
         endpoint: MCPOAuthEndpoint,
-        existingClient: MCPOAuthClient?
+        existingClient: MCPOAuthClient?,
+        preset: MCPOAuthClientConfig? = nil
     ) async throws -> MCPOAuthCredentials {
         guard allowInsecure
                 || MCPOAuthDiscovery.isAcceptableAuthorizationEndpoint(endpoint.authorizationURL, resource: resource) else {
             throw MCPOAuthError.discoveryFailed("the authorization endpoint \(endpoint.authorizationURL.host ?? "") is not https, and it is not on the same server as the MCP URL. If you trust it, turn on \"Allow insecure connection\" for this server")
         }
 
-        let listener = try MCPLoopbackListener()
+        let presetClientID = preset?.normalizedClientID
+        let listener = try MCPLoopbackListener(port: presetClientID == nil ? nil : preset?.normalizedCallbackPort)
         let redirectURI = listener.redirectURI
-        let client = try await registerClient(endpoint: endpoint, redirectURI: redirectURI, existing: existingClient)
+        let client: MCPOAuthClient
+        if let presetClientID {
+            client = MCPOAuthClient(
+                clientID: presetClientID,
+                clientSecret: preset?.clientSecret.flatMap { $0.isEmpty ? nil : $0 },
+                redirectURI: redirectURI
+            )
+        } else {
+            client = try await registerClient(endpoint: endpoint, redirectURI: redirectURI, existing: existingClient)
+        }
+        let scopes = (presetClientID == nil ? nil : preset?.scopes.flatMap { $0.isEmpty ? nil : $0 }) ?? endpoint.scopes
 
         let verifier = PKCE.verifier()
         let challenge = PKCE.challenge(for: verifier)
@@ -558,12 +575,18 @@ final class MCPOAuthFlow {
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "state", value: state),
         ])
-        if !endpoint.scopes.isEmpty {
-            query.append(URLQueryItem(name: "scope", value: endpoint.scopes.joined(separator: " ")))
+        if !scopes.isEmpty {
+            query.append(URLQueryItem(name: "scope", value: scopes.joined(separator: " ")))
         }
         // RFC 8707: name the resource the token is for, so an issuer serving
         // several APIs mints one for this server, not for another.
         query.append(URLQueryItem(name: "resource", value: resource.absoluteString))
+        // Auth0's own spelling of the same thing. Without it (and without the
+        // tenant opting in to `resource`), Auth0 issues a token only its
+        // userinfo endpoint accepts, and the MCP server refuses it.
+        if presetClientID != nil, let audience = preset?.audience?.trimmingCharacters(in: .whitespacesAndNewlines), !audience.isEmpty {
+            query.append(URLQueryItem(name: "audience", value: audience))
+        }
         components.queryItems = query
         guard let authorizationURL = components.url else {
             throw MCPOAuthError.discoveryFailed("the authorization URL could not be built")
@@ -743,9 +766,9 @@ final class RedirectRace: @unchecked Sendable {
     }
 }
 
-/// The registered client id for one server, cached in the Keychain next to
-/// its tokens so a re-sign-in reuses it instead of registering again. A
-/// secret, like the tokens: it is only useful with the redirect URI.
+/// The registered client id for one server, cached next to its tokens so a
+/// re-sign-in reuses it instead of registering again. A secret, like the
+/// tokens: it is only useful with the redirect URI.
 @MainActor
 final class MCPOAuthClientStore {
     private let read: (String) -> String?

@@ -10,7 +10,6 @@ import Foundation
 /// Accepted shapes, all of which appear in real setup instructions:
 ///
 ///     codex mcp add affinity -- uvx mcp-proxy --transport sse http://localhost:6767/sse
-///     claude mcp add --scope user typstedit -- typstedit mcp
 ///     claude mcp add --transport http notion https://mcp.notion.com/mcp
 ///     claude mcp add --transport sse asana https://mcp.asana.com/sse
 ///     claude mcp add --env KEY=value airtable -- npx -y airtable-mcp-server
@@ -110,7 +109,7 @@ enum MCPAddCommand {
                 let value: String? = index + 1 < arguments.count ? arguments[index + 1] : nil
                 switch word {
                 case "--transport", "-t":
-                    explicitTransport = value.flatMap(lenientTransport)
+                    explicitTransport = value.flatMap(MCPTransportType.lenient)
                     index += 2
                 case "--env", "-e":
                     guard let value else { throw ParseError.badPair(word) }
@@ -202,19 +201,6 @@ enum MCPAddCommand {
         throw ParseError.missingTarget(serverName)
     }
 
-    /// Reads the transport names other tools write, so a pasted `--transport
-    /// http` — or a pasted entry's `"type": "streamable-http"` — keeps its
-    /// meaning. Unknown values return nil so the caller can fall back on the
-    /// shape of the entry (a `url` means remote, a `command` local).
-    private static func lenientTransport(_ raw: String) -> MCPTransportType? {
-        switch raw.lowercased().replacingOccurrences(of: "_", with: "-") {
-        case "stdio", "local", "command": return .stdio
-        case "http", "streamable-http", "streamablehttp", "remote": return .http
-        case "sse": return .sse
-        default: return nil
-        }
-    }
-
     /// A server name becomes the tool prefix (`name__tool`), so it is kept to
     /// characters every client accepts for that.
     static func sanitizedName(_ raw: String) -> String {
@@ -263,46 +249,34 @@ enum MCPAddCommand {
     ///
     /// `fallbackName` is the name from `add-json <name> <json>`, which a bare
     /// entry has nowhere else to carry.
-    ///
-    /// The entries are read through `JSONSerialization` rather than decoded
-    /// with `MCPServerConfig.init(from:)` on purpose: TypstEdit's decoder
-    /// insists on a `name` inside every entry and only reads its own field
-    /// spellings, while the blocks other tools write carry the name as the
-    /// map key and use `"type": "http"` or a `command` array. `readEntry(_:)
-    /// accepts those shapes; loosening the file decoder instead would change
-    /// how every `mcp.json` TypstEdit reads.
     static func parseJSON(_ text: String, fallbackName: String? = nil) throws -> [MCPServerConfig] {
         guard let data = text.data(using: .utf8) else {
             throw ParseError.badJSON("not valid text")
         }
 
-        let object: Any
-        do {
-            object = try JSONSerialization.jsonObject(with: data)
-        } catch {
-            throw ParseError.badJSON(error.localizedDescription)
-        }
-
-        // The wrapper every client writes. The map key is the server's name —
-        // the entries themselves carry none — and a malformed entry is
-        // skipped rather than failing the whole block.
-        if let file = object as? [String: Any], let servers = file["mcpServers"] as? [String: Any] {
-            let parsed = servers.compactMap { key, entry -> MCPServerConfig? in
-                validated(readEntry(entry as? [String: Any] ?? [:]), mapKey: key)
-            }
-            guard !parsed.isEmpty else { throw ParseError.noServers }
-            return parsed.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // The wrapper every client writes.
+        if let file = try? JSONDecoder().decode(MCPConfigFile.self, from: data),
+           !file.mcpServers.isEmpty {
+            return file.mcpServers.values
+                .compactMap { validated($0) }
+                .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
 
         // One entry, or several.
-        if let list = object as? [[String: Any]] {
-            return try finish(list.map { readEntry($0) }, fallbackName: fallbackName)
+        if let list = try? JSONDecoder().decode([MCPServerConfig].self, from: data), !list.isEmpty {
+            return try finish(list, fallbackName: fallbackName)
         }
-        if let single = object as? [String: Any] {
-            return try finish([readEntry(single)], fallbackName: fallbackName)
+        if let single = try? JSONDecoder().decode(MCPServerConfig.self, from: data) {
+            return try finish([single], fallbackName: fallbackName)
         }
 
-        throw ParseError.badJSON("expected an MCP server definition, an array of them, or an `mcpServers` block")
+        // Surface the decoder's own reason when the shape is close but wrong.
+        do {
+            _ = try JSONDecoder().decode(MCPConfigFile.self, from: data)
+        } catch {
+            throw ParseError.badJSON(error.localizedDescription)
+        }
+        throw ParseError.noServers
     }
 
     private static func finish(
@@ -319,69 +293,10 @@ enum MCPAddCommand {
         return valid
     }
 
-    /// Reads one raw JSON entry into a config, accepting the field spellings
-    /// other MCP clients write: the transport under `type` or `transport`,
-    /// `command` as a string or as one array (executable + arguments, the
-    /// opencode shape), and `environment` for `env`. A value of the wrong
-    /// shape reads as absent rather than failing the entry.
-    private static func readEntry(_ entry: [String: Any]) -> MCPServerConfig {
-        func string(_ key: String) -> String? { entry[key] as? String }
-        func strings(_ key: String) -> [String] {
-            (entry[key] as? [Any])?.compactMap { $0 as? String } ?? []
-        }
-        func stringMap(_ key: String) -> [String: String] {
-            (entry[key] as? [String: Any])?.compactMapValues { $0 as? String } ?? [:]
-        }
-
-        var command = string("command")
-        var args = strings("args")
-        if command == nil, let parts = entry["command"] as? [Any] {
-            // opencode writes the command as one array: executable + arguments.
-            let words = parts.compactMap { $0 as? String }
-            command = words.first
-            args = Array(words.dropFirst()) + args
-        }
-
-        let url = string("url")
-        let rawTransport = string("transport") ?? string("type")
-        let transport: MCPTransportType
-        if let rawTransport, let known = lenientTransport(rawTransport) {
-            transport = known
-        } else {
-            // No usable transport name: a URL without a command is remote.
-            transport = (command == nil && url != nil) ? .http : .stdio
-        }
-
-        let enabled: Bool
-        if let value = entry["enabled"] as? Bool {
-            enabled = value
-        } else if let value = entry["disabled"] as? Bool {
-            enabled = !value
-        } else {
-            enabled = true
-        }
-
-        var env = stringMap("env")
-        if env.isEmpty { env = stringMap("environment") }
-
-        return MCPServerConfig(
-            name: string("name") ?? "",
-            transport: transport,
-            command: command,
-            args: args,
-            env: env,
-            url: url,
-            headers: stringMap("headers"),
-            enabled: enabled,
-            disabledTools: strings("disabledTools")
-        )
-    }
-
     /// A JSON entry may omit the name (a bare entry in a block gets it from
     /// the map key) and may be missing everything a server needs.
-    private static func validated(_ server: MCPServerConfig, mapKey: String? = nil) -> MCPServerConfig? {
+    private static func validated(_ server: MCPServerConfig) -> MCPServerConfig? {
         var config = server
-        if let mapKey { config.name = mapKey }
         let name = sanitizedName(config.name)
         guard !name.isEmpty, config.isConfigured else { return nil }
         config.name = name

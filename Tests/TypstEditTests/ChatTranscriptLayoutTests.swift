@@ -164,8 +164,11 @@ final class ChatTranscriptLayoutTests: XCTestCase {
                 case .streaming:
                     chat.appendLiveReasoning("token \(index) of a fast reasoning stream ")
                 case .streamingUnthrottled:
+                    // The unthrottled baseline publishes synchronously; the
+                    // engine's buffers flush on a timer, so the comparison is
+                    // "buffered" against "one publish per token".
                     chat.appendLiveReasoning("token \(index) of a fast reasoning stream ")
-                    chat.flushLiveReasoning()
+                    chat.flushLiveBuffersNow()
                 }
                 index += 1
             }

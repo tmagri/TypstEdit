@@ -37,8 +37,7 @@ final class LockedBox<Value>: @unchecked Sendable {
 /// page telling the user to go back to TypstEdit, and closes. Everything else
 /// (favicon requests, a scanner on the port) is answered with 404 and does
 /// not end the wait.
-final class MCPLoopbackListener: @unchecked Sendable {
-    /// How many bytes of the request line to read before giving up on it.
+final class MCPLoopbackListener: @unchecked Sendable {    /// How many bytes of the request line to read before giving up on it.
     private static let maxRequestBytes = 16 * 1024
 
     private let listener: NWListener
@@ -53,11 +52,24 @@ final class MCPLoopbackListener: @unchecked Sendable {
         "http://127.0.0.1:\(port)/callback"
     }
 
-    /// Starts listening on an ephemeral loopback port.
-    init() throws {
+    /// Starts listening on `port`, or on an ephemeral port when nil. A fixed
+    /// port is for a hand-registered client: its sign-in service only accepts
+    /// the exact callback URL it was registered with.
+    init(port fixedPort: UInt16? = nil) throws {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        listener = try NWListener(using: parameters, on: .any)
+        if let fixedPort {
+            guard let nwPort = NWEndpoint.Port(rawValue: fixedPort) else {
+                throw MCPOAuthError.discoveryFailed("\(fixedPort) is not a usable callback port")
+            }
+            do {
+                listener = try NWListener(using: parameters, on: nwPort)
+            } catch {
+                throw MCPOAuthError.discoveryFailed("the callback port \(fixedPort) is unavailable (\(error.localizedDescription)); is another sign-in or app using it?")
+            }
+        } else {
+            listener = try NWListener(using: parameters, on: .any)
+        }
         // Loopback only: never reachable from the network.
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection)
@@ -225,7 +237,7 @@ final class MCPLoopbackListener: @unchecked Sendable {
     <!doctype html><html><head><meta charset="utf-8"><title>TypstEdit — signed in</title>
     <style>body{font:15px -apple-system,Helvetica,sans-serif;margin:3em auto;max-width:30em;text-align:center;color:#222}
     code{background:#f0f0f0;padding:.15em .35em;border-radius:4px}</style></head>
-    <body><h2>Signed in</h2><p>TypstEdit has the access it needs. You can close this tab and go back to
+    <body><h2>Signed in</h2><p>TypstEdit has the access he needs. You can close this tab and go back to
     <code>Settings → MCP</code> to finish.</p></body></html>
     """
 }

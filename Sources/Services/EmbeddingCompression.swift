@@ -1,9 +1,9 @@
 import Foundation
 
-// Storage compression for the conversation-recall vector cache.
-// Per-vector int8 scalar quantization: the transcript is the persistent
-// store, so compression only has to keep cosine ranking intact, not
-// survive bit-exact reloads.
+// Storage compression for the conversation-recall vector cache. Ported
+// patterns (per-vector int8 scalar quantization) sized for TypstEdit's
+// in-memory cache: the transcript is the persistent store, so compression
+// only has to keep cosine ranking intact, not survive bit-exact reloads.
 
 /// One stored embedding vector. Fresh passages sit at full precision;
 /// passages older than the Settings retention window
@@ -13,7 +13,7 @@ import Foundation
 /// error is bounded by half a scale step, far below the relevance cutoffs'
 /// margins).
 ///
-/// `Sendable` because it is written off the main actor (`VectorStore`),
+/// `Sendable` because it is now written off the main actor (`VectorStore`),
 /// not only held in the recall cache's memory.
 enum PackedVector: Equatable, Sendable {
     /// Full precision — what the provider returned.

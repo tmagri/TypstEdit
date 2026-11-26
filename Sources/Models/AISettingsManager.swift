@@ -169,12 +169,41 @@ struct ModelContext {
     /// model. `nil` = unknown, so no cost is invented. A provider that reports
     /// its own charge always wins over this.
     var pricing: ModelPricing? = nil
+    /// Turn-budget override from a saved model; `nil` = the global setting.
+    /// `0` means unlimited, like the global setting. Resolve with
+    /// `AISettingsManager.effectiveMaxTurns(for:)`.
+    var maxTurns: Int? = nil
+    /// Repeat-guard override from a saved model; `nil` = the global setting.
+    /// `0` turns the guard off, like the global setting. Resolve with
+    /// `AISettingsManager.effectiveRepeatCallLimit(for:)`.
+    var repeatCallLimit: Int? = nil
+    /// Whether the model is asked to write one sentence naming its intent
+    /// before each tool call. `nil` = off — this is opt-in per model,
+    /// because it recovers accuracy on small local models (which skip the
+    /// thinking phase) and only adds noise on capable ones. Resolve with
+    /// `AISettingsManager.effectiveToolIntentNotesEnabled(for:)`.
+    var toolIntentNotesEnabled: Bool? = nil
+    /// Subagent concurrency override from a saved model; `nil` = the global
+    /// setting. Resolve with `AISettingsManager.effectiveSubagentConcurrency`.
+    var maxConcurrentSubagents: Int? = nil
+    /// How many request slots this model's server actually has. `0` = unknown.
+    /// Not a preference: it is the number the provider will serve at once, and
+    /// `ParallelDelegation` subtracts one for the parent chat so a queued
+    /// request never masquerades as a stalled one.
+    var providerSlots: Int = 0
+    /// Sampling temperature (0–2). `nil` = don't send; the provider decides.
+    /// Anthropic clamps to 0–1.
+    var temperature: Double? = nil
 
     var isGemini: Bool { source == .gemini }
     var isAnthropic: Bool { source == .anthropic }
     var isLocal: Bool { source.isLocal }
     var isOpenRouter: Bool { source == .openRouter }
     var isPortkey: Bool { source == .portkey }
+
+    /// The flat-rate view of `pricing` the cost estimator consumes
+    /// (`TokenPricing.cost(for:)`). `nil` when no rates are saved.
+    var tokenPricing: TokenPricing? { pricing?.tokenPricing }
 
     /// Timezone used to interpret reset timestamps that omit a timezone.
     var rateLimitResetTimeZone: TimeZone = .current
@@ -267,6 +296,23 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
     /// invented. A provider that reports its own charge (OpenRouter does)
     /// always wins over this.
     var pricing: ModelPricing?
+    /// Turn-budget override while this model is in use. `nil` = global
+    /// setting; `0` = unlimited.
+    var maxTurns: Int?
+    /// Repeat-guard override while this model is in use. `nil` = global
+    /// setting; `0` = off.
+    var repeatCallLimit: Int?
+    /// Ask this model for a one-sentence intent before each tool call.
+    /// `nil` = off. Opt-in per model: it recovers tool-calling accuracy on
+    /// small local models and only adds noise on capable ones.
+    var toolIntentNotesEnabled: Bool?
+    /// `delegate_parallel` worker-count override while this model is in use.
+    /// `nil` = global setting.
+    var maxConcurrentSubagents: Int?
+    /// Request slots the model's server serves at once. `0` = unknown.
+    var providerSlots: Int = 0
+    /// Sampling temperature (0–2). `nil` = don't send.
+    var temperature: Double?
 
     static let defaultLocalEndpoint = "http://localhost:11434/v1/chat/completions"
 
@@ -281,7 +327,13 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         rateLimitResetTimeZoneIdentifier: String = TimeZone.current.identifier,
         compressionMethod: ChatCompressionMethod? = nil,
         contextBudgetTokens: Int? = nil,
-        pricing: ModelPricing? = nil
+        pricing: ModelPricing? = nil,
+        maxTurns: Int? = nil,
+        repeatCallLimit: Int? = nil,
+        toolIntentNotesEnabled: Bool? = nil,
+        maxConcurrentSubagents: Int? = nil,
+        providerSlots: Int = 0,
+        temperature: Double? = nil
     ) {
         self.id = id
         self.name = name
@@ -294,6 +346,12 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         self.compressionMethod = compressionMethod
         self.contextBudgetTokens = contextBudgetTokens
         self.pricing = pricing
+        self.maxTurns = maxTurns
+        self.repeatCallLimit = repeatCallLimit
+        self.toolIntentNotesEnabled = toolIntentNotesEnabled
+        self.maxConcurrentSubagents = maxConcurrentSubagents
+        self.providerSlots = providerSlots
+        self.temperature = temperature
     }
 
     /// Lenient decoding: an unknown source/effort raw value (e.g. from a
@@ -319,6 +377,13 @@ struct AIModelProfile: Codable, Identifiable, Equatable, Hashable {
         contextBudgetTokens = try? c.decode(Int.self, forKey: .contextBudgetTokens)
         // Missing (older saved models) → no cost is computed for it.
         pricing = try? c.decode(ModelPricing.self, forKey: .pricing)
+        // Missing (older saved models) → follow the global setting.
+        maxTurns = try? c.decode(Int.self, forKey: .maxTurns)
+        repeatCallLimit = try? c.decode(Int.self, forKey: .repeatCallLimit)
+        toolIntentNotesEnabled = try? c.decode(Bool.self, forKey: .toolIntentNotesEnabled)
+        maxConcurrentSubagents = try? c.decode(Int.self, forKey: .maxConcurrentSubagents)
+        providerSlots = (try? c.decode(Int.self, forKey: .providerSlots)) ?? 0
+        temperature = try? c.decode(Double.self, forKey: .temperature)
     }
 
     var trimmedModel: String { model.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1284,7 +1349,7 @@ class AISettingsManager: ObservableObject {
     func modelContext(for profile: AIModelProfile) -> ModelContext {
         let resolvedKey = apiKey(for: profile)
         if profile.source == .portkey {
-            return portkeyContext(
+            var ctx = portkeyContext(
                 task: .generation,
                 model: profile.trimmedModel,
                 reasoningEffort: profile.reasoningEffort,
@@ -1293,6 +1358,13 @@ class AISettingsManager: ObservableObject {
                 contextBudgetTokens: profile.contextBudgetTokens,
                 rateLimitResetTimeZone: profile.rateLimitResetTimeZone
             )
+            ctx.maxTurns = profile.maxTurns
+            ctx.repeatCallLimit = profile.repeatCallLimit
+            ctx.toolIntentNotesEnabled = profile.toolIntentNotesEnabled
+            ctx.maxConcurrentSubagents = profile.maxConcurrentSubagents
+            ctx.providerSlots = profile.providerSlots
+            ctx.temperature = profile.temperature
+            return ctx
         }
         return ModelContext(
             task: .generation,
@@ -1304,6 +1376,12 @@ class AISettingsManager: ObservableObject {
             compressionMethod: profile.compressionMethod,
             contextBudgetTokens: profile.contextBudgetTokens,
             pricing: profile.pricing,
+            maxTurns: profile.maxTurns,
+            repeatCallLimit: profile.repeatCallLimit,
+            toolIntentNotesEnabled: profile.toolIntentNotesEnabled,
+            maxConcurrentSubagents: profile.maxConcurrentSubagents,
+            providerSlots: profile.providerSlots,
+            temperature: profile.temperature,
             rateLimitResetTimeZone: profile.rateLimitResetTimeZone
         )
     }
