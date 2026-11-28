@@ -60,7 +60,7 @@ enum ReadOnlyToolPlan: Sendable {
     case projectOutline(url: URL, label: String, startLine: Int?, endLine: Int?,
                         maxBytes: Int, section: String?)
     /// `project__grep_project`: regex scan over the project tree, capped.
-    case projectGrep(root: URL, pattern: String, literal: Bool, caseSensitive: Bool,
+    case projectGrep(root: URL, scopeRootPath: String, pattern: String, literal: Bool, caseSensitive: Bool,
                      glob: String?, maxResults: Int, noteIfEmpty: Bool)
     /// `project__read_skill_file`: one attachment of an enabled skill.
     case projectSkillFile(folder: URL, skillID: String, fileName: String, offset: Int?, limit: Int?,

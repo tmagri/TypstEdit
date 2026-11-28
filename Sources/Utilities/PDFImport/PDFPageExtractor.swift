@@ -46,6 +46,19 @@ enum PDFPageExtractor {
         var spaceAfter = false
         /// Index of the word in the page text (text-layer words only).
         var order: Int?
+        /// Set in a monospace (typewriter) font.
+        var isMonospace = false
+        /// Folded into this row from a smaller overlapped row (superscript).
+        var isScript = false
+        /// The folded script sits above the row's midline (superscript, not sub).
+        var scriptRaised = false
+        /// Foreground colour as "#RRGGBB", nil when black or unknown.
+        var color: String? = nil
+        /// Link target URL, when the word sits in a link annotation.
+        var link: String? = nil
+        /// Marked-content pagination role ("header"/"footer") from the
+        /// content stream, when the producer tagged the word.
+        var artifact: String? = nil
     }
 
     /// Runs from the PDF text layer, or `nil` when the page has no usable
@@ -59,7 +72,8 @@ enum PDFPageExtractor {
     ///
     /// `barriers` are vertical rules (table borders): no run crosses one, so
     /// text in neighbouring cells stays apart even when the gap is narrow.
-    static func textLayerRuns(for page: PDFPage, barriers: [PDFLatticeTables.Line] = []) -> [PDFTextRun]? {
+    static func textLayerRuns(for page: PDFPage, barriers: [PDFLatticeTables.Line] = [],
+                              links: [(rect: CGRect, url: String)] = []) -> [PDFTextRun]? {
         let attributed = ObjCExceptionCatcher.safeAttributedString(for: page)
         let rawString = (attributed?.string ?? page.string) as NSString?
         guard let string = rawString, string.length > 0,
@@ -72,12 +86,34 @@ enum PDFPageExtractor {
         // ("tyrb[b" for בעברית). The font that drew a word is only knowable
         // from the content stream, so it is read once when the page uses one.
         let legacy = legacyFragments(for: page)
+        // PDFKit's attributed string substitutes fonts and drops bold/italic
+        // traits on many PDFs (testdoc.pdf renders real bold that arrives as
+        // plain "Helvetica"), so the content stream is consulted for the
+        // font that actually drew each word. Cheap: one pass, cached glyphs.
+        let streamFonts = PDFLegacyFonts.fragments(of: page, displaySize: displaySize(of: page))
         var words: [Glyph] = []
         var garbage = 0, visible = 0
 
         for line in lines {
             let lineRect = line.bounds(for: page).applying(transform).standardized
             guard lineRect.height > 0, lineRect.height < 300 else { continue }
+            // Marked-content role of this drawn line, decided once from the
+            // fragments overlapping its box. A marked sequence covers the
+            // row it draws, but fragment x-extents are estimates (glyph
+            // count × 0.5 em), so per-word midpoint matching loses line-tail
+            // words ("Procedure:" in the SOP head). Producer marks are the
+            // authoritative furniture signal, so one marked fragment marks
+            // the whole line; table rows are rescued later by the
+            // preset-region unmarking step.
+            var lineArtifact: String? = nil
+            if !streamFonts.isEmpty {
+                let lineBaseline = lineRect.midY
+                lineArtifact = streamFonts.lazy
+                    .filter { $0.artifact != nil && abs($0.point.y - lineBaseline) <= max(3, lineRect.height / 2)
+                              && $0.point.x + $0.width >= lineRect.minX && $0.point.x <= lineRect.maxX }
+                    .map { (role: $0.artifact!, overlap: min($0.point.x + $0.width, lineRect.maxX) - max($0.point.x, lineRect.minX)) }
+                    .max { $0.overlap < $1.overlap }?.role
+            }
             for r in 0..<line.numberOfTextRanges(on: page) {
                 let lineRange = line.range(at: r, on: page)
                 guard lineRange.location != NSNotFound, NSMaxRange(lineRange) <= string.length else { continue }
@@ -109,9 +145,75 @@ enum PDFPageExtractor {
 
                     let fonts = attributed.map { fontsUsed(in: $0, range: wordRange) } ?? []
                     let primary = fonts.max { $0.count < $1.count }?.font
-                    let traits = fontTraits(primary)
+                    var traits = fontTraits(primary)
+                    if !traits.bold, !traits.italic, !traits.monospace, !streamFonts.isEmpty {
+                        // The attributed string lost the traits (a substitute
+                        // font): ask the content stream which font drew over
+                        // this word's x-span and re-derive traits from the
+                        // real embedded name ("NewCM10-Bold" etc.).
+                        if let name = PDFLegacyFonts.fontName(overX: rect.minX, width: rect.width,
+                                                              baseline: rect.midY,
+                                                              tolerance: max(3, rect.height / 2),
+                                                              in: streamFonts) {
+                            let realTraits = fontTraits(name: name)
+                            if realTraits.bold || realTraits.italic || realTraits.monospace {
+                                traits = realTraits
+                            }
+                        }
+                    }
+                    // Marked-content pagination role: the authoritative
+                    // header/footer tag from the content stream (the same
+                    // signal Acrobat's export consumes). The line-level
+                    // verdict wins: one marked fragment marks the line.
+                    let artifact = lineArtifact ?? PDFLegacyFonts.artifactRole(
+                        overX: rect.minX, width: rect.width, baseline: rect.midY,
+                        tolerance: max(3, rect.height / 2), in: streamFonts)
                     let mathFontChars = fonts.filter { PDFLayoutAnalyzer.isMathFont($0.font.fontName) }.reduce(0) { $0 + $1.count }
                     let mathChars = max(mathFontChars, scalars.filter(PDFLayoutAnalyzer.isMathScalar).count)
+                    // Non-black text colour. PDFKit reports the fill colour
+                    // per range in an arbitrary colour space; every read goes
+                    // through sRGB, whose components never throw.
+                    let color = attributed.map { textColor(in: $0, range: wordRange) } ?? nil
+                    let link = links.first(where: { $0.rect.contains(CGPoint(x: rect.midX, y: rect.midY)) })?.url
+
+                    // A superscript glued to its base word ("mc2",
+                    // "footnote1") has no separate word box. A smaller-type
+                    // fragment covering the word's tail marks the split: the
+                    // head keeps the base style, the tail becomes a raised
+                    // script glyph so the emitter can wrap it in #super[].
+                    let wordSize = effectiveFontSize(font: primary, lineHeight: rect.height)
+                    if !streamFonts.isEmpty, text.count >= 2,
+                       let (fragment, splitX) = PDFLegacyFonts.scriptTail(overX: rect.minX, width: rect.width,
+                                                                          baseline: rect.midY,
+                                                                          tolerance: 2, dominantSize: wordSize,
+                                                                          in: streamFonts) {
+                        let splitChar = max(1, min(text.count - 1,
+                            Int(((splitX - rect.minX) / rect.width * Double(text.count)).rounded())))
+                        let head = String(text.prefix(splitChar))
+                        let tail = String(text.dropFirst(splitChar))
+                        let headWidth = rect.width * CGFloat(head.count) / CGFloat(text.count)
+                        let tailWidth = rect.width - headWidth
+                        let tailRect = CGRect(x: rect.minX + headWidth, y: rect.minY,
+                                              width: tailWidth, height: rect.height)
+                        // Raised: fragment origin sits above the word's centre
+                        // (display space, y up) or its type is much smaller.
+                        let raised = fragment.point.y > rect.midY - rect.height * 0.15
+                        words.append(Glyph(text: head, rect: CGRect(x: rect.minX, y: rect.minY,
+                                                                    width: headWidth, height: rect.height),
+                                           fontSize: wordSize,
+                                           isBold: traits.bold, isItalic: traits.italic,
+                                           isMath: mathChars * 2 >= max(scalars.count, 1), order: wordRange.location,
+                                           isMonospace: traits.monospace, color: color, link: link,
+                                           artifact: artifact))
+                        words.append(Glyph(text: tail, rect: tailRect,
+                                           fontSize: max(fragment.fontSize, wordSize * 0.55),
+                                           isBold: traits.bold, isItalic: traits.italic,
+                                           isMath: mathChars * 2 >= max(scalars.count, 1), order: wordRange.location,
+                                           isMonospace: traits.monospace,
+                                           isScript: true, scriptRaised: raised,
+                                           color: color, link: link, artifact: artifact))
+                        continue
+                    }
 
                     // Fake bold draws each word twice with a tiny offset.
                     if let last = words.last, last.text == text,
@@ -119,9 +221,11 @@ enum PDFPageExtractor {
                         continue
                     }
                     words.append(Glyph(text: text, rect: rect,
-                                       fontSize: effectiveFontSize(font: primary, lineHeight: rect.height),
+                                       fontSize: wordSize,
                                        isBold: traits.bold, isItalic: traits.italic,
-                                       isMath: mathChars * 2 >= max(scalars.count, 1), order: wordRange.location))
+                                       isMath: mathChars * 2 >= max(scalars.count, 1), order: wordRange.location,
+                                       isMonospace: traits.monospace, color: color, link: link,
+                                       artifact: artifact))
                 }
             }
         }
@@ -254,15 +358,67 @@ enum PDFPageExtractor {
         }
     }
 
-    private static func fontTraits(_ font: NSFont?) -> (bold: Bool, italic: Bool) {
-        guard let font else { return (false, false) }
-        let name = font.fontName.lowercased()
-        let symbolic = font.fontDescriptor.symbolicTraits
-        let bold = symbolic.contains(.bold)
-            || (["bold", "black", "heavy", "semibold", "demi", "cmbx", "-bd"].contains { name.contains($0) } && !name.contains("light"))
-        let italic = symbolic.contains(.italic)
-            || ["italic", "oblique", "cmti", "cmsl"].contains { name.contains($0) }
-        return (bold, italic)
+    private static func fontTraits(_ font: NSFont?) -> (bold: Bool, italic: Bool, monospace: Bool) {
+        guard let font else { return (false, false, false) }
+        var traits = fontTraits(name: font.fontName)
+        if !traits.bold, !traits.italic {
+            // Symbolic traits catch styled families whose name alone does not
+            // say bold/italic ("Helvetica" with a bold face selected).
+            let symbolic = font.fontDescriptor.symbolicTraits
+            traits.bold = traits.bold || symbolic.contains(.bold)
+            traits.italic = traits.italic || symbolic.contains(.italic)
+            traits.monospace = traits.monospace || symbolic.contains(.monoSpace)
+        }
+        return traits
+    }
+
+    /// Traits from a font name alone: the embedded names a content stream
+    /// reports ("Helvetica-Bold", "DejaVuSansMono-Oblique") are enough.
+    static func fontTraits(name rawName: String) -> (bold: Bool, italic: Bool, monospace: Bool) {
+        let name = rawName.lowercased()
+        let bold = ["bold", "black", "heavy", "semibold", "demi", "cmbx", "-bd"].contains { name.contains($0) } && !name.contains("light")
+        let italic = ["italic", "oblique", "cmti", "cmsl"].contains { name.contains($0) }
+        let monospace = ["mono", "courier", "cmtt", "menlo", "consolas", "monaco"].contains { name.contains($0) }
+        return (bold, italic, monospace)
+    }
+
+    /// The dominant non-black foreground colour of `range`, as "#RRGGBB".
+    ///
+    /// PDFKit fills `.foregroundColor` from the text operators; the colour
+    /// arrives in whatever colour space the PDF used, so every value is
+    /// converted to sRGB before its components are read (reading them in a
+    /// grayscale-space colour raises).
+    static func textColor(in attributed: NSAttributedString, range: NSRange) -> String? {
+        var counts: [String: Int] = [:]
+        var total = 0
+        attributed.enumerateAttribute(.foregroundColor, in: range) { value, subrange, _ in
+            guard let color = (value as? NSColor)?.usingColorSpace(.sRGB) else { return }
+            let red = Int(round(color.redComponent * 255)),
+                green = Int(round(color.greenComponent * 255)),
+                blue = Int(round(color.blueComponent * 255))
+            total += subrange.length
+            // Near-black stays nil: body text is black, and rounding noise
+            // ("#010101") would style whole paragraphs for nothing.
+            guard red + green + blue >= 60 else { return }
+            counts[String(format: "#%02X%02X%02X", red, green, blue), default: 0] += subrange.length
+        }
+        guard total > 0, let best = counts.max(by: { $0.value < $1.value }), best.value * 2 >= total else { return nil }
+        return best.key
+    }
+
+    /// Link annotations with their URL, in display space (rotated, crop-box
+    /// origin bottom-left — the space every run rect lives in).
+    static func linkTargets(for page: PDFPage) -> [(rect: CGRect, url: String)] {
+        let transform = displayTransform(for: page)
+        var result: [(CGRect, String)] = []
+        for annotation in page.annotations where annotation.type == "Link" {
+            guard let action = annotation.value(forAnnotationKey: .action) as? PDFActionURL,
+                  let url = action.url?.absoluteString, !url.isEmpty else { continue }
+            let bounds = annotation.bounds.applying(transform).standardized
+            guard !bounds.isNull, bounds.width > 0.5, bounds.height > 0.5 else { continue }
+            result.append((bounds, url))
+        }
+        return result
     }
 
     /// The reported point size, unless the text matrix scaled it (common in
@@ -387,8 +543,47 @@ enum PDFPageExtractor {
         // Right-to-left text reaches us in the order the glyphs are drawn:
         // the words of an Arabic or Hebrew line are reversed. Restore them.
         words = Self.orderedWords(words)
+        // Style changes break a segment into styled runs: bold/italic/
+        // monospace words keep their traits, a superscript stays separate,
+        // a coloured word keeps its colour, a linked word keeps its link.
+        // Without this a mixed paragraph votes its styles away (the run
+        // takes the 80% majority, and mixed text never reaches it).
+        var groups: [[Glyph]] = []
+        for word in words {
+            if let last = groups.last, let lastWord = last.last,
+               lastWord.isScript == word.isScript
+                && lastWord.scriptRaised == word.scriptRaised
+                && lastWord.isBold == word.isBold
+                && lastWord.isItalic == word.isItalic
+                && lastWord.isMonospace == word.isMonospace
+                && lastWord.color == word.color
+                && lastWord.link == word.link
+                && lastWord.artifact == word.artifact {
+                groups[groups.count - 1].append(word)
+            } else {
+                groups.append([word])
+            }
+        }
+        return groups.flatMap { styledRun(from: $0) }
+    }
+
+    /// One styled run from same-style words, joined with single spaces.
+    /// Words normally read left to right; when they sit on visibly different
+    /// lines (two tight lines merged into one row, as in a two-line table
+    /// cell), the PDF's text order is used instead.
+    private static func styledRun(from words: [Glyph]) -> [PDFTextRun] {
+        guard !words.isEmpty else { return [] }
+        let mids = words.map(\.rect.midY)
+        if let low = mids.min(), let high = mids.max(), let height = words.map(\.rect.height).min(),
+           high - low > height * 0.3, words.allSatisfy({ $0.order != nil }) {
+            let ordered = words.sorted { $0.order! < $1.order! }
+            return [Self.styledRun(single: ordered)]
+        }
+        return [Self.styledRun(single: Self.orderedWords(words))]
+    }
+
+    private static func styledRun(single words: [Glyph]) -> PDFTextRun {
         let text = words.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return [] }
         let sizes = words.map(\.fontSize).sorted()
         let count = Double(words.count)
         let mathShare = Double(words.filter(\.isMath).count) / count
@@ -399,8 +594,17 @@ enum PDFPageExtractor {
             isBold: Double(words.filter(\.isBold).count) / count >= 0.8,
             isItalic: Double(words.filter(\.isItalic).count) / count >= 0.8,
             mathScore: max(mathShare, PDFLayoutAnalyzer.mathSymbolFraction(text)))
+        run.isMonospace = Double(words.filter(\.isMonospace).count) / count >= 0.8
+        run.script = words[0].isScript ? (words[0].scriptRaised ? .raised : .lowered) : .none
+        // Colour: the dominant non-black value among the words.
+        let colors = words.compactMap(\.color)
+        if colors.count * 2 > words.count, let first = colors.first {
+            run.color = first
+        }
+        run.link = words.first(where: { $0.link != nil })?.link
+        run.artifact = words.first(where: { $0.artifact != nil })?.artifact
         run.textOrder = words.compactMap(\.order).min()
-        return [run]
+        return run
     }
 
     private static func groupGlyphRows(_ glyphs: [Glyph]) -> [[Glyph]] {
@@ -441,7 +645,20 @@ enum PDFPageExtractor {
                     && PDFLayoutAnalyzer.verticalOverlap(band(row), band(rows[n])) > 0
                     && horizontallyNear(band(row), band(rows[n]))
             }) {
-                rows[target].append(contentsOf: row)
+                // A whole-row fold is a script run only when it is short: a
+                // long small row is OCR slivers or a second small text line,
+                // which must keep its own run.
+                if row.count <= 4 {
+                    let midline = band(rows[target]).midY
+                    var folded = row
+                    for index in folded.indices {
+                        folded[index].isScript = true
+                        folded[index].scriptRaised = folded[index].rect.midY > midline
+                    }
+                    rows[target].append(contentsOf: folded)
+                } else {
+                    rows[target].append(contentsOf: row)
+                }
                 rows.remove(at: i)
                 if target < i { i -= 1 }
                 continue

@@ -23,15 +23,232 @@ enum PDFLayoutAnalyzer {
         /// Starts with a number set apart from the text ("5   Flavius…"): a
         /// margin paragraph number, which always starts a new paragraph.
         var leadingNumber = false
+        /// The styled runs behind `text`, in order. Empty for OCR/Vision
+        /// lines, which have no styling.
+        var runs: [PDFTextRun] = []
     }
 
     // MARK: - Running Headers & Page Numbers
+
+    /// What repeated in the margin bands: a running head, a footer, and
+    /// whether bare page numbers appear. Captured *before*
+    /// `removeRunningHeaders` deletes the runs, so the emitters can put the
+    /// furniture back as `#set page(header:…) / footer:… / numbering:…`.
+    ///
+    /// A band row qualifies when its digit-normalised text appears on at
+    /// least 40% of pages (and at least two) — the same rule the remover
+    /// applies, so nothing re-emitted was kept in the body.
+    static func pageFurniture(pages: [[PDFTextRun]], pageSizes: [CGSize]) -> (header: PDFMarginText?, footer: PDFMarginText?, pageNumbers: Bool) {
+        let f = furnitureFromArtifacts(pages: pages, pageSizes: pageSizes) ?? furnitureFromBands(pages: pages, pageSizes: pageSizes)
+        return (f.header, f.footer, f.pageNumbers)
+    }
+
+    /// What repeated in the margin bands, read from the content stream's
+    /// pagination artifacts when present (the authoritative signal), else
+    /// from band geometry. `numberingIncludesTotal` also reports whether
+    /// the numbered rows read "Page N of M" rather than a bare number, so
+    /// the emitter can render a live N-of-M counter. `tableRects` are the
+    /// recognised ruled tables' rects across all pages: rows inside their
+    /// vertical bands are table content a producer wrapped in Footer marks
+    /// (SOP's ID table), not furniture — the lattice can miss the table on
+    /// some pages, so the band is matched document-wide.
+    static func furnitureWithNumberingStyle(pages: [[PDFTextRun]], pageSizes: [CGSize],
+                                            tableRects: [CGRect] = [])
+        -> (header: PDFMarginText?, footer: PDFMarginText?, pageNumbers: Bool, numberingIncludesTotal: Bool) {
+        furnitureFromArtifacts(pages: pages, pageSizes: pageSizes, tableRects: tableRects)
+            ?? furnitureFromBands(pages: pages, pageSizes: pageSizes)
+    }
+
+    /// Furniture read from the content stream's pagination artifacts —
+    /// the authoritative signal (`/Artifact <</Type/Pagination/Subtype/
+    /// Header>> BDC … EMC`, ISO 32000-2 §14.8.2): Acrobat's DOCX export
+    /// consumes exactly these markers (sop.pdf: 117; its header1/footer1
+    /// carry the marked rows verbatim, including the title line the band
+    /// heuristic cannot reach and "Page 8 of 8" numbers below the band).
+    /// The vote is per baseline row, not per page: producers mark the
+    /// whole bottom region, so one-off content inside the mark (testdoc
+    /// p1 draws the footnote there) must not poison the rows that repeat.
+    /// "Page N of M" rows are counted as the numbering style, not footer
+    /// text: their wording changes per page, so they could never pass a
+    /// verbatim-stability check. Returns nil when the document carries no
+    /// pagination marks, so the band heuristic still owns PDFs without
+    /// them (typst-made testdoc without marks would still band-match).
+    private static func furnitureFromArtifacts(pages: [[PDFTextRun]], pageSizes: [CGSize], tableRects: [CGRect] = [])
+        -> (header: PDFMarginText?, footer: PDFMarginText?, pageNumbers: Bool, numberingIncludesTotal: Bool)? {
+        struct RowKey: Hashable { var place: String; var key: String }
+        struct Row { var pages: Set<Int> = []; var texts: Set<String> = []
+                     var boldChars = 0; var totalChars = 0; var top: CGFloat = 0 }
+        var rows: [RowKey: Row] = [:]
+        var ofTotalPages = 0
+        var bareNumberPages = 0
+        var markedPages = 0
+        var ofTotalKeys: Set<String> = []
+
+        for (pageIndex, runs) in pages.enumerated() {
+            let top = runs.filter { $0.artifact == "header" }
+            let bottom = runs.filter { $0.artifact == "footer" }
+            guard !top.isEmpty || !bottom.isEmpty else { continue }
+            markedPages += 1
+
+            for (place, marked) in [("header", top), ("footer", bottom)] {
+                // Numbering rows are pulled out of the margin text: they are
+                // the numbering style, and their per-page wording would
+                // break the verbatim-stability rule for real furniture.
+                let numbered = marked.filter { isPageNumber($0.text) }
+                let textRows = marked.filter { !isPageNumber($0.text) }
+                if !numbered.isEmpty {
+                    if numbered.contains(where: { isPageNumberOfTotal($0.text) }) {
+                        ofTotalPages += 1
+                        ofTotalKeys.insert(marginKey(numbered.map(\.text).joined(separator: " ")))
+                    } else {
+                        bareNumberPages += 1
+                    }
+                }
+                guard !textRows.isEmpty else { continue }
+                // Group by baseline so a two-line head keeps reading order.
+                var grouped: [[PDFTextRun]] = []
+                for run in textRows.sorted(by: { $0.rect.midY != $1.rect.midY ? $0.rect.midY > $1.rect.midY : $0.rect.minX < $1.rect.minX }) {
+                    if let last = grouped.last, abs(last[0].rect.midY - run.rect.midY) < run.rect.height {
+                        grouped[grouped.count - 1].append(run)
+                    } else {
+                        grouped.append([run])
+                    }
+                }
+                for row in grouped {
+                    let text = row.sorted { $0.rect.minX < $1.rect.minX }.map(\.text).joined(separator: " ")
+                        .trimmingCharacters(in: .whitespaces)
+                    guard !text.isEmpty, text.count <= 300 else { continue }
+                    let midY = row[0].rect.midY
+                    // Recognised tables are content, not furniture: a row in
+                    // a table's vertical band was only marked because the
+                    // producer wrapped the region in Footer marks (SOP's ID
+                    // table), and the lattice does not catch the table on
+                    // every page, so the band test is document-wide.
+                    guard !tableRects.contains(where: { $0.minY - 2 <= midY && midY <= $0.maxY + 2 }) else { continue }
+                    let entryKey = RowKey(place: place, key: marginKey(text))
+                    var entry = rows[entryKey] ?? Row()
+                    entry.pages.insert(pageIndex)
+                    entry.texts.insert(text)
+                    entry.boldChars += row.filter(\.isBold).map { $0.text.count }.reduce(0, +)
+                    entry.totalChars += max(row.map { $0.text.count }.reduce(0, +), 1)
+                    entry.top = max(entry.top, midY)
+                    rows[entryKey] = entry
+                }
+            }
+        }
+        guard markedPages * 2 >= pages.count, markedPages >= 2 else { return nil }
+        let threshold = max(2, (pages.count + 1) / 2)
+
+        func margin(_ place: String) -> PDFMarginText? {
+            // A row is furniture when most pages drew it verbatim (digits
+            // aside, one wording per key — page-dependent text must never
+            // be re-emitted on every page). A row seen on too few pages is
+            // that page's content, not furniture.
+            let stable = rows.filter { $0.key.place == place && $0.value.pages.count >= threshold && $0.value.texts.count == 1 }
+            guard !stable.isEmpty else { return nil }
+            let ordered = stable.values.sorted { $0.top > $1.top }
+            let text = ordered.map { $0.texts.first ?? "" }.joined(separator: " ")
+                .trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return nil }
+            let boldChars = ordered.reduce(0) { $0 + $1.boldChars }
+            let totalChars = ordered.reduce(0) { $0 + $1.totalChars }
+            return PDFMarginText(text: text, isBold: totalChars > 0 && boldChars * 2 >= totalChars)
+        }
+        let ofTotal = ofTotalPages >= threshold && ofTotalKeys.count == 1
+        let bare = bareNumberPages >= threshold
+        return (margin("header"), margin("footer"), ofTotal || bare, ofTotal)
+    }
+
+    /// "Page 3 of 8" / "3 of 8" / "Page 3/8" — a numbered margin row whose
+    /// wording carries the total. `isPageNumber` already accepts bare "3".
+    static func isPageNumberOfTotal(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count <= 24 else { return false }
+        return trimmed.range(of: #"^(page\s*)?\d{1,4}\s*(of|/)\s*\d{1,4}$"#,
+                             options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    /// Band-position furniture for PDFs without pagination artifacts.
+    private static func furnitureFromBands(pages: [[PDFTextRun]], pageSizes: [CGSize])
+        -> (header: PDFMarginText?, footer: PDFMarginText?, pageNumbers: Bool, numberingIncludesTotal: Bool) {
+        let bandFraction: CGFloat = 0.085
+        struct BandKey: Hashable { var place: String; var key: String }
+        var bands: [BandKey: (pages: Set<Int>, texts: Set<String>, boldChars: Int, totalChars: Int)] = [:]
+        var pageNumberPages: Set<Int> = []
+
+        for (index, runs) in pages.enumerated() {
+            let size = pageSizes[index]
+            for place in ["top", "bottom"] {
+                let inBand = runs.filter { run in
+                    place == "top" ? run.rect.minY >= size.height * (1 - bandFraction)
+                                   : run.rect.maxY <= size.height * bandFraction
+                }
+                let numbers = inBand.filter { isPageNumber($0.text) }
+                if !numbers.isEmpty { pageNumberPages.insert(index) }
+                // One key per *row* inside the band, not per band: a tall
+                // page can put the document's first heading inside the same
+                // 8.5 % band as the running head, and a band-wide join would
+                // make the key differ on every page ("Running Header
+                // Introduction" vs "Running Header Tables"), so nothing ever
+                // repeats. Rows cluster on baseline y; heading-size runs are
+                // excluded — they are body structure, not furniture.
+                // Median size is robust here: a page with superscript
+                // debris (6 pt on 11 pt body) must not drop the size gate to
+                // where the 11 pt running head reads as "heading".
+                let sizes = runs.map(\.fontSize).sorted()
+                let bodySize = sizes.isEmpty ? 10 : sizes[sizes.count / 2]
+                let textRuns = inBand.filter { !isPageNumber($0.text)
+                    && $0.fontSize < bodySize * 1.4 && $0.fontSize > bodySize * 0.6 }
+                    .sorted { $0.rect.minX < $1.rect.minX }
+                var rows: [[PDFTextRun]] = []
+                for run in textRuns {
+                    if let last = rows.last, abs(last[0].rect.midY - run.rect.midY) < run.rect.height {
+                        rows[rows.count - 1].append(run)
+                    } else {
+                        rows.append([run])
+                    }
+                }
+                for row in rows {
+                    let text = row.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+                    guard !text.isEmpty, text.count <= 120 else { continue }
+                    let boldChars = row.filter(\.isBold).map { $0.text.count }.reduce(0, +)
+                    let totalChars = row.map { $0.text.count }.reduce(0, +)
+                    let entryKey = BandKey(place: place, key: marginKey(text))
+                    var entry = bands[entryKey] ?? (pages: Set<Int>(), texts: Set<String>(), boldChars: 0, totalChars: 0)
+                    entry.pages.insert(index)
+                    entry.texts.insert(text)
+                    entry.boldChars += boldChars
+                    entry.totalChars += totalChars
+                    bands[entryKey] = entry
+                }
+            }
+        }
+        guard !pages.isEmpty else { return (nil, nil, false, false) }
+        // More than half the pages (and at least two): below that, a "Chapter
+        // 1/2/3" corner label would read as furniture.
+        let threshold = max(2, Int((Double(pages.count) * 0.5).rounded(.up)))
+        func best(_ place: String) -> PDFMarginText? {
+            let candidates = bands.filter { $0.key.place == place && $0.value.pages.count >= threshold }
+            guard let winner = candidates.max(by: { $0.value.texts.count < $1.value.texts.count }) else { return nil }
+            // Only verbatim-stable rows become static furniture. A row whose
+            // text changes page to page under one digit-normalised key
+            // ("Chapter 1", "Chapter 2…) carries page-dependent content —
+            // re-emitting one page's wording on every page would be wrong.
+            guard winner.value.texts.count == 1, let text = winner.value.texts.first,
+                  !text.isEmpty else { return nil }
+            let bold = winner.value.totalChars > 0 && winner.value.boldChars * 2 >= winner.value.totalChars
+            return PDFMarginText(text: text, isBold: bold)
+        }
+        return (best("top"), best("bottom"), pageNumberPages.count >= threshold, false)
+    }
 
     /// Removes text that repeats in the top or bottom margin band across
     /// pages (running heads, footers, journal names) and bare page numbers.
     ///
     /// A run counts as repeating when its text, with digits normalised, sits
     /// in the same band on at least 40% of pages (and at least two).
+    /// Runs the producer marked as pagination artifacts are furniture by
+    /// definition and are dropped without any repetition test.
     static func removeRunningHeaders(pages: [[PDFTextRun]], pageSizes: [CGSize]) -> [[PDFTextRun]] {
         precondition(pages.count == pageSizes.count)
         let bandFraction: CGFloat = 0.085
@@ -53,6 +270,8 @@ enum PDFLayoutAnalyzer {
 
         let repeating = pages.enumerated().map { pageIndex, runs in
             runs.filter { run in
+                // Marked pagination furniture: drop regardless of position.
+                if run.artifact != nil { return false }
                 guard let place = band(run, pageSizes[pageIndex]) else { return true }
                 if isPageNumber(run.text) { return false }
                 guard pages.count >= 2 else { return true }
@@ -808,7 +1027,8 @@ enum PDFLayoutAnalyzer {
                 isTitle: members.contains(where: \.isTitle),
                 leadingNumber: members.count >= 2
                     && members[0].text.range(of: #"^\d{1,3}$"#, options: .regularExpression) != nil
-                    && members[1].text.first?.isLetter == true))
+                    && members[1].text.first?.isLetter == true,
+                runs: members))
             members.removeAll()
         }
         for run in runs {
@@ -1042,7 +1262,99 @@ enum PDFLayoutAnalyzer {
         var block = makeBlockContent(lines, role: role)
         let size = lines.reduce(0) { $0 + $1.fontSize } / CGFloat(lines.count)
         block.fontSize = (size * 2).rounded() / 2
+        block.spans = styledSpans(from: lines)
         return block
+    }
+
+    /// The block's text as styled spans, or `nil` when no run carries style
+    /// (the common case — plain paragraphs keep `spans == nil`).
+    ///
+    /// The join logic mirrors `joinLines` exactly — the same hyphen, soft
+    /// hyphen, numeric-range and no-space rules — so the concatenated span
+    /// texts reproduce the block's plain text. When they disagree the block
+    /// keeps `nil` and the emitters fall back to plain text.
+    static func styledSpans(from lines: [Line]) -> [PDFStyledSpan]? {
+        let allRuns = lines.flatMap(\.runs)
+        guard allRuns.contains(where: \.hasStyle) else { return nil }
+
+        // Pieces: text pieces with an explicit need for a space before them.
+        var pieces: [(text: String, spaceBefore: Bool, run: PDFTextRun)] = []
+        var pendingSoftBreak = false
+        for line in lines {
+            let lineRuns = line.runs.isEmpty
+                ? [PDFTextRun(text: line.text.trimmingCharacters(in: .whitespaces),
+                              rect: line.rect, fontSize: line.fontSize)]
+                : line.runs
+            for run in lineRuns {
+                let trimmed = run.text.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { continue }
+                let softBreak = trimmed.hasSuffix("\u{00AD}")
+                let text = trimmed.replacingOccurrences(of: "\u{00AD}", with: "")
+                if let last = pieces.last, !pieces.isEmpty {
+                    if pendingSoftBreak {
+                        pieces.append((text, false, run))
+                    } else if let lastChar = last.text.last, let next = text.first,
+                              TextScript.joinsWithoutSpace(after: lastChar, before: next) {
+                        // A Chinese, Japanese or Thai sentence split by the
+                        // line wrapping is one word run: no space.
+                        pieces.append((text, false, run))
+                    } else if last.text.hasSuffix("-") || last.text.hasSuffix("¬"),
+                              last.text.dropLast().last?.isLetter == true,
+                              text.first?.isLowercase == true {
+                        // End-of-line hyphenation: the dash goes away.
+                        pieces[pieces.count - 1].text.removeLast()
+                        pieces.append((text, false, run))
+                    } else if last.text.hasSuffix("-"),
+                              last.text.dropLast().last?.isNumber == true,
+                              text.first?.isNumber == true {
+                        // A numeric range broken after its dash keeps the dash.
+                        pieces.append((text, false, run))
+                    } else {
+                        pieces.append((text, true, run))
+                    }
+                } else {
+                    pieces.append((text, false, run))
+                }
+                pendingSoftBreak = softBreak
+            }
+        }
+
+        // Same-style neighbours merge; a style change carries the space on
+        // the new span so the joined text still matches the plain text.
+        var spans: [PDFStyledSpan] = []
+        for piece in pieces {
+            var plain = PDFStyledSpan(text: piece.text)
+            plain.isBold = piece.run.isBold
+            plain.isItalic = piece.run.isItalic
+            plain.isMonospace = piece.run.isMonospace
+            plain.script = piece.run.script
+            plain.color = piece.run.color
+            plain.link = piece.run.link
+            if let last = spans.last, last.sameStyle(as: plain) {
+                spans[spans.count - 1].text += (piece.spaceBefore ? " " : "") + piece.text
+            } else {
+                if piece.spaceBefore { plain.text = " " + plain.text }
+                spans.append(plain)
+            }
+        }
+        spans = spans.filter { !$0.text.isEmpty }
+
+        // Only keep spans that reproduce the block's plain text (what
+        // `joinLines` produced); otherwise drop them.
+        let joined = spans.map(\.text).joined()
+        let reference = joinLines(lines.map(\.text))
+        guard !spans.isEmpty, normalizeForCompare(joined) == normalizeForCompare(reference) else { return nil }
+        guard spans.contains(where: { !$0.isPlain }) else { return nil }
+        return spans
+    }
+
+    /// The text with every space removed, for the span completeness check:
+    /// `joinLines` only ever inserts single spaces, so if the letters agree
+    /// the spacing agrees too — whatever whitespace the run texts carried.
+    private static func normalizeForCompare(_ text: String) -> String {
+        String(text.unicodeScalars.filter {
+            !CharacterSet.whitespacesAndNewlines.contains($0) && $0 != "\u{00A0}"
+        })
     }
 
     private static func makeBlockContent(_ lines: [Line], role: LineRole) -> PDFImportedBlock {
@@ -1153,6 +1465,12 @@ enum PDFLayoutAnalyzer {
         ]
         for (pattern, ordered) in patterns {
             guard let range = text.range(of: pattern, options: .regularExpression) else { continue }
+            // A line that also ends with a dash is a decorative separator
+            // ("— End of page one content —"), not a bullet item: real
+            // bullets never close with one.
+            if !ordered, text.range(of: #"[\-–—]\s*$"#, options: .regularExpression) != nil {
+                continue
+            }
             let marker = String(text[range])
             let number = Int(marker.filter(\.isNumber))
             // "3. " followed by lowercase prose is more likely a sentence

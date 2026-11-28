@@ -237,18 +237,33 @@ enum FileToolbox {
     }
 
     /// Case-insensitive glob: `*.swift`, `bank??.asm`, `Makefile` all work,
-    /// and so does a path glob (`data/trace_wram/*`) — see `globMatches`.
-    /// Implemented by translating to a regex, which covers `*`, `?`, and
-    /// character classes.
+    /// and so does a path glob (`data/trace_wram/*`, `chapters/**/*.typ`) — see `globMatches`.
+    /// Implemented by translating to a regex, which covers `**`, `*`, and `?`.
     nonisolated static func globMatch(_ glob: String, fileName: String) -> Bool {
         var pattern = "^"
-        for character in glob {
-            switch character {
-            case "*": pattern += "[^/]*"
-            case "?": pattern += "."
-            default:
-                pattern += NSRegularExpression.escapedPattern(for: String(character))
+        var idx = glob.startIndex
+        while idx < glob.endIndex {
+            let ch = glob[idx]
+            if ch == "*" {
+                let next = glob.index(after: idx)
+                if next < glob.endIndex && glob[next] == "*" {
+                    let afterDouble = glob.index(after: next)
+                    if afterDouble < glob.endIndex && glob[afterDouble] == "/" {
+                        pattern += "(?:.*/)?"
+                        idx = glob.index(after: afterDouble)
+                        continue
+                    }
+                    pattern += ".*"
+                    idx = afterDouble
+                    continue
+                }
+                pattern += "[^/]*"
+            } else if ch == "?" {
+                pattern += "."
+            } else {
+                pattern += NSRegularExpression.escapedPattern(for: String(ch))
             }
+            idx = glob.index(after: idx)
         }
         pattern += "$"
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
@@ -264,32 +279,23 @@ enum FileToolbox {
     ///
     /// A glob with no slash is a **name** pattern (`*.asm`, `Makefile`), which
     /// is what `find -name` means. A glob that contains a slash is a **path**
-    /// pattern (`data/trace_wram/*`), which is what `find -path` means. Both
-    /// are reasonable things for a model to write, and matching only the name
-    /// made the second silently return nothing — observed in the chat that
-    /// hung: the model asked `file__find` for `"name_glob":
-    /// "data/trace_wram/*"`, got an empty answer with no hint that the glob
-    /// was the problem, and retried `file__find` 75 times.
-    ///
-    /// `globMatch` already treats `*` as `[^/]*`, so a path pattern is matched
-    /// correctly by handing it the relative path.
+    /// pattern (`data/trace_wram/*`, `chapters/**/*.typ`), which is what
+    /// `find -path` means. Both are reasonable things for a model to write.
     nonisolated static func globMatches(
         _ glob: String, relativePath: String, fileName: String
     ) -> Bool {
-        if glob.contains("/") {
+        let cleanGlob = glob.hasPrefix("./") ? String(glob.dropFirst(2)) : glob
+        if cleanGlob.contains("/") {
             let normalised = relativePath.hasPrefix("/")
                 ? String(relativePath.dropFirst())
                 : relativePath
-            // A leading `*/` or `**/` is common in hand-written patterns; try
-            // the path as written first, then without a leading wildcard
-            // segment, so both spellings work.
-            if globMatch(glob, fileName: normalised) { return true }
-            if glob.hasPrefix("*/") {
-                return globMatch(String(glob.dropFirst(2)), fileName: normalised)
+            if globMatch(cleanGlob, fileName: normalised) { return true }
+            if cleanGlob.hasPrefix("*/") {
+                return globMatch(String(cleanGlob.dropFirst(2)), fileName: normalised)
             }
             return false
         }
-        return globMatch(glob, fileName: fileName)
+        return globMatch(cleanGlob, fileName: fileName)
     }
 
     /// The path of `path` relative to `root`, without a leading slash.

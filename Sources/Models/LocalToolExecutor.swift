@@ -333,10 +333,14 @@ final class LocalToolExecutor {
             tools.append(MCPTool(
                 serverName: Self.namespace,
                 name: "list_files",
-                description: "List files under the current \(scope.noun). Folders are shown with a trailing slash, so you can confirm that an empty delivery/evidence folder exists. Optionally filter by extension.",
+                description: "List files under the current \(scope.noun) (or a specific subfolder via `path`). Folders are shown with a trailing slash, so you can confirm that an empty delivery/evidence folder exists. Optionally filter by extension.",
                 inputSchema: [
                     "type": "object",
                     "properties": [
+                        "path": [
+                            "type": "string",
+                            "description": "Optional subfolder relative to the \(scope.noun) root to list inside, e.g. \"chapters\" or \"assets/images\". Omit to list from the \(scope.noun) root."
+                        ],
                         "extensions": [
                             "type": "array",
                             "items": ["type": "string"],
@@ -473,6 +477,7 @@ final class LocalToolExecutor {
                     "type": "object",
                     "properties": [
                         "pattern": ["type": "string", "description": "Text to find. Treated as a regular expression unless literal is true."],
+                        "path": ["type": "string", "description": "Optional subfolder or file relative to the \(scope.noun) root to narrow the search, e.g. \"chapters\"."],
                         "literal": ["type": "boolean", "description": "Match the pattern as plain text instead of a regex. Default false."],
                         "case_sensitive": ["type": "boolean", "description": "Default false — matching ignores case, which is usually what you want for prose and identifiers."],
                         "glob": ["type": "string", "description": "Optional filename filter, e.g. \"*.typ\" or \"chapters/**/*.typ\"."],
@@ -961,6 +966,7 @@ final class LocalToolExecutor {
             guard let pattern = arguments["pattern"] as? String, !pattern.isEmpty else {
                 throw LocalToolError.invalidArguments("pattern is required")
             }
+            let searchTarget = try Self.resolveGrepTarget(arguments["path"] as? String, within: root)
             let literal = (arguments["literal"] as? Bool) ?? false
             // Validated here so a bad pattern fails with a clear message
             // instead of inside the concurrent runner, which recompiles it.
@@ -972,7 +978,8 @@ final class LocalToolExecutor {
             }
             let requestedMax = Self.intValue(arguments["max_results"]) ?? 100
             return .projectGrep(
-                root: root,
+                root: searchTarget.target,
+                scopeRootPath: root.standardizedFileURL.resolvingSymlinksInPath().path,
                 pattern: pattern,
                 literal: literal,
                 caseSensitive: (arguments["case_sensitive"] as? Bool) ?? false,
@@ -1072,7 +1079,7 @@ final class LocalToolExecutor {
                 isOutlineOnly: true
             )
 
-        case .projectGrep(let root, let pattern, let literal, let caseSensitive,
+        case .projectGrep(let root, let scopeRootPath, let pattern, let literal, let caseSensitive,
                           let glob, let maxResults, let noteIfEmpty):
             let source = literal ? NSRegularExpression.escapedPattern(for: pattern) : pattern
             guard let regex = try? NSRegularExpression(
@@ -1083,7 +1090,7 @@ final class LocalToolExecutor {
             }
             let result = scan(
                 root: root,
-                rootPath: root.standardizedFileURL.path,
+                rootPath: scopeRootPath,
                 regex: regex,
                 globRegex: glob.flatMap { globToRegex($0) },
                 excluded: excludedDirectories,
@@ -1211,9 +1218,28 @@ final class LocalToolExecutor {
     private func listFiles(_ arguments: [String: Any]) throws -> String {
         guard let root = scope.root else { throw LocalToolError.noScope }
         let extensions = (arguments["extensions"] as? [String])?.map { $0.lowercased() }
+        let rawSubpath = (arguments["path"] as? String)
+            ?? (arguments["folder"] as? String)
+            ?? (arguments["directory"] as? String)
+        let trimmedSubpath = rawSubpath?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let searchRoot: URL
+        if let trimmedSubpath, !trimmedSubpath.isEmpty, trimmedSubpath != "." {
+            let resolved = try resolvePath(trimmedSubpath)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: resolved.path, isDirectory: &isDir) else {
+                throw LocalToolError.fileNotFound(trimmedSubpath)
+            }
+            guard isDir.boolValue else {
+                throw LocalToolError.invalidArguments("'\(trimmedSubpath)' is a file, not a folder. Use read_file to read it.")
+            }
+            searchRoot = resolved
+        } else {
+            searchRoot = root
+        }
 
         guard let enumerator = FileManager.default.enumerator(
-            at: root,
+            at: searchRoot,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else {
@@ -1222,31 +1248,47 @@ final class LocalToolExecutor {
 
         let excludedDirs = Self.excludedDirectories
         var results: [String] = []
-        let rootPath = root.standardizedFileURL.path
+        var truncated = false
+        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
 
         for case let url as URL in enumerator {
             let name = url.lastPathComponent
             let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            let resolvedPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+            let relative = resolvedPath.hasPrefix(rootPath + "/")
+                ? String(resolvedPath.dropFirst(rootPath.count + 1))
+                : resolvedPath
             if isDir {
                 if excludedDirs.contains(name) {
                     enumerator.skipDescendants()
                     continue
                 }
                 if extensions == nil || extensions?.isEmpty == true {
-                    let relative = url.standardizedFileURL.path.replacingOccurrences(of: rootPath + "/", with: "")
                     results.append(relative + "/")
-                    if results.count >= 500 { break }
+                    if results.count >= 500 {
+                        truncated = true
+                        break
+                    }
                 }
                 continue
             }
             if let extensions, !extensions.isEmpty, !extensions.contains(url.pathExtension.lowercased()) {
                 continue
             }
-            let relative = url.standardizedFileURL.path.replacingOccurrences(of: rootPath + "/", with: "")
             results.append(relative)
-            if results.count >= 500 { break }
+            if results.count >= 500 {
+                truncated = true
+                break
+            }
         }
-        return results.isEmpty ? "(no matching files)" : results.sorted().joined(separator: "\n")
+        if results.isEmpty {
+            return "(no matching files)"
+        }
+        var output = results.sorted().joined(separator: "\n")
+        if truncated {
+            output += "\n[Listing stopped at 500 entries — pass path: \"<subfolder>\" or extensions to narrow the listing.]"
+        }
+        return output
     }
 
     private func readFile(_ arguments: [String: Any]) throws -> String {
@@ -2012,6 +2054,20 @@ final class LocalToolExecutor {
 
     // MARK: - Grep
 
+    /// Resolves an optional `path` argument for `grep_project` within `root`.
+    private nonisolated static func resolveGrepTarget(_ rawPath: String?, within root: URL) throws -> (target: URL, isDirectory: Bool) {
+        let trimmed = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty, trimmed != "." else {
+            return (root, true)
+        }
+        let target = try resolve(trimmed, within: root)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir) else {
+            throw LocalToolError.fileNotFound(trimmed)
+        }
+        return (target, isDir.boolValue)
+    }
+
     /// Searches file contents across the scope. Runs the actual scan off the
     /// main actor: a project-sized walk on the UI thread would beachball the
     /// app for the duration of the search.
@@ -2020,6 +2076,7 @@ final class LocalToolExecutor {
         guard let pattern = arguments["pattern"] as? String, !pattern.isEmpty else {
             throw LocalToolError.invalidArguments("pattern is required")
         }
+        let searchTarget = try Self.resolveGrepTarget(arguments["path"] as? String, within: root)
         let literal = (arguments["literal"] as? Bool) ?? false
         let caseSensitive = (arguments["case_sensitive"] as? Bool) ?? false
         let glob = arguments["glob"] as? String
@@ -2038,13 +2095,13 @@ final class LocalToolExecutor {
         }
 
         let globRegex = glob.flatMap { Self.globToRegex($0) }
-        let rootPath = root.standardizedFileURL.path
+        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
         let excluded = Self.excludedDirectories
         let fileCap = Self.maxGrepFileCount
         let byteCap = Self.maxGrepFileBytes
 
         let result = await Task.detached(priority: .userInitiated) {
-            Self.scan(root: root, rootPath: rootPath, regex: regex, globRegex: globRegex,
+            Self.scan(root: searchTarget.target, rootPath: rootPath, regex: regex, globRegex: globRegex,
                       excluded: excluded, fileCap: fileCap, byteCap: byteCap, maxResults: maxResults)
         }.value
 
@@ -2078,22 +2135,38 @@ final class LocalToolExecutor {
         var filesScanned = 0
         var capped = false
 
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else { return ([], 0, 0, false) }
+        var isDir: ObjCBool = false
+        let targetIsDir = FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir) && isDir.boolValue
 
-        for case let url as URL in enumerator {
-            let name = url.lastPathComponent
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-            if isDir {
-                if excluded.contains(name) { enumerator.skipDescendants() }
-                continue
+        let urls: [URL]
+        if targetIsDir {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            ) else { return ([], 0, 0, false) }
+            var collected: [URL] = []
+            for case let url as URL in enumerator {
+                let name = url.lastPathComponent
+                let entryIsDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if entryIsDir {
+                    if excluded.contains(name) { enumerator.skipDescendants() }
+                    continue
+                }
+                collected.append(url)
             }
+            urls = collected
+        } else {
+            urls = [root]
+        }
+
+        for url in urls {
             if filesScanned >= fileCap { capped = true; break }
 
-            let relative = url.standardizedFileURL.path.replacingOccurrences(of: rootPath + "/", with: "")
+            let resolvedPath = url.standardizedFileURL.resolvingSymlinksInPath().path
+            let relative = resolvedPath.hasPrefix(rootPath + "/")
+                ? String(resolvedPath.dropFirst(rootPath.count + 1))
+                : resolvedPath
             if let globRegex {
                 let range = NSRange(location: 0, length: (relative as NSString).length)
                 if globRegex.firstMatch(in: relative, options: [], range: range) == nil { continue }
@@ -3319,7 +3392,12 @@ final class LocalToolExecutor {
 
         let rawText = TextFileEncoding.decode(page.data).text
         let isHTML = page.contentType?.lowercased().contains("html") == true || HTMLToMarkdownConverter.looksLikeHTML(rawText)
-        let converted = isHTML ? HTMLToMarkdownConverter.convert(rawText) : rawText
+        var converted = isHTML ? HTMLToMarkdownConverter.convert(rawText) : rawText
+        if isHTML,
+           converted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            converted = "(The page returned HTML with no extractable readable text — it may require JavaScript to render.)"
+        }
 
         var header = "[fetched \(page.finalURL.absoluteString) — HTTP \(page.status)"
         if let contentType = page.contentType {

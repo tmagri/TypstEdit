@@ -27,6 +27,16 @@ enum PDFLegacyFonts {
         /// Approximate advance width in points, used only for matching.
         var width: CGFloat
         var text: String
+        /// The size `Tf` set for this fragment (0 when unknown).
+        var fontSize: CGFloat = 0
+        /// Marked-content role of the enclosing `BDC`/`BMC` sequence:
+        /// "header", "footer", or nil for ordinary body text. Producers
+        /// tag running heads/footers/pagination as layout artifacts
+        /// (`/Artifact <</Attached [/Top]/Type/Pagination/Subtype/Footer>>
+        /// BDC`), the authoritative furniture signal Acrobat's own DOCX
+        /// export consumes (sop.pdf: 117 markers; its header1/footer1.xml
+        /// carry exactly the marked rows).
+        var artifact: String? = nil
     }
 
     /// Kinds of legacy text we can decode.
@@ -137,6 +147,12 @@ enum PDFLegacyFonts {
         CGPDFOperatorTableSetCallback(table, "Tj", legacyOpShow)
         CGPDFOperatorTableSetCallback(table, "TJ", legacyOpShowArray)
         CGPDFOperatorTableSetCallback(table, "'", legacyOpQuoteShow)
+        // Marked content: the /Artifact properties dict names the layout
+        // role (Header/Footer/Pagination), which drives furniture
+        // detection downstream.
+        CGPDFOperatorTableSetCallback(table, "BDC", legacyOpBeginMarkedProperties)
+        CGPDFOperatorTableSetCallback(table, "BMC", legacyOpBeginMarkedTag)
+        CGPDFOperatorTableSetCallback(table, "EMC", legacyOpEndMarked)
 
         let scanner = CGPDFScannerCreate(content, table, Unmanaged.passUnretained(state).toOpaque())
         CGPDFScannerScan(scanner)
@@ -170,6 +186,91 @@ enum PDFLegacyFonts {
     }
 
     // MARK: - Matching words to fonts
+
+    /// A fragment in `fragments` that covers the tail of the x-span
+    /// `[x, x + width]` on `baseline` with a clearly smaller font — the
+    /// signature of a superscript glued into the same word by PDFKit
+    /// ("mc2", "footnote1": no space, so no separate word box). Returns the
+    /// fragment and the x where its smaller text starts, for word splitting.
+    static func scriptTail(overX x: CGFloat, width wordWidth: CGFloat, baseline: CGFloat,
+                           tolerance: CGFloat, dominantSize: CGFloat,
+                           in fragments: [Fragment]) -> (fragment: Fragment, splitX: CGFloat)? {
+        guard wordWidth > 2 else { return nil }
+        var best: (fragment: Fragment, splitX: CGFloat)?
+        for fragment in fragments {
+            // Clearly smaller type than the word's own size.
+            guard fragment.fontSize > 0, fragment.fontSize <= dominantSize * 0.8 else { continue }
+            guard abs(fragment.point.y - baseline) <= max(tolerance, dominantSize * 0.5) else { continue }
+            let start = fragment.point.x
+            let end = fragment.point.x + fragment.width
+            // Must cover the tail: start inside the word's right half and
+            // reach at least the word's end.
+            let tailStart = x + wordWidth / 2
+            guard start > tailStart, start < x + wordWidth, end >= x + wordWidth - 2 else { continue }
+            if best == nil || start > best!.splitX { best = (fragment, start) }
+        }
+        return best
+    }
+
+    /// The embedded font name of the fragment that covers the x-span
+    /// `[x, x + width]` on the baseline band `baseline ± tolerance`, or `nil`
+    /// when no fragment matches.
+    ///
+    /// Matching is geometric, not textual: CID-keyed fonts (Identity-H) draw
+    /// opaque two-byte codes, so a fragment's `text` is garbage for every
+    /// non-legacy PDF and text containment can never match. The fragment's
+    /// `point` is the Tm origin in display space and `width` approximates
+    /// the run's extent, which is all the word-to-font join needs.
+    static func fontName(overX x: CGFloat, width wordWidth: CGFloat, baseline: CGFloat,
+                         tolerance: CGFloat, in fragments: [Fragment]) -> String? {
+        // A word belongs to the fragment that covers its midpoint: widths
+        // are estimates (glyph count × 0.5 em), so midpoint coverage is the
+        // strongest cheap test, and edge-touching fragments cannot smear
+        // their style onto the neighbouring words.
+        let mid = x + wordWidth / 2
+        var best: (name: String, overlap: CGFloat)?
+        for fragment in fragments {
+            guard abs(fragment.point.y - baseline) <= tolerance else { continue }
+            let start = fragment.point.x
+            let end = fragment.point.x + fragment.width
+            guard mid >= start, mid <= end else { continue }
+            let overlap = min(end, x + wordWidth) - max(start, x)
+            let name = baseName(fragment.font)
+            if let current = best {
+                if overlap > current.overlap { best = (name, overlap) }
+            } else {
+                best = (name, overlap)
+            }
+        }
+        return best?.name
+    }
+
+    /// The marked-content role ("header"/"footer") of the fragment that
+    /// covers the x-span `[x, x + width]` on `baseline ± tolerance`, or nil
+    /// for ordinary body text. Same geometric midpoint rule as `fontName`.
+    static func artifactRole(overX x: CGFloat, width wordWidth: CGFloat, baseline: CGFloat,
+                             tolerance: CGFloat, in fragments: [Fragment]) -> String? {
+        // Any positive overlap qualifies: the role comes from a producer's
+        // own mark, so an over-strict containment rule only loses words
+        // (widths are estimates; the first SOP header pass dropped
+        // "Procedure:" because its fragment midpoint fell into a gap).
+        // Largest overlap wins so a neighbouring body mark cannot steal.
+        var best: (role: String, overlap: CGFloat)?
+        for fragment in fragments {
+            guard let role = fragment.artifact else { continue }
+            guard abs(fragment.point.y - baseline) <= tolerance else { continue }
+            let start = fragment.point.x
+            let end = fragment.point.x + fragment.width
+            let overlap = min(end, x + wordWidth) - max(start, x)
+            guard overlap > 0 else { continue }
+            if let current = best {
+                if overlap > current.overlap { best = (role, overlap) }
+            } else {
+                best = (role, overlap)
+            }
+        }
+        return best?.role
+    }
 
     /// The encoding of the legacy-font fragment that drew `text`, on the line
     /// whose baseline is `baseline` (display y), or `nil` when the text came
@@ -208,6 +309,21 @@ final class LegacyScanState {
     var leading: CGFloat = 0
     var display = CGAffineTransform.identity
     var fragments: [PDFLegacyFonts.Fragment] = []
+    /// Width already drawn on the current text line, in text space. Many
+    /// producers draw a whole line as one `BT` with several `TJ` strings —
+    /// one per style segment — and position each with the line's `Tm`, so
+    /// every fragment would otherwise start at the line's left edge and
+    /// mid-line style boundaries would be invisible to the word join.
+    var drawnWidth: CGFloat = 0
+    /// The font size last set by `Tf`, for advance estimates.
+    var fontSize: CGFloat = 11
+    /// Role of the enclosing marked-content sequence (`BDC`/`BMC` … `EMC`),
+    /// ISO 32000-2 §14.8.2. Nested sequences resolve to the outermost
+    /// pagination role.
+    var artifact: String? = nil
+    /// Stack of enclosing roles, because artifacts nest (sop.pdf nests a
+    /// plain `BDC … EMC` inside the Header sequence).
+    var artifactStack: [String?] = []
 
     func place(_ text: String) {
         guard !text.isEmpty, !font.isEmpty else { return }
@@ -221,8 +337,24 @@ final class LegacyScanState {
             .applying(ctm)
             .applying(display)
         let scale = sqrt(abs(ctm.a * ctm.d - ctm.b * ctm.c))
-        let width = CGFloat(text.count) * scale * 0.5
-        fragments.append(.init(font: font, point: origin, width: width, text: text))
+        // Identity-H and other two-byte encodings deliver two latin-1 chars
+        // per glyph; halve the count so the width estimates glyphs.
+        let glyphCount = max(1, text.count / 2)
+        let width = CGFloat(glyphCount) * fontSize * 0.5 * scale
+        var start = origin
+        if drawnWidth > 0 {
+            // Advance the segment start along the line's direction. Lines
+            // are horizontal in every layout we join words against, so the
+            // x component alone is enough.
+            let unit = CGPoint(x: linear.a, y: linear.b)
+                .applying(ctm).applying(display)
+            let length = max(0.001, sqrt(unit.x * unit.x + unit.y * unit.y))
+            start.x += unit.x / length * drawnWidth
+            start.y += unit.y / length * drawnWidth
+        }
+        fragments.append(.init(font: font, point: start, width: width, text: text,
+                               fontSize: fontSize, artifact: artifact))
+        drawnWidth += width
     }
 }
 
@@ -282,14 +414,17 @@ private func legacyOpConcat(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRaw
 private func legacyOpBeginText(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     guard let state = legacyState(info) else { return }
     state.textMatrix = .identity
-    state.stack = []
-    state.ctm = .identity
+    state.drawnWidth = 0
+    // `BT` resets the text matrix and text line parameters only. The CTM is
+    // graphics state: it survives until `Q`, and many producers place every
+    // text block with `q … cm … BT … ET Q`, so resetting it here put every
+    // fragment at (0, 0) and broke the word-to-font join (testdoc.pdf).
 }
 
 private func legacyOpFont(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     guard let state = legacyState(info) else { return }
-    var ignored: CGPDFObjectRef?
-    CGPDFScannerPopObject(scanner, &ignored)   // the size
+    var size: CGPDFReal = 0
+    if CGPDFScannerPopNumber(scanner, &size) { state.fontSize = CGFloat(size) }
     var name: UnsafePointer<CChar>?
     guard CGPDFScannerPopName(scanner, &name), let name else { return }
     let resource = String(cString: name)
@@ -308,6 +443,7 @@ private func legacyOpMoveLine(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableR
     guard let state = legacyState(info) else { return }
     let ty = legacyPopNumber(scanner) ?? 0, tx = legacyPopNumber(scanner) ?? 0
     state.textMatrix = state.textMatrix.translatedBy(x: tx, y: ty)
+    state.drawnWidth = 0
 }
 
 private func legacyOpMoveLineAndLeading(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
@@ -315,6 +451,7 @@ private func legacyOpMoveLineAndLeading(_ scanner: CGPDFScannerRef, _ info: Unsa
     let ty = legacyPopNumber(scanner) ?? 0, tx = legacyPopNumber(scanner) ?? 0
     state.leading = -ty
     state.textMatrix = state.textMatrix.translatedBy(x: tx, y: ty)
+    state.drawnWidth = 0
 }
 
 private func legacyOpLeading(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
@@ -325,6 +462,7 @@ private func legacyOpLeading(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRa
 private func legacyOpNextLine(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     guard let state = legacyState(info) else { return }
     state.textMatrix = state.textMatrix.translatedBy(x: 0, y: -state.leading)
+    state.drawnWidth = 0
 }
 
 private func legacyOpShow(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
@@ -338,13 +476,14 @@ private func legacyOpQuoteShow(_ scanner: CGPDFScannerRef, _ info: UnsafeMutable
     if let text = legacyPopText(scanner) { state.place(text) }
 }
 
-/// `TJ`: an array of strings and kerning adjustments. A large negative
-/// adjustment is a word gap.
+/// `TJ`: an array of strings and kerning adjustments. Each string is placed
+/// as its own fragment at its own x so mid-line font switches become visible
+/// to the word join (styled segments are separate TJ strings). A large
+/// negative adjustment is a word gap.
 private func legacyOpShowArray(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
     guard let state = legacyState(info) else { return }
     var array: CGPDFArrayRef?
     guard CGPDFScannerPopArray(scanner, &array), let array else { return }
-    var text = ""
     for index in 0..<CGPDFArrayGetCount(array) {
         var element: CGPDFObjectRef?
         guard CGPDFArrayGetObject(array, index, &element), let element else { continue }
@@ -352,10 +491,57 @@ private func legacyOpShowArray(_ scanner: CGPDFScannerRef, _ info: UnsafeMutable
         if CGPDFObjectGetValue(element, .string, &string), let string,
            let bytes = CGPDFStringGetBytePtr(string) {
             let data = Data(bytes: bytes, count: CGPDFStringGetLength(string))
-            text += String(data: data, encoding: .isoLatin1) ?? ""
+            state.place(String(data: data, encoding: .isoLatin1) ?? "")
             continue
         }
-        if let adjustment = legacyNumberValue(element), adjustment < -200 { text += " " }
+        // Kerning adjustments shift the pen in thousandths of text space.
+        if let adjustment = legacyNumberValue(element) {
+            state.drawnWidth += adjustment < -200 ? -adjustment / 1000 + state.fontSize * 0.3
+                                                  : -adjustment / 1000
+        }
     }
-    state.place(text)
+}
+
+// MARK: - Marked content (ISO 32000-2 §14.8.2)
+
+private func legacyOpBeginMarkedProperties(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    guard let state = legacyState(info) else { return }
+    // `tag properties` — pop the properties dict, then the tag name.
+    var object: CGPDFObjectRef?
+    guard CGPDFScannerPopObject(scanner, &object), let object else { return }
+    var name: UnsafePointer<CChar>?
+    guard CGPDFScannerPopName(scanner, &name), let name else { return }
+    let tag = String(cString: name)
+    state.artifactStack.append(state.artifact)
+    guard tag == "Artifact" else { state.artifact = nil; return }
+    // The properties dictionary may be inline or a resource reference;
+    // only the inline `/Artifact <</Type/Pagination/Subtype/Header>>`
+    // form names the role. An unreadable dict is an untyped artifact:
+    // no role, so body-text handling applies.
+    var dict: CGPDFDictionaryRef?
+    guard CGPDFObjectGetValue(object, .dictionary, &dict), let dict else { state.artifact = nil; return }
+    var typeName: UnsafePointer<CChar>?
+    var subtypeName: UnsafePointer<CChar>?
+    CGPDFDictionaryGetName(dict, "Type", &typeName)
+    CGPDFDictionaryGetName(dict, "Subtype", &subtypeName)
+    guard let t = typeName.map(String.init), t == "Pagination" else { state.artifact = nil; return }
+    switch subtypeName.map(String.init) {
+    case "Header": state.artifact = "header"
+    case "Footer": state.artifact = "footer"
+    default: break
+    }
+}
+
+private func legacyOpBeginMarkedTag(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    guard let state = legacyState(info) else { return }
+    var name: UnsafePointer<CChar>?
+    guard CGPDFScannerPopName(scanner, &name) else { return }
+    state.artifactStack.append(state.artifact)
+    // A bare tag adds no role: keep the enclosing one (real files nest
+    // `BMC … EMC` inside an Artifact sequence).
+}
+
+private func legacyOpEndMarked(_ scanner: CGPDFScannerRef, _ info: UnsafeMutableRawPointer?) {
+    guard let state = legacyState(info), let restored = state.artifactStack.popLast() else { return }
+    state.artifact = restored
 }

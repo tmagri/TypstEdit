@@ -64,9 +64,10 @@ enum PDFImportEmitter {
     private static func typstBlock(_ block: PDFImportedBlock, contentWidth: CGFloat) -> String? {
         switch (block.kind, block.content) {
         case (.heading(let level), .text(let text)):
-            return String(repeating: "=", count: level) + " " + escapeMarkup(text, atLineStart: false)
+            let spans = renderSpans(block.spans, plain: text, atLineStart: false, dropBold: true)
+            return String(repeating: "=", count: level) + " " + spans
         case (.paragraph, .text(let text)), (.caption, .text(let text)):
-            return escapeMarkup(text, atLineStart: true)
+            return renderSpans(block.spans, plain: text, atLineStart: true)
         case (.code(let language), .text(let text)):
             return fenced(text, language: language)
         case (_, .table(let table)):
@@ -92,12 +93,13 @@ enum PDFImportEmitter {
             guard case .listItem(let depth, _) = block.kind else { continue }
             let indent = String(repeating: "  ", count: depth)
             if let label, let number = label.number {
-                lines.append(indent + "\(number). " + escapeMarkup(label.rest, atLineStart: false))
+                lines.append(indent + "\(number). " + renderSpans(block.spans, plain: label.rest, atLineStart: false))
             } else if let label {
-                lines.append(indent + "- " + escapeMarkup(label.label + " " + label.rest, atLineStart: false))
+                lines.append(indent + "- " + renderSpans(block.spans, plain: label.label + " " + label.rest, atLineStart: false))
             } else {
                 // In a marker-less (labelled) list a bullet item keeps its bullet.
-                lines.append(indent + "- " + (labelled ? "• " : "") + escapeMarkup(block.content.plainText, atLineStart: false))
+                lines.append(indent + "- " + (labelled ? "• " : "")
+                             + renderSpans(block.spans, plain: block.content.plainText, atLineStart: false))
             }
         }
         let body = lines.joined(separator: "\n")
@@ -164,8 +166,12 @@ enum PDFImportEmitter {
         return "(" + widths.map { "\($0)fr" }.joined(separator: ", ") + ")"
     }
 
-    /// Cells in row-major order. Typst places each cell in the next free
-    /// position, so positions covered by an earlier span are skipped.
+    /// Cells in row-major order. Positions are explicit (`table.cell(x:, y:)`)
+    /// because Typst's auto-placement fills the next free slot: a rowspan
+    /// that ends mid-table leaves holes a later row's cells fall into,
+    /// shifting everything left and pushing a colspan past the grid (hard
+    /// compile error, first seen on SOP-DPK-AMR-002). Explicit positions
+    /// also keep cells at their true coordinates when a hole sits mid-row.
     private static func typstSpannedGrid(_ table: PDFTableData, rows: [[String]], columns: Int) -> String {
         var covered = Set<[Int]>()
         var spanAt: [[Int]: PDFCellSpan] = [:]
@@ -183,13 +189,14 @@ enum PDFImportEmitter {
         for (r, row) in rows.enumerated() {
             var cells: [String] = []
             for (c, text) in row.enumerated() where !covered.contains([r, c]) {
+                let content = cell(text)
                 if let span = spanAt[[r, c]] {
-                    var arguments: [String] = []
+                    var arguments = ["x: \(c)", "y: \(r)"]
                     if span.rowSpan > 1 { arguments.append("rowspan: \(span.rowSpan)") }
                     if span.columnSpan > 1 { arguments.append("colspan: \(span.columnSpan)") }
-                    cells.append("table.cell(\(arguments.joined(separator: ", ")))\(cell(text))")
+                    cells.append("table.cell(\(arguments.joined(separator: ", ")))\(content)")
                 } else {
-                    cells.append(cell(text))
+                    cells.append("table.cell(x: \(c), y: \(r))\(content)")
                 }
             }
             guard !cells.isEmpty else { continue }
@@ -242,10 +249,35 @@ enum PDFImportEmitter {
             ("a5", CGSize(width: 419.53, height: 595.28)),
             ("a3", CGSize(width: 841.89, height: 1190.55)),
         ]
-        if let paper = papers.first(where: { abs($0.1.width - portrait.width) < 4 && abs($0.1.height - portrait.height) < 4 }) {
-            return "#set page(paper: \"\(paper.0)\"\(flipped))"
+        var furniture = ""
+        // Margin furniture the import removed goes back as page setup. A
+        // custom footer and Typst's `numbering` would clash, so numbers are
+        // only requested when there is no footer text to emit.
+        if let header = document.runningHeader {
+            furniture += ", header: [\(escapeMarkup(header.text, atLineStart: false))]"
         }
-        return "#set page(width: \(formatPoints(size.width)), height: \(formatPoints(size.height)))"
+        // "Page N of M" margins become a live page counter (each page must
+        // show its own number). Counter access needs `context`, so the
+        // footer is a context block: static wording inside align(center),
+        // counter expressions inline. The static text survives escaping;
+        // counter markup is appended outside escapeMarkup.
+        if document.pageNumberingIncludesTotal == true {
+            let counter = "#counter(page).display() of #counter(page).final().first()"
+            if let footer = document.runningFooter {
+                let text = escapeMarkup(footer.text, atLineStart: false)
+                furniture += ", footer: context align(center)[\(text) — Page \(counter)]"
+            } else {
+                furniture += ", footer: context align(center)[Page \(counter)]"
+            }
+        } else if let footer = document.runningFooter {
+            furniture += ", footer: [\(escapeMarkup(footer.text, atLineStart: false))]"
+        } else if document.hasPageNumbers {
+            furniture += ", numbering: \"1\""
+        }
+        if let paper = papers.first(where: { abs($0.1.width - portrait.width) < 4 && abs($0.1.height - portrait.height) < 4 }) {
+            return "#set page(paper: \"\(paper.0)\"\(flipped)\(furniture))"
+        }
+        return "#set page(width: \(formatPoints(size.width)), height: \(formatPoints(size.height))\(furniture))"
     }
 
     /// Width of the text block, estimated from where text actually sits.
@@ -281,13 +313,81 @@ enum PDFImportEmitter {
         return text.split(separator: "\n", omittingEmptySubsequences: false).map { pad + $0 }.joined(separator: "\n")
     }
 
+    // MARK: - Styled spans
+
+    /// Renders a block's styled spans as Typst markup, falling back to the
+    /// plain escaped text when the spans are absent or do not reproduce it.
+    ///
+    /// Nesting, innermost out: monospace (`raw` text) → bold → italic →
+    /// script → colour → link. Inside a link, `#link("url")[…]` accepts
+    /// styled content; inside a colour, `#text(fill: …)[…]` accepts
+    /// scripts. A monospace span keeps its text raw (only its own brackets
+    /// are literal), so it is always the innermost layer.
+    static func renderSpans(_ spans: [PDFStyledSpan]?, plain: String, atLineStart: Bool, dropBold: Bool = false) -> String {
+        guard let spans, !spans.isEmpty else { return escapeMarkup(plain, atLineStart: atLineStart) }
+        var out = ""
+        for (index, span) in spans.enumerated() {
+            // Marker-adjacent whitespace would break the markup: Typst reads
+            // `* text*` as literal asterisks, and a span that swallowed the
+            // word gap leaves `word.* text` glued to the previous one. Keep
+            // the padding outside the styled body.
+            var lead = ""
+            var trail = ""
+            var content = span.text
+            while let first = content.first, first == " " {
+                lead += " "
+                content.removeFirst()
+            }
+            while let last = content.last, last == " " {
+                trail += " "
+                content.removeLast()
+            }
+            var body: String
+            if content.isEmpty {
+                body = lead + trail
+            } else if span.isMonospace {
+                // Raw text: no markup inside, the fence only has to be longer
+                // than any backtick run in the text.
+                var longest = 0, current = 0
+                for character in content {
+                    current = character == "`" ? current + 1 : 0
+                    longest = max(longest, current)
+                }
+                let fence = String(repeating: "`", count: longest + 1)
+                body = lead + fence + content + fence + trail
+            } else {
+                body = escapeMarkup(content, atLineStart: atLineStart && index == 0 && lead.isEmpty)
+                if span.isBold, !dropBold { body = "*" + body + "*" }
+                if span.isItalic { body = "_" + body + "_" }
+                if span.script == .raised { body = "#super[" + body + "]" }
+                if span.script == .lowered { body = "#sub[" + body + "]" }
+                body = lead + body + trail
+            }
+            if let color = span.color, !content.isEmpty { body = "#text(fill: rgb(\"\(color)\"))[" + body + "]" }
+            if let link = span.link, !content.isEmpty { body = "#link(\"\(escapeString(link))\")[" + body + "]" }
+            out += body
+        }
+        // A styled first span would swallow the line-start escape, and a
+        // line that now begins with markup text is not at line start any
+        // more — escape only when the output itself starts dangerously.
+        if atLineStart, let first = out.first, "=-+".contains(first), !out.hasPrefix("\\") {
+            out = "\\" + out
+        }
+        return out
+    }
+
     // MARK: - Escaping
 
     /// Escapes text for Typst markup so PDF text can never be read as markup.
     static func escapeMarkup(_ text: String, atLineStart: Bool = true) -> String {
+        // U+FFFC and neighbours are PDFKit's stand-ins for inline objects
+        // (images already export separately); they render as tofu in Typst.
+        let cleaned = text.replacingOccurrences(of: "\u{FFFC}", with: "")
+                          .replacingOccurrences(of: "\u{FFFE}", with: "")
+                          .replacingOccurrences(of: "\u{FFFF}", with: "")
         var out = ""
-        out.reserveCapacity(text.count + 8)
-        let words = text.split(separator: " ", omittingEmptySubsequences: false)
+        out.reserveCapacity(cleaned.count + 8)
+        let words = cleaned.split(separator: " ", omittingEmptySubsequences: false)
         for (index, word) in words.enumerated() {
             if index > 0 { out += " " }
             // URLs stay intact: Typst links them and they contain no markup.

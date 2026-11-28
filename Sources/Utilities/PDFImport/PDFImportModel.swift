@@ -12,11 +12,29 @@ import CoreGraphics
 ///
 /// All geometry is in *display space*: PDF points, origin bottom-left of the
 /// page's crop box, with page rotation already applied, so "up" is up.
+/// Margin furniture text (running head or footer) with its weight.
+struct PDFMarginText: Sendable, Equatable, Codable {
+    var text: String
+    var isBold: Bool
+}
+
 struct PDFImportedDocument: Sendable, Equatable, Codable {
     var sourceName: String = ""
     var pages: [PDFImportedPage] = []
     /// Dominant body font size across the document, in points.
     var bodyFontSize: CGFloat = 11
+    /// Text repeating in the top margin band on most pages (running head).
+    /// `nil` when no stable head was found.
+    var runningHeader: PDFMarginText? = nil
+    /// Text repeating in the bottom margin band on most pages (footer).
+    var runningFooter: PDFMarginText? = nil
+    /// Bare page numbers were found in the margin bands.
+    var hasPageNumbers = false
+    /// The margin numbers read "Page N of M" (or "N of M"), not bare "N":
+    /// the emitter renders a live `Page #counter(page).display() of
+    /// #counter(page).final().first()` footer instead of `numbering: "1"`.
+    /// Optional so documents encoded before this field decode as plain.
+    var pageNumberingIncludesTotal: Bool? = nil
 
     var blocks: [PDFImportedBlock] { pages.flatMap(\.blocks) }
 }
@@ -45,6 +63,45 @@ struct PDFImportedBlock: Sendable, Equatable, Codable {
     var content: PDFBlockContent
     /// Average font size of the block's text, when it has text.
     var fontSize: CGFloat? = nil
+    /// Styled runs behind `content`'s plain text, when any styling was
+    /// found (bold, italic, monospace, super/subscript, colour, links).
+    /// Emitters use the plain text instead when this is `nil` or its
+    /// concatenation disagrees with it.
+    var spans: [PDFStyledSpan]? = nil
+}
+
+/// One styled piece of a block's text. The concatenation of the `text`s
+/// reproduces the block's plain text when the spans are complete; emitters
+/// verify that before trusting them.
+struct PDFStyledSpan: Sendable, Equatable, Codable {
+    var text: String
+    var isBold = false
+    var isItalic = false
+    /// Set in a monospace font (typewriter face in the source PDF).
+    var isMonospace = false
+    /// Raised or lowered relative to the line (superscript, footnote marks).
+    var script: PDFSpanScript = .none
+    /// Foreground colour as "#RRGGBB", `nil` when black.
+    var color: String? = nil
+    /// Link target (absolute URL), when this span sits inside a link.
+    var link: String? = nil
+
+    var isPlain: Bool {
+        !isBold && !isItalic && !isMonospace && script == .none && color == nil && link == nil
+    }
+}
+
+enum PDFSpanScript: String, Sendable, Equatable, Codable {
+    case none, raised, lowered
+}
+
+extension PDFStyledSpan {
+    /// Whether appending another span with a single space would lose no
+    /// styling boundary (same weight, face, script, colour and link).
+    func sameStyle(as other: PDFStyledSpan) -> Bool {
+        isBold == other.isBold && isItalic == other.isItalic && isMonospace == other.isMonospace
+            && script == other.script && color == other.color && link == other.link
+    }
 }
 
 enum PDFBlockKind: Sendable, Equatable, Codable {
@@ -223,6 +280,18 @@ struct PDFTextRun: Sendable, Equatable {
     /// came from the text layer: the PDF's own reading order, which is
     /// reliable inside a table cell even where geometry is ambiguous.
     var textOrder: Int?
+    /// Set in a monospace (typewriter) font.
+    var isMonospace = false
+    /// Raised or lowered relative to the row it was folded into.
+    var script: PDFSpanScript = .none
+    /// Foreground colour as "#RRGGBB", nil when black.
+    var color: String? = nil
+    /// Link target URL, when this run sits inside a link annotation.
+    var link: String? = nil
+    /// Marked-content role from the content stream ("header"/"footer"),
+    /// set when the producer tagged the run as a pagination artifact
+    /// (ISO 32000-2 §14.8.2). The authoritative furniture signal.
+    var artifact: String? = nil
 
     init(text: String, rect: CGRect, fontSize: CGFloat, isBold: Bool = false,
          isItalic: Bool = false, mathScore: Double = 0, isTitle: Bool = false) {
@@ -233,6 +302,10 @@ struct PDFTextRun: Sendable, Equatable {
         self.isItalic = isItalic
         self.mathScore = mathScore
         self.isTitle = isTitle
+    }
+
+    var hasStyle: Bool {
+        isBold || isItalic || isMonospace || script != .none || color != nil || link != nil
     }
 }
 

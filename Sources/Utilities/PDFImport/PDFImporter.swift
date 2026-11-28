@@ -76,7 +76,8 @@ struct PDFImporter: Sendable {
             // crossing cell borders.
             let layer: (runs: [PDFTextRun], all: [PDFTextRun], tables: [PDFRegion])? = options.forceOCR ? nil : autoreleasepool {
                 let rulings = PDFLatticeTables.rulings(page: page, displaySize: size)
-                guard var runs = PDFPageExtractor.textLayerRuns(for: page, barriers: rulings.vertical) else { return nil }
+                let links = PDFPageExtractor.linkTargets(for: page)
+                guard var runs = PDFPageExtractor.textLayerRuns(for: page, barriers: rulings.vertical, links: links) else { return nil }
                 PDFPageExtractor.applyInkWeight(page: page, displaySize: size, runs: &runs, sizesTrusted: !scanned)
                 let all = runs
                 let lattice = PDFLatticeTables.tables(from: rulings, runs: runs)
@@ -102,8 +103,37 @@ struct PDFImporter: Sendable {
             }
         }
 
+        var document = PDFImportedDocument(sourceName: sourceURL.lastPathComponent)
+
         // 2. Running headers / page numbers, then the body size.
+        // What repeats in the margins is captured before it is removed, so
+        // the emitters can put the furniture back as page setup.
         if options.removeRunningHeaders {
+            // Producers sometimes mark ruled-table content as artifacts
+            // too (SOP: the repeated ID table sits inside Footer marks).
+            // Recognised tables are content, not furniture: unmark their
+            // runs before the furniture vote, or the ID table would be
+            // swallowed into the footer and the remover would drop it.
+            for item in work.indices {
+                guard !work[item].presetTables.isEmpty else { continue }
+                let rects = work[item].presetTables.map(\.rect)
+                let unmarked = work[item].sizeSample.map { run -> PDFTextRun in
+                    guard run.artifact != nil,
+                          rects.contains(where: { $0.insetBy(dx: 2, dy: 2).contains(CGPoint(x: run.rect.midX, y: run.rect.midY)) })
+                    else { return run }
+                    var copy = run
+                    copy.artifact = nil
+                    return copy
+                }
+                if work[item].bodySample.isEmpty { work[item].runs = unmarked }
+                else { work[item].bodySample = unmarked }
+            }
+            let furniture = PDFLayoutAnalyzer.furnitureWithNumberingStyle(pages: work.map(\.sizeSample), pageSizes: work.map(\.size),
+                                                                 tableRects: work.flatMap { $0.presetTables.map(\.rect) })
+            document.runningHeader = furniture.header
+            document.runningFooter = furniture.footer
+            document.hasPageNumbers = furniture.pageNumbers
+            document.pageNumberingIncludesTotal = furniture.numberingIncludesTotal
             // Recognised blocks (scanned pages) take part as stand-in runs,
             // so a running head is dropped whichever path read the page.
             func standIn(_ region: PDFRegion) -> PDFTextRun? {
@@ -125,7 +155,7 @@ struct PDFImporter: Sendable {
         let bodySize = PDFLayoutAnalyzer.bodyFontSize(work.flatMap(\.sizeSample))
 
         // 3. Tables, figures and reading order, page by page.
-        var document = PDFImportedDocument(sourceName: sourceURL.lastPathComponent, bodyFontSize: bodySize)
+        document.bodyFontSize = bodySize
         for item in work {
             try Task.checkCancellation()
             guard let page = pdf.page(at: item.index) else { continue }

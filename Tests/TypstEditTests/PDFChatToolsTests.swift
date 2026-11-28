@@ -136,7 +136,9 @@ final class PDFChatToolsTests: XCTestCase {
         XCTAssertFalse(existing)
         let typst = try String(contentsOf: root.appendingPathComponent("imported/report.typ"), encoding: .utf8)
         XCTAssertTrue(typst.contains("= Quarterly Report"), typst)
-        XCTAssertTrue(typst.contains("table.cell(colspan: 2)"), typst)
+        // Spanned cells carry explicit grid positions (the SOP fix): Typst
+        // auto-placement would otherwise shift cells and overflow the grid.
+        XCTAssertTrue(typst.contains("table.cell(x: 0, y: 0, colspan: 2)"), typst)
         XCTAssertTrue(out.contains("imported/report.typ"), out)
     }
 

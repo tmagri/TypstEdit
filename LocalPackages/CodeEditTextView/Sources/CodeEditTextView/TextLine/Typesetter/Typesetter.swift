@@ -181,7 +181,8 @@ final public class Typesetter {
             )
 
             // Indicates the subrange on the range that the typesetter knows about. This may not be the entire line
-            let typesetSubrange = NSRange(location: context.currentPosition - range.location, length: lineBreak)
+            let fragmentStart = context.currentPosition - range.location
+            let typesetSubrange = NSRange(location: fragmentStart, length: lineBreak - fragmentStart)
             let typesetData = typesetLine(typesetter: typesetter, range: typesetSubrange)
 
             // The typesetter won't tell us if 0 characters can fit in the constrained space. This checks to

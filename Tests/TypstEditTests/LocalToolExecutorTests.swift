@@ -905,6 +905,29 @@ final class LocalToolExecutorTests: XCTestCase {
         XCTAssertTrue(out.contains("deploy/evidence/"), out)
     }
 
+    func testListFilesAndGrepInSubfolder() async throws {
+        try write("root.typ", "needle in root\n")
+        try write("chapters/intro.typ", "needle in intro\n")
+        try write("chapters/nested/deep.typ", "needle in deep\n")
+        try write("other/notes.md", "needle in other\n")
+
+        let subList = try await run("list_files", ["path": "chapters"])
+        XCTAssertTrue(subList.contains("chapters/intro.typ"), subList)
+        XCTAssertTrue(subList.contains("chapters/nested/deep.typ"), subList)
+        XCTAssertFalse(subList.contains("root.typ"), subList)
+        XCTAssertFalse(subList.contains("other/notes.md"), subList)
+
+        let grepSub = try await run("grep_project", ["pattern": "needle", "path": "chapters"])
+        XCTAssertTrue(grepSub.contains("chapters/intro.typ:1:"), grepSub)
+        XCTAssertTrue(grepSub.contains("chapters/nested/deep.typ:1:"), grepSub)
+        XCTAssertFalse(grepSub.contains("root.typ"), grepSub)
+        XCTAssertFalse(grepSub.contains("other/notes.md"), grepSub)
+
+        XCTAssertTrue(FileToolbox.globMatches("chapters/**/*.typ", relativePath: "chapters/nested/deep.typ", fileName: "deep.typ"))
+        XCTAssertTrue(FileToolbox.globMatches("**/*.typ", relativePath: "chapters/intro.typ", fileName: "intro.typ"))
+        XCTAssertFalse(FileToolbox.globMatches("chapters/**/*.typ", relativePath: "other/notes.md", fileName: "notes.md"))
+    }
+
     func testExportMarkdownWritesConvertedCopy() async throws {
         try write("Mugs.typ", "= Mugs\n\nSome **bold** text.\n")
         var seen: PendingApprovalKind?

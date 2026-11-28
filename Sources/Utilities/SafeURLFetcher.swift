@@ -57,7 +57,18 @@ enum SafeURLFetcher {
         }
     }
 
-    private static let userAgent = "TypstEdit/AI-Chat-web_fetch (+https://github.com/tmagri/TypstEdit)"
+    private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+
+    /// Whether two hosts are identical or differ only by a `www.` prefix
+    /// (e.g. `example.com` ↔ `www.example.com`).
+    static func isSameSiteOrWWWVariant(_ a: String?, _ b: String?) -> Bool {
+        guard let a = a?.lowercased(), let b = b?.lowercased(), !a.isEmpty, !b.isEmpty else {
+            return false
+        }
+        if a == b { return true }
+        let stripWWW: (String) -> String = { $0.hasPrefix("www.") ? String($0.dropFirst(4)) : $0 }
+        return stripWWW(a) == stripWWW(b)
+    }
 
     /// Fetches `url`, following same-host redirects — re-validating the
     /// destination address on every hop — and stopping, without following,
@@ -88,6 +99,7 @@ enum SafeURLFetcher {
             request.timeoutInterval = timeout
             request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("text/html, application/xhtml+xml, text/plain, application/json;q=0.9, */*;q=0.5", forHTTPHeaderField: "Accept")
+            request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
             if let cookies = await cookieHeader(currentURL), !cookies.isEmpty {
                 request.setValue(cookies, forHTTPHeaderField: "Cookie")
             }
@@ -107,7 +119,7 @@ enum SafeURLFetcher {
                 }
                 guard hopsLeft > 0 else { throw FetchError.tooManyRedirects }
                 hopsLeft -= 1
-                guard redirectURL.host?.lowercased() == currentURL.host?.lowercased() else {
+                guard isSameSiteOrWWWVariant(redirectURL.host, currentURL.host) else {
                     throw FetchError.crossHostRedirect(from: currentURL, to: redirectURL)
                 }
                 currentURL = redirectURL

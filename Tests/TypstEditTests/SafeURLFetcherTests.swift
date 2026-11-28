@@ -118,6 +118,15 @@ final class SafeURLFetcherTests: XCTestCase {
         XCTAssertTrue(out.contains("documentation examples"), out)
     }
 
+    func testWWWHostVariantMatchingForRedirects() {
+        XCTAssertTrue(SafeURLFetcher.isSameSiteOrWWWVariant("example.com", "www.example.com"))
+        XCTAssertTrue(SafeURLFetcher.isSameSiteOrWWWVariant("www.Example.com", "example.com"))
+        XCTAssertTrue(SafeURLFetcher.isSameSiteOrWWWVariant("typst.app", "typst.app"))
+        XCTAssertFalse(SafeURLFetcher.isSameSiteOrWWWVariant("example.com", "evil.com"))
+        XCTAssertFalse(SafeURLFetcher.isSameSiteOrWWWVariant("sub.example.com", "www.example.com"))
+        XCTAssertFalse(SafeURLFetcher.isSameSiteOrWWWVariant(nil, "example.com"))
+    }
+
     // MARK: - Setup
 
     private var executor: LocalToolExecutor!

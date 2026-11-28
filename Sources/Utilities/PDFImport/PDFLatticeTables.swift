@@ -44,7 +44,10 @@ enum PDFLatticeTables {
         context.scaleBy(x: scale, y: scale)
         page.draw(with: .cropBox, to: context)
         guard let data = context.data?.assumingMemoryBound(to: UInt8.self) else { return Rulings() }
-        let dark: UInt8 = 200
+        // Near-black only. A looser cutoff (200) also catches mid-gray cell
+        // fills — a light-blue header band renders around gray 156-194 — and
+        // the fill then floods the run scan, smothering the border grid.
+        let dark: UInt8 = 100
 
         var horizontal: [(y: Int, x0: Int, x1: Int)] = []
         let minAcross = Int(15 * scale)
@@ -269,7 +272,11 @@ enum PDFLatticeTables {
                 if !words.allSatisfy(\.isBold) { headerBold = false }
             }
         }
-        guard !used.isEmpty else { return nil }
+        // A grid whose cells are all blank is a flowchart/callout frame, not
+        // a table — its box borders must not become empty ruled rows.
+        guard used.contains(where: { !runs[$0].text.trimmingCharacters(in: .whitespaces).isEmpty }),
+              grid.contains(where: { $0.contains(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) })
+        else { return nil }
         consumed.formUnion(used)
 
         var table = PDFTableData(rows: grid, headerRows: headerBold && headerHasText ? 1 : 0)

@@ -140,7 +140,11 @@ final class PDFImportTests: XCTestCase {
         guard case .table(let table)? = detection.regions.first?.kind else { return XCTFail("no table") }
         XCTAssertEqual(table.rows, [["Request", ""], ["Path", "/api/task"]])
         XCTAssertEqual(table.spans, [PDFCellSpan(row: 0, column: 0, rowSpan: 1, columnSpan: 2)])
-        XCTAssertTrue(PDFImportEmitter.typstTable(table, rect: .zero, contentWidth: 400).contains("table.cell(colspan: 2)[Request]"))
+        let typst = PDFImportEmitter.typstTable(table, rect: .zero, contentWidth: 400)
+        // Cells carry explicit x/y so Typst never auto-places them (the
+        // auto-placement shift that broke SOP-DPK-AMR-002's alarm table).
+        XCTAssertTrue(typst.contains("table.cell(x: 0, y: 0, colspan: 2)[Request]"))
+        XCTAssertTrue(typst.contains("table.cell(x: 0, y: 1)[Path]"))
     }
 
     func testFramedCodeKeepsIndentation() {
