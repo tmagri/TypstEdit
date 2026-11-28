@@ -26,6 +26,7 @@ struct AIChatView: View {
     /// the panel is destroyed when the sidebar switches to Files or the
     /// Calculator, and SwiftUI would take a local `@State` draft with it.
     @State private var showYoloConfirm = false
+    @State private var showBypassConfirm = false
     @FocusState private var inputFocused: Bool
     @State private var shiftEnterMonitor: Any?
 
@@ -204,6 +205,12 @@ struct AIChatView: View {
             Button("Enable", role: .destructive) { chat.yoloMode = true }
         } message: {
             Text("File writes, edits, Python runs, and permitted Git actions (stage, commit, fetch, pull) will execute without asking you first for this app session. Push always requires your approval. YOLO does not enable Git permissions. The AI remains limited to this project/notebook, and Git tools require the repository root. YOLO turns itself off when TypstEdit restarts.")
+        }
+        .alert("Enable Bypass Permissions?", isPresented: $showBypassConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Enable", role: .destructive) { chat.bypassPermissions = true }
+        } message: {
+            Text("Every tool call in this conversation will run immediately with no approval card, no safety-monitor pause, no sandbox, network reachable, and sudo allowed. This turns off when TypstEdit restarts or when you turn off Unlock Bypass Permissions in Settings.")
         }
         .alert("Rename Chat", isPresented: $showRename) {
             TextField("Name", text: $renameDraft)
@@ -2820,6 +2827,9 @@ struct AIChatView: View {
                     Spacer(minLength: 0)
                     planToggle(iconOnly: iconOnly)
                     yoloToggle(iconOnly: iconOnly)
+                    if aiSettings.bypassPermissionsUnlocked {
+                        bypassToggle(iconOnly: iconOnly)
+                    }
                 }
                 // On its own line the chip always has room for the name.
                 HStack(spacing: 10) {
@@ -2838,6 +2848,9 @@ struct AIChatView: View {
                 Spacer(minLength: 0)
                 planToggle(iconOnly: iconOnly)
                 yoloToggle(iconOnly: iconOnly)
+                if aiSettings.bypassPermissionsUnlocked {
+                    bypassToggle(iconOnly: iconOnly)
+                }
             }
         }
     }
@@ -2959,6 +2972,23 @@ struct AIChatView: View {
         .help(chat.yoloMode
               ? "YOLO mode is ON — writes, edits, code runs, and permitted local Git actions/pulls are auto-approved. Push still asks. Click to turn off."
               : "YOLO mode: auto-approve writes, edits, code runs, and permitted local Git actions/pulls for this session. Push always asks.")
+    }
+
+    private func bypassToggle(iconOnly: Bool) -> some View {
+        Button {
+            if chat.bypassPermissions {
+                chat.bypassPermissions = false
+            } else {
+                showBypassConfirm = true
+            }
+        } label: {
+            pickerLabel("Bypass", systemImage: chat.bypassPermissions ? "flame.fill" : "flame", iconOnly: iconOnly)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(chat.bypassPermissions ? .red : .secondary)
+        .help(chat.bypassPermissions
+              ? "Bypass Permissions is ON for this conversation — every tool call runs without approval cards or sandboxing. Click to turn off."
+              : "Bypass Permissions: run every tool call in this conversation without approval cards or sandboxing.")
     }
 
     private func send() {
